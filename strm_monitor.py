@@ -28,7 +28,8 @@ def load_config():
 _cfg = load_config()
 
 # 映射变量
-MONITOR_FOLDER = _cfg.get('Local', 'monitor_folder')
+folders_str = _cfg.get('Local', 'monitor_folders')
+MONITOR_FOLDERS = [f.strip() for f in folders_str.split(',') if f.strip()]
 DB_FILE        = _cfg.get('Local', 'db_file')
 
 WEBDAV_HOST    = _cfg.get('WebDAV', 'host')
@@ -225,7 +226,6 @@ def scan_existing_files():
     
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    
     # 先把数据库里的路径拿出来做成字典，查询速度极快
     cursor.execute('SELECT local_path, webdav_path FROM strm_files')
     db_records = dict(cursor.fetchall())
@@ -233,32 +233,35 @@ def scan_existing_files():
     new_updates = []
     count_skip = 0
     
-    for root, dirs, files in os.walk(MONITOR_FOLDER):
-        for file in files:
-            if file.endswith('.strm'):
-                local_path = os.path.join(root, file)
-                
-                # 如果数据库里已经有了，直接跳过，不读硬盘文件
-                if local_path in db_records:
-                    count_skip += 1
-                    continue
-                
-                try:
-                    with open(local_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    webdav_path = parse_strm_content(content)
-                    if webdav_path:
-                        new_updates.append((local_path, webdav_path))
-                except:
-                    continue
-
+    # --- 文件夹遍历循环 ---
+    for folder in MONITOR_FOLDERS:
+        if not os.path.exists(folder):
+            print(f"[跳过] 路径不存在: {folder}")
+            continue
+        
+        print(f" -> 正在扫描: {folder}")
+        for root, dirs, files in os.walk(folder):
+            for file in files:
+                if file.endswith('.strm'):
+                    local_path = os.path.join(root, file)
+                    # 如果数据库里已经有了，直接跳过，不读硬盘文件
+                    if local_path in db_records:
+                        count_skip += 1
+                        continue
+                    try:
+                        with open(local_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        webdav_path = parse_strm_content(content)
+                        if webdav_path:
+                            new_updates.append((local_path, webdav_path))
+                    except:
+                        continue
     # 批量入库
     if new_updates:
         cursor.executemany('INSERT OR REPLACE INTO strm_files VALUES (?, ?)', new_updates)
         conn.commit()
-    
     conn.close()
-    print(f"同步完成！耗时: {time.time() - start_time:.2f}秒 (跳过已存在: {count_skip}, 新录入: {len(new_updates)})")
+    print(f"同步完成！耗时: {time.time() - start_time:.2f}秒 (跳过: {count_skip}, 新增: {len(new_updates)})")
 
 if __name__ == "__main__":
     init_db()
@@ -266,10 +269,24 @@ if __name__ == "__main__":
     
     event_handler = StrmMonitorHandler()
     observer = Observer()
-    observer.schedule(event_handler, MONITOR_FOLDER, recursive=True)
-    observer.start()
     
-    print(f"正在监控文件夹: {MONITOR_FOLDER}")
+    # --- 为每个文件夹注册监控 ---
+    active_count = 0
+    for folder in MONITOR_FOLDERS:
+        if os.path.exists(folder):
+            # 每个路径都 schedule 一下，同一个 event_handler 可以复用
+            observer.schedule(event_handler, folder, recursive=True)
+            print(f"[监控中] {folder}")
+            active_count += 1
+        else:
+            print(f"[警告] 无法启动监控，路径不存在: {folder}")
+            
+    if active_count == 0:
+        print("[错误] 没有有效的监控路径，程序退出。")
+        sys.exit(1)
+        
+    observer.start()
+    print(f"\n共启动 {active_count} 个监控任务。")
     
     try:
         # 检测是否在控制台前台运行
