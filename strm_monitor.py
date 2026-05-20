@@ -16,7 +16,35 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # 程序版本号
-VERSION = "v2026.05.20"
+VERSION = "v2026.05.20.1"
+
+import datetime
+
+# 控制台心跳定时器
+_console_refresh_interval = 10
+_refresh_timer = None
+
+def _cancel_heartbeat():
+    """停止心跳定时器"""
+    global _refresh_timer
+    if _refresh_timer:
+        _refresh_timer.cancel()
+        _refresh_timer = None
+
+def _console_heartbeat():
+    """每隔10秒在控制台输出时间戳，不记录到日志文件"""
+    try:
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')        
+        print(f"{_C_B}{now} {_C_GRAY}[TIME]{_C_END}")
+    except Exception:
+        pass
+    
+    # 重新调度下一次
+    global _refresh_timer
+    _refresh_timer = threading.Timer(_console_refresh_interval, _console_heartbeat)
+    _refresh_timer.daemon = True
+    _refresh_timer.start()
+
 
 # 锁机制
 db_lock = threading.Lock()
@@ -27,6 +55,8 @@ pending_cleanups = {}
 # ANSI 颜色定义 (仅供 ColorConsoleHandler 涂色使用)
 _C_G = "\033[92m"; _C_Y = "\033[93m"; _C_R = "\033[91m"; _C_B = "\033[94m"
 _C_P = "\033[95m"; _C_C = "\033[96m"; _C_BOLD = "\033[1m"; _C_END = "\033[0m"
+_C_GRAY = "\033[90m"
+
 
 # ================= 辅助函数 =================
 
@@ -109,10 +139,20 @@ def load_config():
     return config
 
 # ================= 加载配置与初始化 =================
-
 _cfg = load_config(); init_logging()
-MONITOR_FOLDERS = [os.path.abspath(os.path.normpath(f)) for f in manual_extract_list('MonitorFolders')]
-REFRESH_PATHS   = manual_extract_list('RefreshPaths')
+# === MonitorFolders ===
+_mf = manual_extract_list('MonitorFolders')
+if not _mf and _cfg.has_option('Local', 'monitor_folders'):
+    _mf = _cfg.get('Local', 'monitor_folders').split(',')
+MONITOR_FOLDERS = list(dict.fromkeys([
+    os.path.abspath(os.path.normpath(f.strip()))
+    for f in _mf if f.strip()
+]))
+# === RefreshPaths ===
+_rp = manual_extract_list('RefreshPaths')
+if not _rp and _cfg.has_option('WebDAV', 'refresh_paths'):
+    _rp = _cfg.get('DAV', 'refresh_paths').split(',')
+REFRESH_PATHS = [p.strip() for p in _rp if p.strip()]
 DB_FILE          = _cfg.get('Local', 'db_file')
 WEBDAV_HOST      = _cfg.get('WebDAV', 'host').rstrip('/')
 WEBDAV_USER      = _cfg.get('WebDAV', 'user')
@@ -122,6 +162,7 @@ TRASH_DIR_NAME   = _cfg.get('Setting', 'trash_dir_name')
 REFRESH_INTERVAL = _cfg.getint('Setting', 'webdav_refresh_interval', fallback=0)
 REFRESH_DEPTH    = _cfg.getint('Setting', 'webdav_refresh_depth', fallback=3)
 GHOST_PROTECT_SEC= 60
+
 
 def log_i(msg): logging.info(msg)
 def log_f(msg): logging.getLogger("FileOnly").info(msg)
@@ -278,47 +319,127 @@ def sync_folders_from_strms():
 
 def parse_strm_content(content):
     content = content.strip()
-    if not content.startswith('http'): return content
+    if not content.startswith('http'): 
+        return content
     path = unquote(urlparse(content).path) 
-    return path[2:] if path.startswith('/d/') else path
+    # 修正：确保 /d/ 去掉后路径以 / 开头
+    if path.startswith('/d/'):
+        return '/' + path[3:]
+    return path
+
 
 class StrmMonitorHandler(FileSystemEventHandler):
     def on_created(self, event):
-        if not event.is_directory and event.src_path.endswith('.strm'): 
+        if not event.is_directory and event.src_path.endswith('.strm'):
+            # 延时等待可能的 handle_deletion 完成
+            # time.sleep(1.0)  # 测试问题时可先去掉，确认基本功能正常后再加
             self.add_to_db(os.path.abspath(os.path.normpath(event.src_path)))
+
     def on_modified(self, event):
-        if not event.is_directory and event.src_path.endswith('.strm'): 
+        if not event.is_directory and event.src_path.endswith('.strm'):
             self.add_to_db(os.path.abspath(os.path.normpath(event.src_path)))
+
     def on_deleted(self, event):
         if not event.is_directory and event.src_path.endswith('.strm'):
-            threading.Thread(target=self.handle_deletion, args=(os.path.abspath(os.path.normpath(event.src_path)),)).start()
+            threading.Thread(
+                target=self.handle_deletion,
+                args=(os.path.abspath(os.path.normpath(event.src_path)),)
+            ).start()
 
     def add_to_db(self, local_path, is_watchdog=True):
         try:
-            if is_watchdog: time.sleep(0.5) 
-            with open(local_path, 'r', encoding='utf-8') as f: content = f.read()
+            if is_watchdog:
+                time.sleep(0.5)
+
+            # 防御性检查
+            if not os.path.exists(local_path):
+                log_d(f"[add_to_db] 文件已消失，跳过")
+                return
+
+            with open(local_path, 'r', encoding='utf-8') as f:
+                content = f.read()
             webdav_path = parse_strm_content(content)
-            if webdav_path:
-                with db_lock:
-                    conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
-                    now = time.time()
-                    cursor.execute('SELECT expire_time FROM ghost_files WHERE webdav_path = ?', (webdav_path,))
-                    ghost = cursor.fetchone()
-                    if ghost and ghost[0] > now:
-                        log_i(f"[二次清理] 自动拦截并抹除刚生成的重复索引: {os.path.basename(local_path)}")
-                        conn.close()
-                        try: os.remove(local_path)
-                        except: pass
-                        return
-                    cursor.execute('SELECT webdav_path FROM strm_files WHERE local_path = ?', (local_path,))
-                    row = cursor.fetchone()
-                    if row and row[0] == webdav_path: conn.close(); return
-                    cursor.execute('INSERT OR REPLACE INTO strm_files VALUES (?, ?)', (local_path, webdav_path))
-                    conn.commit(); conn.close()
-                log_i(f"[索引更新] {os.path.basename(local_path)} -> {webdav_path}")
-                save_known_folder("/" + "/".join(webdav_path.strip('/').split('/')[:-1]))
-                trigger_delayed_cleanup("/" + "/".join(webdav_path.strip('/').split('/')[:-1]))
-        except: pass
+            if not webdav_path:
+                return
+
+            with db_lock:
+                conn = sqlite3.connect(DB_FILE)
+                cursor = conn.cursor()
+                now = time.time()
+
+                # 先清理所有过期 ghost
+                cursor.execute('DELETE FROM ghost_files WHERE expire_time <= ?', (now,))
+
+                # 如果 ghost 表中还有这个 webdav_path，说明还在保护期内
+                cursor.execute('SELECT expire_time FROM ghost_files WHERE webdav_path = ?', (webdav_path,))
+                ghost = cursor.fetchone()
+                if ghost and ghost[0] > now:
+                    log_i(f"[二次清理] 自动拦截: {os.path.basename(local_path)}")
+                    conn.close()
+                    try:
+                        os.remove(local_path)
+                    except:
+                        pass
+                    return
+
+                # 检查本地文件是否已在数据库中（正常流程）
+                cursor.execute('SELECT webdav_path FROM strm_files WHERE local_path = ?', (local_path,))
+                row = cursor.fetchone()
+                if row and row[0] == webdav_path:
+                    # 文件已存在且内容相同，不需要更新
+                    conn.close()
+                    return
+
+                # 插入或更新数据库
+                cursor.execute('INSERT OR REPLACE INTO strm_files VALUES (?, ?)', (local_path, webdav_path))
+                conn.commit()
+                conn.close()
+
+            log_i(f"[索引更新] {os.path.basename(local_path)} -> {webdav_path}")
+            parent_dir = "/" + "/".join(webdav_path.strip('/').split('/')[:-1])
+            save_known_folder(parent_dir)
+            trigger_delayed_cleanup(parent_dir)
+
+        except Exception as e:
+            log_e(f"[索引失败] {e}", exc=True)
+
+    def handle_deletion(self, local_path):
+        with db_lock:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute('SELECT webdav_path FROM strm_files WHERE local_path = ?', (local_path,))
+            result = cursor.fetchone()
+            if not result:
+                conn.close()
+                return
+            webdav_path = result[0]
+            cursor.execute('INSERT OR REPLACE INTO ghost_files VALUES (?, ?)',
+                           (webdav_path, time.time() + GHOST_PROTECT_SEC))
+            cursor.execute('DELETE FROM strm_files WHERE local_path = ?', (local_path,))
+            conn.commit()
+            conn.close()
+
+        log_i(f"[检测到删除] {os.path.basename(local_path)}")
+        with dav_write_lock:
+            try:
+                if client.check_exists(webdav_path):
+                    if WEBDAV_ACTION == "DELETE":
+                        client.delete(webdav_path)
+                        log_i(f" -> 已从云盘永久删除: {webdav_path}")
+                    elif WEBDAV_ACTION == "MOVE":
+                        parts = webdav_path.strip('/').split('/')
+                        tdir = f"/{parts[0]}/{TRASH_DIR_NAME}/{'/'.join(parts[1:-1])}".rstrip('/')
+                        tfile = f"{tdir}/{parts[-1]}"
+                        client.makedirs(tdir)
+                        client.move(webdav_path, tfile)
+                        log_i(f" -> 已移入回收站: {tfile}")
+                else:
+                    log_d(f" -> 云盘文件已不存在")
+                remove_empty_local_dirs()
+                check_log_size()
+            except Exception as e:
+                log_e(f" -> 联动操作失败: {e}")
+
 
     def handle_deletion(self, local_path):
         with db_lock:
@@ -389,6 +510,7 @@ def handle_cascade_delete(webdav_folder_path):
         remove_empty_local_dirs()
     except Exception as e: log_d(f"级联清理失败: {e}")
 
+# cleanup_zombie_strms 中，不插入 ghost
 def cleanup_zombie_strms(parent_webdav_folder, remote_files):
     try:
         with db_lock:
@@ -401,8 +523,9 @@ def cleanup_zombie_strms(parent_webdav_folder, remote_files):
                 log_i(f"[冗余清理] 移除本地失效索引: {os.path.basename(local_path)}")
                 with db_lock:
                     conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
-                    cursor.execute('INSERT OR REPLACE INTO ghost_files VALUES (?, ?)', (webdav_path, time.time() + GHOST_PROTECT_SEC))
-                    cursor.execute('DELETE FROM strm_files WHERE local_path = ?', (local_path,)); conn.commit(); conn.close()
+                    # ❌ 删除这一行：cursor.execute('INSERT OR REPLACE INTO ghost_files VALUES (?, ?)', ...)
+                    cursor.execute('DELETE FROM strm_files WHERE local_path = ?', (local_path,))
+                    conn.commit(); conn.close()
                 if os.path.exists(local_path):
                     try: os.remove(local_path)
                     except: pass
@@ -463,6 +586,8 @@ def webdav_refresh_worker():
 
 if __name__ == "__main__":
     enable_windows_ansi(); init_db()
+    # 启动控制台心跳
+    _console_heartbeat()
     print("\n" + "="*60)
     print(f"{_C_B}{_C_BOLD}   Openlist Strm Monitor {VERSION}{_C_END}")
     print("="*60)
@@ -488,8 +613,13 @@ if __name__ == "__main__":
                 if input().strip().lower() == 'q': break
         else:
             while True: time.sleep(1)
-    except (KeyboardInterrupt, EOFError): pass
-    print("\n[系统] 正在安全停止监控线程...")
-    observer.stop(); observer.join()
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        print("\n[系统] 正在安全停止监控线程...")
+        _cancel_heartbeat()  # 不用 global，直接调用函数
+        observer.stop()
+        observer.join()
+
     log_f(f"程序已安全停止 - {VERSION}")
     log_f("==================================================\n\n\n")
