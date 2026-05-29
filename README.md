@@ -177,4 +177,3 @@ max_size_mb = 2
 ### 📄 开源协议
 
 本项目采用 [MIT License](LICENSE) 协议。
-```
