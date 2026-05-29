@@ -1,0 +1,178 @@
+# ============================================================
+# openlist_strm_bridge 配置文件
+# ============================================================
+#
+# 本程序用于配合 OpenList STRM 引擎的"同步模式"。
+#
+# 推荐目录模型：
+#
+# A 区：OpenList STRM 引擎生成区
+#   - 由 OpenList / STRM 引擎负责生成
+#   - 程序只读取和监控
+#
+# B 区：媒体库消费区
+#   - 给 Emby / Jellyfin等媒体库扫描
+#   - 程序会从 A 区同步 STRM 到 B 区
+#   - 用户删除 B 区 STRM 时，会联动 WebDAV 删除或移动源文件
+#
+# C 区：幽灵/隔离区
+#   - 用于存放特殊情况下迁移、隔离或失效的 STRM
+#   - 日常使用频率不高，但建议保留
+#
+# ============================================================
+
+
+[local]
+# SQLite 数据库文件路径。
+# 可以使用相对路径，相对路径以 config.toml 所在目录为基准。
+db_file = "./bridge.db"
+
+
+[paths]
+# A 区路径列表文件。
+# 每行一个本地目录路径。
+# 这些目录通常是 OpenList STRM 引擎的输出目录。
+a_folders_file = "./a_folders.txt"
+
+# WebDAV 主动刷新路径列表文件。
+# 每行一个 OpenList 中的目录路径。
+# 
+# 用途：
+# - 调用 Admin API 触发索引更新
+# - 让 OpenList 重新扫描这些目录
+# - 检测云端目录变化
+# - 清理 B 区冗余 STRM
+#
+# 注意：
+# - 如果 config.toml 中 [refresh].enabled = false，本文件不会参与周期刷新。
+# - 填写的是 OpenList 中的路径，不是本地路径。
+#
+# 示例：
+# /天翼云盘家庭云1TB/番剧
+# /阿里云盘/电影
+refresh_paths_file = "./refresh_paths.txt"
+
+# STRM 引擎入口路径列表文件。
+# 每行一个 OpenList 中 STRM 引擎的入口路径。
+#
+# 用途：
+# - 访问引擎入口，触发引擎生成/更新 STRM
+# - 检查引擎是否正常运行
+#
+# 注意：
+# - 这是引擎的入口路径，不是被索引的媒体目录。
+# - 通常是一个顶层目录，如 /strm 或 /测试a
+#
+# 示例：
+# /strm
+# /测试a
+strm_engine_paths_file = "./strm_engine_paths.txt"
+
+# B 区根目录。
+# 这是媒体库实际扫描的目录。
+# 程序会把 A 区 STRM 同步到这里。
+# 这里不能设置多文件夹
+b_root = "C:/Users/1/Downloads/测试b"
+
+# C 区根目录。
+# 用于幽灵迁移、异常隔离等场景。
+# 日常可能很少用到，但建议保留。
+c_root = "C:/Users/1/Downloads/测试c"
+
+
+[webdav]
+# OpenList WebDAV 地址。
+# 通常格式：
+#   http://127.0.0.1:5244/dav
+host = "http://127.0.0.1:5243/dav"
+
+# WebDAV 用户名,如果使用主动刷新功能 必须使用admin权限账户以调用api刷新路径
+user = "admin"
+
+# WebDAV 密码。
+password = ""
+
+#2FA 密钥 如果开启了二次密钥就需要填写
+totp_secret = ""
+
+[refresh]
+# 是否启用主动刷新。
+#
+# false：
+#   只依赖文件系统事件和删除后的延迟清理。
+#   推荐用于调试 B 删除联动。
+#
+# true：
+#   程序会周期性扫描 refresh_paths.txt 中的 WebDAV 路径。
+#   用于主动发现云端目录变化，并清理 B 区冗余 STRM。
+enabled = true
+
+# 主动刷新间隔，单位：分钟。
+# enabled = true 时生效。
+interval_minutes = 10
+
+# WebDAV 主动刷新递归深度。
+# 数值越大，请求越多。
+# 建议：
+#   测试：2~3
+#   正式：3~5
+depth = 5
+
+
+[behavior]
+# B 区 STRM 被删除后，对 WebDAV 源文件执行的动作。
+#
+# MOVE：
+#   移动到 WebDAV 回收站目录。推荐。
+#
+# DELETE：
+#   直接删除 WebDAV 源文件。危险，不建议初期使用。
+action = "MOVE"
+
+# WebDAV 回收站目录名。
+# 当 action = "MOVE" 时生效。
+#
+# 例如源文件：
+#   /天翼云盘个人云1TB/番剧/xxx/S01E01.mp4
+#
+# 会移动到：
+#   /天翼云盘个人云1TB/strm_回收站_测试/番剧/xxx/S01E01.mp4
+#
+#   移动的路径是由strm文件的内容反向拼凑的 所以和strm引擎的路径无关 
+#   因此不会恢复到不可写的 http://127.0.0.1:5243/strm/回收站
+trash_dir_name = "strm_回收站"
+
+# ghost 保护时间，单位：秒。
+#
+# 用途：
+#   B 区删除 STRM 后，A 区可能因为 OpenList 同步延迟又短暂生成同一 STRM。
+#   ghost 保护用于阻止刚删除的内容被立刻重新同步回 B 区。
+#
+# 建议：
+#   测试环境至少 300 秒，避免 OpenList / STRM 引擎同步延迟导致删除后回灌。
+ghost_protect_seconds = 10
+
+# A/B 同步后的等待时间，单位：秒。
+#
+# 用于等待 OpenList / STRM 引擎 / 文件系统事件落地。
+a_to_b_restore_delay_seconds = 30
+
+
+[log]
+# 日志级别。
+#
+# INFO：
+#   默认推荐，只输出阶段、汇总和重要事件。
+#
+# DEBUG：
+#   排障使用。
+level = "INFO"
+
+# 日志文件路径。
+file = "./activity.log"
+
+# 单个日志文件最大大小，单位 MB。
+max_size_mb = 2
+
+# 保留的历史日志数量。
+backup_count = 5
