@@ -60,6 +60,7 @@ from utils import (
     quarantine_file,
     safe_remove_file,
     remove_empty_dirs,
+    move_file,
 )
 
 
@@ -296,9 +297,9 @@ class AppService:
         exists = self._refresh_webdav_recursive(root_path, depth, current_depth=0)
         if not exists:
             logging.warning("[WebDAV刷新] 根路径不存在或不可访问: %s", root_path)
-        if cleanup_allowed:
-            self.migrate_b_under_root_to_c(root_path)
-            self.db.remove_known_folder_prefix(root_path)
+            if cleanup_allowed:
+                self.migrate_b_under_root_to_c(root_path)
+                self.db.remove_known_folder_prefix(root_path)
             return
         if cleanup_allowed:
             self.cleanup_b_zombies_under_folder(root_path)
@@ -847,6 +848,99 @@ class AppService:
                 except OSError as e:
                     logging.warning("[冗余清理] 删除带时间戳冗余文件失败: %s (%s)", file_path, e)
 
+        # ========== 三层校验：清理 B 区中 A 区源已不存在的冗余 STRM ==========
+        try:
+            all_b_records = self.db.get_all_b_records()
+        except Exception as e:
+            logging.error("[冗余清理] 查询 B 区记录失败: %s", e)
+            return
+
+        if not all_b_records:
+            logging.info("[冗余清理] B 区冗余清理完成")
+            return
+
+        removed_count = 0
+        migrated_count = 0
+
+        for row in all_b_records:
+            local_path = row[0]  # local_path
+            webdav_path = row[1]  # webdav_path
+            source_a_path = row[3]  # source_a_path
+            fingerprint = row[4]  # fingerprint
+
+            if not webdav_path:
+                continue
+
+            # 第 1 层：幽灵保护检查
+            if self.db.is_ghost_protected(webdav_path):
+                continue
+
+            # 第 2 层：A 区源文件存在性检查
+            source_exists = False
+            if source_a_path and Path(source_a_path).exists():
+                source_exists = True
+            else:
+                alt_source = self.find_a_source_by_webdav(webdav_path)
+                if alt_source:
+                    source_exists = True
+
+            if not source_exists:
+                # A 区源文件不存在，迁移到 C 区
+                local = Path(local_path)
+                if not local.exists():
+                    self.db.delete_b_by_local(local_path)
+                    if fingerprint:
+                        self.refresh_identity_current_b_path(fingerprint)
+                    continue
+
+                try:
+                    rel = local.resolve().relative_to(self.b_root)
+                except ValueError:
+                    rel = Path(local.name)
+                target = self.c_root / rel
+
+                if local.exists():
+                    try:
+                        move_file(local, target)
+                    except OSError as exc:
+                        logging.warning("[冗余清理→C区] 迁移失败: %s -> %s (%s)", local, target, exc)
+                        safe_remove_file(local_path)
+                        self.db.delete_b_by_local(local_path)
+                        if fingerprint:
+                            self.refresh_identity_current_b_path(fingerprint)
+                        continue
+
+                self.db.upsert_c(
+                    str(target),
+                    webdav_path,
+                    local_path,
+                    webdav_parent(webdav_path),
+                )
+                self.db.delete_b_by_local(local_path)
+                if fingerprint:
+                    self.refresh_identity_current_b_path(fingerprint)
+                migrated_count += 1
+                logging.info("[冗余清理→C区] A区源文件已不存在，迁移至C区: %s -> %s", local_path, webdav_path)
+                continue
+
+            # 第 3 层：WebDAV 存在性检查
+            if self.admin_api.check_exists(webdav_path):
+                continue
+
+            # WebDAV 上文件不存在，直接删除
+            safe_remove_file(local_path)
+            self.db.delete_b_by_local(local_path)
+            if fingerprint:
+                self.refresh_identity_current_b_path(fingerprint)
+            removed_count += 1
+            logging.info("[冗余清理] 已移除失效STRM(WebDAV不存在): %s -> %s", local_path, webdav_path)
+
+        if migrated_count:
+            logging.warning("[冗余清理→C区] 共迁移 %s 个 A 区源已删除的 STRM 到 C 区", migrated_count)
+        if removed_count:
+            logging.warning("[冗余清理] 共清理 %s 个 WebDAV 已不存在的 STRM", removed_count)
+
+        self.cleanup_local_empty_dirs()
         logging.info("[冗余清理] B 区冗余清理完成")
 
     def cleanup_local_empty_dirs(self) -> None:
@@ -1072,19 +1166,40 @@ class AppService:
         分数越小越优先保留。
         规则：
         1. 标准命名（0） > 非标准命名（1）【绝对优先】
-        2. 标准命名内部：路径短优先
-        3. 非标准命名内部：路径短优先
-        4. 文件名作为第三排序键（稳定排序）
+        2. 同标准/非标准内：和 A 区源路径层级差异越大越优先（用户手动调整过层级）
+        3. 层级差异相同时：路径短优先
+        4. 文件名作为稳定排序键
         """
         p = Path(path)
         name = p.name.lower()
 
         is_standard = self._is_standard_media_name(name)
+
+        # 计算 B 区文件相对于 B 根目录的层级深度
+        try:
+            b_depth = len(p.relative_to(self.b_root).parts)
+        except ValueError:
+            b_depth = 0
+
+        # 反推对应的 A 区路径，计算 A 区层级深度
+        a_depth = b_depth  # 默认相同
+        a_path_str = self._reverse_map_b_to_a(path)
+        if a_path_str and Path(a_path_str).exists():
+            try:
+                a_root = self.get_a_root_for_path(a_path_str)
+                if a_root:
+                    a_depth = len(Path(a_path_str).relative_to(a_root).parts)
+            except (ValueError, AttributeError):
+                pass
+
+        # 层级差异越大，分数越低（越优先）
+        # 差异为0时得0，差异为1时得-1，差异为2时得-2...
+        # 这样用户手动调整过层级的文件会被优先保留
+        depth_diff_priority = -(abs(b_depth - a_depth))
+
         path_len = len(str(p))
 
-        # 标准命名的文件分数总是以 0 开头，非标准以 1 开头
-        # 这样标准命名的文件在任何情况下都比非标准命名的优先级高
-        return (0 if is_standard else 1, path_len, name)
+        return (0 if is_standard else 1, depth_diff_priority, path_len, name)
 
     def ensure_single_visible_instance(
         self,
@@ -1358,18 +1473,42 @@ class AppService:
             logging.warning("[OpenListAdmin] 索引更新触发失败: %s", engine_paths)
 
     def handle_b_deleted(self, local_path: str) -> None:
-        """处理 B 区文件被删除的事件。
-        当用户从媒体库目录删除 STRM 时，联动处理 WebDAV 源文件。
-        """
         with self._b_move_lock:
             row = self.db.get_b_by_local_full(local_path)
             if not row:
                 return
             _, webdav_path, parent_webdav_path, _source_a_path, fingerprint, _status, _ = row
+
+            if fingerprint:
+                # 修复：除了查数据库，还要扫描文件系统中是否存在同指纹文件
+                b_instances = self.db.get_b_instances_by_fingerprint(fingerprint)
+                any_b_instance_exists = False
+
+                # 1. 查数据库记录
+                for instance in b_instances:
+                    instance_path = instance[0]
+                    if Path(instance_path).exists():
+                        any_b_instance_exists = True
+                        break
+
+                # 2. 修复：扫描整个 B 区文件系统，找同指纹的 strm 文件
+                if not any_b_instance_exists:
+                    b_root = Path(self.config.paths.b_root)
+                    for strm_file in b_root.rglob("*.strm"):
+                        try:
+                            content = read_strm_webdav_path(str(strm_file))
+                            if content and make_strm_fingerprint(content) == fingerprint:
+                                any_b_instance_exists = True
+                                break
+                        except:
+                            continue
+
+                if any_b_instance_exists:
+                    logging.info("[B区删除联动] B区中仍存在同指纹文件，跳过WebDAV删除: %s", local_path)
+                    self.db.delete_b_by_local(local_path)
+                    return
+
             ok = self._execute_webdav_deletion(webdav_path, parent_webdav_path)
-            if not ok:
-                return
-            self._cleanup_after_b_deletion(local_path, webdav_path, parent_webdav_path, fingerprint)
 
     def _execute_webdav_deletion(self, webdav_path: str, parent_webdav_path: str) -> bool:
         """执行 WebDAV 源文件删除/MOVE 操作。"""
@@ -1472,11 +1611,32 @@ class AppService:
     ) -> None:
         """B 区删除后的数据库和状态清理。"""
         if fingerprint:
-            self.cleanup_all_b_instances_for_deleted_source(
-                fingerprint=fingerprint,
-                deleted_webdav_path=webdav_path,
-            )
-            self.db.clear_identity_b_path_by_fingerprint(fingerprint)
+            # 检查该 fingerprint 对应的 B 区文件是否仍然存在于文件系统中
+            # 如果存在，说明只是路径发生了合法变化（血缘校验通过），
+            # 不应触发源文件删除流程
+            b_instances = self.db.get_b_instances_by_fingerprint(fingerprint)
+            any_b_instance_exists = False
+            for instance in b_instances:
+                instance_path = instance[0]
+                if Path(instance_path).exists():
+                    any_b_instance_exists = True
+                    break
+
+            if any_b_instance_exists:
+                logging.info(
+                    "[B区删除联动] B区中仍存在同指纹文件，跳过源文件删除检测: %s (指纹: %s)",
+                    local_path,
+                    fingerprint,
+                )
+                # 只清理当前这条记录，不清除所有同指纹实例
+                self.db.delete_b_by_local(local_path)
+            else:
+                # B 区中真的不存在该 fingerprint 的文件了，才触发源文件删除
+                self.cleanup_all_b_instances_for_deleted_source(
+                    fingerprint=fingerprint,
+                    deleted_webdav_path=webdav_path,
+                )
+                self.db.clear_identity_b_path_by_fingerprint(fingerprint)
         else:
             self.db.delete_b_by_local(local_path)
         self.trigger_delayed_cleanup(parent_webdav_path)
@@ -1526,6 +1686,17 @@ class AppService:
         # 1. 清理同 fingerprint 的所有数据库记录
         for instance in self.db.get_b_instances_by_fingerprint(fingerprint):
             instance_path = instance[0]
+
+            # 保险检查：如果文件仍然存在于磁盘上，说明只是路径发生了合法变化
+            # （如层级调整、改名等血缘校验通过的情况），不应删除
+            if Path(instance_path).exists():
+                logging.info(
+                    "[B区删除联动] 跳过清理，文件仍存在于磁盘: %s (指纹: %s)",
+                    instance_path,
+                    fingerprint,
+                )
+                continue
+
             safe_remove_file(instance_path)
             self.db.delete_b_by_local(instance_path)
             logging.info(
@@ -1595,6 +1766,11 @@ class AppService:
     def cleanup_b_zombies_under_folder(self, folder_path: str) -> None:
         """清理指定 WebDAV 目录下已经不存在的 B 区 STRM 记录和本地文件。
 
+        三层校验：
+        1. 幽灵保护检查
+        2. A 区源文件存在性检查 — A 区源文件不存在则迁移到 C 区
+        3. WebDAV 存在性检查 — WebDAV 上文件不存在则直接删除
+
         安全策略：
         - 只清理同时被"程序监控"和"STRM引擎监控"的路径
         - 如果路径只在 refresh_paths 中但不在 strm_engine_paths 中，跳过清理
@@ -1638,11 +1814,72 @@ class AppService:
         if not rows:
             return
         removed_count = 0
+        migrated_count = 0
         for local_path, webdav_path, _parent, _source_a_path, _updated_at in rows:
             if self.db.is_ghost_protected(webdav_path):
                 continue
+
+            # 第 2 层：A 区源文件存在性检查
+            source_exists = False
+            if _source_a_path and Path(_source_a_path).exists():
+                source_exists = True
+            else:
+                alt_source = self.find_a_source_by_webdav(webdav_path)
+                if alt_source:
+                    source_exists = True
+
+            if not source_exists:
+                # A 区源文件不存在，迁移到 C 区
+                local = Path(local_path)
+                if not local.exists():
+                    self.db.delete_b_by_local(local_path)
+                    try:
+                        fingerprint = make_strm_fingerprint(webdav_path)
+                        self.refresh_identity_current_b_path(fingerprint)
+                    except (TypeError, ValueError):
+                        pass
+                    continue
+
+                try:
+                    rel = local.resolve().relative_to(self.b_root)
+                except ValueError:
+                    rel = Path(local.name)
+                target = self.c_root / rel
+
+                if local.exists():
+                    try:
+                        move_file(local, target)
+                    except OSError as exc:
+                        logging.warning("[B区冗余清理→C区] 迁移失败: %s -> %s (%s)", local, target, exc)
+                        safe_remove_file(local_path)
+                        self.db.delete_b_by_local(local_path)
+                        try:
+                            fingerprint = make_strm_fingerprint(webdav_path)
+                            self.refresh_identity_current_b_path(fingerprint)
+                        except (TypeError, ValueError):
+                            pass
+                        continue
+
+                self.db.upsert_c(
+                    str(target),
+                    webdav_path,
+                    local_path,
+                    normalized_folder,
+                )
+                self.db.delete_b_by_local(local_path)
+                try:
+                    fingerprint = make_strm_fingerprint(webdav_path)
+                    self.refresh_identity_current_b_path(fingerprint)
+                except (TypeError, ValueError):
+                    pass
+                migrated_count += 1
+                logging.info("[B区冗余清理→C区] A区源文件已不存在，迁移至C区: %s -> %s", local_path, webdav_path)
+                continue
+
+            # 第 3 层：WebDAV 存在性检查
             if self.admin_api.check_exists(webdav_path):
                 continue
+
             safe_remove_file(local_path)
             self.db.delete_b_by_local(local_path)
             try:
@@ -1652,6 +1889,11 @@ class AppService:
                 pass
             removed_count += 1
             logging.info("[B区冗余清理] 已移除失效STRM: %s -> %s", local_path, webdav_path)
+
+        if migrated_count:
+            logging.warning(
+                "[B区冗余清理→C区] %s 下共迁移 %s 个 A 区源已删除的 STRM", normalized_folder, migrated_count
+            )
         if removed_count:
             logging.warning("[B区冗余清理] %s 下共清理 %s 个失效 STRM", normalized_folder, removed_count)
 
