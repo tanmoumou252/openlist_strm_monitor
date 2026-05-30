@@ -42,18 +42,26 @@ class BAreaEventHandler(FileSystemEventHandler):
             logging.exception("[B区事件处理异常] %s args=%s", func.__name__, args)
 
     def on_created(self, event) -> None:
+        if getattr(self.app, '_b_watcher_paused', False):
+            return
         if not event.is_directory and event.src_path.lower().endswith(".strm"):
             self.app.handle_b_created_or_modified(event.src_path)
 
     def on_modified(self, event) -> None:
+        if getattr(self.app, '_b_watcher_paused', False):
+            return
         if not event.is_directory and event.src_path.lower().endswith(".strm"):
             self.app.handle_b_created_or_modified(event.src_path)
 
     def on_deleted(self, event) -> None:
+        if getattr(self.app, '_b_watcher_paused', False):
+            return
         if not event.is_directory and event.src_path.lower().endswith(".strm"):
             self._run_async(self.app.handle_b_deleted, event.src_path)
 
     def on_moved(self, event) -> None:
+        if getattr(self.app, '_b_watcher_paused', False):
+            return
         if event.is_directory:
             return
 
@@ -61,7 +69,10 @@ class BAreaEventHandler(FileSystemEventHandler):
         dst_is_strm = event.dest_path.lower().endswith(".strm")
 
         if src_is_strm or dst_is_strm:
-            self._run_async(self.app.handle_b_moved, event.src_path, event.dest_path)
+            self._run_async(
+                self.app.handle_b_moved,
+                event.src_path,
+                event.dest_path)
 
 
 class CAreaEventHandler(FileSystemEventHandler):

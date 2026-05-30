@@ -9,7 +9,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def ensure_base_dir_first():
     normalized_base_dir = os.path.normcase(os.path.abspath(BASE_DIR))
-    sys.path[:] = [p for p in sys.path if os.path.normcase(os.path.abspath(p or os.getcwd())) != normalized_base_dir]
+    sys.path[:] = [
+        p
+        for p in sys.path
+        if os.path.normcase(os.path.abspath(p or os.getcwd())) != normalized_base_dir
+    ]
     sys.path.insert(0, BASE_DIR)
 
 
@@ -43,12 +47,18 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-def read_line_list(file_path: str, base_dir: str | Path, is_webdav: bool = False) -> list[str]:
+def read_line_list(
+    file_path: str, base_dir: str | Path, is_webdav: bool = False
+) -> list[str]:
     full_path = Path(base_dir) / file_path
     if not full_path.exists():
         return []
     with open(full_path, "r", encoding="utf-8") as f:
-        lines = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+        lines = [
+            line.strip()
+            for line in f
+            if line.strip() and not line.strip().startswith("#")
+        ]
     if is_webdav:
         return [line.rstrip("/") for line in lines]
     return lines
@@ -125,7 +135,9 @@ class StrmStorageMapping:
 
     def get_engine_entry_path(self, sub_path: str = "") -> str:
         """获取 STRM 引擎入口路径"""
-        base = self.engine_entry_paths[0] if self.engine_entry_paths else self.mount_path
+        base = (
+            self.engine_entry_paths[0] if self.engine_entry_paths else self.mount_path
+        )
         if sub_path:
             return f"{base}/{sub_path.lstrip('/')}"
         return base
@@ -168,7 +180,9 @@ class AppConfig:
             return self.paths.strm_engine_paths
         if name == "refresh_paths":
             return self.paths.refresh_paths
-        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+        raise AttributeError(
+            f"'{self.__class__.__name__}' object has no attribute '{name}'"
+        )
 
     @classmethod
     def from_file(cls, toml_path: str) -> "AppConfig":
@@ -214,7 +228,9 @@ class AppConfig:
             trash_dir_name=behavior_data.get("trash_dir_name", "trash"),
             action=behavior_data.get("action", "MOVE"),
             ghost_protect_seconds=behavior_data.get("ghost_protect_seconds", 300),
-            a_to_b_restore_delay_seconds=behavior_data.get("a_to_b_restore_delay_seconds", 30),
+            a_to_b_restore_delay_seconds=behavior_data.get(
+                "a_to_b_restore_delay_seconds", 30
+            ),
         )
 
         log_data = data.get("log", {})
@@ -272,9 +288,15 @@ class AppConfig:
                             # 容 paths 为字符串和列表的两种情况
                             paths_val = addition.get("paths", "")
                             if isinstance(paths_val, list):
-                                storage_paths = [str(p).strip() for p in paths_val if str(p).strip()]
+                                storage_paths = [
+                                    str(p).strip() for p in paths_val if str(p).strip()
+                                ]
                             else:
-                                storage_paths = [p.strip() for p in paths_val.split("\n") if p.strip()]
+                                storage_paths = [
+                                    p.strip()
+                                    for p in paths_val.split("\n")
+                                    if p.strip()
+                                ]
 
                             local_path = addition.get("SaveStrmLocalPath", "")
 
@@ -295,7 +317,10 @@ class AppConfig:
                                     local_path=local_path,
                                 )
                         except json.JSONDecodeError:
-                            logging.warning("[STRM存储解析] 解析 addition 失败: %s", addition_str[:200])
+                            logging.warning(
+                                "[STRM存储解析] 解析 addition 失败: %s",
+                                addition_str[:200],
+                            )
             else:
                 logging.warning("[STRM存储API] 登录失败，跳过 STRM 存储映射")
         except Exception as exc:
@@ -326,19 +351,32 @@ class AppConfig:
             totp_secret=self._read_single_line("webdav_totp_secret.txt", base_dir),
         )
         self.refresh = RefreshConfig(
-            interval_seconds=int(self._read_single_line("refresh_interval.txt", base_dir) or "300"),
-            wait_seconds=int(self._read_single_line("refresh_wait.txt", base_dir) or "30"),
+            interval_seconds=int(
+                self._read_single_line("refresh_interval.txt", base_dir) or "300"
+            ),
+            wait_seconds=int(
+                self._read_single_line("refresh_wait.txt", base_dir) or "30"
+            ),
             enabled=True,
             depth=5,
         )
         self.behavior = BehaviorConfig(
-            sync_on_startup=self._read_single_line("sync_on_startup.txt", base_dir).lower() == "true",
-            sync_on_startup_wait=int(self._read_single_line("sync_on_startup_wait.txt", base_dir) or "0"),
+            sync_on_startup=self._read_single_line(
+                "sync_on_startup.txt", base_dir
+            ).lower()
+            == "true",
+            sync_on_startup_wait=int(
+                self._read_single_line("sync_on_startup_wait.txt", base_dir) or "0"
+            ),
         )
         self.log = LogConfig(
             level=self._read_single_line("log_level.txt", base_dir) or "INFO",
-            max_size_mb=int(self._read_single_line("log_max_size_mb.txt", base_dir) or "2"),
-            backup_count=int(self._read_single_line("log_backup_count.txt", base_dir) or "5"),
+            max_size_mb=int(
+                self._read_single_line("log_max_size_mb.txt", base_dir) or "2"
+            ),
+            backup_count=int(
+                self._read_single_line("log_backup_count.txt", base_dir) or "5"
+            ),
         )
         self.local = LocalConfig(
             base_dir=base_dir,
@@ -347,9 +385,13 @@ class AppConfig:
             c_dir=os.path.join(base_dir, "c"),
         )
         self.paths = PathsConfig(
-            strm_engine_paths=read_line_list("strm_engine_paths.txt", base_dir, is_webdav=True),
+            strm_engine_paths=read_line_list(
+                "strm_engine_paths.txt", base_dir, is_webdav=True
+            ),
             refresh_paths=read_line_list("refresh_paths.txt", base_dir, is_webdav=True),
-            strm_monitored_paths=read_line_list("strm_monitored_paths.txt", base_dir, is_webdav=True),
+            strm_monitored_paths=read_line_list(
+                "strm_monitored_paths.txt", base_dir, is_webdav=True
+            ),
             b_root=os.path.join(base_dir, "b"),
             c_root=os.path.join(base_dir, "c"),
         )

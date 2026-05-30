@@ -50,7 +50,8 @@ def parse_strm_content(content: str) -> str | None:
     return None
 
 
-def _canonicalize_webdav_path(webdav_path: str, *, case_sensitive: bool = True) -> str:
+def _canonicalize_webdav_path(webdav_path: str, *,
+                              case_sensitive: bool = True) -> str:
     """
     规范化 WebDAV 路径，用于稳定比较和生成身份指纹。
 
@@ -67,7 +68,9 @@ def _canonicalize_webdav_path(webdav_path: str, *, case_sensitive: bool = True) 
     默认保持大小写敏感，因为 OpenList/WebDAV 服务端路径理论上可能大小写敏感。
     """
     if not isinstance(webdav_path, str):
-        raise TypeError(f"webdav_path must be str, got {type(webdav_path).__name__}")
+        raise TypeError(
+            f"webdav_path must be str, got {
+                type(webdav_path).__name__}")
 
     canonical = webdav_path.strip()
     if not canonical:
@@ -93,7 +96,8 @@ def _canonicalize_webdav_path(webdav_path: str, *, case_sensitive: bool = True) 
     return canonical
 
 
-def make_strm_fingerprint(webdav_path: str, *, case_sensitive: bool = True) -> str:
+def make_strm_fingerprint(webdav_path: str, *,
+                          case_sensitive: bool = True) -> str:
     """
     根据 WebDAV 路径生成稳定 STRM 身份指纹。
 
@@ -134,12 +138,25 @@ def move_file(src: str | Path, dst: str | Path) -> None:
     shutil.move(str(src), str(dst))
 
 
-def safe_remove_file(path: str | Path) -> None:
+def safe_remove_file(path: str | Path) -> bool:
+    """安全删除文件，返回是否成功删除。"""
     try:
-        if Path(path).exists():
+        p = Path(path)
+        if p.exists():
+            p.unlink()
+            return True
+        return True  # 文件已不存在
+    except PermissionError:
+        # 尝试修改权限后删除
+        try:
+            import stat
+            os.chmod(str(path), stat.S_IWRITE | stat.S_IRWXU)
             Path(path).unlink()
+            return True
+        except Exception:
+            return False
     except OSError:
-        pass
+        return False
 
 
 def remove_empty_dirs(root_folder: str | Path) -> None:

@@ -1,4 +1,31 @@
 from __future__ import annotations
+from utils import (
+    make_strm_fingerprint,
+    read_strm_webdav_path,
+    webdav_parent,
+    build_webdav_trash_path,
+    quarantine_file,
+    safe_remove_file,
+    remove_empty_dirs,
+    move_file,
+)
+from refresh_service import RefreshService
+from webdav_client import OpenListAdminClient
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from typing import Generator, Optional
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+from contextlib import contextmanager
+import traceback
+import time
+import threading
+import sqlite3
+import shutil
+import re
+import logging
+import json
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -8,11 +35,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def ensure_base_dir_first():
     normalized_base_dir = os.path.normcase(os.path.abspath(BASE_DIR))
-    sys.path[:] = [p for p in sys.path if os.path.normcase(os.path.abspath(p or os.getcwd())) != normalized_base_dir]
+    sys.path[:] = [p for p in sys.path if os.path.normcase(
+        os.path.abspath(p or os.getcwd())) != normalized_base_dir]
     sys.path.insert(0, BASE_DIR)
 
 
-def load_local_module(module_name: str, filename: str, base_dir: str | None = None):
+def load_local_module(module_name: str, filename: str,
+                      base_dir: str | None = None):
     import importlib.util
     from types import ModuleType
 
@@ -35,33 +64,6 @@ try:
     import tomllib
 except ImportError:
     import tomli as tomllib
-import hashlib
-import json
-import logging
-import re
-import shutil
-import sqlite3
-import threading
-import time
-import traceback
-from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Generator, Optional
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
-from webdav_client import OpenListAdminClient
-from refresh_service import RefreshService
-from utils import (
-    make_strm_fingerprint,
-    read_strm_webdav_path,
-    webdav_parent,
-    build_webdav_trash_path,
-    quarantine_file,
-    safe_remove_file,
-    remove_empty_dirs,
-    move_file,
-)
 
 
 # ==================== STRM 存储管理类 ====================
@@ -141,13 +143,16 @@ class StrmStorageManager:
 
     def get_working_sync_storages(self) -> list[StrmStorageInfo]:
         """获取有效的同步模式存储"""
-        return [s for s in self.get_strm_storages() if s.is_working and s.is_sync_mode]
+        return [s for s in self.get_strm_storages(
+        ) if s.is_working and s.is_sync_mode]
 
-    def validate_against_local_paths(self, local_strm_engine_paths: list[str]) -> dict:
+    def validate_against_local_paths(
+            self, local_strm_engine_paths: list[str]) -> dict:
         """验证本地配置与 API 的一致性"""
         api_storages = self.get_strm_storages()
         api_mount_paths = {s.mount_path for s in api_storages}
-        local_strm_set = set(p.rstrip("/") for p in local_strm_engine_paths if p.strip())
+        local_strm_set = set(p.rstrip("/")
+                             for p in local_strm_engine_paths if p.strip())
         result: dict = {
             "api_storages": api_storages,
             "missing_in_api": [],
@@ -176,7 +181,8 @@ class StrmStorageManager:
 
 # =========================================================
 class AppService:
-    def __init__(self, config: AppConfig, db: Database, admin_api: OpenListAdminClient) -> None:
+    def __init__(self, config: AppConfig, db: Database,
+                 admin_api: OpenListAdminClient) -> None:
         self.config = config
         self.db = db
         self.admin_api = admin_api
@@ -195,6 +201,7 @@ class AppService:
         self.b_root = Path(config.paths.b_root).resolve()
         self.c_root = Path(config.paths.c_root).resolve()
         self.engine_configs: list[dict] = []
+        self._b_watcher_paused = False  # 新增：B 区监控暂停标志
 
     def get_path_lock(self, path: str | Path) -> threading.Lock:
         key = str(Path(path).resolve())
@@ -214,7 +221,8 @@ class AppService:
             if not root or root == "/":
                 continue
             normalized_root = root.rstrip("/") or "/"
-            if normalized_path == normalized_root or normalized_path.startswith(normalized_root + "/"):
+            if normalized_path == normalized_root or normalized_path.startswith(
+                    normalized_root + "/"):
                 return True
         return False
 
@@ -224,7 +232,8 @@ class AppService:
         """
         if not self.config.strm_engine_paths:
             return True
-        return self.is_path_under_any_root(root_path, self.config.strm_engine_paths)
+        return self.is_path_under_any_root(
+            root_path, self.config.strm_engine_paths)
 
     def is_strm_engine_monitored(self, root_path: str) -> bool:
         """判断路径是否在 STRM 引擎监控范围内。
@@ -243,7 +252,8 @@ class AppService:
             return None
         candidates = []
         for engine_path in self.config.strm_engine_paths:
-            if webdav_path == engine_path or webdav_path.startswith(engine_path + "/"):
+            if webdav_path == engine_path or webdav_path.startswith(
+                    engine_path + "/"):
                 candidates.append(engine_path)
         if not candidates:
             return None
@@ -276,7 +286,8 @@ class AppService:
             self.migrate_b_under_root_to_c(root_path)
             self.db.remove_known_folder_prefix(root_path)
 
-    def persist_current_roots_snapshot(self, valid_engine_paths: list[str] | None = None) -> None:
+    def persist_current_roots_snapshot(
+            self, valid_engine_paths: list[str] | None = None) -> None:
         """持久化当前根目录快照，可选只保存有效的引擎路径。"""
         roots = [
             (root_path, trash_path)
@@ -294,7 +305,8 @@ class AppService:
         cleanup_allowed = self.is_valid_refresh_root(root_path)
         if not cleanup_allowed:
             logging.info("[WebDAV刷新] %s 不在 STRM 引擎监控范围内，仅刷新不清理 B 区", root_path)
-        exists = self._refresh_webdav_recursive(root_path, depth, current_depth=0)
+        exists = self._refresh_webdav_recursive(
+            root_path, depth, current_depth=0)
         if not exists:
             logging.warning("[WebDAV刷新] 根路径不存在或不可访问: %s", root_path)
             if cleanup_allowed:
@@ -310,16 +322,22 @@ class AppService:
         """
         root_path = root_path.rstrip("/") or "/"
         logging.info("[WebDAV只读刷新] %s (不清理B区)", root_path)
-        exists = self._refresh_webdav_recursive(root_path, depth, current_depth=0)
+        exists = self._refresh_webdav_recursive(
+            root_path, depth, current_depth=0)
         if not exists:
             logging.warning("[WebDAV只读刷新] 根路径不存在或不可访问: %s", root_path)
         self.db.save_known_folder(root_path, source="webdav_refresh_readonly")
 
-    def _refresh_webdav_recursive(self, path: str, max_depth: int, current_depth: int) -> bool:
+    def _refresh_webdav_recursive(
+            self, path: str, max_depth: int, current_depth: int) -> bool:
         if current_depth > max_depth:
             return True
         normalized_path = path.rstrip("/") or "/"
-        logging.debug("[WebDAV刷新] 扫描 %s (深度 %s/%s)", normalized_path, current_depth, max_depth)
+        logging.debug(
+            "[WebDAV刷新] 扫描 %s (深度 %s/%s)",
+            normalized_path,
+            current_depth,
+            max_depth)
         result = self.admin_api.list_contents(normalized_path)
         if isinstance(result, str):
             if result == "404_NOT_FOUND":
@@ -336,7 +354,8 @@ class AppService:
             if folder_name:
                 # 将相对名称拼接到父路径上
                 sub_path = f"{normalized_path}/{folder_name}"
-                self._refresh_webdav_recursive(sub_path, max_depth, current_depth + 1)
+                self._refresh_webdav_recursive(
+                    sub_path, max_depth, current_depth + 1)
         return True
 
     def start(self) -> None:
@@ -389,13 +408,18 @@ class AppService:
         active_a = 0
         for a_root in self.a_roots:
             if a_root.exists():
-                self.observer.schedule(AAreaEventHandler(self), str(a_root), recursive=True)
+                self.observer.schedule(
+                    AAreaEventHandler(self), str(a_root), recursive=True)
                 active_a += 1
                 logging.info("[监控启动] A区: %s", a_root)
             else:
                 logging.warning("[监控跳过] A区不存在: %s", a_root)
-        self.observer.schedule(BAreaEventHandler(self), str(self.b_root), recursive=True)
-        self.observer.schedule(CAreaEventHandler(self), str(self.c_root), recursive=True)
+        self.observer.schedule(
+            BAreaEventHandler(self), str(
+                self.b_root), recursive=True)
+        self.observer.schedule(
+            CAreaEventHandler(self), str(
+                self.c_root), recursive=True)
         self.observer.start()
         logging.info("[监控启动] B区: %s", self.b_root)
         logging.info("[监控启动] C区: %s", self.c_root)
@@ -461,11 +485,17 @@ class AppService:
             driver = s.get("driver", "")
             mount_path = s.get("mount_path", "unknown")
             if driver.lower() != "strm":
-                logging.debug("[引擎配置] 忽略非 STRM 驱动存储: %s (driver=%s)", mount_path, driver)
+                logging.debug(
+                    "[引擎配置] 忽略非 STRM 驱动存储: %s (driver=%s)",
+                    mount_path,
+                    driver)
                 continue
 
             addition_str = s.get("addition", "{}")
-            logging.debug("[引擎配置] 发现 STRM 存储 [%s], addition 内容: %s", mount_path, addition_str)
+            logging.debug(
+                "[引擎配置] 发现 STRM 存储 [%s], addition 内容: %s",
+                mount_path,
+                addition_str)
 
             try:
                 addition = json.loads(addition_str)
@@ -474,9 +504,11 @@ class AppService:
                 # 兼容 paths 为列表的解析
                 paths_val = addition.get("paths", "")
                 if isinstance(paths_val, list):
-                    source_paths = [str(p).strip() for p in paths_val if str(p).strip()]
+                    source_paths = [str(p).strip()
+                                    for p in paths_val if str(p).strip()]
                 else:
-                    source_paths = [p.strip() for p in paths_val.split("\n") if p.strip()]
+                    source_paths = [p.strip()
+                                    for p in paths_val.split("\n") if p.strip()]
 
                 if not save_path:
                     logging.warning(
@@ -501,7 +533,8 @@ class AppService:
             except Exception as e:
                 logging.error("[引擎配置] 解析存储 [%s] 配置失败: %s", mount_path, e)
 
-    def _verify_b_path_lineage(self, b_local_path: str, webdav_path: str, is_sync_phase: bool = False) -> bool:
+    def _verify_b_path_lineage(
+            self, b_local_path: str, webdav_path: str, is_sync_phase: bool = False) -> bool:
         """
         [剧集归属感校验]
         补充了详细的排查日志输出。
@@ -516,7 +549,8 @@ class AppService:
             if len(rel_to_b.parts) > 0:
                 # 第一级目录就是 A 区根目录的名称 (例如 "测试a")
                 a_root_name = rel_to_b.parts[0]
-                a_root_path = next((ar for ar in self.a_roots if ar.name == a_root_name), None)
+                a_root_path = next(
+                    (ar for ar in self.a_roots if ar.name == a_root_name), None)
         except ValueError:
             pass
 
@@ -528,18 +562,22 @@ class AppService:
             logging.debug("[血统校验放行] 引擎配置未加载，默认放行: %s", b_local_path)
             return True
 
-        config = next((c for c in self.engine_configs if c["a_root_norm"] == str(a_root_path.resolve())), None)
+        config = next(
+            (c for c in self.engine_configs if c["a_root_norm"] == str(
+                a_root_path.resolve())), None)
         if not config:
             logging.debug("[血统校验放行] 未找到该库的引擎配置，默认放行: %s", b_local_path)
             return True
 
         # 3. 识别云端“媒体根目录” (这里的 webdav_path 是 STRM 里读取的最真实的物理路径)
-        source_path = next((sp for sp in config["source_paths"] if webdav_path.startswith(sp.rstrip("/") + "/")), None)
+        source_path = next(
+            (sp for sp in config["source_paths"] if webdav_path.startswith(
+                sp.rstrip("/") + "/")), None)
         if not source_path:
             logging.debug("[血统校验放行] 真实云盘路径不在配置监控范围内，默认放行: %s", webdav_path)
             return True
 
-        rel_cloud_str = webdav_path[len(source_path.rstrip("/")) :].lstrip("/")
+        rel_cloud_str = webdav_path[len(source_path.rstrip("/")):].lstrip("/")
         rel_parts = rel_cloud_str.split("/")
 
         # 4. 识别 B 区物理层级
@@ -568,11 +606,15 @@ class AppService:
 
             # 如果是个存在文件夹的番剧，且本地被重命名了
             if cloud_show_name and physical_media_folder_name != cloud_show_name:
-                cloud_media_root = f"{source_path.rstrip('/')}/{cloud_show_name}"
+                cloud_media_root = f"{
+                    source_path.rstrip('/')}/{cloud_show_name}"
 
-                total_a_episodes = self.db.get_a_count_under_root(cloud_media_root)
+                total_a_episodes = self.db.get_a_count_under_root(
+                    cloud_media_root)
                 if total_a_episodes <= 1:
-                    logging.debug("[血统校验] 整个番剧只有一集(或A区无数据)，放行重命名: %s", b_local_path)
+                    logging.debug(
+                        "[血统校验] 整个番剧只有一集(或A区无数据)，放行重命名: %s",
+                        b_local_path)
                     return True  # 整个番剧只有一集，允许放行
 
                 physical_media_root_dir = engine_entry_path / physical_media_folder_name
@@ -580,12 +622,16 @@ class AppService:
                 if physical_media_root_dir.exists():
                     for p in physical_media_root_dir.rglob("*.strm"):
                         s_webdav = read_strm_webdav_path(p)
-                        if s_webdav and s_webdav.startswith(cloud_media_root + "/"):
+                        if s_webdav and s_webdav.startswith(
+                                cloud_media_root + "/"):
                             local_matches += 1
 
                 if local_matches <= 1:
-                    logging.info("[血统校验] 发现潜在的单兵非法重命名，进入观察期: 目录=%s", physical_media_root_dir)
-                    self.trigger_delayed_solo_check(str(physical_media_root_dir), cloud_media_root)
+                    logging.info(
+                        "[血统校验] 发现潜在的单兵非法重命名，进入观察期: 目录=%s",
+                        physical_media_root_dir)
+                    self.trigger_delayed_solo_check(
+                        str(physical_media_root_dir), cloud_media_root)
                     return True
 
             logging.debug("[血统校验] 校验通过: %s", b_local_path)
@@ -598,7 +644,8 @@ class AppService:
             logging.debug("[血统校验] 异常放行: %s", e)
             return True
 
-    def trigger_delayed_solo_check(self, physical_dir: str, cloud_media_root: str):
+    def trigger_delayed_solo_check(
+            self, physical_dir: str, cloud_media_root: str):
         """为某个物理文件夹开启单兵存活校验"""
         with self.cleanup_lock:
             # 如果该文件夹已经在观察名单了，刷新时间（防止批量重命名过程中反复触发）
@@ -606,7 +653,9 @@ class AppService:
             if old_timer:
                 old_timer.cancel()
 
-            timer = threading.Timer(30, self.execute_solo_judgment, args=(physical_dir, cloud_media_root))
+            timer = threading.Timer(
+                30, self.execute_solo_judgment, args=(
+                    physical_dir, cloud_media_root))
             timer.daemon = True
             self.pending_cleanups[physical_dir] = timer
             timer.start()
@@ -665,7 +714,8 @@ class AppService:
                         disk_fingerprint_to_paths[fingerprint] = set()
                     disk_fingerprint_to_paths[fingerprint].add(path_str)
 
-                    disk_path_to_data[path_str] = {"webdav": webdav_path, "fp": fingerprint}
+                    disk_path_to_data[path_str] = {
+                        "webdav": webdav_path, "fp": fingerprint}
             except Exception as e:
                 logging.warning("[初始化] 读取 B 区文件失败: %s (%s)", strm_file, e)
 
@@ -690,10 +740,12 @@ class AppService:
                 self.db.delete_b_by_local(db_local_path)
                 continue
 
-            if db_local_path in disk_path_to_data and disk_path_to_data[db_local_path]["fp"] == db_fingerprint:
+            if db_local_path in disk_path_to_data and disk_path_to_data[
+                    db_local_path]["fp"] == db_fingerprint:
                 webdav_path = disk_path_to_data[db_local_path]["webdav"]
                 if not self._verify_b_path_lineage(db_local_path, webdav_path):
-                    logging.warning("[B区历史越界清理] 物理删除历史遗留越界文件: %s", db_local_path)
+                    logging.warning(
+                        "[B区历史越界清理] 物理删除历史遗留越界文件: %s", db_local_path)
                     safe_remove_file(db_local_path)
                     self.db.delete_b_by_local(db_local_path)
                     self.refresh_identity_current_b_path(db_fingerprint)
@@ -703,17 +755,21 @@ class AppService:
                 processed_disk_paths.add(db_local_path)
                 continue
 
-            disk_paths_for_fp = disk_fingerprint_to_paths.get(db_fingerprint, set())
-            available_paths = [p for p in disk_paths_for_fp if p not in processed_disk_paths]
+            disk_paths_for_fp = disk_fingerprint_to_paths.get(
+                db_fingerprint, set())
+            available_paths = [
+                p for p in disk_paths_for_fp if p not in processed_disk_paths]
 
             valid_new_path = None
             for candidate_path in available_paths:
                 candidate_webdav = disk_path_to_data[candidate_path]["webdav"]
-                if self._verify_b_path_lineage(candidate_path, candidate_webdav):
+                if self._verify_b_path_lineage(
+                        candidate_path, candidate_webdav):
                     valid_new_path = candidate_path
                     break
                 else:
-                    logging.warning("[B区越界清理] 发现非法跨目录移动，物理删除: %s", candidate_path)
+                    logging.warning(
+                        "[B区越界清理] 发现非法跨目录移动，物理删除: %s", candidate_path)
                     safe_remove_file(candidate_path)
                     processed_disk_paths.add(candidate_path)
 
@@ -721,10 +777,14 @@ class AppService:
                 self.db.move_b_record(db_local_path, valid_new_path)
                 identity = self.db.get_identity_by_fingerprint(db_fingerprint)
                 if identity and identity[3] == db_local_path:
-                    self.db.update_identity_b_path(db_fingerprint, valid_new_path)
+                    self.db.update_identity_b_path(
+                        db_fingerprint, valid_new_path)
 
                 processed_disk_paths.add(valid_new_path)
-                logging.info("[B区自同步] 更新路径(合法重命名): %s -> %s", db_local_path, valid_new_path)
+                logging.info(
+                    "[B区自同步] 更新路径(合法重命名): %s -> %s",
+                    db_local_path,
+                    valid_new_path)
             else:
                 self.db.delete_b_by_local(db_local_path)
                 self.refresh_identity_current_b_path(db_fingerprint)
@@ -738,13 +798,16 @@ class AppService:
                 fingerprint = data["fp"]
 
                 if not self._verify_b_path_lineage(disk_path, webdav_path):
-                    logging.warning("[B区越界清理] 发现非法新增跨区复制文件，物理删除: %s", disk_path)
+                    logging.warning(
+                        "[B区越界清理] 发现非法新增跨区复制文件，物理删除: %s", disk_path)
                     safe_remove_file(disk_path)
                     continue
 
-                parent_webdav_path = webdav_parent(webdav_path) if webdav_path else ""
+                parent_webdav_path = webdav_parent(
+                    webdav_path) if webdav_path else ""
                 identity = self.db.get_identity_by_fingerprint(fingerprint)
-                source_a_path = identity[2] if identity else self.find_a_source_by_webdav(webdav_path)
+                source_a_path = identity[2] if identity else self.find_a_source_by_webdav(
+                    webdav_path)
 
                 self.db.upsert_b(
                     local_path=disk_path,
@@ -782,7 +845,8 @@ class AppService:
                     total_files += 1
         logging.info("[初始化] A区扫描完成，共处理 %s 个 STRM 文件", total_files)
 
-    def scan_a_to_b_full_sync(self, valid_engine_paths: list[str] | None = None) -> None:
+    def scan_a_to_b_full_sync(
+            self, valid_engine_paths: list[str] | None = None) -> None:
         """A -> B 全量同步，可选只同步指定引擎路径下的文件。
 
         Args:
@@ -798,7 +862,8 @@ class AppService:
         skip_count = 0
         for local_path, webdav_path, parent_webdav_path, _ in self.db.get_all_a():
             if valid_engine_paths is not None:
-                if not any(webdav_path == p or webdav_path.startswith(p + "/") for p in valid_engine_paths):
+                if not any(webdav_path == p or webdav_path.startswith(
+                        p + "/") for p in valid_engine_paths):
                     logging.debug(
                         "[A->B跳过] %s 不在有效引擎路径范围内",
                         webdav_path,
@@ -806,7 +871,8 @@ class AppService:
                     continue
             if self.db.is_ghost_protected(webdav_path):
                 continue
-            result = self.copy_a_record_to_b_if_needed(local_path, webdav_path, parent_webdav_path)
+            result = self.copy_a_record_to_b_if_needed(
+                local_path, webdav_path, parent_webdav_path)
             total_records += 1
             if result is True:
                 success_count += 1
@@ -846,7 +912,8 @@ class AppService:
                     self.db.delete_b_by_local(str(file_path))
                     logging.info("[冗余清理] 已删除带时间戳的冗余文件: %s", file_path)
                 except OSError as e:
-                    logging.warning("[冗余清理] 删除带时间戳冗余文件失败: %s (%s)", file_path, e)
+                    logging.warning(
+                        "[冗余清理] 删除带时间戳冗余文件失败: %s (%s)", file_path, e)
 
         # ========== 三层校验：清理 B 区中 A 区源已不存在的冗余 STRM ==========
         try:
@@ -903,7 +970,8 @@ class AppService:
                     try:
                         move_file(local, target)
                     except OSError as exc:
-                        logging.warning("[冗余清理→C区] 迁移失败: %s -> %s (%s)", local, target, exc)
+                        logging.warning(
+                            "[冗余清理→C区] 迁移失败: %s -> %s (%s)", local, target, exc)
                         safe_remove_file(local_path)
                         self.db.delete_b_by_local(local_path)
                         if fingerprint:
@@ -920,7 +988,10 @@ class AppService:
                 if fingerprint:
                     self.refresh_identity_current_b_path(fingerprint)
                 migrated_count += 1
-                logging.info("[冗余清理→C区] A区源文件已不存在，迁移至C区: %s -> %s", local_path, webdav_path)
+                logging.info(
+                    "[冗余清理→C区] A区源文件已不存在，迁移至C区: %s -> %s",
+                    local_path,
+                    webdav_path)
                 continue
 
             # 第 3 层：WebDAV 存在性检查
@@ -933,10 +1004,15 @@ class AppService:
             if fingerprint:
                 self.refresh_identity_current_b_path(fingerprint)
             removed_count += 1
-            logging.info("[冗余清理] 已移除失效STRM(WebDAV不存在): %s -> %s", local_path, webdav_path)
+            logging.info(
+                "[冗余清理] 已移除失效STRM(WebDAV不存在): %s -> %s",
+                local_path,
+                webdav_path)
 
         if migrated_count:
-            logging.warning("[冗余清理→C区] 共迁移 %s 个 A 区源已删除的 STRM 到 C 区", migrated_count)
+            logging.warning(
+                "[冗余清理→C区] 共迁移 %s 个 A 区源已删除的 STRM 到 C 区",
+                migrated_count)
         if removed_count:
             logging.warning("[冗余清理] 共清理 %s 个 WebDAV 已不存在的 STRM", removed_count)
 
@@ -993,7 +1069,8 @@ class AppService:
         # 如果在复制前，B区已经有该指纹的有效主实例，进行评分比较。
         # 如果A区这个文件的名字并不比B区现有的好，直接拒绝物理复制！
         # =======================================================
-        valid_b_instance = self.db.get_valid_b_instance_by_fingerprint(fingerprint)
+        valid_b_instance = self.db.get_valid_b_instance_by_fingerprint(
+            fingerprint)
         if valid_b_instance:
             existing_main_path = valid_b_instance[0]
             # 如果将要复制的目标路径与B区主实例路径不同 (说明是同义但不同名的文件)
@@ -1056,7 +1133,8 @@ class AppService:
         else:
             logging.debug("[A区删除] 未找到A索引: %s", local_path)
 
-    def copy_a_record_to_b_if_needed(self, a_local_path: str, webdav_path: str, parent_webdav_path: str) -> bool | None:
+    def copy_a_record_to_b_if_needed(
+            self, a_local_path: str, webdav_path: str, parent_webdav_path: str) -> bool | None:
         """复制 A→B，但会先检查指纹是否已存在。如果存在则跳过。
         返回：
             True: 复制成功
@@ -1066,15 +1144,18 @@ class AppService:
         fingerprint = make_strm_fingerprint(webdav_path)
         if self.db.b_fingerprint_exists(fingerprint):
             return None  # 会被统计为 skip_count
-        return self.copy_a_record_to_b(a_local_path, webdav_path, parent_webdav_path)
+        return self.copy_a_record_to_b(
+            a_local_path, webdav_path, parent_webdav_path)
 
-    def copy_a_record_to_b(self, a_local_path: str, webdav_path: str, parent: str) -> bool | None:
+    def copy_a_record_to_b(self, a_local_path: str,
+                           webdav_path: str, parent: str) -> bool | None:
         try:
             # 1. 计算物理路径
             b_local = self.build_b_path_from_a(a_local_path)
 
             # 2. 血统校验（同步阶段）
-            if not self._verify_b_path_lineage(str(b_local), webdav_path, is_sync_phase=True):
+            if not self._verify_b_path_lineage(
+                    str(b_local), webdav_path, is_sync_phase=True):
                 return False
 
         except ValueError as exc:
@@ -1096,7 +1177,8 @@ class AppService:
                         source_a_path=a_local_path,
                         current_b_path=str(b_local),
                     )
-                    self.ensure_single_visible_instance(fingerprint, str(b_local))
+                    self.ensure_single_visible_instance(
+                        fingerprint, str(b_local))
                     return None
                 except Exception as e:
                     logging.error("[A->B跳过失败] %s", e)
@@ -1113,7 +1195,13 @@ class AppService:
         # 5. 写入数据库
         try:
             fingerprint = make_strm_fingerprint(webdav_path)
-            self.db.upsert_b(str(b_local), webdav_path, parent, a_local_path, fingerprint=fingerprint, status="valid")
+            self.db.upsert_b(
+                str(b_local),
+                webdav_path,
+                parent,
+                a_local_path,
+                fingerprint=fingerprint,
+                status="valid")
             self.db.upsert_identity(
                 fingerprint=fingerprint,
                 webdav_path=webdav_path,
@@ -1181,20 +1269,21 @@ class AppService:
         except ValueError:
             b_depth = 0
 
-        # 反推对应的 A 区路径，计算 A 区层级深度
+        # 从数据库查该文件对应的 A 区源路径，计算 A 区层级深度
         a_depth = b_depth  # 默认相同
-        a_path_str = self._reverse_map_b_to_a(path)
-        if a_path_str and Path(a_path_str).exists():
-            try:
-                a_root = self.get_a_root_for_path(a_path_str)
-                if a_root:
-                    a_depth = len(Path(a_path_str).relative_to(a_root).parts)
-            except (ValueError, AttributeError):
-                pass
+        try:
+            row = self.db.get_b_by_local_full(path)
+            if row:
+                source_a_path = row[3]  # source_a_path 是第4列（0-indexed）
+                if source_a_path and Path(source_a_path).exists():
+                    a_root = self.get_a_root_for_path(source_a_path)
+                    if a_root:
+                        a_depth = len(
+                            Path(source_a_path).relative_to(a_root).parts)
+        except Exception:
+            pass
 
         # 层级差异越大，分数越低（越优先）
-        # 差异为0时得0，差异为1时得-1，差异为2时得-2...
-        # 这样用户手动调整过层级的文件会被优先保留
         depth_diff_priority = -(abs(b_depth - a_depth))
 
         path_len = len(str(p))
@@ -1217,7 +1306,8 @@ class AppService:
             return
 
         # 只处理 valid 状态
-        valid_files = [row[0] for row in all_instances if row[5] == "valid" and Path(row[0]).exists()]
+        valid_files = [row[0] for row in all_instances if row[5]
+                       == "valid" and Path(row[0]).exists()]
 
         if not valid_files:
             return
@@ -1229,7 +1319,8 @@ class AppService:
         duplicates = valid_files[1:]
 
         # 更新 DB（只标记非主的）
-        duplicate_paths = self.db.mark_other_b_instances_duplicate(fingerprint, keep)
+        duplicate_paths = self.db.mark_other_b_instances_duplicate(
+            fingerprint, keep)
 
         for dup_path in duplicate_paths:
             dup = Path(dup_path)
@@ -1240,9 +1331,14 @@ class AppService:
             if quarantined:
                 moved = self.db.move_b_record(str(dup), str(quarantined))
                 if moved:
-                    self.db.mark_b_instance_status(str(quarantined), "duplicate")
+                    self.db.mark_b_instance_status(
+                        str(quarantined), "duplicate")
 
-                logging.warning("[B区重复] 已隔离重复实例: %s -> %s (保留=%s)", dup, quarantined, keep)
+                logging.warning(
+                    "[B区重复] 已隔离重复实例: %s -> %s (保留=%s)",
+                    dup,
+                    quarantined,
+                    keep)
             else:
                 logging.warning("[B区重复] 重复实例隔离失败: %s", dup)
 
@@ -1324,23 +1420,191 @@ class AppService:
             # =========================================================
             if not self._verify_b_path_lineage(str(local), webdav_path):
                 logging.warning("[B区越界拦截] 拒绝非法复制，该路径无对应A区源: %s", local)
+                # 获取该指纹的合法历史位置，从 A 区恢复
+                fingerprint = make_strm_fingerprint(webdav_path)
+                self._restore_b_from_a_after_violation(
+                    local, webdav_path, fingerprint)
+                return
+            parent = webdav_parent(webdav_path)
+            fingerprint = make_strm_fingerprint(webdav_path)
+            # =========================================================
+            if not self._verify_a_source_exists(
+                    str(local), webdav_path, fingerprint):
+                logging.warning("[B区拦截] A区无对应源文件，拒绝非法strm: %s", local)
                 safe_remove_file(local)
                 if row:
                     self.db.delete_b_by_local(str(local))
                 return
-            # =========================================================
-            parent = webdav_parent(webdav_path)
-            fingerprint = make_strm_fingerprint(webdav_path)
+
             if row:
-                self._handle_existing_b_file(local, webdav_path, parent, fingerprint, row)
+                self._handle_existing_b_file(
+                    local, webdav_path, parent, fingerprint, row)
             else:
-                self._handle_new_b_file(local, webdav_path, parent, fingerprint)
+                self._handle_new_b_file(
+                    local, webdav_path, parent, fingerprint)
+
+    def _restore_b_from_a_after_violation(
+        self,
+        local: Path,
+        webdav_path: str,
+        fingerprint: str,
+    ) -> None:
+        """血统校验失败后：删除越界文件，从 A 区恢复到正确位置，并临时暂停 B 区监控。"""
+        local_path = str(local)
+
+        # 1. 先强制删除越界的 B 区文件（使用 os.remove 并验证）
+        self._force_delete_and_verify(local)
+
+        # 清理数据库记录
+        self.db.delete_b_by_local(local_path)
+
+        # 如果文件仍然无法删除，跳过恢复，避免创建重复文件
+        if local.exists():
+            logging.error("[B区越界恢复] 无法删除越界文件，跳过恢复操作: %s", local_path)
+            return
+
+        # 2. 查找 identity 表中该指纹的合法历史位置
+        identity = self.db.get_identity_by_fingerprint(fingerprint)
+        correct_b_path: str | None = None
+
+        if identity:
+            # identity: (fingerprint, webdav_path, source_a_path, current_b_path, updated_at)
+            historical_b_path = identity[3]  # current_b_path
+            if historical_b_path and historical_b_path != local_path:
+                # 检查历史路径是否还在，且内容正确
+                if Path(historical_b_path).exists():
+                    existing_webdav = read_strm_webdav_path(historical_b_path)
+                    if existing_webdav == webdav_path:
+                        correct_b_path = historical_b_path
+                        logging.debug("[B区越界恢复] 历史合法路径仍有效: %s", correct_b_path)
+
+        # 3. 如果历史路径不可用，尝试从 A 区源恢复
+        if not correct_b_path:
+            source_a_path = identity[2] if identity else None
+            if not source_a_path or not Path(source_a_path).exists():
+                source_a_path = self.find_a_source_by_webdav(webdav_path)
+
+            if source_a_path and Path(source_a_path).exists():
+                try:
+                    # 计算正确的 B 区路径
+                    correct_b_path = str(
+                        self.build_b_path_from_a(source_a_path))
+                    correct_b = Path(correct_b_path)
+                    correct_b.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source_a_path, correct_b)
+                    logging.info(
+                        "[B区越界恢复] 已从 A 区恢复到正确位置: %s -> %s",
+                        source_a_path,
+                        correct_b_path)
+                except Exception as exc:
+                    logging.error("[B区越界恢复] 从 A 区恢复失败: %s", exc)
+                    correct_b_path = None
+            else:
+                logging.warning("[B区越界恢复] 找不到 A 区源文件，无法恢复: %s", webdav_path)
+
+        # 4. 更新数据库
+        if correct_b_path:
+            parent = webdav_parent(webdav_path)
+            source_a = identity[2] if identity else self.find_a_source_by_webdav(
+                webdav_path)
+            self.db.upsert_b(
+                correct_b_path,
+                webdav_path,
+                parent,
+                source_a,
+                fingerprint=fingerprint,
+                status="valid",
+            )
+            self.db.upsert_identity(
+                fingerprint=fingerprint,
+                webdav_path=webdav_path,
+                source_a_path=source_a,
+                current_b_path=correct_b_path,
+            )
+            self.ensure_single_visible_instance(fingerprint, correct_b_path)
+
+        # 5. 临时暂停 B 区监控，避免恢复操作触发事件循环
+        self._pause_b_watcher_temporarily()
+
+    def _pause_b_watcher_temporarily(self, seconds: int = 5) -> None:
+        """临时暂停 B 区文件监控一段时间，防止恢复操作触发监控事件导致循环。"""
+        def _resume():
+            self._b_watcher_paused = False
+            logging.debug("[B区监控] 监控已恢复")
+
+        self._b_watcher_paused = True
+        timer = threading.Timer(seconds, _resume)
+        timer.daemon = True
+        timer.start()
+        logging.info("[B区监控] 临时暂停 %s 秒，避免恢复操作触发循环", seconds)
+
+    def _verify_a_source_exists(
+            self, b_local_path: str, webdav_path: str, fingerprint: str) -> bool:
+        """校验 B 区 strm 在 A 区是否有对应的源文件。"""
+        # 1. 查 identity 表
+        identity = self.db.get_identity_by_fingerprint(fingerprint)
+        if identity and identity[2]:  # source_a_path
+            if Path(identity[2]).exists():
+                return True
+
+        # 2. 通过 webdav_path 反查 A 区
+        a_source = self.find_a_source_by_webdav(webdav_path)
+        if a_source and Path(a_source).exists():
+            return True
+
+        # 3. 都找不到，说明 A 区没有这个源文件
+        logging.debug(
+            "[A区源校验] A区无对应源文件: %s (指向: %s)",
+            b_local_path,
+            webdav_path)
+        return False
+
+    def _force_delete_and_verify(self, path: Path) -> bool:
+        """强制删除文件并验证结果，失败时尝试多种方法。"""
+        path_str = str(path)
+
+        if not path.exists():
+            return True
+
+        # 方法 1: 使用 safe_remove_file
+        safe_remove_file(path)
+        if not path.exists():
+            logging.info("[B区越界恢复] 已删除越界文件: %s", path_str)
+            return True
+
+        # 方法 2: 直接使用 os.remove
+        try:
+            os.remove(path_str)
+            if not path.exists():
+                logging.info("[B区越界恢复] 已删除越界文件(os.remove): %s", path_str)
+                return True
+        except OSError as exc:
+            logging.warning("[B区越界恢复] os.remove 失败 %s: %s", path_str, exc)
+
+        # 方法 3: 尝试修改文件权限后删除
+        try:
+            import stat
+            os.chmod(path_str, stat.S_IWRITE | stat.S_IREAD | stat.S_IRWXU)
+            os.remove(path_str)
+            if not path.exists():
+                logging.info("[B区越界恢复] 已删除越界文件(chmod+remove): %s", path_str)
+                return True
+        except Exception as exc:
+            logging.warning("[B区越界恢复] chmod+remove 失败 %s: %s", path_str, exc)
+
+        # 最终验证
+        if path.exists():
+            logging.error("[B区越界恢复] 无法删除越界文件: %s", path_str)
+            return False
+
+        return True
 
     def _handle_unparseable_strm(self, local: Path, row: tuple | None) -> None:
         """处理无法解析的 STRM 文件：尝试恢复，失败则隔离。"""
         if row:
             _, old_webdav_path, parent, source_a_path, _fingerprint, _status, _ = row
-            if self.restore_b_file_from_a(str(local), old_webdav_path, parent, source_a_path):
+            if self.restore_b_file_from_a(
+                    str(local), old_webdav_path, parent, source_a_path):
                 logging.warning("[B区修复] 已从A区恢复异常STRM: %s", local)
                 return
         quarantined = quarantine_file(local, suffix=".invalid")
@@ -1348,7 +1612,10 @@ class AppService:
             if row:
                 self.db.move_b_record(str(local), str(quarantined))
                 self.db.mark_b_instance_status(str(quarantined), "quarantined")
-            logging.warning("[B区隔离] 无法解析STRM，已隔离: %s -> %s", local, quarantined)
+            logging.warning(
+                "[B区隔离] 无法解析STRM，已隔离: %s -> %s",
+                local,
+                quarantined)
         else:
             logging.warning("[B区隔离失败] 无法解析STRM: %s", local)
 
@@ -1364,10 +1631,17 @@ class AppService:
         _, old_webdav_path, old_parent, source_a_path, old_fingerprint, status, _ = row
         if old_fingerprint == fingerprint or old_webdav_path == webdav_path:
             # 内容未变，刷新记录
-            self._refresh_b_record(local, webdav_path, parent, source_a_path, fingerprint, status)
+            self._refresh_b_record(
+                local,
+                webdav_path,
+                parent,
+                source_a_path,
+                fingerprint,
+                status)
             return
         # 内容变化，尝试恢复
-        if self.restore_b_file_from_a(str(local), old_webdav_path, old_parent, source_a_path):
+        if self.restore_b_file_from_a(
+                str(local), old_webdav_path, old_parent, source_a_path):
             logging.warning("[B区修复] 内容被修改，已从A区恢复: %s", local)
             return
         # 恢复失败，隔离
@@ -1396,7 +1670,8 @@ class AppService:
             fingerprint=fingerprint,
             webdav_path=webdav_path,
             source_a_path=source_a_path,
-            current_b_path=str(local) if normalized_status == "valid" else None,
+            current_b_path=str(
+                local) if normalized_status == "valid" else None,
         )
         if normalized_status == "valid":
             self.ensure_single_visible_instance(fingerprint, str(local))
@@ -1418,7 +1693,8 @@ class AppService:
     ) -> None:
         """处理新出现的 B 区文件。"""
         identity = self.db.get_identity_by_fingerprint(fingerprint)
-        source_a_path = identity[2] if identity else self.find_a_source_by_webdav(webdav_path)
+        source_a_path = identity[2] if identity else self.find_a_source_by_webdav(
+            webdav_path)
         self.db.upsert_b(
             str(local),
             webdav_path,
@@ -1446,20 +1722,24 @@ class AppService:
         for entry_path, mapping in self.config.strm_storage_map.items():
             for mp in mapping.paths:
                 if cloud_path.startswith(mp):
-                    relative = cloud_path[len(mp.rstrip("/")) :].lstrip("/")
-                    engine_path = f"{entry_path.rstrip('/')}/{relative}" if relative else entry_path
+                    relative = cloud_path[len(mp.rstrip("/")):].lstrip("/")
+                    engine_path = f"{
+                        entry_path.rstrip('/')}/{relative}" if relative else entry_path
                     result.append(engine_path)
                     break
         return result
 
-    def request_openlist_index_update(self, webdav_path: str, parent_webdav_path: str) -> None:
+    def request_openlist_index_update(
+            self, webdav_path: str, parent_webdav_path: str) -> None:
         """删除/MOVE 成功后，通知 OpenList 更新搜索索引。"""
         del webdav_path
 
         # 将真实云盘路径映射为引擎入口路径
         engine_paths = self._cloud_path_to_engine_paths(parent_webdav_path)
         if not engine_paths:
-            logging.debug("[OpenListAdmin] 无法映射引擎路径，跳过索引更新: %s", parent_webdav_path)
+            logging.debug(
+                "[OpenListAdmin] 无法映射引擎路径，跳过索引更新: %s",
+                parent_webdav_path)
             return
 
         if not self.admin_api.token and not self.admin_api.login():
@@ -1481,7 +1761,8 @@ class AppService:
 
             if fingerprint:
                 # 修复：除了查数据库，还要扫描文件系统中是否存在同指纹文件
-                b_instances = self.db.get_b_instances_by_fingerprint(fingerprint)
+                b_instances = self.db.get_b_instances_by_fingerprint(
+                    fingerprint)
                 any_b_instance_exists = False
 
                 # 1. 查数据库记录
@@ -1497,26 +1778,30 @@ class AppService:
                     for strm_file in b_root.rglob("*.strm"):
                         try:
                             content = read_strm_webdav_path(str(strm_file))
-                            if content and make_strm_fingerprint(content) == fingerprint:
+                            if content and make_strm_fingerprint(
+                                    content) == fingerprint:
                                 any_b_instance_exists = True
                                 break
-                        except:
+                        except BaseException:
                             continue
 
                 if any_b_instance_exists:
-                    logging.info("[B区删除联动] B区中仍存在同指纹文件，跳过WebDAV删除: %s", local_path)
+                    logging.info(
+                        "[B区删除联动] B区中仍存在同指纹文件，跳过WebDAV删除: %s", local_path)
                     self.db.delete_b_by_local(local_path)
                     return
 
             ok = self._execute_webdav_deletion(webdav_path, parent_webdav_path)
 
-    def _execute_webdav_deletion(self, webdav_path: str, parent_webdav_path: str) -> bool:
+    def _execute_webdav_deletion(
+            self, webdav_path: str, parent_webdav_path: str) -> bool:
         """执行 WebDAV 源文件删除/MOVE 操作。"""
         lock = self.get_path_lock(webdav_path)
         with lock, self._dav_write_lock:
             ok = self._perform_webdav_action(webdav_path)
             if ok:
-                self.request_openlist_index_update(webdav_path, parent_webdav_path)
+                self.request_openlist_index_update(
+                    webdav_path, parent_webdav_path)
                 self.db.set_ghost_protection(
                     webdav_path,
                     self.config.behavior.ghost_protect_seconds,
@@ -1548,7 +1833,10 @@ class AppService:
 
             ok = self.admin_api.move(cloud_path, trash_path)
             if not ok:
-                logging.error("[B区删除联动] MOVE失败: %s -> %s", cloud_path, trash_path)
+                logging.error(
+                    "[B区删除联动] MOVE失败: %s -> %s",
+                    cloud_path,
+                    trash_path)
             return ok
 
         ok = self.admin_api.remove(cloud_path)
@@ -1645,13 +1933,14 @@ class AppService:
     def handle_b_moved(self, src_path: str, dest_path: str) -> None:
         """处理 B 区文件移动或重命名。"""
         with self._b_move_lock:
-            # 防御 1: 如果目标文件已经被之前的“血统拦截”删除了，直接结束
+            # 防御 1: 如果目标文件已经被之前的"血统拦截"删除了，直接结束
             if not Path(dest_path).exists():
                 return
 
             src_row = self.db.get_b_by_local_full(src_path)
             if not src_row:
-                if Path(dest_path).exists() and dest_path.lower().endswith(".strm"):
+                if Path(dest_path).exists(
+                ) and dest_path.lower().endswith(".strm"):
                     self.handle_b_created_or_modified(dest_path)
                 return
 
@@ -1663,8 +1952,19 @@ class AppService:
                 return
 
             if dest_webdav_path == webdav_path:
-                # 即使路径变了，只要内容指纹没变，且经过了 handle_b_created_or_modified 里的血统校验
-                # 我们就更新数据库记录
+                # 内容未变，但移动后需要重新校验目标位置的血统
+                if not self._verify_b_path_lineage(dest_path, webdav_path):
+                    logging.warning(
+                        "[B区移动拦截] 移动后位置越界，执行恢复: %s -> %s", src_path, dest_path)
+                    self._restore_b_from_a_after_violation(
+                        Path(dest_path), webdav_path, fingerprint or make_strm_fingerprint(webdav_path))
+                    # 清理源记录
+                    self.db.delete_b_by_local(src_path)
+                    if fingerprint:
+                        self.refresh_identity_current_b_path(fingerprint)
+                    return
+
+                # 血统校验通过，正常更新路径
                 moved = self.db.move_b_record(src_path, dest_path)
                 if moved:
                     if status:
@@ -1673,14 +1973,19 @@ class AppService:
                         self.db.update_identity_b_path(fingerprint, dest_path)
                     logging.info("[B区移动] 已更新路径: %s -> %s", src_path, dest_path)
                 return
+
+            # 新增：移动后内容变化，需要校验目标位置是否合法
+            # 先按新文件处理，让 handle_b_created_or_modified 去处理血统校验
             self.db.delete_b_by_local(src_path)
             if fingerprint:
                 self.refresh_identity_current_b_path(fingerprint)
             if Path(dest_path).exists() and dest_path.lower().endswith(".strm"):
+                # 直接调用 handle_b_created_or_modified，它会处理血统校验和恢复
                 self.handle_b_created_or_modified(dest_path)
             logging.info("[B区移动] 内容不一致，已按新文件处理: %s -> %s", src_path, dest_path)
 
-    def cleanup_all_b_instances_for_deleted_source(self, fingerprint: str, deleted_webdav_path: str) -> None:
+    def cleanup_all_b_instances_for_deleted_source(
+            self, fingerprint: str, deleted_webdav_path: str) -> None:
         """删除 WebDAV 源文件成功后，清理 B 区中所有同 fingerprint 实例和冗余后缀文件。"""
 
         # 1. 清理同 fingerprint 的所有数据库记录
@@ -1789,22 +2094,23 @@ class AppService:
                 result = self.admin_api.list_contents(engine_path)
                 if isinstance(result, str):
                     logging.warning(
-                        "[B区冗余清理跳过] STRM引擎路径 %s (对应 %s) 当前不可访问," "跳过清理以避免网络中断导致误删",
+                        "[B区冗余清理跳过] STRM引擎路径 %s (对应 %s) 当前不可访问,跳过清理以避免网络中断导致误删",
                         engine_path,
                         normalized_folder,
                     )
                     return
                 elif isinstance(result, dict):
-                    if not (result.get("code") in (0, 200) or "folders" in result or "files" in result):
+                    if not (result.get("code") in (0, 200)
+                            or "folders" in result or "files" in result):
                         logging.warning(
-                            "[B区冗余清理跳过] STRM引擎路径 %s (对应 %s) 返回异常," "跳过清理以避免网络中断导致误删",
+                            "[B区冗余清理跳过] STRM引擎路径 %s (对应 %s) 返回异常,跳过清理以避免网络中断导致误删",
                             engine_path,
                             normalized_folder,
                         )
                         return
                 else:
                     logging.warning(
-                        "[B区冗余清理跳过] STRM引擎路径 %s (对应 %s) 返回未知类型 %s," "跳过清理以避免网络中断导致误删",
+                        "[B区冗余清理跳过] STRM引擎路径 %s (对应 %s) 返回未知类型 %s,跳过清理以避免网络中断导致误删",
                         engine_path,
                         normalized_folder,
                         type(result).__name__,
@@ -1850,7 +2156,8 @@ class AppService:
                     try:
                         move_file(local, target)
                     except OSError as exc:
-                        logging.warning("[B区冗余清理→C区] 迁移失败: %s -> %s (%s)", local, target, exc)
+                        logging.warning(
+                            "[B区冗余清理→C区] 迁移失败: %s -> %s (%s)", local, target, exc)
                         safe_remove_file(local_path)
                         self.db.delete_b_by_local(local_path)
                         try:
@@ -1873,7 +2180,10 @@ class AppService:
                 except (TypeError, ValueError):
                     pass
                 migrated_count += 1
-                logging.info("[B区冗余清理→C区] A区源文件已不存在，迁移至C区: %s -> %s", local_path, webdav_path)
+                logging.info(
+                    "[B区冗余清理→C区] A区源文件已不存在，迁移至C区: %s -> %s",
+                    local_path,
+                    webdav_path)
                 continue
 
             # 第 3 层：WebDAV 存在性检查
@@ -1888,14 +2198,20 @@ class AppService:
             except (TypeError, ValueError):
                 pass
             removed_count += 1
-            logging.info("[B区冗余清理] 已移除失效STRM: %s -> %s", local_path, webdav_path)
+            logging.info(
+                "[B区冗余清理] 已移除失效STRM: %s -> %s",
+                local_path,
+                webdav_path)
 
         if migrated_count:
             logging.warning(
                 "[B区冗余清理→C区] %s 下共迁移 %s 个 A 区源已删除的 STRM", normalized_folder, migrated_count
             )
         if removed_count:
-            logging.warning("[B区冗余清理] %s 下共清理 %s 个失效 STRM", normalized_folder, removed_count)
+            logging.warning(
+                "[B区冗余清理] %s 下共清理 %s 个失效 STRM",
+                normalized_folder,
+                removed_count)
 
     def refresh_identity_current_b_path(self, fingerprint: str) -> None:
         """根据当前 B 区 valid 实例刷新 strm_identity.current_b_path。
@@ -1937,20 +2253,21 @@ class AppService:
                 result = self.admin_api.list_contents(engine_path)
                 if isinstance(result, str):
                     logging.warning(
-                        "[幽灵迁移跳过] STRM引擎路径 %s 当前不可访问," "不迁移以避免网络中断导致误操作",
+                        "[幽灵迁移跳过] STRM引擎路径 %s 当前不可访问,不迁移以避免网络中断导致误操作",
                         engine_path,
                     )
                     return
                 elif isinstance(result, dict):
-                    if not (result.get("code") in (0, 200) or "folders" in result or "files" in result):
+                    if not (result.get("code") in (0, 200)
+                            or "folders" in result or "files" in result):
                         logging.warning(
-                            "[幽灵迁移跳过] STRM引擎路径 %s 返回异常," "不迁移以避免网络中断导致误操作",
+                            "[幽灵迁移跳过] STRM引擎路径 %s 返回异常,不迁移以避免网络中断导致误操作",
                             engine_path,
                         )
                         return
                 else:
                     logging.warning(
-                        "[幽灵迁移跳过] STRM引擎路径 %s 返回未知类型 %s," "不迁移以避免网络中断导致误操作",
+                        "[幽灵迁移跳过] STRM引擎路径 %s 返回未知类型 %s,不迁移以避免网络中断导致误操作",
                         engine_path,
                         type(result).__name__,
                     )
@@ -1969,7 +2286,8 @@ class AppService:
                 try:
                     move_file(local, target)
                 except OSError as exc:
-                    logging.warning("[幽灵迁移] 文件迁移失败: %s -> %s (%s)", local, target, exc)
+                    logging.warning(
+                        "[幽灵迁移] 文件迁移失败: %s -> %s (%s)", local, target, exc)
                     continue
             self.db.upsert_c(
                 str(target),
@@ -2002,10 +2320,13 @@ class AppService:
             logging.error("[STRM存储验证] Admin API 登录失败")
             return {"error": "login_failed", "valid": []}
         manager = StrmStorageManager(admin_client)
-        result = manager.validate_against_local_paths(self.config.strm_engine_paths)
+        result = manager.validate_against_local_paths(
+            self.config.strm_engine_paths)
         # 记录验证结果
         if result["missing_in_api"]:
-            logging.warning("[STRM存储验证] 本地配置但 API 中不存在的路径: %s", result["missing_in_api"])
+            logging.warning(
+                "[STRM存储验证] 本地配置但 API 中不存在的路径: %s",
+                result["missing_in_api"])
         if result["extra_in_api"]:
             extra_paths = [s.mount_path for s in result["extra_in_api"]]
             logging.info("[STRM存储验证] API 中存在但本地未配置的路径: %s", extra_paths)
@@ -2027,7 +2348,8 @@ class AppService:
         logging.info("[STRM存储验证] 有效的 STRM 存储: %s", valid_paths)
         return result
 
-    def build_strm_access_path(self, mount_path: str, sub_path: str = "") -> str:
+    def build_strm_access_path(self, mount_path: str,
+                               sub_path: str = "") -> str:
         """构建 STRM 引擎入口路径（用于 API 访问如 fs list）"""
         mapping = self.config.strm_storage_map.get(mount_path)
         if mapping:
