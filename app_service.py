@@ -201,7 +201,8 @@ class AppService:
         self.b_root = Path(config.paths.b_root).resolve()
         self.c_root = Path(config.paths.c_root).resolve()
         self.engine_configs: list[dict] = []
-        self._b_watcher_paused = False  # 新增：B 区监控暂停标志
+        self._restoring_markers: set[str] = set()  # 正在恢复的文件指纹集合
+        self._restoring_lock = threading.Lock()
 
     def get_path_lock(self, path: str | Path) -> threading.Lock:
         key = str(Path(path).resolve())
@@ -1452,52 +1453,78 @@ class AppService:
         """血统校验失败后：删除越界文件，从 A 区恢复到正确位置，并临时暂停 B 区监控。"""
         local_path = str(local)
 
-        # 1. 先强制删除越界的 B 区文件（使用 os.remove 并验证）
-        self._force_delete_and_verify(local)
-
-        # 清理数据库记录
+        # 1. 先强制删除越界的 B 区文件
+        deleted = self._force_delete_and_verify(local)
         self.db.delete_b_by_local(local_path)
-
-        # 如果文件仍然无法删除，跳过恢复，避免创建重复文件
-        if local.exists():
-            logging.error("[B区越界恢复] 无法删除越界文件，跳过恢复操作: %s", local_path)
+        if not deleted:
+            logging.error("[B区越界恢复] 无法删除越界文件，跳过恢复: %s", local_path)
             return
+        logging.info("[B区越界恢复] 已删除越界文件: %s", local_path)
 
-        # 2. 查找 identity 表中该指纹的合法历史位置
+        # 2. 查找 identity 表中该指纹的合法历史位置（优先使用）
         identity = self.db.get_identity_by_fingerprint(fingerprint)
         correct_b_path: str | None = None
+        source_a_path: str | None = None
 
         if identity:
             # identity: (fingerprint, webdav_path, source_a_path, current_b_path, updated_at)
             historical_b_path = identity[3]  # current_b_path
+            source_a_path = identity[2]  # source_a_path
+
+            # 验证历史路径是否仍然有效
             if historical_b_path and historical_b_path != local_path:
-                # 检查历史路径是否还在，且内容正确
-                if Path(historical_b_path).exists():
+                historical = Path(historical_b_path)
+                if historical.exists():
+                    # 验证内容是否匹配
                     existing_webdav = read_strm_webdav_path(historical_b_path)
                     if existing_webdav == webdav_path:
                         correct_b_path = historical_b_path
-                        logging.debug("[B区越界恢复] 历史合法路径仍有效: %s", correct_b_path)
+                        logging.debug(
+                            "[B区越界恢复] 历史合法路径仍有效，直接使用: %s", correct_b_path)
 
-        # 3. 如果历史路径不可用，尝试从 A 区源恢复
+        # 3. 如果历史路径不可用，尝试从 A 区源恢复（但保持历史路径位置）
         if not correct_b_path:
-            source_a_path = identity[2] if identity else None
+            # 尝试找到 A 区源文件
             if not source_a_path or not Path(source_a_path).exists():
                 source_a_path = self.find_a_source_by_webdav(webdav_path)
 
             if source_a_path and Path(source_a_path).exists():
-                try:
-                    # 计算正确的 B 区路径
+                # 如果有历史路径，恢复到历史路径位置
+                if identity and identity[3]:
+                    correct_b_path = identity[3]
+                else:
+                    # 没有历史路径，才从 A 区源计算
                     correct_b_path = str(
                         self.build_b_path_from_a(source_a_path))
+
+                try:
                     correct_b = Path(correct_b_path)
                     correct_b.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(source_a_path, correct_b)
-                    logging.info(
-                        "[B区越界恢复] 已从 A 区恢复到正确位置: %s -> %s",
-                        source_a_path,
-                        correct_b_path)
+
+                    # 标记恢复操作，避免被误认为是用户操作
+                    with self._restoring_lock:
+                        self._restoring_markers.add(fingerprint)
+
+                    try:
+                        shutil.copyfile(source_a_path, correct_b)
+                        logging.info(
+                            "[B区越界恢复] 已从 A 区恢复到正确位置: %s -> %s",
+                            source_a_path,
+                            correct_b_path)
+                    finally:
+                        # 延迟移除标记，确保文件系统事件处理完成
+                        def _remove_marker():
+                            time.sleep(2)
+                            with self._restoring_lock:
+                                self._restoring_markers.discard(fingerprint)
+
+                        threading.Thread(
+                            target=_remove_marker, daemon=True).start()
+
                 except Exception as exc:
                     logging.error("[B区越界恢复] 从 A 区恢复失败: %s", exc)
+                    with self._restoring_lock:
+                        self._restoring_markers.discard(fingerprint)
                     correct_b_path = None
             else:
                 logging.warning("[B区越界恢复] 找不到 A 区源文件，无法恢复: %s", webdav_path)
@@ -1505,38 +1532,23 @@ class AppService:
         # 4. 更新数据库
         if correct_b_path:
             parent = webdav_parent(webdav_path)
-            source_a = identity[2] if identity else self.find_a_source_by_webdav(
-                webdav_path)
+            final_source_a = source_a_path or (
+                identity[2] if identity else self.find_a_source_by_webdav(webdav_path))
             self.db.upsert_b(
                 correct_b_path,
                 webdav_path,
                 parent,
-                source_a,
+                final_source_a,
                 fingerprint=fingerprint,
                 status="valid",
             )
             self.db.upsert_identity(
                 fingerprint=fingerprint,
                 webdav_path=webdav_path,
-                source_a_path=source_a,
+                source_a_path=final_source_a,
                 current_b_path=correct_b_path,
             )
             self.ensure_single_visible_instance(fingerprint, correct_b_path)
-
-        # 5. 临时暂停 B 区监控，避免恢复操作触发事件循环
-        self._pause_b_watcher_temporarily()
-
-    def _pause_b_watcher_temporarily(self, seconds: int = 5) -> None:
-        """临时暂停 B 区文件监控一段时间，防止恢复操作触发监控事件导致循环。"""
-        def _resume():
-            self._b_watcher_paused = False
-            logging.debug("[B区监控] 监控已恢复")
-
-        self._b_watcher_paused = True
-        timer = threading.Timer(seconds, _resume)
-        timer.daemon = True
-        timer.start()
-        logging.info("[B区监控] 临时暂停 %s 秒，避免恢复操作触发循环", seconds)
 
     def _verify_a_source_exists(
             self, b_local_path: str, webdav_path: str, fingerprint: str) -> bool:
@@ -1753,45 +1765,39 @@ class AppService:
             logging.warning("[OpenListAdmin] 索引更新触发失败: %s", engine_paths)
 
     def handle_b_deleted(self, local_path: str) -> None:
-        with self._b_move_lock:
-            row = self.db.get_b_by_local_full(local_path)
+        """处理 B 区 STRM 删除事件。"""
+        local = Path(local_path).resolve()
+        lock = self.get_path_lock(local)
+        with lock:
+            row = self.db.get_b_by_local_full(str(local))
             if not row:
                 return
-            _, webdav_path, parent_webdav_path, _source_a_path, fingerprint, _status, _ = row
 
-            if fingerprint:
-                # 修复：除了查数据库，还要扫描文件系统中是否存在同指纹文件
-                b_instances = self.db.get_b_instances_by_fingerprint(
-                    fingerprint)
-                any_b_instance_exists = False
+            _, webdav_path, _parent_webdav_path, _source_a_path, fingerprint, _status, _ = row
 
-                # 1. 查数据库记录
-                for instance in b_instances:
-                    instance_path = instance[0]
-                    if Path(instance_path).exists():
-                        any_b_instance_exists = True
-                        break
-
-                # 2. 修复：扫描整个 B 区文件系统，找同指纹的 strm 文件
-                if not any_b_instance_exists:
-                    b_root = Path(self.config.paths.b_root)
-                    for strm_file in b_root.rglob("*.strm"):
-                        try:
-                            content = read_strm_webdav_path(str(strm_file))
-                            if content and make_strm_fingerprint(
-                                    content) == fingerprint:
-                                any_b_instance_exists = True
-                                break
-                        except BaseException:
-                            continue
-
-                if any_b_instance_exists:
-                    logging.info(
-                        "[B区删除联动] B区中仍存在同指纹文件，跳过WebDAV删除: %s", local_path)
-                    self.db.delete_b_by_local(local_path)
+            # 检查是否是程序正在恢复的文件
+            with self._restoring_lock:
+                if fingerprint in self._restoring_markers:
+                    logging.info("[B区删除] 检测到程序恢复操作，跳过追删: %s", local_path)
                     return
 
-            ok = self._execute_webdav_deletion(webdav_path, parent_webdav_path)
+            # 检查是否还有其他同指纹文件存在
+            if self.db.has_other_b_instance(fingerprint, str(local)):
+                logging.info("[B区删除联动] B区中仍存在同指纹文件，跳过WebDAV删除: %s", local_path)
+                self.db.delete_b_by_local(str(local))
+                return
+
+            # 删除 WebDAV 上的源文件
+            if webdav_path:
+                try:
+                    self.webdav.delete(webdav_path)
+                    logging.info("[B区删除联动] 已删除WebDAV源文件: %s", webdav_path)
+                except Exception as exc:
+                    logging.error("[B区删除联动] 删除WebDAV源文件失败: %s", exc)
+
+            self.db.delete_b_by_local(str(local))
+            if fingerprint:
+                self.refresh_identity_current_b_path(fingerprint)
 
     def _execute_webdav_deletion(
             self, webdav_path: str, parent_webdav_path: str) -> bool:
@@ -1946,25 +1952,23 @@ class AppService:
 
             _, webdav_path, _parent_webdav_path, _source_a_path, fingerprint, status, _ = src_row
 
+            # 检查是否是程序正在恢复的文件
+            with self._restoring_lock:
+                if fingerprint in self._restoring_markers:
+                    logging.info(
+                        "[B区移动] 检测到程序恢复操作，跳过处理: %s -> %s",
+                        src_path,
+                        dest_path)
+                    return
+
             # 防御 2: read_strm_webdav_path 此时可能返回 None
             dest_webdav_path = read_strm_webdav_path(dest_path)
             if not dest_webdav_path:
                 return
 
             if dest_webdav_path == webdav_path:
-                # 内容未变，但移动后需要重新校验目标位置的血统
-                if not self._verify_b_path_lineage(dest_path, webdav_path):
-                    logging.warning(
-                        "[B区移动拦截] 移动后位置越界，执行恢复: %s -> %s", src_path, dest_path)
-                    self._restore_b_from_a_after_violation(
-                        Path(dest_path), webdav_path, fingerprint or make_strm_fingerprint(webdav_path))
-                    # 清理源记录
-                    self.db.delete_b_by_local(src_path)
-                    if fingerprint:
-                        self.refresh_identity_current_b_path(fingerprint)
-                    return
-
-                # 血统校验通过，正常更新路径
+                # 即使路径变了，只要内容指纹没变，且经过了 handle_b_created_or_modified 里的血统校验
+                # 我们就更新数据库记录
                 moved = self.db.move_b_record(src_path, dest_path)
                 if moved:
                     if status:
@@ -1974,8 +1978,7 @@ class AppService:
                     logging.info("[B区移动] 已更新路径: %s -> %s", src_path, dest_path)
                 return
 
-            # 新增：移动后内容变化，需要校验目标位置是否合法
-            # 先按新文件处理，让 handle_b_created_or_modified 去处理血统校验
+            # 移动后内容变化，需要校验目标位置是否合法
             self.db.delete_b_by_local(src_path)
             if fingerprint:
                 self.refresh_identity_current_b_path(fingerprint)

@@ -34,7 +34,8 @@ class Database:
         columns = {row[1] for row in cur.fetchall()}
 
         if column_name not in columns:
-            cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
+            cur.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
 
     def init_db(self) -> None:
         logging.info("[DB] 开始初始化数据库表结构: %s", self.db_path)
@@ -161,7 +162,8 @@ class Database:
             conn.commit()
             logging.info("[DB] 数据库核心表与索引核对并创建完成！")
 
-    def upsert_a(self, local_path: str, webdav_path: str, parent_webdav_path: str) -> None:
+    def upsert_a(self, local_path: str, webdav_path: str,
+                 parent_webdav_path: str) -> None:
         now = time.time()
         with self.lock, self.connection() as conn:
             conn.execute(
@@ -229,17 +231,20 @@ class Database:
 
     def delete_a_by_local(self, local_path: str) -> None:
         with self.lock, self.connection() as conn:
-            conn.execute("DELETE FROM a_strm_files WHERE local_path = ?", (local_path,))
+            conn.execute(
+                "DELETE FROM a_strm_files WHERE local_path = ?", (local_path,))
             conn.commit()
 
     def delete_b_by_local(self, local_path: str) -> None:
         with self.lock, self.connection() as conn:
-            conn.execute("DELETE FROM b_strm_files WHERE local_path = ?", (local_path,))
+            conn.execute(
+                "DELETE FROM b_strm_files WHERE local_path = ?", (local_path,))
             conn.commit()
 
     def delete_c_by_local(self, local_path: str) -> None:
         with self.lock, self.connection() as conn:
-            conn.execute("DELETE FROM c_ghost_files WHERE local_path = ?", (local_path,))
+            conn.execute(
+                "DELETE FROM c_ghost_files WHERE local_path = ?", (local_path,))
             conn.commit()
 
     def get_a_by_local(self, local_path: str) -> tuple | None:
@@ -274,7 +279,8 @@ class Database:
 
     def get_all_a(self) -> list[tuple]:
         with self.lock, self.connection() as conn:
-            cur = conn.execute("SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files")
+            cur = conn.execute(
+                "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files")
             return cur.fetchall()
 
     def get_all_b(self) -> list[tuple]:
@@ -293,7 +299,8 @@ class Database:
                 """)
             return cur.fetchall()
 
-    def save_known_folder(self, folder_path: str, source: str = "unknown") -> None:
+    def save_known_folder(self, folder_path: str,
+                          source: str = "unknown") -> None:
         if not folder_path or folder_path == "/":
             return
         now = time.time()
@@ -320,7 +327,8 @@ class Database:
             )
             conn.commit()
 
-    def set_ghost_protection(self, webdav_path: str, seconds: int, reason: str = "") -> None:
+    def set_ghost_protection(self, webdav_path: str,
+                             seconds: int, reason: str = "") -> None:
         expire = time.time() + seconds
         with self.lock, self.connection() as conn:
             conn.execute(
@@ -335,7 +343,8 @@ class Database:
     def cleanup_expired_ghosts(self) -> None:
         now = time.time()
         with self.lock, self.connection() as conn:
-            conn.execute("DELETE FROM ghost_protection WHERE expire_time <= ?", (now,))
+            conn.execute(
+                "DELETE FROM ghost_protection WHERE expire_time <= ?", (now,))
             conn.commit()
 
     def is_ghost_protected(self, webdav_path: str) -> bool:
@@ -348,7 +357,8 @@ class Database:
             row = cur.fetchone()
             return bool(row and row[0] > time.time())
 
-    def set_protected_root(self, root_path: str, trash_path: str, active: bool = True) -> None:
+    def set_protected_root(self, root_path: str,
+                           trash_path: str, active: bool = True) -> None:
         now = time.time()
         with self.lock, self.connection() as conn:
             conn.execute(
@@ -369,13 +379,15 @@ class Database:
                 INSERT INTO protected_roots(root_path, trash_path, active, updated_at)
                 VALUES (?, ?, 1, ?)
                 """,
-                [(root_path, trash_path, now) for root_path, trash_path in roots],
+                [(root_path, trash_path, now)
+                 for root_path, trash_path in roots],
             )
             conn.commit()
 
     def get_protected_roots(self) -> list[tuple]:
         with self.lock, self.connection() as conn:
-            cur = conn.execute("SELECT root_path, trash_path, active, updated_at FROM protected_roots")
+            cur = conn.execute(
+                "SELECT root_path, trash_path, active, updated_at FROM protected_roots")
             return cur.fetchall()
 
     def get_protected_root_paths(self) -> list[str]:
@@ -383,7 +395,8 @@ class Database:
             cur = conn.execute("SELECT root_path FROM protected_roots")
             return [row[0] for row in cur.fetchall()]
 
-    def save_protected_roots_snapshot(self, roots: list[tuple[str, str]]) -> None:
+    def save_protected_roots_snapshot(
+            self, roots: list[tuple[str, str]]) -> None:
         now = time.time()
         with self.lock, self.connection() as conn:
             conn.execute("DELETE FROM protected_roots_snapshot")
@@ -392,13 +405,15 @@ class Database:
                 INSERT INTO protected_roots_snapshot(root_path, trash_path, updated_at)
                 VALUES (?, ?, ?)
                 """,
-                [(root_path, trash_path, now) for root_path, trash_path in roots],
+                [(root_path, trash_path, now)
+                 for root_path, trash_path in roots],
             )
             conn.commit()
 
     def get_protected_roots_snapshot_paths(self) -> list[str]:
         with self.lock, self.connection() as conn:
-            cur = conn.execute("SELECT root_path FROM protected_roots_snapshot")
+            cur = conn.execute(
+                "SELECT root_path FROM protected_roots_snapshot")
             return [row[0] for row in cur.fetchall()]
 
     def set_control(self, key: str, value: str) -> None:
@@ -492,7 +507,8 @@ class Database:
             )
             return cur.fetchone()
 
-    def update_identity_b_path(self, fingerprint: str, current_b_path: str | None) -> None:
+    def update_identity_b_path(self, fingerprint: str,
+                               current_b_path: str | None) -> None:
         now = time.time()
         with self.lock, self.connection() as conn:
             conn.execute(
@@ -505,7 +521,8 @@ class Database:
             )
             conn.commit()
 
-    def update_identity_a_path(self, fingerprint: str, source_a_path: str | None) -> None:
+    def update_identity_a_path(self, fingerprint: str,
+                               source_a_path: str | None) -> None:
         now = time.time()
         with self.lock, self.connection() as conn:
             conn.execute(
@@ -679,7 +696,8 @@ class Database:
             )
             conn.commit()
 
-    def get_valid_b_instance_by_fingerprint(self, fingerprint: str) -> tuple | None:
+    def get_valid_b_instance_by_fingerprint(
+            self, fingerprint: str) -> tuple | None:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 """
@@ -773,13 +791,17 @@ class Database:
     def b_fingerprint_exists(self, fingerprint: str) -> bool:
         """检查 B 区数据库中是否已存在该指纹"""
         with self.lock, self.connection() as conn:
-            cur = conn.execute("SELECT 1 FROM b_strm_files WHERE fingerprint = ? LIMIT 1", (fingerprint,))
+            cur = conn.execute(
+                "SELECT 1 FROM b_strm_files WHERE fingerprint = ? LIMIT 1", (fingerprint,))
             return cur.fetchone() is not None
 
     def update_b_local_path(self, old_path: str, new_path: str) -> bool:
         """更新 B 区文件的本地路径（用于文件名改变的情况）"""
         with self.lock, self.connection() as conn:
-            cur = conn.execute("UPDATE b_strm_files SET local_path = ? WHERE local_path = ?", (new_path, old_path))
+            cur = conn.execute(
+                "UPDATE b_strm_files SET local_path = ? WHERE local_path = ?",
+                (new_path,
+                 old_path))
             return cur.rowcount > 0
 
     def insert_b_strm_file(
@@ -828,3 +850,13 @@ class Database:
                 (pattern,)
             )
             return cur.fetchone()[0]
+
+    def has_other_b_instance(self, fingerprint: str,
+                             exclude_local_path: str) -> bool:
+        """检查是否存在同一指纹的其他 B 区实例（排除指定路径）。"""
+        with self.connection() as conn:
+            cur = conn.execute(
+                "SELECT 1 FROM b_strm_files WHERE fingerprint = ? AND local_path != ? LIMIT 1",
+                (fingerprint, exclude_local_path),
+            )
+            return cur.fetchone() is not None
