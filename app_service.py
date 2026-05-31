@@ -1,4 +1,39 @@
 from __future__ import annotations
+from pathlib import Path
+import posixpath
+import urllib.parse
+import hashlib
+import json
+import logging
+import re
+import shutil
+import sqlite3
+import threading
+import time
+import traceback
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Generator, Optional
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+# autopep8: off
+# isort: off
+import os
+import sys
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def ensure_base_dir_first():
+    normalized_base_dir = os.path.normcase(os.path.abspath(BASE_DIR))
+    sys.path[:] = [p for p in sys.path if os.path.normcase(
+        os.path.abspath(p or os.getcwd())) != normalized_base_dir]
+    sys.path.insert(0, BASE_DIR)
+
+ensure_base_dir_first()
+
+
 from utils import (
     make_strm_fingerprint,
     read_strm_webdav_path,
@@ -11,33 +46,8 @@ from utils import (
 )
 from refresh_service import RefreshService
 from webdav_client import OpenListAdminClient
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-from typing import Generator, Optional
-from datetime import datetime, timedelta
-from dataclasses import dataclass
-from contextlib import contextmanager
-import traceback
-import time
-import threading
-import sqlite3
-import shutil
-import re
-import logging
-import json
-import hashlib
-import os
-import sys
-from pathlib import Path
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-def ensure_base_dir_first():
-    normalized_base_dir = os.path.normcase(os.path.abspath(BASE_DIR))
-    sys.path[:] = [p for p in sys.path if os.path.normcase(
-        os.path.abspath(p or os.getcwd())) != normalized_base_dir]
-    sys.path.insert(0, BASE_DIR)
+# autopep8: on
+# isort: on
 
 
 def load_local_module(module_name: str, filename: str,
@@ -59,14 +69,14 @@ def load_local_module(module_name: str, filename: str,
     return module
 
 
-ensure_base_dir_first()
 try:
     import tomllib
 except ImportError:
     import tomli as tomllib
 
-
 # ==================== STRM 存储管理类 ====================
+
+
 @dataclass(slots=True, frozen=True)
 class StrmStorageInfo:
     """STRM 存储信息"""
@@ -775,10 +785,27 @@ class AppService:
                     processed_disk_paths.add(candidate_path)
 
             if valid_new_path:
+                # 更新数据库路径
                 self.db.move_b_record(db_local_path, valid_new_path)
                 identity = self.db.get_identity_by_fingerprint(db_fingerprint)
                 if identity and identity[3] == db_local_path:
                     self.db.update_identity_b_path(
+                        db_fingerprint, valid_new_path)
+
+                # 物理删除旧路径文件（如果存在且不同于新路径）
+                try:
+                    old_path_obj = Path(db_local_path)
+                    if old_path_obj.exists() and str(old_path_obj.resolve()) != str(
+                            Path(valid_new_path).resolve()):
+                        safe_remove_file(old_path_obj)
+                        logging.debug("[B区自同步] 删除旧路径物理文件: %s", db_local_path)
+                except Exception as e:
+                    logging.warning(
+                        "[B区自同步] 删除旧路径物理文件失败: %s (%s)", db_local_path, e)
+
+                # 触发单实例检查，确保评分机制生效
+                if db_fingerprint:
+                    self.ensure_single_visible_instance(
                         db_fingerprint, valid_new_path)
 
                 processed_disk_paths.add(valid_new_path)
@@ -1250,13 +1277,21 @@ class AppService:
 
         return False
 
+    def _canonicalize_webdav_path(self, path: str) -> str:
+        """规范化 WebDAV 路径"""
+        if not path:
+            return ""
+        path = path.replace("\\", "/")
+        path = urllib.parse.unquote(path)
+        return posixpath.normpath(path)
+
     def _b_file_score(self, path: str) -> tuple:
         """
         分数越小越优先保留。
         规则：
         1. 标准命名（0） > 非标准命名（1）【绝对优先】
-        2. 同标准/非标准内：和 A 区源路径层级差异越大越优先（用户手动调整过层级）
-        3. 层级差异相同时：路径短优先
+        2. 同标准/非标准内：B区路径与WebDAV路径从右向左匹配，匹配越少（差异越大）越优先（说明用户手动调整过）
+        3. 差异相同时：路径短优先
         4. 文件名作为稳定排序键
         """
         p = Path(path)
@@ -1264,32 +1299,46 @@ class AppService:
 
         is_standard = self._is_standard_media_name(name)
 
-        # 计算 B 区文件相对于 B 根目录的层级深度
+        # 1. 提取 B 区相对路径的所有部分（不含 B 区根目录）
         try:
-            b_depth = len(p.relative_to(self.b_root).parts)
+            b_rel_parts = p.relative_to(self.b_root).parts
         except ValueError:
-            b_depth = 0
+            b_rel_parts = p.parts
 
-        # 从数据库查该文件对应的 A 区源路径，计算 A 区层级深度
-        a_depth = b_depth  # 默认相同
+        # 2. 从数据库查该文件对应的 WebDAV 路径并提取其路径部分
+        webdav_parts = []
         try:
             row = self.db.get_b_by_local_full(path)
             if row:
-                source_a_path = row[3]  # source_a_path 是第4列（0-indexed）
-                if source_a_path and Path(source_a_path).exists():
-                    a_root = self.get_a_root_for_path(source_a_path)
-                    if a_root:
-                        a_depth = len(
-                            Path(source_a_path).relative_to(a_root).parts)
+                webdav_path = row[1]  # webdav_path 是第2列（0-indexed）
+                if webdav_path:
+                    canonical_webdav = self._canonicalize_webdav_path(
+                        webdav_path)
+                    # 去掉前后的斜杠后拆分
+                    webdav_parts = [
+                        part for part in canonical_webdav.strip("/").split("/") if part]
         except Exception:
             pass
 
-        # 层级差异越大，分数越低（越优先）
-        depth_diff_priority = -(abs(b_depth - a_depth))
+        # 3. 计算从右向左的匹配层级数
+        # 如果查不到 WebDAV 信息，默认匹配数设为最大（代表未修改，优先级最低）
+        if not webdav_parts:
+            match_count = len(b_rel_parts)
+        else:
+            match_count = 0
+            # 从右向左逐级对比（忽略大小写差异）
+            for b_part, w_part in zip(
+                    reversed(b_rel_parts), reversed(webdav_parts)):
+                if b_part.lower() == w_part.lower():
+                    match_count += 1
+                else:
+                    break
 
+        # 4. 路径长度（作为次要参考，路径越短越优先）
         path_len = len(str(p))
 
-        return (0 if is_standard else 1, depth_diff_priority, path_len, name)
+        # 返回元组用于排序。match_count 越小，说明改动越多，分数越低，越优先保留。
+        return (0 if is_standard else 1, match_count, path_len, name)
 
     def ensure_single_visible_instance(
         self,
