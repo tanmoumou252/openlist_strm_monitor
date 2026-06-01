@@ -182,7 +182,7 @@ cython_debug/
 *.db
 bridge.db
 
-*.py
 openlist_strm_bridge.code-workspace
 .aider*
-*.toml
+python_embed/
+docs/

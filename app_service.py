@@ -46,6 +46,7 @@ from utils import (
 )
 from refresh_service import RefreshService
 from webdav_client import OpenListAdminClient
+from media_renamer import suggest_rename, build_season_path, _extract_season_episode
 # autopep8: on
 # isort: on
 
@@ -447,14 +448,76 @@ class AppService:
                 continue
         return None
 
-    def build_b_path_from_a(self, a_local_path: str | Path) -> Path:
-        """将 A 中的文件映射到 B： B/<a_root_name>/<相对路径>"""
+    def build_b_path_from_a(self, a_local_path: str | Path,
+                            webdav_path: str | None = None) -> Path:
+        """将 A 中的文件映射到 B"""
         a_local = Path(a_local_path).resolve()
         a_root = self.get_a_root_for_path(a_local)
         if a_root is None:
             raise ValueError(f"文件不属于任何A根目录: {a_local}")
+
         rel = a_local.relative_to(a_root)
         root_name = a_root.name or "a_root"
+
+        # 尝试自动重命名
+        suggested_name = suggest_rename(a_local)
+        if suggested_name and webdav_path:
+            season, _ = _extract_season_episode(a_local.name)
+            if season is not None:
+                # 从 webdav_path 提取真正的媒体根名称
+                # 通过 engine_configs 中的 source_paths 来定位
+                cloud_show_name = None
+                for config in getattr(self, "engine_configs", []):
+                    for sp in config.get("source_paths", []):
+                        if webdav_path.startswith(sp.rstrip("/") + "/"):
+                            rel_cloud = webdav_path[len(
+                                sp.rstrip("/")):].lstrip("/")
+                            cloud_show_name = rel_cloud.split(
+                                "/")[0] if rel_cloud else None
+                            break
+                    if cloud_show_name:
+                        break
+
+                if cloud_show_name:
+                    show_name = cloud_show_name
+                else:
+                    # 回退：从 webdav_path 提取
+                    # 尝试找到引擎入口路径对应的媒体名
+                    engine_path = self._find_matching_engine_path(webdav_path)
+                    if engine_path:
+                        rel_to_engine = webdav_path[len(
+                            engine_path.rstrip("/")):].lstrip("/")
+                        show_name = rel_to_engine.split(
+                            "/")[0] if rel_to_engine else None
+                    else:
+                        show_name = None
+
+                    # 如果还是找不到，尝试从路径中提取
+                    if not show_name:
+                        webdav_parts = webdav_path.strip("/").split("/")
+                        # 从右向左找第一个不是 Season/Episode/sXX 的目录
+                        for part in reversed(webdav_parts[:-1]):  # 排除文件名
+                            part_lower = part.lower()
+                            if (part_lower.startswith("season") or
+                                part_lower.startswith("episode") or
+                                    re.match(r"^s\d{1,2}$", part_lower)):  # 匹配 s01, s1, s02 等
+                                continue
+                            show_name = part
+                            break
+                        if not show_name and len(webdav_parts) >= 2:
+                            show_name = webdav_parts[-2]
+
+                if show_name:
+                    # 使用 build_season_path 构建标准路径
+                    new_path = build_season_path(
+                        self.b_root / root_name,
+                        show_name,
+                        season,
+                        suggested_name,
+                    )
+                    return new_path
+
+        # 默认行为：保持原有结构
         return self.b_root / root_name / rel
 
     def _reverse_map_b_to_a(self, b_local_path: str | Path) -> str | None:
@@ -550,6 +613,7 @@ class AppService:
         [剧集归属感校验]
         补充了详细的排查日志输出。
         """
+        fingerprint = make_strm_fingerprint(webdav_path)
         b_local = Path(b_local_path).resolve()
 
         # 🚀 修复：通过 B 区路径反推其所属的 A 区根目录
@@ -592,27 +656,97 @@ class AppService:
         rel_parts = rel_cloud_str.split("/")
 
         # 4. 识别 B 区物理层级
-        entry_name = source_path.rstrip("/").split("/")[-1]
-        engine_entry_path = self.b_root / a_root_path.name / entry_name
+        # 注意：B 区路径结构是 {b_root}/{a_root_name}/{media_folder}/{season_folder}/{file}
+        # 没有中间层级（如 "番剧"），所以 engine_entry_path 只到 a_root_name
+        engine_entry_path = self.b_root / a_root_path.name
+
+        # 从 webdav_path 提取媒体文件夹名
+        rel_cloud_str = webdav_path[len(source_path.rstrip("/")):].lstrip("/")
+        rel_parts = rel_cloud_str.split("/")
+        cloud_show_name = rel_parts[0] if len(rel_parts) >= 2 else None
 
         try:
             rel_to_entry = b_local.relative_to(engine_entry_path)
 
-            # 🚀 边界校验：不能提到引擎根目录
+            # 边界校验：不能提到引擎根目录
             if len(rel_to_entry.parts) < 2:
-                # 如果原本在云端就是电影(直接放在根目录没有子文件夹)，则合法；如果是番剧提到了根目录，非法！
+                # 如果原本在云端就是电影(直接放在根目录没有子文件夹)，则合法
                 if len(rel_parts) < 2:
                     logging.debug("[血统校验] 判定为根目录电影，放行: %s", b_local_path)
                     return True
                 logging.warning(
-                    "[血统校验失败] 发现越界文件(不可提至根目录): 物理路径=%s, 云端=%s", b_local_path, webdav_path
+                    "[血统校验失败] 发现越界文件(不可提至根目录): 物理路径=%s, 云端=%s",
+                    b_local_path, webdav_path
                 )
                 return False
 
+            # 处理 Season XX 层级：允许在 Season 层级下的文件
             physical_media_folder_name = rel_to_entry.parts[0]
+
+            # 如果存在 Season 层级，提取真正的媒体文件夹名
+            if len(rel_to_entry.parts) >= 2 and rel_to_entry.parts[1].lower(
+            ).startswith("season"):
+                season_folder = rel_to_entry.parts[1]
+                logging.debug(
+                    "[血统校验] 检测到 Season 层级: %s/%s",
+                    physical_media_folder_name,
+                    season_folder,
+                )
+
+            # 查询是否有历史边界映射
+            boundary = self.db.get_media_boundary_by_fingerprint(fingerprint)
+            if boundary:
+                _, source_media_name, current_media_name, _, _ = boundary
+                # 如果当前物理文件夹名与映射记录一致，直接放行
+                if physical_media_folder_name == current_media_name:
+                    logging.debug(
+                        "[血统校验] 边界映射匹配，放行: %s -> %s",
+                        source_media_name,
+                        current_media_name,
+                    )
+                    return True
+                # 如果当前物理文件夹名与源名称一致，更新映射
+                if physical_media_folder_name == source_media_name:
+                    logging.debug(
+                        "[血统校验] 回到源边界，放行: %s", physical_media_folder_name
+                    )
+                    return True
+
             cloud_show_name = rel_parts[0] if len(rel_parts) >= 2 else None
 
             if is_sync_phase:
+                # 同步阶段：记录边界映射
+                if cloud_show_name and physical_media_folder_name != cloud_show_name:
+                    # 检查是否已有映射
+                    existing = self.db.get_media_boundary_by_fingerprint(
+                        fingerprint)
+                    if not existing:
+                        self.db.upsert_media_boundary(
+                            fingerprint=fingerprint,
+                            source_media_name=cloud_show_name,
+                            current_media_name=physical_media_folder_name,
+                            engine_entry_path=str(engine_entry_path),
+                        )
+                        logging.info(
+                            "[边界映射] 记录新映射: %s -> %s (指纹: %s...)",
+                            cloud_show_name,
+                            physical_media_folder_name,
+                            fingerprint[:8],
+                        )
+                    elif existing[2] != physical_media_folder_name:
+                        # 更新映射到新的边界
+                        self.db.upsert_media_boundary(
+                            fingerprint=fingerprint,
+                            source_media_name=existing[1],  # 保持原始源名称
+                            current_media_name=physical_media_folder_name,
+                            engine_entry_path=str(engine_entry_path),
+                        )
+                        logging.info(
+                            "[边界映射] 更新映射: %s -> %s (指纹: %s...)",
+                            existing[1],
+                            physical_media_folder_name,
+                            fingerprint[:8],
+                        )
                 return True
 
             # 如果是个存在文件夹的番剧，且本地被重命名了
@@ -1087,7 +1221,7 @@ class AppService:
             return
 
         try:
-            b_local = self.build_b_path_from_a(local)
+            b_local = self.build_b_path_from_a(local, webdav_path)
         except ValueError as exc:
             logging.warning("[A->B跳过] %s", exc)
             return
@@ -1169,6 +1303,8 @@ class AppService:
             None: 跳过（指纹已存在）
             False: 复制失败
         """
+        if self.db.is_ghost_protected(webdav_path):
+            return None
         fingerprint = make_strm_fingerprint(webdav_path)
         if self.db.b_fingerprint_exists(fingerprint):
             return None  # 会被统计为 skip_count
@@ -1179,7 +1315,7 @@ class AppService:
                            webdav_path: str, parent: str) -> bool | None:
         try:
             # 1. 计算物理路径
-            b_local = self.build_b_path_from_a(a_local_path)
+            b_local = self.build_b_path_from_a(a_local_path, webdav_path)
 
             # 2. 血统校验（同步阶段）
             if not self._verify_b_path_lineage(
@@ -1465,18 +1601,22 @@ class AppService:
             if not webdav_path:
                 self._handle_unparseable_strm(local, row)
                 return
+
+            fingerprint = make_strm_fingerprint(webdav_path)
+
             # =========================================================
             # 热重载跨区越界检测（血统校验）
             # =========================================================
             if not self._verify_b_path_lineage(str(local), webdav_path):
                 logging.warning("[B区越界拦截] 拒绝非法复制，该路径无对应A区源: %s", local)
-                # 获取该指纹的合法历史位置，从 A 区恢复
-                fingerprint = make_strm_fingerprint(webdav_path)
                 self._restore_b_from_a_after_violation(
                     local, webdav_path, fingerprint)
                 return
+
             parent = webdav_parent(webdav_path)
-            fingerprint = make_strm_fingerprint(webdav_path)
+
+            # =========================================================
+            # A区源文件存在性检查（考虑边界映射）
             # =========================================================
             if not self._verify_a_source_exists(
                     str(local), webdav_path, fingerprint):
@@ -1542,9 +1682,10 @@ class AppService:
                 if identity and identity[3]:
                     correct_b_path = identity[3]
                 else:
-                    # 没有历史路径，才从 A 区源计算
+                    # 获取源文件的 webdav_path
+                    src_webdav = read_strm_webdav_path(source_a_path)
                     correct_b_path = str(
-                        self.build_b_path_from_a(source_a_path))
+                        self.build_b_path_from_a(source_a_path, src_webdav))
 
                 try:
                     correct_b = Path(correct_b_path)
@@ -1613,7 +1754,18 @@ class AppService:
         if a_source and Path(a_source).exists():
             return True
 
-        # 3. 都找不到，说明 A 区没有这个源文件
+        # 3. 检查边界映射：如果血统校验已通过（有边界映射），放宽检查
+        boundary = self.db.get_media_boundary_by_fingerprint(fingerprint)
+        if boundary:
+            # 有边界映射说明是合法的重命名/层级调整，允许通过
+            logging.debug(
+                "[A区源校验] 边界映射存在，放宽检查: %s (指纹: %s...)",
+                b_local_path,
+                fingerprint[:8],
+            )
+            return True
+
+        # 4. 都找不到，说明 A 区没有这个源文件
         logging.debug(
             "[A区源校验] A区无对应源文件: %s (指向: %s)",
             b_local_path,
@@ -1756,6 +1908,10 @@ class AppService:
         identity = self.db.get_identity_by_fingerprint(fingerprint)
         source_a_path = identity[2] if identity else self.find_a_source_by_webdav(
             webdav_path)
+
+        # 检查并记录边界映射
+        self._maybe_record_boundary_mapping(local, webdav_path, fingerprint)
+
         self.db.upsert_b(
             str(local),
             webdav_path,
@@ -1836,13 +1992,9 @@ class AppService:
                 self.db.delete_b_by_local(str(local))
                 return
 
-            # 删除 WebDAV 上的源文件
+            # 执行 WebDAV 源文件删除/MOVE（带 ghost 保护）
             if webdav_path:
-                try:
-                    self.webdav.delete(webdav_path)
-                    logging.info("[B区删除联动] 已删除WebDAV源文件: %s", webdav_path)
-                except Exception as exc:
-                    logging.error("[B区删除联动] 删除WebDAV源文件失败: %s", exc)
+                self._execute_webdav_deletion(webdav_path, _parent_webdav_path)
 
             self.db.delete_b_by_local(str(local))
             if fingerprint:
@@ -2425,3 +2577,61 @@ class AppService:
         if mapping:
             return mapping.get_local_path(sub_path)
         return os.path.join(self.config.local.a_dir, sub_path.lstrip("/\\"))
+
+    def _maybe_record_boundary_mapping(
+        self,
+        local: Path,
+        webdav_path: str,
+        fingerprint: str,
+    ) -> None:
+        """根据当前文件位置和 webdav_path，记录可能的边界映射。"""
+        try:
+            # 从 B 区路径提取媒体文件夹名
+            rel_to_b = local.relative_to(self.b_root)
+            if len(rel_to_b.parts) < 3:  # 至少需要: a_root_name/媒体名/文件
+                return
+
+            # 提取媒体文件夹名（跳过 a_root_name）
+            media_folder_name = rel_to_b.parts[1]
+
+            # 从 webdav_path 提取云端媒体名
+            webdav_parts = webdav_path.strip("/").split("/")
+            if len(webdav_parts) < 2:
+                return
+
+            # 找到引擎入口路径对应的 source_path
+            cloud_show_name = None
+            for config in getattr(self, "engine_configs", []):
+                for sp in config.get("source_paths", []):
+                    if webdav_path.startswith(sp.rstrip("/") + "/"):
+                        # 提取相对路径的第一部分作为媒体名
+                        rel_cloud = webdav_path[len(
+                            sp.rstrip("/")):].lstrip("/")
+                        cloud_show_name = rel_cloud.split(
+                            "/")[0] if rel_cloud else None
+                        break
+                if cloud_show_name:
+                    break
+
+            if not cloud_show_name:
+                return
+
+            # 如果名称不同，记录映射
+            if media_folder_name != cloud_show_name:
+                existing = self.db.get_media_boundary_by_fingerprint(
+                    fingerprint)
+                if not existing:
+                    self.db.upsert_media_boundary(
+                        fingerprint=fingerprint,
+                        source_media_name=cloud_show_name,
+                        current_media_name=media_folder_name,
+                        engine_entry_path=str(self.b_root / rel_to_b.parts[0]),
+                    )
+                    logging.info(
+                        "[边界映射] 自动记录: %s -> %s (指纹: %s...)",
+                        cloud_show_name,
+                        media_folder_name,
+                        fingerprint[:8],
+                    )
+        except (ValueError, IndexError):
+            pass

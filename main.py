@@ -12,11 +12,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def ensure_base_dir_first():
     normalized_base_dir = os.path.normcase(os.path.abspath(BASE_DIR))
-    sys.path[:] = [p for p in sys.path if os.path.normcase(os.path.abspath(p or os.getcwd())) != normalized_base_dir]
+    sys.path[:] = [p for p in sys.path if os.path.normcase(
+        os.path.abspath(p or os.getcwd())) != normalized_base_dir]
     sys.path.insert(0, BASE_DIR)
 
 
-def load_local_module(module_name: str, filename: str, base_dir: str | None = None):
+def load_local_module(module_name: str, filename: str,
+                      base_dir: str | None = None):
     if base_dir is None:
         base_dir = BASE_DIR
     module_path = os.path.join(base_dir, filename)
@@ -31,6 +33,10 @@ def load_local_module(module_name: str, filename: str, base_dir: str | None = No
     return module
 
 
+# ==================== 保护区开始 ====================
+# autopep8: off
+# isort: off
+
 ensure_base_dir_first()
 try:
     import tomllib
@@ -44,6 +50,10 @@ from config import AppConfig
 from database import Database
 from logger_setup import setup_logging
 from webdav_client import OpenListAdminClient
+
+# autopep8: on
+# isort: on
+# ==================== 保护区结束 ====================
 
 
 def main() -> None:
