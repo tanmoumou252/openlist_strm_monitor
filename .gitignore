@@ -184,5 +184,5 @@ bridge.db
 
 openlist_strm_bridge.code-workspace
 .aider*
-python_embed/
 docs/
+python_embed/

@@ -462,10 +462,24 @@ class AppService:
         # 尝试自动重命名
         suggested_name = suggest_rename(a_local)
         if suggested_name and webdav_path:
-            season, _ = _extract_season_episode(a_local.name)
-            if season is not None:
+            # ===== 修复：始终从 webdav_path 提取季信息 =====
+            season = self._extract_season_from_webdav_path(webdav_path)
+            # 如果 webdav_path 中也提取不到，回退到从文件名提取
+            if season is None:
+                season, _ = _extract_season_episode(a_local.name)
+            # =============================================
+
+            # 从文件名提取集信息
+            _, episode = _extract_season_episode(a_local.name)
+
+            if season is not None and episode is not None:
+                # 构建标准文件名 S{season:02d}E{episode:02d}
+                standard_name = f"S{
+                    season:02d}E{
+                    episode:02d}{
+                    Path(suggested_name).suffix}"
+
                 # 从 webdav_path 提取真正的媒体根名称
-                # 通过 engine_configs 中的 source_paths 来定位
                 cloud_show_name = None
                 for config in getattr(self, "engine_configs", []):
                     for sp in config.get("source_paths", []):
@@ -482,7 +496,6 @@ class AppService:
                     show_name = cloud_show_name
                 else:
                     # 回退：从 webdav_path 提取
-                    # 尝试找到引擎入口路径对应的媒体名
                     engine_path = self._find_matching_engine_path(webdav_path)
                     if engine_path:
                         rel_to_engine = webdav_path[len(
@@ -495,17 +508,32 @@ class AppService:
                     # 如果还是找不到，尝试从路径中提取
                     if not show_name:
                         webdav_parts = webdav_path.strip("/").split("/")
-                        # 从右向左找第一个不是 Season/Episode/sXX 的目录
-                        for part in reversed(webdav_parts[:-1]):  # 排除文件名
+                        for part in reversed(webdav_parts[:-1]):
                             part_lower = part.lower()
                             if (part_lower.startswith("season") or
                                 part_lower.startswith("episode") or
-                                    re.match(r"^s\d{1,2}$", part_lower)):  # 匹配 s01, s1, s02 等
+                                    re.match(r"^s\d{1,2}$", part_lower)):
                                 continue
                             show_name = part
                             break
                         if not show_name and len(webdav_parts) >= 2:
                             show_name = webdav_parts[-2]
+
+                # 关键修复：当 cloud_show_name 找到后，需要检查 webdav_path 中是否包含 Season 层级
+                if cloud_show_name:
+                    webdav_parts = webdav_path.strip("/").split("/")
+                    season_index = None
+                    for i, part in enumerate(webdav_parts):
+                        part_lower = part.lower()
+                        if part_lower.startswith("season") or re.match(
+                                r"^s\d{1,2}$", part_lower):
+                            season_index = i
+                            break
+
+                    if season_index is not None and season_index >= 1:
+                        show_name = webdav_parts[season_index - 1]
+                    else:
+                        show_name = cloud_show_name
 
                 if show_name:
                     # 使用 build_season_path 构建标准路径
@@ -513,7 +541,7 @@ class AppService:
                         self.b_root / root_name,
                         show_name,
                         season,
-                        suggested_name,
+                        standard_name,
                     )
                     return new_path
 
@@ -2635,3 +2663,42 @@ class AppService:
                     )
         except (ValueError, IndexError):
             pass
+
+    @staticmethod
+    def _extract_season_from_webdav_path(webdav_path: str) -> int | None:
+        """从 WebDAV 路径中提取季信息。
+
+        例如：/d/测试本地/番剧/fanju4/第二季/第01集.mp4 -> 2
+               /d/测试本地/番剧/fanju4/Season 2/第01集.mp4 -> 2
+               /d/测试本地/番剧/fanju4/S02/第01集.mp4 -> 2
+        """
+        if not webdav_path:
+            return None
+
+        # 解析路径中的目录部分（去掉文件名）
+        parsed = urllib.parse.urlparse(webdav_path)
+        path = parsed.path
+
+        # 分割路径
+        parts = path.strip("/").split("/")
+
+        # 从右向左遍历目录部分，寻找季信息
+        for part in reversed(parts[:-1]):  # 排除最后一个（文件名）
+            part_lower = part.lower()
+
+            # 匹配 "Season XX" 或 "SeasonX" 格式
+            season_match = re.match(r"^season\s*(\d{1,2})$", part_lower)
+            if season_match:
+                return int(season_match.group(1))
+
+            # 匹配 "SXX" 格式（如 S02, s2）
+            s_match = re.match(r"^s(\d{1,2})$", part_lower)
+            if s_match:
+                return int(s_match.group(1))
+
+            cn_match = re.match(r"^第([一二三四五六七八九十\d]+)季$", part_lower)
+            if cn_match:
+                from media_renamer import _cn_to_int as _cn_to_int_func
+                return _cn_to_int_func(cn_match.group(1))
+
+        return None

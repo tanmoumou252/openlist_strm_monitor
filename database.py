@@ -159,6 +159,26 @@ class Database:
                 ON strm_identity(current_b_path)
                 """)
 
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS strm_media_boundary (
+                    fingerprint TEXT PRIMARY KEY,
+                    source_media_name TEXT NOT NULL,
+                    current_media_name TEXT NOT NULL,
+                    engine_entry_path TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_boundary_source_name
+                ON strm_media_boundary(source_media_name)
+                """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_boundary_current_name
+                ON strm_media_boundary(current_media_name)
+                """)
+
             conn.commit()
             logging.info("[DB] 数据库核心表与索引核对并创建完成！")
 
@@ -860,3 +880,71 @@ class Database:
                 (fingerprint, exclude_local_path),
             )
             return cur.fetchone() is not None
+
+    def upsert_media_boundary(
+        self,
+        fingerprint: str,
+        source_media_name: str,
+        current_media_name: str,
+        engine_entry_path: str,
+    ) -> None:
+        now = time.time()
+        with self.lock, self.connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO strm_media_boundary(
+                    fingerprint,
+                    source_media_name,
+                    current_media_name,
+                    engine_entry_path,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (fingerprint, source_media_name,
+                 current_media_name, engine_entry_path, now),
+            )
+            conn.commit()
+
+    def get_media_boundary_by_fingerprint(
+            self, fingerprint: str) -> tuple | None:
+        with self.lock, self.connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
+                FROM strm_media_boundary
+                WHERE fingerprint = ?
+                """,
+                (fingerprint,),
+            )
+            return cur.fetchone()
+
+    def get_media_boundaries_by_source_name(
+        self, source_media_name: str, engine_entry_path: str
+    ) -> list[tuple]:
+        with self.lock, self.connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
+                FROM strm_media_boundary
+                WHERE source_media_name = ? AND engine_entry_path = ?
+                """,
+                (source_media_name, engine_entry_path),
+            )
+            return cur.fetchall()
+
+    def get_media_boundary_by_current_name(
+        self, current_media_name: str, engine_entry_path: str
+    ) -> tuple | None:
+        with self.lock, self.connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
+                FROM strm_media_boundary
+                WHERE current_media_name = ? AND engine_entry_path = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (current_media_name, engine_entry_path),
+            )
+            return cur.fetchone()

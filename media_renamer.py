@@ -97,7 +97,11 @@ def suggest_rename(src_path: str | Path) -> str | None:
 
     season, episode = _extract_season_episode(filename)
     if season is not None and episode is not None:
-        new_name = _build_standard_name(season, episode) + ext
+        # ===== 修复：只返回集信息，不包含季信息 =====
+        # 文件名如 "第01集.mp4" 不包含季信息，_extract_season_episode 会默认 season=1
+        # 但实际季信息在 webdav_path 的目录结构中（如 "第二季"）
+        # 所以这里只返回 E01 格式，让调用方决定季信息
+        new_name = f"E{episode:02d}{ext}"
         return new_name
 
     return None
