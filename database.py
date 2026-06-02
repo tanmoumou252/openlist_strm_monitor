@@ -6,22 +6,48 @@ import threading
 import time
 import logging
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Generator
 
 
 class Database:
-    def __init__(self, db_path: str) -> None:
-        self.db_path = db_path
-        self.lock = threading.RLock()
 
     @contextmanager
     def connection(self) -> Generator[sqlite3.Connection, None, None]:
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
+
+        # ===== 修复：添加重试机制 =====
+        max_retries = 3
+        retry_delay = 0.1  # 100ms
+
+        conn = None
         try:
-            yield conn
+            for attempt in range(max_retries):
+                try:
+                    conn = sqlite3.connect(self.db_path)
+                    # 设置超时和 WAL 模式以提高并发性能
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute("PRAGMA busy_timeout=5000")
+                    yield conn
+                    return
+                except sqlite3.OperationalError as e:
+                    if "readonly" in str(e).lower(
+                    ) and attempt < max_retries - 1:
+                        logging.warning(
+                            "[DB] 数据库只读错误，尝试修复权限 (尝试 %s/%s): %s",
+                            attempt + 1, max_retries, e
+                        )
+                        self._ensure_db_writable()
+                        time.sleep(retry_delay)
+                        continue
+                    raise
         finally:
-            conn.close()
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        # =================================
 
     def _ensure_column(
         self,
@@ -37,7 +63,13 @@ class Database:
             cur.execute(
                 f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
 
-    def init_db(self) -> None:
+    def __init__(self, db_path: str) -> None:
+        self.db_path = db_path
+        self.lock = threading.RLock()
+
+        # ===== 修复：确保数据库文件可写 =====
+        self._ensure_db_writable()
+        # ====================================
         logging.info("[DB] 开始初始化数据库表结构: %s", self.db_path)
         with self.lock, self.connection() as conn:
             cur = conn.cursor()
@@ -181,6 +213,11 @@ class Database:
 
             conn.commit()
             logging.info("[DB] 数据库核心表与索引核对并创建完成！")
+
+    def init_db(self) -> None:
+        """初始化数据库（兼容旧调用，实际初始化已在 __init__ 中完成）"""
+        logging.debug("[DB] init_db 被调用，数据库已在 __init__ 中初始化")
+        pass
 
     def upsert_a(self, local_path: str, webdav_path: str,
                  parent_webdav_path: str) -> None:
@@ -948,3 +985,39 @@ class Database:
                 (current_media_name, engine_entry_path),
             )
             return cur.fetchone()
+
+    def _ensure_db_writable(self) -> None:
+        """确保数据库文件及其父目录可写。"""
+        db_path = Path(self.db_path)
+
+        # 确保父目录存在且可写
+        parent_dir = db_path.parent
+        if not parent_dir.exists():
+            parent_dir.mkdir(parents=True, exist_ok=True)
+
+        # 检查父目录权限
+        if not os.access(str(parent_dir), os.W_OK):
+            logging.warning("[DB] 数据库目录不可写，尝试修复权限: %s", parent_dir)
+            try:
+                os.chmod(str(parent_dir), 0o755)
+            except Exception as e:
+                logging.error("[DB] 无法修复数据库目录权限: %s", e)
+
+        # 如果数据库文件已存在，检查其权限
+        if db_path.exists():
+            if not os.access(str(db_path), os.W_OK):
+                logging.warning("[DB] 数据库文件不可写，尝试修复权限: %s", db_path)
+                try:
+                    os.chmod(str(db_path), 0o644)
+                except Exception as e:
+                    logging.error("[DB] 无法修复数据库文件权限: %s", e)
+        else:
+            # ===== 修复：数据库文件不存在时，尝试创建空文件以确保可写 =====
+            try:
+                # 创建一个临时连接来创建数据库文件
+                temp_conn = sqlite3.connect(str(db_path))
+                temp_conn.close()
+                logging.info("[DB] 已创建数据库文件: %s", db_path)
+            except Exception as e:
+                logging.error("[DB] 无法创建数据库文件: %s", e)
+            # ============================================================

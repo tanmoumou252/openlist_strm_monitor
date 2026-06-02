@@ -543,6 +543,13 @@ class AppService:
                         season,
                         standard_name,
                     )
+                    # ===== 验证源文件存在性 =====
+                    if not a_local.exists():
+                        logging.warning(
+                            "[build_b_path] 源文件不存在，但返回路径: %s -> %s",
+                            a_local, new_path
+                        )
+                    # ====================================
                     return new_path
 
         # 默认行为：保持原有结构
@@ -1041,7 +1048,7 @@ class AppService:
 
         Args:
             valid_engine_paths: 如果提供，只同步这些路径下的文件；
-                              如果为 None，同步所有（兼容旧逻辑）。
+                            如果为 None，同步所有（兼容旧逻辑）。
         """
         logging.info("[初始化] A -> B 全量同步")
         if valid_engine_paths is not None:
@@ -1051,6 +1058,11 @@ class AppService:
         fail_count = 0
         skip_count = 0
         for local_path, webdav_path, parent_webdav_path, _ in self.db.get_all_a():
+            # ===== 修复：检查源文件是否存在 =====
+            if not Path(local_path).exists():
+                logging.warning("[A->B跳过] 源文件不存在: %s", local_path)
+                continue
+            # ====================================
             if valid_engine_paths is not None:
                 if not any(webdav_path == p or webdav_path.startswith(
                         p + "/") for p in valid_engine_paths):
@@ -1379,6 +1391,12 @@ class AppService:
         # 4. 执行物理拷贝
         try:
             b_local.parent.mkdir(parents=True, exist_ok=True)
+            # ===== 修复：检查源文件是否存在 =====
+            source_path = Path(a_local_path)
+            if not source_path.exists():
+                logging.error("[A->B复制失败] 源文件不存在: %s", a_local_path)
+                return False
+            # ====================================
             shutil.copyfile(a_local_path, b_local)
         except Exception as e:
             logging.error("[A->B复制失败] IO错误: %s", e)
