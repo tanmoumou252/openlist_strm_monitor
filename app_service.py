@@ -1154,6 +1154,18 @@ class AppService:
                     source_exists = True
 
             if not source_exists:
+                # A 区源文件不存在，检查 WebDAV 上是否仍存在
+                # 如果 WebDAV 上存在，说明 A 区只是暂时不可用（如 OpenList 同步模式中），
+                # 应该跳过清理，等待 A 区重建
+                if self.admin_api.check_exists(webdav_path):
+                    logging.debug(
+                        "[冗余清理跳过] A区源文件暂不可用但WebDAV存在，跳过清理: %s",
+                        webdav_path)
+                    continue
+
+                # A 区源文件不存在且 WebDAV 上也不存在，迁移到 C 区
+
+            if not source_exists:
                 # A 区源文件不存在，迁移到 C 区
                 local = Path(local_path)
                 if not local.exists():
@@ -1326,6 +1338,13 @@ class AppService:
         """A 区删除由 OpenList 引擎同步模式直接处理，本程序不介入 WebDAV 删除。
         这里仅清理 A 区索引，并在后续主动刷新 / 延迟清理中修正 B 区冗余。
         """
+        # 如果文件仍然存在，说明是修改操作而非真正的删除，跳过清理
+        if Path(local_path).exists():
+            logging.debug(
+                "[A区跳过] 文件仍存在，可能是openlist引擎的同步操作:删除strm又新建: %s",
+                local_path)
+            return
+
         row = self.db.get_a_by_local(local_path)
         self.db.delete_a_by_local(local_path)
         if row:
@@ -2278,7 +2297,12 @@ class AppService:
                     logging.warning("[冗余清理] 删除冗余文件失败: %s (%s)", file_path, e)
 
     def trigger_delayed_cleanup(self, folder_path: str) -> None:
-        """为指定 WebDAV 目录安排延迟冗余清理。"""
+        """为指定 WebDAV 目录安排延迟冗余清理。
+        1. 先等待一段时间，让 openlist 的同步重建尽量完成
+        2. 到期后先执行目录刷新（预检查）
+        3. 再等待一段确认时间
+        4. 最后才真正清理
+        """
         # 将真实云盘路径映射为引擎入口路径
         engine_paths = self._cloud_path_to_engine_paths(folder_path)
         if engine_paths:
@@ -2287,36 +2311,87 @@ class AppService:
         else:
             normalized_folder = folder_path.rstrip("/") or "/"
 
-        delay = max(1, self.config.behavior.a_to_b_restore_delay_seconds)
+        # 直接内置默认值，不再依赖外部配置
+        delay = 10
         with self.cleanup_lock:
             old_timer = self.pending_cleanups.pop(normalized_folder, None)
             if old_timer:
                 old_timer.cancel()
+
             timer = threading.Timer(
                 delay,
+                self.execute_targeted_cleanup_precheck,
+                args=(normalized_folder,),
+            )
+            timer.daemon = True
+            self.pending_cleanups[normalized_folder] = timer
+            timer.start()
+            logging.debug(
+                "[延迟清理] 已安排预检查 %s 秒后执行: %s",
+                delay,
+                normalized_folder)
+
+    def execute_targeted_cleanup(self, folder_path: str) -> None:
+        """执行指定 WebDAV 目录下的 B 区冗余清理。
+
+        这里是最终清理阶段：
+        - 不再负责刷新目录
+        - 只做真正的冗余清理与本地空目录清理
+        """
+        normalized_folder = folder_path.rstrip("/") or "/"
+        with self.cleanup_lock:
+            self.pending_cleanups.pop(normalized_folder, None)
+
+        logging.info("[延迟清理-确认] 开始最终清理: %s", normalized_folder)
+        self.cleanup_b_zombies_under_folder(normalized_folder)
+        self.cleanup_local_empty_dirs()
+        logging.info("[延迟清理-确认] 完成: %s", normalized_folder)
+
+    def execute_targeted_cleanup_precheck(self, folder_path: str) -> None:
+        """延迟清理的预检查阶段。
+
+        作用：
+        1. 先主动刷新一次 openlist 目录，尽量让 A 区重建完成
+        2. 再安排一次二次确认
+        3. 二次确认到期后才执行真正清理
+        """
+        normalized_folder = folder_path.rstrip("/") or "/"
+        with self.cleanup_lock:
+            self.pending_cleanups.pop(normalized_folder, None)
+
+        logging.info("[延迟清理-预检查] 开始刷新目录: %s", normalized_folder)
+
+        # 确保已登录
+        if not self.admin_api.token and not self.admin_api.login():
+            logging.warning("[延迟清理-预检查] 登录失败，无法主动刷新目录: %s", normalized_folder)
+            return
+
+        # 主动触发 openlist 目录刷新
+        res = self.admin_api.list_directory(normalized_folder)
+        if not (isinstance(res, dict) and res.get("code") in (0, 200)):
+            logging.warning("[延迟清理-预检查] 目录 API 刷新失败: %s", normalized_folder)
+            return
+
+        # 直接内置默认值，不再依赖外部配置
+        confirm_delay = 5
+        with self.cleanup_lock:
+            old_timer = self.pending_cleanups.pop(normalized_folder, None)
+            if old_timer:
+                old_timer.cancel()
+
+            timer = threading.Timer(
+                confirm_delay,
                 self.execute_targeted_cleanup,
                 args=(normalized_folder,),
             )
             timer.daemon = True
             self.pending_cleanups[normalized_folder] = timer
             timer.start()
-            logging.debug("[延迟清理] 已安排 %s 秒后清理: %s", delay, normalized_folder)
-
-    def execute_targeted_cleanup(self, folder_path: str) -> None:
-        """执行指定 WebDAV 目录下的 B 区冗余清理。"""
-        normalized_folder = folder_path.rstrip("/") or "/"
-        with self.cleanup_lock:
-            self.pending_cleanups.pop(normalized_folder, None)
-        logging.info("[延迟清理] 开始清理: %s", normalized_folder)
-        if not self.admin_api.token and not self.admin_api.login():
-            logging.warning("[延迟清理] 登录失败，无法主动刷新目录: %s", normalized_folder)
-        else:
-            res = self.admin_api.list_directory(normalized_folder)
-            if not (isinstance(res, dict) and res.get("code") in (0, 200)):
-                logging.warning("[延迟清理] 目录 API 刷新失败: %s", normalized_folder)
-        self.cleanup_b_zombies_under_folder(normalized_folder)
-        self.cleanup_local_empty_dirs()
-        logging.info("[延迟清理] 完成: %s", normalized_folder)
+            logging.debug(
+                "[延迟清理-预检查] 已安排二次确认 %s 秒后执行: %s",
+                confirm_delay,
+                normalized_folder,
+            )
 
     def cleanup_b_zombies_under_folder(self, folder_path: str) -> None:
         """清理指定 WebDAV 目录下已经不存在的 B 区 STRM 记录和本地文件。
@@ -2383,6 +2458,17 @@ class AppService:
                 alt_source = self.find_a_source_by_webdav(webdav_path)
                 if alt_source:
                     source_exists = True
+
+            if not source_exists:
+                # A 区源文件不存在，检查 WebDAV 上是否仍存在
+                # 如果 WebDAV 上存在，说明 A 区只是暂时不可用（如 OpenList 同步模式中），
+                # 应该跳过清理，等待 A 区重建
+                if self.admin_api.check_exists(webdav_path):
+                    logging.debug(
+                        "[B区冗余清理跳过] A区源文件暂不可用但WebDAV存在，跳过清理: %s",
+                        webdav_path)
+                    continue
+                # A 区源文件不存在且 WebDAV 上也不存在，迁移到 C 区
 
             if not source_exists:
                 # A 区源文件不存在，迁移到 C 区

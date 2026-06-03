@@ -16,20 +16,37 @@ class Database:
     def connection(self) -> Generator[sqlite3.Connection, None, None]:
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
 
-        # ===== 修复：添加重试机制 =====
         max_retries = 3
-        retry_delay = 0.1  # 100ms
+        retry_delay = 0.1
 
         conn = None
         try:
             for attempt in range(max_retries):
                 try:
+                    self._ensure_db_writable()
+
                     conn = sqlite3.connect(self.db_path)
-                    # 设置超时和 WAL 模式以提高并发性能
                     conn.execute("PRAGMA journal_mode=WAL")
                     conn.execute("PRAGMA busy_timeout=5000")
-                    yield conn
-                    return
+
+                    # ===== 修复：使用真正的写操作验证连接是否可写 =====
+                    try:
+                        # 尝试执行一个写操作来验证权限
+                        conn.execute(
+                            "CREATE TABLE IF NOT EXISTS _write_test(x)")
+                        conn.execute("DROP TABLE IF EXISTS _write_test")
+                        conn.commit()
+                        # 如果执行到这里，说明有写权限
+                        yield conn
+                        return
+                    except sqlite3.OperationalError as e:
+                        # 写操作失败，关闭连接并重试
+                        conn.close()
+                        conn = None
+                        raise sqlite3.OperationalError(
+                            f"readonly connection: {e}")
+                    # =================================================
+
                 except sqlite3.OperationalError as e:
                     if "readonly" in str(e).lower(
                     ) and attempt < max_retries - 1:
@@ -37,7 +54,6 @@ class Database:
                             "[DB] 数据库只读错误，尝试修复权限 (尝试 %s/%s): %s",
                             attempt + 1, max_retries, e
                         )
-                        self._ensure_db_writable()
                         time.sleep(retry_delay)
                         continue
                     raise
