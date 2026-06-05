@@ -225,6 +225,8 @@ class OpenListAdminClient:
             return "404_NOT_FOUND"
         data = result.get("data", {})
         content = data.get("content", []) if isinstance(data, dict) else []
+        if content is None:
+            content = []
         folders, files = [], []
         for item in content:
             if isinstance(item, dict):
