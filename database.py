@@ -339,6 +339,14 @@ class Database:
             )
             return cur.fetchone()
 
+    def get_a_by_webdav(self, webdav_path: str) -> tuple | None:
+        with self.lock, self.connection() as conn:
+            cur = conn.execute(
+                "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files WHERE webdav_path = ?",
+                (webdav_path,),
+            )
+            return cur.fetchone()
+
     def get_b_by_webdav(self, webdav_path: str) -> list[tuple]:
         with self.lock, self.connection() as conn:
             cur = conn.execute(

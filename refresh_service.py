@@ -1,4 +1,10 @@
 from __future__ import annotations
+import threading
+from typing import Optional
+from dataclasses import dataclass
+import time
+import logging
+import json
 import os
 import sys
 from pathlib import Path
@@ -8,11 +14,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def ensure_base_dir_first():
     normalized_base_dir = os.path.normcase(os.path.abspath(BASE_DIR))
-    sys.path[:] = [p for p in sys.path if os.path.normcase(os.path.abspath(p or os.getcwd())) != normalized_base_dir]
+    sys.path[:] = [p for p in sys.path if os.path.normcase(
+        os.path.abspath(p or os.getcwd())) != normalized_base_dir]
     sys.path.insert(0, BASE_DIR)
 
 
-def load_local_module(module_name: str, filename: str, base_dir: str | None = None):
+def load_local_module(module_name: str, filename: str,
+                      base_dir: str | None = None):
     import importlib.util
     from types import ModuleType
 
@@ -37,12 +45,6 @@ try:
 except ImportError:
     import tomli as tomllib
 
-import json
-import logging
-import time
-from dataclasses import dataclass
-from typing import Optional
-import threading
 
 # ==================== PathAnalysis 定义 ====================
 
@@ -74,7 +76,7 @@ class _StrmStorageInfo:
 
     @property
     def is_sync_mode(self) -> bool:
-        return self.save_local_mode.lower() == "sync"
+        return self.save_local_mode.lower() == "update"
 
 
 class _StrmStorageManager:
@@ -138,7 +140,8 @@ class _StrmStorageManager:
 
     def get_working_sync_storages(self) -> list[_StrmStorageInfo]:
         """获取有效的同步模式存储"""
-        return [s for s in self.get_strm_storages() if s.is_working and s.is_sync_mode]
+        return [s for s in self.get_strm_storages(
+        ) if s.is_working and s.is_sync_mode]
 
 
 # =========================================================
@@ -187,12 +190,19 @@ class RefreshService:
         path_analysis = self._analyze_paths()
         self._log_path_analysis(path_analysis)
 
-        accessible_engines = self._check_engine_accessibility(path_analysis.engine_set)
+        accessible_engines = self._check_engine_accessibility(
+            path_analysis.engine_set)
 
-        safe_refresh_paths = self._calculate_safe_refresh_paths(path_analysis, accessible_engines)
+        # ===== update 模式：清理 A 区过期文件 =====
+        self._cleanup_a_for_update_mode(accessible_engines)
+        # =========================================
+
+        safe_refresh_paths = self._calculate_safe_refresh_paths(
+            path_analysis, accessible_engines)
 
         # 执行 WebDAV 刷新
-        self._execute_webdav_refreshes(safe_refresh_paths, path_analysis.only_refresh)
+        self._execute_webdav_refreshes(
+            safe_refresh_paths, path_analysis.only_refresh)
 
         # 等待同步落地
         self._wait_for_sync()
@@ -259,7 +269,8 @@ class RefreshService:
         logging.warning("[STRM引擎路径检查] Admin API 验证失败，无法确定可访问路径")
         return set()
 
-    def _validate_strm_storages_via_api(self, engine_set: set[str]) -> set[str] | None:
+    def _validate_strm_storages_via_api(
+            self, engine_set: set[str]) -> set[str] | None:
         """
         通过 Admin API 验证 STRM 存储状态。
 
@@ -269,7 +280,8 @@ class RefreshService:
             # 从已加载的模块中获取 OpenListAdminClient
             webdav_module = sys.modules.get("webdav_client")
             if webdav_module is None:
-                logging.warning("[STRM存储API验证] webdav_client 模块未加载，回退到 WebDAV 检查")
+                logging.warning(
+                    "[STRM存储API验证] webdav_client 模块未加载，回退到 WebDAV 检查")
                 return None
 
             OpenListAdminClient = webdav_module.OpenListAdminClient
@@ -290,7 +302,8 @@ class RefreshService:
             all_storages = manager.get_strm_storages()
 
             # 只选择状态为 work 且是 sync 模式的存储
-            valid_storages = [s for s in all_storages if s.is_working and s.is_sync_mode]
+            valid_storages = [
+                s for s in all_storages if s.is_working and s.is_sync_mode]
             valid_paths = {s.mount_path for s in valid_storages}
 
             # 检查请求的 engine_set 是否在有效路径中
@@ -301,7 +314,8 @@ class RefreshService:
                 else:
                     # 检查是否是子路径
                     for valid_path in valid_paths:
-                        if engine_path == valid_path or engine_path.startswith(valid_path + "/"):
+                        if engine_path == valid_path or engine_path.startswith(
+                                valid_path + "/"):
                             result.add(engine_path)
                             break
 
@@ -318,7 +332,7 @@ class RefreshService:
                         )
                     elif not storage.is_sync_mode:
                         logging.warning(
-                            "[STRM存储API验证] 存储非同步模式: %s (mode=%s)",
+                            "[STRM存储API验证] 存储非更新模式: %s (mode=%s, 需要改为更新模式)",
                             storage.mount_path,
                             storage.save_local_mode,
                         )
@@ -346,11 +360,13 @@ class RefreshService:
     ) -> None:
         for root_path in safe_refresh_paths:
             # root_path 已经是引擎入口路径（如 /测试a），直接使用
-            self.app.refresh_webdav_root(root_path, self.app.config.refresh.depth)
+            self.app.refresh_webdav_root(
+                root_path, self.app.config.refresh.depth)
 
         for root_path in sorted(only_refresh):
             logging.info("[WebDAV刷新] 仅刷新目录结构，不清理B区: %s", root_path)
-            self.app.refresh_webdav_root_readonly(root_path, self.app.config.refresh.depth)
+            self.app.refresh_webdav_root_readonly(
+                root_path, self.app.config.refresh.depth)
 
     def _wait_for_sync(self) -> None:
         """等待 OpenList / 外部同步落地。"""
@@ -367,7 +383,14 @@ class RefreshService:
 
         self.app.cleanup_local_empty_dirs()
 
-    def _persist_snapshot(self, accessible_engines: set[str], engine_set: set[str]) -> None:
+    def _persist_snapshot(
+            self, accessible_engines: set[str], engine_set: set[str]) -> None:
         """保存保护根目录快照。"""
         snapshot_paths = sorted(accessible_engines) if engine_set else None
-        self.app.persist_current_roots_snapshot(valid_engine_paths=snapshot_paths)
+        self.app.persist_current_roots_snapshot(
+            valid_engine_paths=snapshot_paths)
+
+    def _cleanup_a_for_update_mode(self, accessible_engines: set[str]) -> None:
+        """在 update 模式下，清理 A 区中云端已删除的文件"""
+        for engine_path in accessible_engines:
+            self.app.cleanup_a_deleted_on_cloud(engine_path)

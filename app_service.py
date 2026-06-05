@@ -94,7 +94,7 @@ class StrmStorageInfo:
 
     @property
     def is_sync_mode(self) -> bool:
-        return self.save_local_mode.lower() == "sync"
+        return self.save_local_mode.lower() == "update"
 
 
 class StrmStorageManager:
@@ -1258,6 +1258,21 @@ class AppService:
         self.db.save_known_folder(parent, source="a")
 
         fingerprint = make_strm_fingerprint(webdav_path)
+        # 如果 WebDAV 已经没有该文件，直接在 A 区删除 STRM 并同步 DB
+        if not self.admin_api.check_exists(webdav_path):
+            logging.warning(
+                "[A区即时清理] WebDAV 已不存在，删除本地冗余 STRM: %s",
+                local,
+            )
+            safe_remove_file(str(local))
+            self.db.delete_a_by_local(str(local))
+            self.db.set_ghost_protection(
+                webdav_path,
+                self.config.behavior.ghost_protect_seconds,
+                reason="webdav_not_exists",
+            )
+            return
+        # -----------------------------------------
         old_identity = self.db.get_identity_by_fingerprint(fingerprint)
         current_b_path = old_identity[3] if old_identity else None
 
@@ -1322,9 +1337,15 @@ class AppService:
         if old_identity and current_b_path is None:
             if not self.admin_api.check_exists(webdav_path):
                 logging.warning(
-                    "[A->B跳过] WebDAV源文件已不存在，跳过复制: %s",
+                    "[A->B跳过] WebDAV源文件已不存在，跳过复制并清理A区: %s",
                     webdav_path,
                 )
+                # 清理 A 区冗余文件
+                a_local_path = str(local)
+                if local.exists():
+                    safe_remove_file(a_local_path)
+                    logging.info("[A区清理] 删除冗余STRM: %s", a_local_path)
+                self.db.delete_a_by_local(a_local_path)
                 self.db.set_ghost_protection(
                     webdav_path,
                     self.config.behavior.ghost_protect_seconds,
@@ -1335,8 +1356,10 @@ class AppService:
         self.copy_a_record_to_b(str(local), webdav_path, parent)
 
     def handle_a_deleted(self, local_path: str) -> None:
-        """A 区删除由 OpenList 引擎同步模式直接处理，本程序不介入 WebDAV 删除。
-        这里仅清理 A 区索引，并在后续主动刷新 / 延迟清理中修正 B 区冗余。
+        """A 区删除处理（update 模式下）。
+        OpenList 的 update 模式不会自动删除本地 STRM，
+        所以监控到的删除都是真实的用户删除或程序清理。
+        这里清理 A 区索引，并在后续主动刷新 / 延迟清理中修正 B 区冗余。
         """
         # 如果文件仍然存在，说明是修改操作而非真正的删除，跳过清理
         if Path(local_path).exists():
@@ -1406,7 +1429,25 @@ class AppService:
                 except Exception as e:
                     logging.error("[A->B跳过失败] %s", e)
                     return False
-
+        # 如果 WebDAV 源文件已不存在，说明 A 区是冗余文件，清理掉
+        if not self.admin_api.check_exists(webdav_path):
+            logging.warning(
+                "[A->B跳过] WebDAV源文件已不存在，跳过复制并清理A区: %s",
+                webdav_path,
+            )
+            # 清理 A 区冗余文件
+            if Path(a_local_path).exists():
+                safe_remove_file(a_local_path)
+                logging.info("[A区清理] 删除冗余STRM: %s", a_local_path)
+            self.db.delete_a_by_local(a_local_path)
+            # 设置 ghost 保护，防止再次同步
+            self.db.set_ghost_protection(
+                webdav_path,
+                self.config.behavior.ghost_protect_seconds,
+                reason="webdav_not_exists",
+            )
+            return False
+        # ====================================
         # 4. 执行物理拷贝
         try:
             b_local.parent.mkdir(parents=True, exist_ok=True)
@@ -2013,14 +2054,15 @@ class AppService:
 
     def request_openlist_index_update(
             self, webdav_path: str, parent_webdav_path: str) -> None:
-        """删除/MOVE 成功后，通知 OpenList 更新搜索索引。"""
+        """删除/MOVE 成功后，通知 OpenList 更新索引。"""
         del webdav_path
 
         # 将真实云盘路径映射为引擎入口路径
         engine_paths = self._cloud_path_to_engine_paths(parent_webdav_path)
         if not engine_paths:
             logging.debug(
-                "[OpenListAdmin] 无法映射引擎路径，跳过索引更新: %s",
+                "[OpenListAdmin]"
+                " 无法映射引擎路径，跳过索引更新: %s",
                 parent_webdav_path)
             return
 
@@ -2030,7 +2072,7 @@ class AppService:
 
         ok = self.admin_api.trigger_refresh_via_fs_list(engine_paths)
         if ok:
-            logging.info("[OpenListAdmin] 已请求更新搜索索引: %s", engine_paths)
+            logging.info("[OpenListAdmin] 已请求更新strm索引: %s", engine_paths)
         else:
             logging.warning("[OpenListAdmin] 索引更新触发失败: %s", engine_paths)
 
@@ -2051,19 +2093,64 @@ class AppService:
                     logging.info("[B区删除] 检测到程序恢复操作，跳过追删: %s", local_path)
                     return
 
-            # 检查是否还有其他同指纹文件存在
+            # 检查是否还有其他同指纹文件存在（数据库层面）
             if self.db.has_other_b_instance(fingerprint, str(local)):
                 logging.info("[B区删除联动] B区中仍存在同指纹文件，跳过WebDAV删除: %s", local_path)
+                self.db.delete_b_by_local(str(local))
+                return
+
+            # 文件可能只是移动了位置（如从 Season 03 移动到上级目录），而不是真正被删除
+            if fingerprint and self._check_fingerprint_exists_in_b(
+                    fingerprint, exclude_path=str(local)):
+                logging.info(
+                    "[B区删除联动] B区文件系统中仍存在同指纹文件，跳过WebDAV删除: %s",
+                    local_path)
                 self.db.delete_b_by_local(str(local))
                 return
 
             # 执行 WebDAV 源文件删除/MOVE（带 ghost 保护）
             if webdav_path:
                 self._execute_webdav_deletion(webdav_path, _parent_webdav_path)
-
+                # ===== 更新模式触发钩子也不会删除strm,所以删除 A 区文件需要程序来做 =====
+                self._delete_a_file_by_webdav(webdav_path)
+                # ========================================================================
             self.db.delete_b_by_local(str(local))
             if fingerprint:
                 self.refresh_identity_current_b_path(fingerprint)
+
+    def _check_fingerprint_exists_in_b(
+            self, fingerprint: str, exclude_path: str | None = None) -> bool:
+        """检查 B 区文件系统中是否还有指定指纹的文件存在。"""
+        # 首先检查数据库中其他记录对应的文件是否存在
+        b_instances = self.db.get_b_instances_by_fingerprint(fingerprint)
+        for instance in b_instances:
+            instance_path = instance[0]
+            if exclude_path and instance_path == exclude_path:
+                continue
+            if Path(instance_path).exists():
+                return True
+
+        # 如果数据库中没有找到，扫描 B 区文件系统
+        # 这是一个兜底检查，防止 watchdog 事件顺序问题
+        try:
+            b_root = Path(self.config.paths.b_root)
+            if b_root.exists():
+                for strm_file in b_root.rglob("*.strm"):
+                    if exclude_path and str(strm_file) == exclude_path:
+                        continue
+                    try:
+                        file_webdav = read_strm_webdav_path(str(strm_file))
+                        if file_webdav:
+                            file_fingerprint = make_strm_fingerprint(
+                                file_webdav)
+                            if file_fingerprint == fingerprint:
+                                return True
+                    except Exception:
+                        continue
+        except Exception as e:
+            logging.debug("[指纹检查] 扫描 B 区文件系统失败: %s", e)
+
+        return False
 
     def _execute_webdav_deletion(
             self, webdav_path: str, parent_webdav_path: str) -> bool:
@@ -2083,6 +2170,17 @@ class AppService:
             else:
                 logging.warning("[B区删除联动] WebDAV处理失败: %s", webdav_path)
             return ok
+
+    def _delete_a_file_by_webdav(self, webdav_path: str) -> None:
+        """根据 WebDAV 路径找到并删除对应的 A 区文件"""
+        # 从数据库查找 A 区路径
+        a_record = self.db.get_a_by_webdav(webdav_path)
+        if a_record:
+            a_path = a_record[0]  # local_path
+            if Path(a_path).exists():
+                safe_remove_file(a_path)
+                logging.info("[A区删除] B区删除联动，清理A区: %s", a_path)
+            self.db.delete_a_by_local(a_path)
 
     # ---------- 下方是修复真实的 WebDAV 请求动作 ----------
 
@@ -2676,7 +2774,7 @@ class AppService:
         if result["non_sync_mode"]:
             for s in result["non_sync_mode"]:
                 logging.warning(
-                    "[STRM存储验证] 非同步模式的存储: %s (mode=%s)",
+                    "[STRM存储验证] 非更新模式的存储: %s (mode=%s, 需要改为更新模式)",
                     s.mount_path,
                     s.save_local_mode,
                 )
@@ -2806,3 +2904,47 @@ class AppService:
                 return _cn_to_int_func(cn_match.group(1))
 
         return None
+
+    def cleanup_a_deleted_on_cloud(self, engine_path: str) -> None:
+        """扫描 A 区，删除云端已不存在的 STRM 文件（update 模式核心逻辑）"""
+        # 从配置中找到对应的 A 区根目录
+        a_root = None
+        for entry_path, mapping in self.config.strm_storage_map.items():
+            if engine_path == entry_path or engine_path.startswith(
+                    entry_path + "/"):
+                a_root = Path(mapping.local_path)
+                # 拼接 paths[0] 的最后一级目录
+                if mapping.paths:
+                    last_dir = mapping.paths[0].rstrip("/").split("/")[-1]
+                    a_root = a_root / last_dir
+                break
+
+        if not a_root or not a_root.exists():
+            return
+
+        for strm_file in a_root.rglob("*.strm"):
+            webdav_path = read_strm_webdav_path(str(strm_file))
+            if not webdav_path:
+                continue
+
+            if not self.admin_api.check_exists(webdav_path):
+                self._safe_delete_a_file(str(strm_file), webdav_path)
+
+    def _safe_delete_a_file(self, local_path: str, webdav_path: str) -> None:
+        """安全删除 A 区文件，同步清理数据库和 B 区"""
+        local = Path(local_path)
+
+        # 1. 删除 A 区物理文件
+        if local.exists():
+            safe_remove_file(local)
+            logging.info("[A区删除] 云端已删除，清理本地: %s", local_path)
+
+        # 2. 清理 A 区数据库记录
+        self.db.delete_a_by_local(local_path)
+
+        # 3. 触发 B 区延迟清理
+        parent = webdav_parent(webdav_path)
+        self.trigger_delayed_cleanup(parent)
+
+        # 4. 清理空目录
+        self.cleanup_local_empty_dirs()
