@@ -13,7 +13,7 @@
 本项目采用多分支管理不同的部署场景，并配有极尽详尽的系统设计架构 Wiki。在部署前请务必阅读文档。
 
 - **📖 官方 Wiki 知识库**：点击访问 [Wiki](/../../wiki) 获取最详细的架构设计、血统校验边界、网络探活断路器及注意事项。
-- **🌿 STRM 引擎同步模式（推荐）**：请切换至 [sync_strm 分支](/../../tree/sync_strm)获取配合 OpenList 引擎同步模式的本地双向协调器源码。
+- **🌿 STRM 引擎更新模式api版（推荐）**：请切换至 [sync_strm 分支](/../../tree/sync_strm)获取配合 OpenList 引擎更新模式的本地双向协调器源码。
 - **🤖 代码全AI生成**：零人工添加 感谢nvidia nim和中转站 感谢[aider](https://github.com/Aider-AI/aider)架构师模式。
 
 ---
