@@ -2,13 +2,13 @@
 # openlist_strm_bridge 配置文件
 # ============================================================
 #
-# 本程序用于配合 OpenList STRM 引擎的"同步模式"。
+# 本程序用于配合 OpenList STRM 引擎的"更新模式"。
 #
 # 推荐目录模型：
 #
 # A 区：OpenList STRM 引擎生成区
 #   - 由 OpenList / STRM 引擎负责生成
-#   - 程序只读取和监控
+#   - 程序监控并联动删除
 #
 # B 区：媒体库消费区
 #   - 给 Emby / Jellyfin等媒体库扫描
@@ -72,11 +72,13 @@ strm_engine_paths_file = "./strm_engine_paths.txt"
 # 这是媒体库实际扫描的目录。
 # 程序会把 A 区 STRM 同步到这里。
 # 这里不能设置多文件夹
+# 注意路径斜杠的方向
 b_root = "C:/Users/1/Downloads/测试b"
 
 # C 区根目录。
 # 用于幽灵迁移、异常隔离等场景。
 # 日常可能很少用到，但建议保留。
+# 注意路径斜杠的方向
 c_root = "C:/Users/1/Downloads/测试c"
 
 

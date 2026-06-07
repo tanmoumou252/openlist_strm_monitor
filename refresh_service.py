@@ -139,7 +139,7 @@ class _StrmStorageManager:
         return result
 
     def get_working_sync_storages(self) -> list[_StrmStorageInfo]:
-        """获取有效的同步模式存储"""
+        """获取有效的更新模式存储"""
         return [s for s in self.get_strm_storages(
         ) if s.is_working and s.is_sync_mode]
 

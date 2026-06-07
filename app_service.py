@@ -162,7 +162,7 @@ class StrmStorageManager:
         return result
 
     def get_working_sync_storages(self) -> list[StrmStorageInfo]:
-        """获取有效的同步模式存储"""
+        """获取有效的更新模式存储"""
         return [s for s in self.get_strm_storages(
         ) if s.is_working and s.is_sync_mode]
 
@@ -511,17 +511,35 @@ class AppService:
                 if cloud_show_name:
                     show_name = cloud_show_name
                 else:
-                    # 回退：从 webdav_path 提取
-                    engine_path = self._find_matching_engine_path(webdav_path)
-                    if engine_path:
-                        rel_to_engine = webdav_path[len(
-                            engine_path.rstrip("/")):].lstrip("/")
-                        show_name = rel_to_engine.split(
-                            "/")[0] if rel_to_engine else None
-                    else:
+                    # 回退：从 A 区本地路径的目录结构提取 show_name
+                    # 优先使用本地目录结构，因为 webdav_path 可能不包含完整的层级信息
+                    try:
+                        rel_to_a_root = a_local.relative_to(a_root)
+                        # rel_to_a_root 例如: 测试番剧/[2023] 女神的露天咖啡厅/[DBD-Raws]...
+                        if len(rel_to_a_root.parts) >= 2:
+                            # 倒数第二部分是媒体文件夹名（排除文件名）
+                            show_name = rel_to_a_root.parts[-2]
+                        elif len(rel_to_a_root.parts) == 1:
+                            # 只有一层，用这部分
+                            show_name = rel_to_a_root.parts[0]
+                        else:
+                            show_name = None
+                    except ValueError:
                         show_name = None
 
-                    # 如果还是找不到，尝试从路径中提取
+                    # 如果本地提取失败，再尝试从 webdav_path 提取
+                    if not show_name:
+                        engine_path = self._find_matching_engine_path(
+                            webdav_path)
+                        if engine_path:
+                            rel_to_engine = webdav_path[len(
+                                engine_path.rstrip("/")):].lstrip("/")
+                            show_name = rel_to_engine.split(
+                                "/")[0] if rel_to_engine else None
+                        else:
+                            show_name = None
+
+                    # 最后兜底
                     if not show_name:
                         webdav_parts = webdav_path.strip("/").split("/")
                         for part in reversed(webdav_parts[:-1]):
@@ -1601,6 +1619,33 @@ class AppService:
         # 提取季集信息
         season, episode = _extract_season_episode(sub_file.name)
 
+        # 如果字幕本身没有季集信息，尝试从相邻的 STRM 文件提取
+        if season is None or episode is None:
+            parent_dir = sub_file.parent
+
+            # 1. 先查同目录
+            for strm_file in parent_dir.glob("*.strm"):
+                season, episode = _extract_season_episode(strm_file.name)
+                if season is not None and episode is not None:
+                    logging.debug("[字幕关联] 从同目录STRM提取: %s -> S%02dE%02d",
+                                  strm_file.name, season, episode)
+                    break
+
+            # 2. 如果当前在媒体根目录（不是Season目录），查子目录
+            if (season is None or episode is None) and not re.match(
+                    r"(?i)^season\s*\d+$", parent_dir.name):
+                for sub_dir in parent_dir.iterdir():
+                    if sub_dir.is_dir() and re.match(r"(?i)^season\s*\d+$", sub_dir.name):
+                        for strm_file in sub_dir.glob("*.strm"):
+                            season, episode = _extract_season_episode(
+                                strm_file.name)
+                            if season is not None and episode is not None:
+                                logging.debug("[字幕关联] 从子目录STRM提取: %s -> S%02dE%02d",
+                                              strm_file.name, season, episode)
+                                break
+                        if season is not None and episode is not None:
+                            break
+
         # 电影模式：无季集信息
         if season is None or episode is None:
             # 查找同目录下的 STRM 文件作为关联目标
@@ -1663,15 +1708,26 @@ class AppService:
         if len(parts) < 2:
             return
 
-        # 提取媒体名称
+        # 提取媒体名称（与 build_b_path_from_a 保持一致）
+        # 从文件所在目录向上查找，排除 Season 目录，找到媒体名称
         show_name = None
-        for part in parts[:-1]:
-            if part.lower() not in ("番剧", "动漫", "动画", "anime", "movie", "电影", "tv", "电视剧"):
-                show_name = part
+        check_path = sub_file.parent
+        while check_path != a_root and check_path.is_relative_to(a_root):
+            dir_name = check_path.name
+            if not re.match(
+                    r"(?i)^season\s*\d+$", dir_name) and not re.match(r"^s\d{1,2}$", dir_name, re.I):
+                show_name = dir_name
                 break
+            check_path = check_path.parent
 
         if not show_name:
-            show_name = parts[0] if parts else "Unknown"
+            # 回退到原来的逻辑
+            if len(parts) >= 2:
+                show_name = parts[-2]
+            elif len(parts) == 1:
+                show_name = parts[0]
+            else:
+                show_name = "Unknown"
 
         # 构建目标路径
         b_target_dir = self.b_root / a_root.name / \
