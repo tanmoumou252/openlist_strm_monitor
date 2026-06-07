@@ -46,7 +46,16 @@ from utils import (
 )
 from refresh_service import RefreshService
 from webdav_client import OpenListAdminClient
-from media_renamer import suggest_rename, build_season_path, _extract_season_episode
+from media_renamer import (
+    suggest_rename, 
+    build_season_path, 
+    _extract_season_episode,
+    _build_standard_name,
+    detect_media_type_from_path,
+    is_subtitle_file,
+    detect_subtitle_language,
+    SUBTITLE_EXTS,
+)
 # autopep8: on
 # isort: on
 
@@ -214,6 +223,7 @@ class AppService:
         self.engine_configs: list[dict] = []
         self._restoring_markers: set[str] = set()  # 正在恢复的文件指纹集合
         self._restoring_lock = threading.Lock()
+        self.db.init_subtitle_table()   # 初始化字幕表
 
     def get_path_lock(self, path: str | Path) -> threading.Lock:
         key = str(Path(path).resolve())
@@ -458,6 +468,12 @@ class AppService:
 
         rel = a_local.relative_to(a_root)
         root_name = a_root.name or "a_root"
+
+        # 检测是否为电影目录
+        is_movie = self._should_treat_as_movie(a_local, webdav_path)
+        if is_movie:
+            # 电影保持原有结构，不做番剧重命名
+            return self.b_root / root_name / rel
 
         # 尝试自动重命名
         suggested_name = suggest_rename(a_local)
@@ -1030,17 +1046,24 @@ class AppService:
 
     def initial_scan_a(self) -> None:
         logging.info("[初始化] 扫描A区")
-        total_files = 0
+        total_strm = 0
+        total_subtitle = 0
         for a_root in self.a_roots:
             if not a_root.exists():
                 continue
-            for root, _, files in os.walk(a_root):
+            for root, _dirs, files in os.walk(a_root):
                 for name in files:
-                    if not name.lower().endswith(".strm"):
-                        continue
-                    self.handle_a_created_or_modified(str(Path(root) / name))
-                    total_files += 1
-        logging.info("[初始化] A区扫描完成，共处理 %s 个 STRM 文件", total_files)
+                    file_path = Path(root) / name
+                    if name.lower().endswith(".strm"):
+                        self.handle_a_created_or_modified(str(file_path))
+                        total_strm += 1
+                    elif is_subtitle_file(file_path):
+                        self.process_subtitle_file(file_path)
+                        total_subtitle += 1
+        logging.info(
+            "[初始化] A区扫描完成，共处理 %s 个 STRM 文件，%s 个字幕文件",
+            total_strm,
+            total_subtitle)
 
     def scan_a_to_b_full_sync(
             self, valid_engine_paths: list[str] | None = None) -> None:
@@ -1246,6 +1269,11 @@ class AppService:
             return
         if self.get_a_root_for_path(local) is None:
             logging.debug("[A区跳过] 不属于任何A根目录: %s", local)
+            return
+
+        # 字幕文件独立处理，不进入 STRM 流程
+        if is_subtitle_file(local):
+            self.process_subtitle_file(local)
             return
 
         webdav_path = read_strm_webdav_path(local)
@@ -1484,6 +1512,210 @@ class AppService:
             logging.error("[A->B复制失败] DB错误: %s", e)
             safe_remove_file(b_local)
             return False
+
+    def _find_related_subtitles(self, strm_path: str | Path) -> list[Path]:
+        """查找与STRM文件同目录下的所有字幕文件"""
+        strm = Path(strm_path)
+        if not strm.parent.exists():
+            return []
+
+        subtitles = []
+        for ext in SUBTITLE_EXTS:
+            subtitles.extend(strm.parent.glob(f"*{ext}"))
+            subtitles.extend(strm.parent.glob(f"*{ext.upper()}"))
+
+        # 去重并排序
+        seen = set()
+        result = []
+        for sub in subtitles:
+            key = sub.resolve()
+            if key not in seen:
+                seen.add(key)
+                result.append(sub)
+        return result
+
+    def _should_treat_as_movie(
+            self, a_local_path: str | Path, webdav_path: str | None = None) -> bool:
+        """判断是否应该按电影处理"""
+        # 1. 检查路径中的目录名
+        media_type = detect_media_type_from_path(a_local_path)
+        if media_type == "movie":
+            return True
+        if media_type == "anime":
+            return False
+
+        # 2. 检查webdav_path
+        if webdav_path:
+            media_type = detect_media_type_from_path(webdav_path)
+            if media_type == "movie":
+                return True
+            if media_type == "anime":
+                return False
+
+        # 3. 默认：如果无法识别季集信息，可能是电影
+        season, episode = _extract_season_episode(Path(a_local_path).name)
+        if season is None or episode is None:
+            # 检查是否是单文件目录
+            parent = Path(a_local_path).parent
+            strm_count = len(list(parent.glob("*.strm")))
+            if strm_count <= 1:
+                # 可能是电影或单集
+                return True
+
+        return False
+
+    def process_subtitle_file(self, a_subtitle_path: str | Path) -> None:
+        """
+        独立处理单个字幕文件：从文件名提取季集信息，直接复制到B区标准目录。
+        使用数据库记录已处理字幕，避免重复处理。
+        """
+        sub_file = Path(a_subtitle_path).resolve()
+        if not sub_file.exists():
+            return
+
+        # 获取A区根目录
+        a_root = self.get_a_root_for_path(sub_file)
+        if a_root is None:
+            return
+
+        # 计算字幕指纹（基于文件路径和内容修改时间）
+        stat = sub_file.stat()
+        fingerprint = hashlib.sha256(
+            f"{sub_file}:{stat.st_size}:{stat.st_mtime}".encode()
+        ).hexdigest()
+
+        # 检查数据库：已存在且目标文件仍在，跳过
+        existing = self.db.get_subtitle_by_local(str(sub_file))
+        logging.debug("[字幕数据库] 查询 %s: %s", sub_file, existing is not None)
+        if existing:
+            target_path = existing[2]
+            logging.debug(
+                "[字幕数据库] 目标路径: %s, 存在: %s",
+                target_path,
+                Path(target_path).exists())
+            if Path(target_path).exists():
+                logging.debug("[字幕跳过] 已处理且目标存在: %s", sub_file)
+                return
+            # 目标不存在，重新处理
+
+        # 提取季集信息
+        season, episode = _extract_season_episode(sub_file.name)
+
+        # 电影模式：无季集信息
+        if season is None or episode is None:
+            # 查找同目录下的 STRM 文件作为关联目标
+            parent_dir = sub_file.parent
+            strm_files = list(parent_dir.glob("*.strm"))
+
+            if strm_files:
+                movie_stem = strm_files[0].stem
+            else:
+                movie_stem = sub_file.stem
+
+            b_target_dir = self.b_root / a_root.name / \
+                sub_file.relative_to(a_root).parent
+
+            lang_info = detect_subtitle_language(sub_file.name)
+            if lang_info is None:
+                new_name = f"{movie_stem}.forced.zho.中文{
+                    sub_file.suffix.lower()}"
+            else:
+                _code, _label, _priority = lang_info
+                new_name = f"{movie_stem}.forced.{_code}.{_label}{
+                    sub_file.suffix.lower()}"
+
+            target = b_target_dir / new_name
+            # ===== 防御：目标文件已存在则跳过 =====
+            if target.exists():
+                logging.debug("[字幕跳过] 目标文件已存在: %s", target)
+                # 确保数据库记录存在
+                self.db.upsert_subtitle(
+                    local_path=str(sub_file),
+                    target_path=str(target),
+                    fingerprint=fingerprint,
+                    season=None,
+                    episode=None,
+                    lang_code=lang_info[0] if lang_info else None,
+                )
+                return
+            # =====================================
+            try:
+                b_target_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(sub_file, target)
+                logging.debug("[字幕复制] 电影字幕: %s -> %s", sub_file, target)
+
+                # 记录到数据库
+                self.db.upsert_subtitle(
+                    local_path=str(sub_file),
+                    target_path=str(target),
+                    fingerprint=fingerprint,
+                    season=None,
+                    episode=None,
+                    lang_code=lang_info[0] if lang_info else None,
+                )
+            except Exception as e:
+                logging.warning("[字幕复制失败] %s: %s", sub_file, e)
+            return
+
+        # 番剧模式
+        rel = sub_file.relative_to(a_root)
+        parts = list(rel.parts)
+        if len(parts) < 2:
+            return
+
+        # 提取媒体名称
+        show_name = None
+        for part in parts[:-1]:
+            if part.lower() not in ("番剧", "动漫", "动画", "anime", "movie", "电影", "tv", "电视剧"):
+                show_name = part
+                break
+
+        if not show_name:
+            show_name = parts[0] if parts else "Unknown"
+
+        # 构建目标路径
+        b_target_dir = self.b_root / a_root.name / \
+            show_name / f"Season {season:02d}"
+        base_name = _build_standard_name(season, episode)
+        lang_info = detect_subtitle_language(sub_file.name)
+
+        if lang_info is None:
+            new_name = f"{base_name}.forced.zho.中文{sub_file.suffix.lower()}"
+        else:
+            _code, _label, _priority = lang_info
+            new_name = f"{base_name}.forced.{_code}.{_label}{
+                sub_file.suffix.lower()}"
+
+        target = b_target_dir / new_name
+        # ===== 防御：目标文件已存在则跳过 =====
+        if target.exists():
+            logging.debug("[字幕跳过] 目标文件已存在: %s", target)
+            self.db.upsert_subtitle(
+                local_path=str(sub_file),
+                target_path=str(target),
+                fingerprint=fingerprint,
+                season=season,
+                episode=episode,
+                lang_code=lang_info[0] if lang_info else None,
+            )
+            return
+        # =====================================
+        try:
+            b_target_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(sub_file, target)
+            logging.debug("[字幕复制] 番剧字幕: %s -> %s", sub_file, target)
+
+            # 记录到数据库
+            self.db.upsert_subtitle(
+                local_path=str(sub_file),
+                target_path=str(target),
+                fingerprint=fingerprint,
+                season=season,
+                episode=episode,
+                lang_code=lang_info[0] if lang_info else None,
+            )
+        except Exception as e:
+            logging.warning("[字幕复制失败] %s: %s", sub_file, e)
 
     def _is_standard_media_name(self, name: str) -> bool:
         """

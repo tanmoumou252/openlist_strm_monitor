@@ -1045,3 +1045,106 @@ class Database:
             except Exception as e:
                 logging.error("[DB] 无法创建数据库文件: %s", e)
             # ============================================================
+
+    # ========== 字幕表操作 ==========
+
+    def init_subtitle_table(self) -> None:
+        """初始化字幕表"""
+        with self.connection() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS subtitles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    local_path TEXT NOT NULL UNIQUE,
+                    target_path TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    season INTEGER,
+                    episode INTEGER,
+                    lang_code TEXT,
+                    status TEXT DEFAULT 'valid',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_subtitle_fingerprint
+                ON subtitles(fingerprint)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_subtitle_target
+                ON subtitles(target_path)
+            """)
+
+    def upsert_subtitle(
+        self,
+        local_path: str,
+        target_path: str,
+        fingerprint: str,
+        season: int | None = None,
+        episode: int | None = None,
+        lang_code: str | None = None,
+        status: str = "valid",
+    ) -> None:
+        """插入或更新字幕记录"""
+        with self.connection() as conn:
+            conn.execute("""
+                INSERT INTO subtitles
+                (local_path, target_path, fingerprint, season, episode, lang_code, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(local_path) DO UPDATE SET
+                    target_path = excluded.target_path,
+                    fingerprint = excluded.fingerprint,
+                    season = excluded.season,
+                    episode = excluded.episode,
+                    lang_code = excluded.lang_code,
+                    status = excluded.status,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (local_path, target_path, fingerprint, season, episode, lang_code, status))
+            conn.commit()
+
+    def get_subtitle_by_local(self, local_path: str) -> tuple | None:
+        """根据本地路径查询字幕记录"""
+        with self.connection() as conn:
+            cur = conn.execute(
+                "SELECT * FROM subtitles WHERE local_path = ?",
+                (local_path,)
+            )
+            return cur.fetchone()
+
+    def subtitle_exists(self, local_path: str) -> bool:
+        """检查字幕是否已存在"""
+        with self.connection() as conn:
+            cur = conn.execute(
+                "SELECT 1 FROM subtitles WHERE local_path = ?",
+                (local_path,)
+            )
+            return cur.fetchone() is not None
+
+    def get_subtitles_by_fingerprint(self, fingerprint: str) -> list[tuple]:
+        """根据指纹获取所有字幕"""
+        with self.connection() as conn:
+            cur = conn.execute(
+                "SELECT * FROM subtitles WHERE fingerprint = ?",
+                (fingerprint,)
+            )
+            return cur.fetchall()
+
+    def delete_subtitle_by_local(self, local_path: str) -> None:
+        """删除字幕记录"""
+        with self.connection() as conn:
+            conn.execute(
+                "DELETE FROM subtitles WHERE local_path = ?",
+                (local_path,)
+            )
+            conn.commit()
+
+    def cleanup_invalid_subtitles(self) -> None:
+        """清理目标文件已不存在的字幕记录"""
+        with self.connection() as conn:
+            cur = conn.execute("SELECT local_path, target_path FROM subtitles")
+            for local_path, target_path in cur.fetchall():
+                if not Path(target_path).exists():
+                    conn.execute(
+                        "DELETE FROM subtitles WHERE local_path = ?",
+                        (local_path,)
+                    )
+            conn.commit()
