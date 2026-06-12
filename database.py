@@ -86,7 +86,7 @@ class Database:
         # ===== 修复：确保数据库文件可写 =====
         self._ensure_db_writable()
         # ====================================
-        logging.info("[DB] 开始初始化数据库表结构: %s", self.db_path)
+        logging.info("[DB] 开始初始化数据库表结构")
         with self.lock, self.connection() as conn:
             cur = conn.cursor()
 
