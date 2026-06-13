@@ -48,6 +48,35 @@ def _cn_to_int(s: str) -> int | None:
     return CN_NUMBERS.get(s)
 
 
+def extract_season_from_path(path: str | Path) -> int | None:
+    """从路径中提取季信息，包括中文季目录如 '第二季'、'Season 1' 等"""
+    path_str = str(path)
+    parts = path_str.replace("\\", "/").split("/")
+
+    for part in parts:
+        part_lower = part.lower()
+
+        # 匹配 "Season XX" 或 "SeasonX" 格式
+        season_match = re.match(
+            r"^season\s*(\d{1,2})$",
+            part_lower,
+            re.IGNORECASE)
+        if season_match:
+            return int(season_match.group(1))
+
+        # 匹配 "SXX" 格式（如 S02, s2）
+        s_match = re.match(r"^s(\d{1,2})$", part_lower, re.IGNORECASE)
+        if s_match:
+            return int(s_match.group(1))
+
+        # 匹配中文 "第X季"
+        cn_match = re.match(r"^第([一二三四五六七八九十\d]+)季$", part_lower)
+        if cn_match:
+            return _cn_to_int(cn_match.group(1))
+
+    return None
+
+
 def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
     """从文件名中提取季和集数（增强版）"""
     # 1. 优先匹配 S01E01 格式
@@ -57,6 +86,29 @@ def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
             season = int(match.group(1))
             episode = int(match.group(2))
             return season, episode
+
+    # 1.5 增强模式：处理 [Name S1][01] 或 [Name][S1][01] 等嵌套格式
+    # 例如：[DBD-Raws][Megami no Cafe Terrace S1][01][1080P]...
+    # 先尝试提取所有方括号内的内容
+    bracket_contents = re.findall(r'\[([^\]]+)\]', filename)
+    if len(bracket_contents) >= 2:
+        # 查找包含 S数字 的括号内容
+        for i, content in enumerate(bracket_contents):
+            s_match = re.search(r'[Ss](\d{1,2})', content)
+            if s_match:
+                season = int(s_match.group(1))
+                # 在后面的括号内容中找集数
+                for j in range(i + 1, len(bracket_contents)):
+                    later_content = bracket_contents[j]
+                    # 纯数字且是2-3位
+                    if re.match(r'^\d{2,3}$', later_content):
+                        episode = int(later_content)
+                        return season, episode
+                    # 或者包含 "第X集"
+                    ep_match = re.search(r'第(\d{1,3})集', later_content)
+                    if ep_match:
+                        episode = int(ep_match.group(1))
+                        return season, episode
 
     # 2. 匹配 [S1][01] 或 Season 1 [01] 或 S1-01 等格式
     # 例如: [DBD-Raws][Megami no Cafe Terrace S1][01]...
@@ -228,8 +280,8 @@ def suggest_rename(src_path: str | Path) -> str | None:
 
     season, episode = _extract_season_episode(filename)
     if season is not None and episode is not None:
-        # 只返回集信息，不包含季信息（季信息在路径中）
-        new_name = f"E{episode:02d}{ext}"
+        # 返回完整格式 S01E01.ext
+        new_name = f"S{season:02d}E{episode:02d}{ext}"
         return new_name
 
     return None

@@ -55,6 +55,7 @@ from media_renamer import (
     is_subtitle_file,
     detect_subtitle_language,
     SUBTITLE_EXTS,
+    extract_season_from_path,
 )
 # autopep8: on
 # isort: on
@@ -478,6 +479,9 @@ class AppService:
         if suggested_name and webdav_path:
             # 优先从 webdav_path 提取季信息
             season = self._extract_season_from_webdav_path(webdav_path)
+            # 回退从路径中的中文季目录提取
+            if season is None:
+                season = extract_season_from_path(a_local)
             # 回退到从文件名提取
             if season is None:
                 season, _ = _extract_season_episode(a_local.name)
@@ -486,29 +490,41 @@ class AppService:
             _, episode = _extract_season_episode(a_local.name)
 
             if season is not None and episode is not None:
-                # 构建标准文件名
-                standard_name = f"S{
-                    season:02d}E{
-                    episode:02d}{
-                    Path(suggested_name).suffix}"
+                # suggest_rename 返回完整格式 S01E01.ext
+                if suggested_name:
+                    standard_name = suggested_name
+                else:
+                    # 兼容旧格式或异常情况
+                    standard_name = f"S{
+                        season:02d}E{
+                        episode:02d}{
+                        Path(a_local).suffix}"
 
                 # ===== 关键修复：保留 A 区完整相对目录结构，只替换文件名并插入 Season =====
                 rel_parts = list(rel.parts)
 
-                # 检查 A 区路径中是否已有 Season 目录
+                # 检查 A 区路径中是否已有 Season 目录或中文季目录
                 has_season_dir = False
                 season_dir_index = -1
+                cn_season_dir_index = -1
                 for i, part in enumerate(rel_parts[:-1]):  # 排除文件名
                     if re.match(r"(?i)^season\s*\d+$", part):
                         has_season_dir = True
                         season_dir_index = i
                         break
+                    # 检测中文季目录如 "第二季"
+                    if re.match(r"^第[一二三四五六七八九十\d]+季$", part):
+                        cn_season_dir_index = i
 
                 if has_season_dir:
                     # 已有 Season 目录：替换为正确的季号，标准化文件名
                     # 保留 Season 之前的所有目录结构
                     new_rel = Path(
                         *rel_parts[:season_dir_index]) / f"Season {season:02d}" / standard_name
+                elif cn_season_dir_index >= 0:
+                    # 有中文季目录：替换为 Season XX，移除中文季目录
+                    new_rel = Path(
+                        *rel_parts[:cn_season_dir_index]) / f"Season {season:02d}" / standard_name
                 else:
                     # 无 Season 目录：在文件名的父目录下添加 Season XX
                     # 保留所有父目录结构
@@ -653,7 +669,7 @@ class AppService:
 
         # 4. 快速通过：完全一致（不含 Season 的情况）
         if a_rel_dir == b_rel_dir:
-            logging.debug("[血统校验通过] 路径完全一致")
+            logging.debug("[血统校验通过] 路径完全一致: %s", b_local_path)
             return True
 
         # 5. 处理 Season 层级差异
@@ -667,12 +683,47 @@ class AppService:
                 # 最后一层是 Season XX
                 last_part = b_parts[-1]
                 if re.match(r"(?i)^season\s*\d+$", last_part):
-                    logging.debug("[血统校验通过] B区自动添加Season层级")
+                    logging.debug("[血统校验通过] B区自动添加Season层级: %s", b_local_path)
                     return True
+
+        # 5.5 处理多层 Season 变化（如 S01 -> S02）
+        # 检查是否是同一媒体文件夹下的 Season 变化
+        if len(a_parts) >= 1 and len(b_parts) >= 1:
+            # 提取媒体文件夹名（假设是 Season 的父级或更上级）
+            a_media_name = None
+            b_media_name = None
+
+            for i, part in enumerate(a_parts):
+                if re.match(r"(?i)^season\s*\d+$", part):
+                    if i > 0:
+                        a_media_name = a_parts[i - 1]
+                    break
+
+            for i, part in enumerate(b_parts):
+                if re.match(r"(?i)^season\s*\d+$", part):
+                    if i > 0:
+                        b_media_name = b_parts[i - 1]
+                    break
+
+            # 如果媒体文件夹名相同，或者通过边界映射关联，允许
+            if a_media_name and b_media_name:
+                if a_media_name == b_media_name:
+                    logging.debug("[血统校验通过] 同一媒体不同Season: %s", b_local_path)
+                    return True
+
+                # 检查边界映射
+                boundary = self.db.get_media_boundary_by_source_name_only(
+                    a_media_name)
+                if boundary:
+                    _, mapped_source, mapped_current, _, _ = boundary
+                    if b_media_name in (mapped_source, mapped_current):
+                        logging.debug(
+                            "[血统校验通过] 边界映射Season变化: %s", b_local_path)
+                        return True
 
         # 6. 引擎配置检查（用于后续边界映射）
         if not hasattr(self, "engine_configs") or not self.engine_configs:
-            logging.debug("[血统校验放行] 引擎配置未加载")
+            logging.debug("[血统校验放行] 引擎配置未加载: %s", b_local_path)
             return True
 
         # 找到匹配的引擎配置
@@ -683,7 +734,7 @@ class AppService:
             None,
         )
         if not config:
-            logging.debug("[血统校验放行] 未找到引擎配置")
+            logging.debug("[血统校验放行] 未找到引擎配置: %s", b_local_path)
             return True
 
         # 7. 识别云端媒体根目录
@@ -691,7 +742,7 @@ class AppService:
             (sp for sp in config["source_paths"] if webdav_path.startswith(
                 sp.rstrip("/") + "/")), None)
         if not source_path:
-            logging.debug("[血统校验放行] 不在监控范围内")
+            logging.debug("[血统校验放行] 不在监控范围内: %s", b_local_path)
             return True
 
         rel_cloud_str = webdav_path[len(source_path.rstrip("/")):].lstrip("/")
@@ -716,7 +767,7 @@ class AppService:
         # 9. 边界校验：不能提到引擎根目录
         if len(b_parts) < 2:
             if len(rel_parts) < 2:
-                logging.debug("[血统校验] 根目录电影，放行")
+                logging.debug("[血统校验] 根目录电影，放行: %s", b_local_path)
                 return True
             logging.warning("[血统校验失败] 越界文件: %s", b_local_path)
             return False
@@ -726,11 +777,61 @@ class AppService:
         if boundary:
             _, source_media_name, current_media_name, _, _ = boundary
             if physical_media_folder_name == current_media_name:
-                logging.debug("[血统校验] 边界映射匹配: %s", current_media_name)
+                logging.debug(
+                    "[血统校验] 边界映射匹配: %s (路径: %s)",
+                    current_media_name,
+                    b_local_path)
                 return True
             if physical_media_folder_name == source_media_name:
-                logging.debug("[血统校验] 回到源边界: %s", source_media_name)
+                logging.debug(
+                    "[血统校验] 回到源边界: %s (路径: %s)",
+                    source_media_name,
+                    b_local_path)
                 return True
+
+        # 10.5 交叉边界映射检查（处理更新番剧场景）
+        # 检查：当前物理位置是否匹配某个"源媒体名"对应的"当前媒体名"
+        # 或者：当前物理位置是"源媒体名"，而某个映射的"当前媒体名"是另一个已知位置
+        if cloud_show_name and physical_media_folder_name:
+            # 情况A：当前在"源边界"位置，检查是否有映射到"当前边界"
+            boundary_by_source = self.db.get_media_boundary_by_source_name_only(
+                physical_media_folder_name
+            )
+            if boundary_by_source:
+                # 找到了：physical_media_folder_name 作为 source_media_name 的映射
+                _, mapped_source, mapped_current, _, _ = boundary_by_source
+                # 验证 cloud_show_name 是否匹配（确保是同一部番剧）
+                if cloud_show_name == mapped_source or cloud_show_name == mapped_current:
+                    logging.debug(
+                        "[血统校验] 交叉边界映射匹配(源->当前): %s -> %s (路径: %s)",
+                        physical_media_folder_name, mapped_current, b_local_path)
+                    return True
+
+            # 情况B：当前在"当前边界"位置，检查反向映射
+            boundary_by_current = self.db.get_media_boundary_by_current_name(
+                physical_media_folder_name, str(self.b_root)
+            )
+            if boundary_by_current:
+                _, mapped_source, mapped_current, _, _ = boundary_by_current
+                if cloud_show_name == mapped_source or cloud_show_name == mapped_current:
+                    logging.debug(
+                        "[血统校验] 交叉边界映射匹配(当前->源): %s <- %s (路径: %s)",
+                        physical_media_folder_name, mapped_source, b_local_path)
+                    return True
+
+            # 情况C：检查 cloud_show_name 是否有映射记录
+            boundary_by_cloud = self.db.get_media_boundary_by_source_name_only(
+                cloud_show_name
+            )
+            if boundary_by_cloud:
+                _, mapped_source, mapped_current, _, _ = boundary_by_cloud
+                # 如果当前物理位置是映射的任一端，都允许
+                if physical_media_folder_name in (
+                        mapped_source, mapped_current):
+                    logging.debug(
+                        "[血统校验] 交叉边界映射匹配(云端): %s -> %s (路径: %s)",
+                        cloud_show_name, mapped_current, b_local_path)
+                    return True
 
         # 11. 同步阶段：记录边界映射
         if is_sync_phase and cloud_show_name and physical_media_folder_name != cloud_show_name:
@@ -1556,6 +1657,104 @@ class AppService:
                 return
             # 目标不存在，重新处理
 
+        # ========== 关键修复：先判断媒体类型，再决定处理方式 ==========
+
+        # 1. 优先基于路径判断媒体类型
+        media_type = detect_media_type_from_path(sub_file)
+        logging.debug("[字幕处理] 路径: %s, 媒体类型: %s", sub_file, media_type)
+
+        # 2. 如果是电影，直接走电影模式
+        if media_type == "movie":
+            self._process_movie_subtitle(sub_file, a_root, fingerprint)
+            return
+
+        # 3. 检查同目录STRM文件，辅助判断是电影还是番剧
+        parent_dir = sub_file.parent
+        strm_files = list(parent_dir.glob("*.strm"))
+
+        # 单STRM且无法提取季集 → 电影
+        if len(strm_files) <= 1:
+            if not strm_files:
+                # 无STRM，按电影处理
+                self._process_movie_subtitle(sub_file, a_root, fingerprint)
+                return
+            # 有1个STRM，检查是否能提取季集
+            strm_season, strm_episode = _extract_season_episode(
+                strm_files[0].name)
+            if strm_season is None or strm_episode is None:
+                # STRM无季集信息，是电影
+                self._process_movie_subtitle(sub_file, a_root, fingerprint)
+                return
+
+        # ========== 番剧模式 ==========
+        self._process_anime_subtitle(sub_file, a_root, fingerprint)
+
+    def _process_movie_subtitle(
+            self, sub_file: Path, a_root: Path, fingerprint: str) -> None:
+        """处理电影字幕：复制到B区同目录，重命名为 电影名.forced.zho.简体.ass"""
+        # 查找同目录下的STRM文件作为关联目标
+        parent_dir = sub_file.parent
+        strm_files = list(parent_dir.glob("*.strm"))
+
+        if strm_files:
+            # 使用STRM文件名（不含扩展名）作为基础
+            movie_stem = strm_files[0].stem
+        else:
+            # 没有STRM，使用字幕文件名（去掉语言标识）
+            movie_stem = sub_file.stem
+            # 去掉常见的语言后缀
+            for suffix in [".forced", ".zho", ".简体", ".繁体",
+                           ".sc", ".tc", ".chs", ".cht", ".scjp"]:
+                movie_stem = movie_stem.replace(suffix, "")
+            movie_stem = movie_stem.rstrip(".")
+
+        # 构建目标路径：保持同目录结构
+        rel_parent = sub_file.relative_to(a_root).parent
+        b_target_dir = self.b_root / rel_parent
+        b_target_dir.mkdir(parents=True, exist_ok=True)
+
+        # 语言信息
+        lang_info = detect_subtitle_language(sub_file.name)
+        if lang_info is None:
+            new_name = f"{movie_stem}.forced.zho.中文{sub_file.suffix.lower()}"
+        else:
+            _code, _label, _priority = lang_info
+            new_name = f"{movie_stem}.forced.{_code}.{_label}{
+                sub_file.suffix.lower()}"
+
+        target = b_target_dir / new_name
+
+        # 如果目标已存在，更新数据库并跳过
+        if target.exists():
+            logging.debug("[字幕跳过] 目标文件已存在: %s", target)
+            self.db.upsert_subtitle(
+                local_path=str(sub_file),
+                target_path=str(target),
+                fingerprint=fingerprint,
+                season=None,
+                episode=None,
+                lang_code=lang_info[0] if lang_info else None,
+            )
+            return
+
+        try:
+            shutil.copyfile(sub_file, target)
+            logging.info("[字幕复制] 电影字幕: %s -> %s", sub_file, target)
+
+            self.db.upsert_subtitle(
+                local_path=str(sub_file),
+                target_path=str(target),
+                fingerprint=fingerprint,
+                season=None,
+                episode=None,
+                lang_code=lang_info[0] if lang_info else None,
+            )
+        except Exception as e:
+            logging.warning("[字幕复制失败] %s: %s", sub_file, e)
+
+    def _process_anime_subtitle(
+            self, sub_file: Path, a_root: Path, fingerprint: str) -> None:
+        """处理番剧字幕：提取季集，复制到 Season XX/S01E01..."""
         # 提取季集信息
         season, episode = _extract_season_episode(sub_file.name)
 
@@ -1586,85 +1785,41 @@ class AppService:
                         if season is not None and episode is not None:
                             break
 
-        # 电影模式：无季集信息
+        # 如果还是无法提取，降级为电影处理
         if season is None or episode is None:
-            # 查找同目录下的 STRM 文件作为关联目标
-            parent_dir = sub_file.parent
-            strm_files = list(parent_dir.glob("*.strm"))
-
-            if strm_files:
-                movie_stem = strm_files[0].stem
-            else:
-                movie_stem = sub_file.stem
-
-            rel_parent = sub_file.relative_to(a_root).parent
-            # ===== 修复：直接使用完整相对路径，移除 parts[1:] 截断 =====
-            b_target_dir = self.b_root / rel_parent
-
-            lang_info = detect_subtitle_language(sub_file.name)
-            if lang_info is None:
-                new_name = f"{movie_stem}.forced.zho.中文{
-                    sub_file.suffix.lower()}"
-            else:
-                _code, _label, _priority = lang_info
-                new_name = f"{movie_stem}.forced.{_code}.{_label}{
-                    sub_file.suffix.lower()}"
-
-            target = b_target_dir / new_name
-            # ===== 防御：目标文件已存在则跳过 =====
-            if target.exists():
-                logging.debug("[字幕跳过] 目标文件已存在: %s", target)
-                # 确保数据库记录存在
-                self.db.upsert_subtitle(
-                    local_path=str(sub_file),
-                    target_path=str(target),
-                    fingerprint=fingerprint,
-                    season=None,
-                    episode=None,
-                    lang_code=lang_info[0] if lang_info else None,
-                )
-                return
-            # =====================================
-            try:
-                b_target_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(sub_file, target)
-                logging.debug("[字幕复制] 电影字幕: %s -> %s", sub_file, target)
-
-                # 记录到数据库
-                self.db.upsert_subtitle(
-                    local_path=str(sub_file),
-                    target_path=str(target),
-                    fingerprint=fingerprint,
-                    season=None,
-                    episode=None,
-                    lang_code=lang_info[0] if lang_info else None,
-                )
-            except Exception as e:
-                logging.warning("[字幕复制失败] %s: %s", sub_file, e)
+            logging.warning("[字幕处理] 无法提取番剧季集，降级为电影模式: %s", sub_file)
+            self._process_movie_subtitle(sub_file, a_root, fingerprint)
             return
 
-        # 番剧模式：构建标准路径，包含 Season 目录
+        # 构建标准路径
         rel = sub_file.relative_to(a_root)
         rel_parts = list(rel.parts)
 
-        # 检查是否已有 Season 目录
+        # 检查是否已有 Season 目录或中文季目录
         has_season_dir = False
+        cn_season_index = -1
         for i, part in enumerate(rel_parts[:-1]):
             if re.match(r"(?i)^season\s*\d+$", part):
                 has_season_dir = True
                 break
+            if re.match(r"^第[一二三四五六七八九十\d]+季$", part):
+                cn_season_index = i
 
         if has_season_dir:
             b_target_dir = self.b_root / rel.parent
+        elif cn_season_index >= 0:
+            b_target_dir = self.b_root / \
+                Path(*rel_parts[:cn_season_index]) / f"Season {season:02d}"
         else:
-            # 插入 Season 目录
             if len(rel_parts) >= 2:
                 b_target_dir = self.b_root / \
                     Path(*rel_parts[:-1]) / f"Season {season:02d}"
             else:
                 b_target_dir = self.b_root / rel.parent
 
-        base_name = _build_standard_name(season, episode)  # S01E01
+        b_target_dir.mkdir(parents=True, exist_ok=True)
+
+        base_name = _build_standard_name(season, episode)
         lang_info = detect_subtitle_language(sub_file.name)
 
         if lang_info is None:
@@ -1675,7 +1830,8 @@ class AppService:
                 sub_file.suffix.lower()}"
 
         target = b_target_dir / new_name
-        # ===== 防御：目标文件已存在则跳过 =====
+
+        # 如果目标已存在，更新数据库并跳过
         if target.exists():
             logging.debug("[字幕跳过] 目标文件已存在: %s", target)
             self.db.upsert_subtitle(
@@ -1687,13 +1843,11 @@ class AppService:
                 lang_code=lang_info[0] if lang_info else None,
             )
             return
-        # =====================================
-        try:
-            b_target_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(sub_file, target)
-            logging.debug("[字幕复制] 番剧字幕: %s -> %s", sub_file, target)
 
-            # 记录到数据库
+        try:
+            shutil.copyfile(sub_file, target)
+            logging.info("[字幕复制] 番剧字幕: %s -> %s", sub_file, target)
+
             self.db.upsert_subtitle(
                 local_path=str(sub_file),
                 target_path=str(target),

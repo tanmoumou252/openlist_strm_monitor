@@ -1010,6 +1010,23 @@ class Database:
             )
             return cur.fetchone()
 
+    def get_media_boundary_by_source_name_only(
+        self, source_media_name: str
+    ) -> tuple | None:
+        """根据源媒体名查找边界映射（不限制引擎路径，取最新的）"""
+        with self.lock, self.connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
+                FROM strm_media_boundary
+                WHERE source_media_name = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (source_media_name,),
+            )
+            return cur.fetchone()
+
     def _ensure_db_writable(self) -> None:
         """确保数据库文件及其父目录可写。"""
         db_path = Path(self.db_path)
