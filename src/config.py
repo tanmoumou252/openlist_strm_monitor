@@ -192,6 +192,8 @@ class AppConfig:
         with open(toml_path, "rb") as f:
             data = tomllib.load(f)
 
+        # toml_path 指向项目根目录下的 config.toml
+        # base_dir 应该是项目根目录（用于查找 .txt 配置文件）
         base_dir = os.path.dirname(toml_path)
 
         local_data = data.get("local", {})

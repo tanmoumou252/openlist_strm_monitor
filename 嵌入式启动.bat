@@ -4,8 +4,8 @@ setlocal
 
 cd /d "%~dp0"
 
-set "PYTHON=%~dp0python_embed\python.exe"
-set "APP=%~dp0main.py"
+set "PYTHON=%~dp0src\python_embed\python.exe"
+set "APP=%~dp0src\main.py"
 
 if not exist "%PYTHON%" (
     echo [ERROR] 未找到嵌入式 Python: %PYTHON%

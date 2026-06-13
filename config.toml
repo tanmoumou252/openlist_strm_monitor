@@ -73,12 +73,14 @@ strm_engine_paths_file = "./strm_engine_paths.txt"
 # 程序会把 A 区 STRM 同步到这里。
 # 这里不能设置多文件夹
 # 注意路径斜杠的方向
+# 路径需要用 / 去隔开 不要直接使用Windows资源管理器里复制出来的路径
 b_root = "C:/Users/1/Downloads/测试b"
 
 # C 区根目录。
 # 用于幽灵迁移、异常隔离等场景。
 # 日常可能很少用到，但建议保留。
 # 注意路径斜杠的方向
+# 路径需要用 / 去隔开 不要直接使用Windows资源管理器里复制出来的路径
 c_root = "C:/Users/1/Downloads/测试c"
 
 

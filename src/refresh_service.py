@@ -9,7 +9,10 @@ import os
 import sys
 from pathlib import Path
 
+# BASE_DIR = src/ 目录（代码目录）
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# PROJECT_ROOT = 项目根目录（配置文件目录）
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
 
 
 def ensure_base_dir_first():

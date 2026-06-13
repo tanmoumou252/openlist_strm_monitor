@@ -7,7 +7,10 @@ import importlib.util
 import time
 from types import ModuleType
 
+# BASE_DIR = src/ 目录（代码目录）
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# PROJECT_ROOT = 项目根目录（配置文件目录）
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
 
 
 def ensure_base_dir_first():
@@ -57,7 +60,8 @@ from webdav_client import OpenListAdminClient
 
 
 def main() -> None:
-    config = AppConfig.from_file(os.path.join(BASE_DIR, "config.toml"))
+    # 配置文件在项目根目录
+    config = AppConfig.from_file(os.path.join(PROJECT_ROOT, "config.toml"))
     setup_logging(
         level=config.log.level,
         log_file=config.log.file,

@@ -5,7 +5,7 @@ cd /d "%~dp0"
 
 :: 1. 将 Python 命令指向系统变量中的全局 python
 set "PYTHON=python"
-set "APP=%~dp0main.py"
+set "APP=%~dp0src\main.py"
 
 :: 2. 检查系统变量中是否存在 python 
 where %PYTHON% >nul 2>nul
