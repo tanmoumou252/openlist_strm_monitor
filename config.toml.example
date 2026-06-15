@@ -96,7 +96,7 @@ user = "admin"
 # WebDAV 密码。
 password = ""
 
-#2FA 密钥 如果开启了二次密钥就需要填写
+# 2FA 密钥 如果开启了二次密钥就需要填写
 totp_secret = ""
 
 [refresh]
