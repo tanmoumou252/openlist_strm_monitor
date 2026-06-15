@@ -60,7 +60,7 @@ class OpenListAdminClient:
                 with open(self.token_cache_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.token = data.get("token")
-                    log.debug("🔑 已从本地缓存加载 JWT Token")
+                    log.debug("已从本地缓存加载 JWT Token")
             except Exception:
                 self.token = None
 
@@ -71,7 +71,7 @@ class OpenListAdminClient:
             with open(self.token_cache_path, "w", encoding="utf-8") as f:
                 json.dump({"token": token, "ts": time.time()}, f)
         except Exception as e:
-            log.warning(f"💾 无法保存 Token 缓存: {e}")
+            log.warning(f"无法保存 Token 缓存: {e}")
 
     def login(self, force: bool = False) -> bool:
         """登录获取 JWT。force=True 会无视缓存强制联网登录"""
@@ -97,7 +97,7 @@ class OpenListAdminClient:
             log.info("OpenList 登录成功，Token 已更新")
             return True
         except Exception as e:
-            log.error(f"❌ 登录请求失败: {e}")
+            log.error(f"登录请求失败: {e}")
             return False
 
     def _do_request(self, method: str, url: str, **kwargs) -> Optional[requests.Response]:
@@ -153,7 +153,7 @@ class OpenListAdminClient:
                     pass
 
             if should_retry:
-                log.warning("⚠️ Token 已过期，尝试自动重新登录...")
+                log.warning("Token 已过期，尝试自动重新登录...")
                 if self.login(force=True):
                     kwargs["headers"]["Authorization"] = self.token
                     res = self.session.request(method, url, **kwargs)
@@ -177,7 +177,7 @@ class OpenListAdminClient:
 
             return res
         except Exception as e:
-            log.error(f"📡 网络请求异常 ({url}): {e}")
+            log.error(f"网络请求异常 ({url}): {e}")
             return None
 
     # ================= 业务方法 (全量补全) =================
@@ -196,7 +196,7 @@ class OpenListAdminClient:
             try:
                 return res.json()
             except:
-                log.error("❌ get_storage_info: 响应非 JSON 格式")
+                log.error("get_storage_info: 响应非 JSON 格式")
         return None
 
     # 3. 列出目录 (FS API)

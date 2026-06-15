@@ -1,7 +1,5 @@
-# autopep8: off
-# isort: off
-
 from __future__ import annotations
+
 import threading
 from typing import Optional
 from dataclasses import dataclass
@@ -9,40 +7,13 @@ import time
 import logging
 import json
 import os
-import sys
 from pathlib import Path
 
-# BASE_DIR = src/ 目录（代码目录）
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # PROJECT_ROOT = 项目根目录（配置文件目录）
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-
-def ensure_base_dir_first():
-    normalized_base_dir = os.path.normcase(os.path.abspath(BASE_DIR))
-    sys.path[:] = [p for p in sys.path if os.path.normcase(
-        os.path.abspath(p or os.getcwd())) != normalized_base_dir]
-    sys.path.insert(0, BASE_DIR)
-
-
-def load_local_module(module_name: str, filename: str,
-                      base_dir: str | None = None):
-    import importlib.util
-    from types import ModuleType
-
-    if base_dir is None:
-        base_dir = BASE_DIR
-    module_path = os.path.join(base_dir, filename)
-    if not os.path.isfile(module_path):
-        raise FileNotFoundError(f"本地模块文件不存在: {module_path}")
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"无法创建模块加载规范: {module_name} ({module_path})")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
+# Bootstrap: 使用公共模块避免重复
+from utils.bootstrap import ensure_base_dir_first
 
 ensure_base_dir_first()
 
@@ -50,9 +21,6 @@ try:
     import tomllib
 except ImportError:
     import tomli as tomllib
-
-# autopep8: on
-# isort: on
 
 
 # ==================== PathAnalysis 定义 ====================

@@ -1,5 +1,10 @@
 """Utils package - common utility functions."""
 
+from .bootstrap import (
+    ensure_base_dir_first,
+    load_local_module,
+    BASE_DIR as BOOTSTRAP_BASE_DIR,
+)
 from .strm_utils import (
     parse_strm_content,
     make_strm_fingerprint,
@@ -25,10 +30,16 @@ from .webdav_utils import (
 )
 
 __all__ = [
+    # Bootstrap
+    "ensure_base_dir_first",
+    "load_local_module",
+    "BOOTSTRAP_BASE_DIR",
+    # STRM
     "parse_strm_content",
     "make_strm_fingerprint",
     "read_strm_webdav_path",
     "_canonicalize_webdav_path",
+    # File operations
     "ensure_parent",
     "copy_file",
     "move_file",
@@ -38,6 +49,7 @@ __all__ = [
     "local_join",
     "quarantine_file",
     "remove_file_strict",
+    # WebDAV
     "webdav_parent",
     "webdav_root_name",
     "build_webdav_trash_path",

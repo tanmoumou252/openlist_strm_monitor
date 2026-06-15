@@ -13,38 +13,6 @@ from pathlib import Path
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-
-def ensure_base_dir_first():
-    normalized_base_dir = os.path.normcase(os.path.abspath(BASE_DIR))
-    sys.path[:] = [
-        p
-        for p in sys.path
-        if os.path.normcase(os.path.abspath(p or os.getcwd())) != normalized_base_dir
-    ]
-    sys.path.insert(0, BASE_DIR)
-
-
-def load_local_module(module_name: str, filename: str,
-                      base_dir: str | None = None):
-    import importlib.util
-    from types import ModuleType
-
-    if base_dir is None:
-        base_dir = BASE_DIR
-    module_path = os.path.join(base_dir, filename)
-    if not os.path.isfile(module_path):
-        raise FileNotFoundError(f"本地模块文件不存在: {module_path}")
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"无法创建模块加载规范: {module_name} ({module_path})")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-ensure_base_dir_first()
-
 try:
     import tomllib
 except ImportError:
@@ -52,6 +20,11 @@ except ImportError:
 
 # autopep8: on
 # isort: on
+
+# Bootstrap: ensure src/ is first in sys.path
+from utils.bootstrap import ensure_base_dir_first
+
+ensure_base_dir_first()
 
 
 def read_line_list(
@@ -328,8 +301,7 @@ class AppConfig:
 
                             # 为每个 group 创建 StrmStorageMapping
                             for last_dir, group_paths in path_groups.items():
-                                entry_path = f"{
-                                    mount_path.rstrip('/')}/{last_dir}"
+                                entry_path = f"{mount_path.rstrip('/')}/{last_dir}"
                                 strm_storage_map[entry_path] = StrmStorageMapping(
                                     mount_path=mount_path,
                                     paths=group_paths,
@@ -412,9 +384,6 @@ class AppConfig:
             ),
             refresh_paths=read_line_list(
                 "refresh_paths.txt", base_dir, is_webdav=True),
-            strm_monitored_paths=read_line_list(
-                "strm_monitored_paths.txt", base_dir, is_webdav=True
-            ),
             b_root=os.path.join(base_dir, "b"),
             c_root=os.path.join(base_dir, "c"),
         )
