@@ -134,9 +134,12 @@ def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
         episode_match = re.search(
             r"\[(\d{2,3})\]|第(\d{1,3})集|[-_\s](\d{2,3})[-_\s]", filename)
         if episode_match:
-            episode = int(episode_match.group(
-                1) or episode_match.group(2) or episode_match.group(3))
-            return season, episode
+            # 安全地获取匹配的集数，添加空值检查
+            episode_str = next(
+                (g for g in episode_match.groups() if g is not None), None)
+            if episode_str is not None:
+                episode = int(episode_str)
+                return season, episode
 
     # 4. 匹配中文格式：第X季第Y集, 第一季第一集
     season_match = re.search(r"第([一二三四五六七八九十\d]+)季", filename)

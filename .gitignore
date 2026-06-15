@@ -182,7 +182,13 @@ cython_debug/
 *.db
 bridge.db
 
-openlist_strm_bridge.code-workspace
+.code-workspace
 .aider*
 docs/
 python_embed/
+*.db-wal
+*.db-shm
+config.toml
+todo.md
+
+

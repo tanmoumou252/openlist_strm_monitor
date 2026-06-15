@@ -20,50 +20,50 @@ class Database:
         retry_delay = 0.1
 
         conn = None
-        try:
-            for attempt in range(max_retries):
+        for attempt in range(max_retries):
+            try:
+                self._ensure_db_writable()
+
+                conn = sqlite3.connect(self.db_path)
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=5000")
+
+                # 使用真正的写操作验证连接是否可写
                 try:
-                    self._ensure_db_writable()
-
-                    conn = sqlite3.connect(self.db_path)
-                    conn.execute("PRAGMA journal_mode=WAL")
-                    conn.execute("PRAGMA busy_timeout=5000")
-
-                    # ===== 修复：使用真正的写操作验证连接是否可写 =====
-                    try:
-                        # 尝试执行一个写操作来验证权限
-                        conn.execute(
-                            "CREATE TABLE IF NOT EXISTS _write_test(x)")
-                        conn.execute("DROP TABLE IF EXISTS _write_test")
-                        conn.commit()
-                        # 如果执行到这里，说明有写权限
-                        yield conn
-                        return
-                    except sqlite3.OperationalError as e:
-                        # 写操作失败，关闭连接并重试
-                        conn.close()
-                        conn = None
-                        raise sqlite3.OperationalError(
-                            f"readonly connection: {e}")
-                    # =================================================
-
+                    conn.execute(
+                        "CREATE TABLE IF NOT EXISTS _write_test(x)")
+                    conn.execute("DROP TABLE IF EXISTS _write_test")
+                    conn.commit()
                 except sqlite3.OperationalError as e:
-                    if "readonly" in str(e).lower(
-                    ) and attempt < max_retries - 1:
-                        logging.warning(
-                            "[DB] 数据库只读错误，尝试修复权限 (尝试 %s/%s): %s",
-                            attempt + 1, max_retries, e
-                        )
-                        time.sleep(retry_delay)
-                        continue
-                    raise
-        finally:
-            if conn is not None:
-                try:
                     conn.close()
-                except Exception:
-                    pass
-        # =================================
+                    conn = None
+                    raise sqlite3.OperationalError(
+                        f"readonly connection: {e}")
+
+                # 验证通过，yield 连接给调用者
+                yield conn
+                # 使用完毕后关闭连接
+                conn.close()
+                conn = None
+                return
+
+            except sqlite3.OperationalError as e:
+                # 确保连接被关闭
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    conn = None
+
+                if "readonly" in str(e).lower() and attempt < max_retries - 1:
+                    logging.warning(
+                        "[DB] 数据库只读错误，尝试修复权限 (尝试 %s/%s): %s",
+                        attempt + 1, max_retries, e
+                    )
+                    time.sleep(retry_delay)
+                    continue
+                raise
 
     def _ensure_column(
         self,
@@ -358,7 +358,7 @@ class Database:
             )
             return cur.fetchall()
 
-    def get_all_a(self) -> list[tuple]:
+    def get_all_a_records(self) -> list[tuple]:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files")
@@ -628,6 +628,9 @@ class Database:
         """
         B 区文件被重命名/隔离后，把 b_strm_files 的 local_path
         从旧路径迁移到新路径，并保留 fingerprint/status。
+        
+        使用 INSERT OR REPLACE 实现原子操作，避免先 DELETE 再 INSERT
+        时中间失败导致的数据丢失。
         """
         with self.lock, self.connection() as conn:
             cur = conn.execute(
@@ -648,36 +651,44 @@ class Database:
 
             webdav_path, parent_webdav_path, source_a_path, fingerprint, status = row
             now = time.time()
+            new_status = status or "valid"
 
-            conn.execute(
-                "DELETE FROM b_strm_files WHERE local_path = ?",
-                (old_local_path,),
-            )
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO b_strm_files(
-                    local_path,
-                    webdav_path,
-                    parent_webdav_path,
-                    source_a_path,
-                    fingerprint,
-                    status,
-                    updated_at
+            try:
+                # 使用 INSERT OR REPLACE 实现原子替换
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO b_strm_files(
+                        local_path,
+                        webdav_path,
+                        parent_webdav_path,
+                        source_a_path,
+                        fingerprint,
+                        status,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_local_path,
+                        webdav_path,
+                        parent_webdav_path,
+                        source_a_path,
+                        fingerprint,
+                        new_status,
+                        now,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    new_local_path,
-                    webdav_path,
-                    parent_webdav_path,
-                    source_a_path,
-                    fingerprint,
-                    status or "valid",
-                    now,
-                ),
-            )
-            conn.commit()
-            return True
+                # 删除旧记录
+                conn.execute(
+                    "DELETE FROM b_strm_files WHERE local_path = ?",
+                    (old_local_path,),
+                )
+                conn.commit()
+                return True
+            except sqlite3.Error as e:
+                conn.rollback()
+                logging.error("[DB] move_b_record 失败: %s", e)
+                return False
 
     def delete_identity_by_b_path(self, current_b_path: str) -> None:
         with self.lock, self.connection() as conn:
@@ -935,7 +946,7 @@ class Database:
     def has_other_b_instance(self, fingerprint: str,
                              exclude_local_path: str) -> bool:
         """检查是否存在同一指纹的其他 B 区实例（排除指定路径）。"""
-        with self.connection() as conn:
+        with self.lock, self.connection() as conn:
             cur = conn.execute(
                 "SELECT 1 FROM b_strm_files WHERE fingerprint = ? AND local_path != ? LIMIT 1",
                 (fingerprint, exclude_local_path),

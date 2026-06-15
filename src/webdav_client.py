@@ -45,6 +45,7 @@ class OpenListAdminClient:
         self.totp_secret = totp_secret
         self.token: Optional[str] = None
         self.session = requests.Session()
+        self._fs_list_logged: set[str] = set()
 
         # Token 缓存文件路径 (存放在脚本同目录)
         self.token_cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".admin_token.json")
@@ -86,13 +87,15 @@ class OpenListAdminClient:
             res = self.session.post(url, json=payload, timeout=10)
             res.raise_for_status()
             data = res.json()
-            token = data.get("data", {}).get("token") or data.get("token")
-            if token:
-                self._save_token_to_cache(token)
-                log.info("🔓 OpenList 登录成功，Token 已更新")
-                return True
-            log.error(f"❌ 登录响应异常: {data}")
-            return False
+            token = data.get("data", {}).get("token")
+            if not token:
+                token = data.get("token")
+            if not token:
+                log.error("登录响应中未获取到有效 Token: %s", data)
+                return False
+            self._save_token_to_cache(token)
+            log.info("OpenList 登录成功，Token 已更新")
+            return True
         except Exception as e:
             log.error(f"❌ 登录请求失败: {e}")
             return False
@@ -110,7 +113,35 @@ class OpenListAdminClient:
         kwargs["headers"] = headers
 
         try:
+            # 提取请求对象摘要（json payload 或 params），方便定位是哪个文件/路径
+            req_summary = ""
+            json_payload = kwargs.get("json")
+            if json_payload and isinstance(json_payload, dict):
+                # 取 path/dir/src_dir/names 等关键字段
+                keys_of_interest = ("path", "dir", "src_dir", "dst_dir", "names")
+                summary_parts = [f"{k}={json_payload[k]}" for k in keys_of_interest if k in json_payload]
+                if summary_parts:
+                    req_summary = " | " + ", ".join(summary_parts)
+            params = kwargs.get("params")
+            if params and isinstance(params, dict):
+                req_summary = " | params=" + str(params)
+            # /api/fs/list 日志精简：只输出一次路径扫描
+            _is_fs_list = url.endswith("/api/fs/list")
+            _fs_path = ""
+            if _is_fs_list and isinstance(json_payload, dict):
+                _fs_path = str(json_payload.get("path", "")).strip()
+
+            if _is_fs_list and _fs_path:
+                if _fs_path not in self._fs_list_logged:
+                    self._fs_list_logged.add(_fs_path)
+                    log.debug("[STRM] 扫描 %s", _fs_path)
+            else:
+                log.debug("[API请求] %s %s%s", method, url, req_summary)
+
             res = self.session.request(method, url, **kwargs)
+
+            if not _is_fs_list:
+                log.debug("[API响应] 状态码=%s", res.status_code)
 
             # 检查是否过期：HTTP 401 或业务 JSON code 401
             should_retry = res.status_code == 401
@@ -126,8 +157,23 @@ class OpenListAdminClient:
                 if self.login(force=True):
                     kwargs["headers"]["Authorization"] = self.token
                     res = self.session.request(method, url, **kwargs)
+                    if not _is_fs_list:
+                        log.debug("[API重试] 重新登录后状态码=%s", res.status_code)
                 else:
+                    log.error("[API重试] 重新登录失败")
                     return res  # 登录失败，直接返回 401 结果
+
+            # 记录响应摘要（避免记录大响应体）
+            try:
+                if res.status_code == 200:
+                    response_json = res.json()
+                    code = response_json.get('code', 'N/A')
+                    message = response_json.get('message', '')
+                    if not _is_fs_list:
+                        log.debug("[API结果] 业务码=%s, 消息=%s", code, message)
+            except:
+                if not _is_fs_list:
+                    log.debug("[API结果] 响应非JSON格式")
 
             return res
         except Exception as e:
@@ -169,8 +215,31 @@ class OpenListAdminClient:
     # 4. 创建目录 (FS API)
     def mkdir(self, path: str) -> bool:
         url = f"{self.host}/api/fs/mkdir"
+        log.debug("[建目录] path=%s", path)
         res = self._do_request("POST", url, json={"path": path}, timeout=15)
-        return res is not None and res.status_code == 200
+        if res is None:
+            log.debug("[建目录] 请求失败: res=None")
+            return False
+        if res.status_code != 200:
+            log.warning("[建目录] 请求非200: status=%s", res.status_code)
+            return False
+        try:
+            data = res.json()
+        except Exception:
+            log.error("[建目录] 响应非 JSON: %s", getattr(res, "text", "")[:500])
+            return False
+        code = data.get("code")
+        if not self._is_success_code(code):
+            # mkdir 目录已存在时 code 可能不是成功，但不影响使用
+            log.warning("[建目录] 业务码非成功: code=%s message=%s (path=%s)", code, data.get("message", ""), path)
+            # 仍然返回 True，因为目录可能已存在
+            return True
+        log.debug("[建目录] 创建成功: %s", path)
+        return True
+
+    def _is_success_code(self, code: int) -> bool:
+        """判断业务 code 是否为成功值"""
+        return code in (0, 200)
 
     # 5. 移动文件 (FS API)
     def move(self, src: str, dst: str) -> bool:
@@ -180,18 +249,54 @@ class OpenListAdminClient:
             "dst_dir": os.path.dirname(dst),
             "names": [os.path.basename(src)],
         }
+        log.debug("[移动] %s -> %s", src, dst)
         res = self._do_request("POST", url, json=payload, timeout=30)
-        return res is not None and res.status_code == 200
+        if res is None:
+            log.debug("[移动] 请求失败: res=None")
+            return False
+        log.debug("[移动] 响应: status=%s body=%s", res.status_code, getattr(res, "text", "")[:500])
+        if res.status_code != 200:
+            log.warning("[移动] 请求非200: status=%s", res.status_code)
+            return False
+        try:
+            data = res.json()
+        except Exception:
+            log.error("[移动] 响应非 JSON: %s", getattr(res, "text", "")[:500])
+            return False
+        code = data.get("code")
+        if not self._is_success_code(code):
+            log.error("[移动] 业务失败: code=%s message=%s", code, data.get("message", ""))
+            return False
+        log.debug("[移动] 成功")
+        return True
 
     # 6. 删除文件 (FS API)
     def remove(self, path: str) -> bool:
-        url = f"{self.host}/api/fs/remove"
+        url = f'{self.host}/api/fs/remove'
         payload = {
-            "dir": os.path.dirname(path),
-            "names": [os.path.basename(path)],
+            'dir': os.path.dirname(path),
+            'names': [os.path.basename(path)],
         }
-        res = self._do_request("POST", url, json=payload, timeout=30)
-        return res is not None and res.status_code == 200
+        log.debug('[删除] %s', path)
+        res = self._do_request('POST', url, json=payload, timeout=30)
+        if res is None:
+            log.debug('[删除] 请求失败: res=None')
+            return False
+        log.debug('[删除] 响应: status=%s body=%s', res.status_code, getattr(res, 'text', '')[:500])
+        if res.status_code != 200:
+            log.warning('[删除] 请求非200: status=%s', res.status_code)
+            return False
+        try:
+            data = res.json()
+        except Exception:
+            log.error('[删除] 响应非 JSON: %s', getattr(res, 'text', '')[:500])
+            return False
+        code = data.get('code')
+        if not self._is_success_code(code):
+            log.error('[删除] 业务失败: code=%s message=%s', code, data.get('message', ''))
+            return False
+        log.debug('[删除] 成功')
+        return True
 
     # 7. 检查路径是否存在 (逻辑方法)
     def check_exists(self, path: str) -> bool:

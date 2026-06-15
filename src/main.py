@@ -1,62 +1,35 @@
+# autopep8: off
+# isort: off
+
 from __future__ import annotations
+
 import os
 import sys
-import logging
-from pathlib import Path
-import importlib.util
-import time
-from types import ModuleType
 
 # BASE_DIR = src/ 目录（代码目录）
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # PROJECT_ROOT = 项目根目录（配置文件目录）
 PROJECT_ROOT = os.path.dirname(BASE_DIR)
 
+# 确保 src 目录在 sys.path 最前面
+sys.path.insert(0, BASE_DIR)
 
-def ensure_base_dir_first():
-    normalized_base_dir = os.path.normcase(os.path.abspath(BASE_DIR))
-    sys.path[:] = [p for p in sys.path if os.path.normcase(
-        os.path.abspath(p or os.getcwd())) != normalized_base_dir]
-    sys.path.insert(0, BASE_DIR)
+from app_service import AppService
+from webdav_client import OpenListAdminClient
+from logger_setup import setup_logging
+from database import Database
+from config import AppConfig
 
+import logging
+import time
 
-def load_local_module(module_name: str, filename: str,
-                      base_dir: str | None = None):
-    if base_dir is None:
-        base_dir = BASE_DIR
-    module_path = os.path.join(base_dir, filename)
-    if not os.path.isfile(module_path):
-        raise FileNotFoundError(f"本地模块文件不存在: {module_path}")
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"无法创建模块加载规范: {module_name} ({module_path})")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-# ==================== 保护区开始 ====================
-# autopep8: off
-# isort: off
-
-ensure_base_dir_first()
 try:
     import tomllib
 except ImportError:
     import tomli as tomllib
 
-# --- 导入项目内部模块 ---
-load_local_module("area_watchers", "area_watchers.py")
-from app_service import AppService
-from config import AppConfig
-from database import Database
-from logger_setup import setup_logging
-from webdav_client import OpenListAdminClient
-
 # autopep8: on
 # isort: on
-# ==================== 保护区结束 ====================
 
 
 def main() -> None:

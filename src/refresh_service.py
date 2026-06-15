@@ -1,3 +1,6 @@
+# autopep8: off
+# isort: off
+
 from __future__ import annotations
 import threading
 from typing import Optional
@@ -47,6 +50,9 @@ try:
     import tomllib
 except ImportError:
     import tomli as tomllib
+
+# autopep8: on
+# isort: on
 
 
 # ==================== PathAnalysis 定义 ====================
@@ -280,21 +286,12 @@ class RefreshService:
         返回可访问的引擎路径集合，如果验证失败返回 None。
         """
         try:
-            # 从已加载的模块中获取 OpenListAdminClient
-            webdav_module = sys.modules.get("webdav_client")
-            if webdav_module is None:
+            # 复用 app.admin_api，避免重复创建客户端和 Token 缓存不一致
+            admin_client = self.app.admin_api
+            if admin_client is None:
                 logging.warning(
-                    "[STRM存储API验证] webdav_client 模块未加载，回退到 WebDAV 检查")
+                    "[STRM存储API验证] admin_api 未初始化，回退到 WebDAV 检查")
                 return None
-
-            OpenListAdminClient = webdav_module.OpenListAdminClient
-
-            admin_client = OpenListAdminClient(
-                host=self.app.config.webdav.host,
-                user=self.app.config.webdav.user,
-                password=self.app.config.webdav.password,
-                totp_secret=self.app.config.webdav.totp_secret,
-            )
 
             if not admin_client.login():
                 logging.warning("[STRM存储API验证] Admin API 登录失败，回退到 WebDAV 检查")

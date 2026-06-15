@@ -1,3 +1,6 @@
+# autopep8: off
+# isort: off
+
 """ [测试] OpenList Admin API 测试脚本
 功能：
 1. 从 config.toml 读取配置
@@ -21,6 +24,9 @@ if str(_current_dir) not in sys.path:
 
 from config import AppConfig
 from openlist_admin_api import OpenListAdminClient
+
+# autopep8: on
+# isort: on
 
 # ---------- 日志配置 ----------
 LOG_FILE = Path(_current_dir) / "openlist_api_test.log"
