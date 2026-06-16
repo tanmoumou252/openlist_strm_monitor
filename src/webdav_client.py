@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import hashlib
 import hmac
@@ -8,7 +10,7 @@ import os
 import time
 from urllib.parse import unquote
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any
 import requests
 from lxml import etree
 
@@ -43,7 +45,7 @@ class OpenListAdminClient:
         self.user = user
         self.password = password
         self.totp_secret = totp_secret
-        self.token: Optional[str] = None
+        self.token: str | None = None
         self.session = requests.Session()
         self._fs_list_logged: set[str] = set()
 
@@ -53,7 +55,7 @@ class OpenListAdminClient:
 
     # ================= 内部辅助方法 =================
 
-    def _load_token_from_cache(self):
+    def _load_token_from_cache(self) -> None:
         """从文件加载缓存的 Token"""
         if os.path.exists(self.token_cache_path):
             try:
@@ -64,7 +66,7 @@ class OpenListAdminClient:
             except Exception:
                 self.token = None
 
-    def _save_token_to_cache(self, token: str):
+    def _save_token_to_cache(self, token: str) -> None:
         """将 Token 保存到本地文件"""
         self.token = token
         try:
@@ -100,7 +102,7 @@ class OpenListAdminClient:
             log.error(f"登录请求失败: {e}")
             return False
 
-    def _do_request(self, method: str, url: str, **kwargs) -> Optional[requests.Response]:
+    def _do_request(self, method: str, url: str, **kwargs) -> requests.Response | None:
         """统一请求包装器：注入 Token、自动处理 401 过期重试"""
         if not self.token:
             if not self.login():
@@ -183,13 +185,13 @@ class OpenListAdminClient:
     # ================= 业务方法 (全量补全) =================
 
     # 1. 获取存储列表 (Admin API)
-    def list_storages(self, page: int = 1, per_page: int = 30) -> Optional[Dict[str, Any]]:
+    def list_storages(self, page: int = 1, per_page: int = 30) -> dict[str, Any] | None:
         url = f"{self.host}/api/admin/storage/list"
         res = self._do_request("GET", url, params={"page": page, "per_page": per_page}, timeout=10)
         return res.json() if res and res.status_code == 200 else None
 
     # 2. 获取存储详情 (Admin API) - 【补全】
-    def get_storage_info(self, storage_id: int) -> Optional[Dict[str, Any]]:
+    def get_storage_info(self, storage_id: int) -> dict[str, Any] | None:
         url = f"{self.host}/api/admin/storage/get"
         res = self._do_request("GET", url, params={"id": storage_id}, timeout=10)
         if res and res.status_code == 200:
@@ -200,7 +202,7 @@ class OpenListAdminClient:
         return None
 
     # 3. 列出目录 (FS API)
-    def list_directory(self, path: str = "/", **kwargs) -> Optional[Dict[str, Any]]:
+    def list_directory(self, path: str = "/", **kwargs) -> dict[str, Any] | None:
         url = f"{self.host}/api/fs/list"
         payload = {
             "path": path,
@@ -324,7 +326,7 @@ class OpenListAdminClient:
             return False
 
     # 8. 获取兼容格式的内容列表 (逻辑方法)
-    def list_contents(self, path: str):
+    def list_contents(self, path: str) -> dict[str, list[dict[str, Any]]] | str:
         result = self.list_directory(path)
         if result is None or result.get("code") not in (0, 200):
             return "404_NOT_FOUND"
@@ -377,8 +379,8 @@ class OpenlistWebDAV:
         self,
         method: str,
         path: str,
-        data: Optional[bytes] = None,
-        headers: Optional[Dict[str, str]] = None,
+        data: bytes | None = None,
+        headers: dict[str, str] | None = None,
         stream: bool = False,
     ) -> requests.Response:
         # 确保 path 以 / 开头，避免拼接错误
@@ -415,7 +417,7 @@ class OpenlistWebDAV:
                 return False
             raise
 
-    def list_contents(self, path: str) -> Union[Dict, str]:
+    def list_contents(self, path: str) -> dict | str:
         try:
             res = self._request(
                 "PROPFIND",

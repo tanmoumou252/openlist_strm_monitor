@@ -7,6 +7,8 @@
  5. 移动文件 (POST /api/fs/move)
  6. 删除文件 (POST /api/fs/remove)"""
 
+from __future__ import annotations
+
 import os
 import requests
 import logging
@@ -14,7 +16,7 @@ import time
 import hmac
 import hashlib
 import base64
-from typing import Optional, Dict, Any, List
+from typing import Any
 from pathlib import Path
 
 log = logging.getLogger("openlist_api")
@@ -29,7 +31,7 @@ class OpenListAdminClient:
         self.user = user
         self.password = password
         self.totp_secret = totp_secret
-        self.token: Optional[str] = None
+        self.token: str | None = None
 
     # ==================================================================
     # 内置 TOTP 生成方法（不依赖外部模块）
@@ -64,7 +66,7 @@ class OpenListAdminClient:
     # ==================================================================
     # 登录 (POST /api/auth/login)
     # ==================================================================
-    def login(self, otp_code: Optional[str] = None) -> bool:
+    def login(self, otp_code: str | None = None) -> bool:
         """POST /api/auth/login"""
         if not otp_code and self.totp_secret:
             otp_code = self._generate_totp(self.totp_secret)
@@ -95,7 +97,7 @@ class OpenListAdminClient:
             log.error(f"❌ 登录请求异常：{e}")
             return False
 
-    def _get_headers(self) -> Dict[str, str]:
+    def _get_headers(self) -> dict[str, str]:
         """构建通用请求头"""
         if not self.token:
             raise Exception("未登录，请先调用 login()")
@@ -107,7 +109,7 @@ class OpenListAdminClient:
     # ==================================================================
     # 存储相关接口 (openlist_api_storages.md)
     # ==================================================================
-    def list_storages(self, page: int = 1, per_page: int = 30) -> Optional[Dict[str, Any]]:
+    def list_storages(self, page: int = 1, per_page: int = 30) -> dict[str, Any] | None:
         """GET /api/admin/storage/list"""
         url = f"{self.host}/api/admin/storage/list"
         params = {"page": page, "per_page": per_page}
@@ -120,7 +122,7 @@ class OpenListAdminClient:
             log.error(f"❌ 获取存储列表失败：{e}")
             return None
 
-    def get_storage_info(self, storage_id: int) -> Optional[Dict[str, Any]]:
+    def get_storage_info(self, storage_id: int) -> dict[str, Any] | None:
         """GET /api/admin/storage/get?id={id}"""
         url = f"{self.host}/api/admin/storage/get"
         params = {"id": storage_id}
@@ -152,7 +154,7 @@ class OpenListAdminClient:
         refresh: bool = False,
         page: int = 1,
         per_page: int = 30,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """POST /api/fs/list"""
         url = f"{self.host}/api/fs/list"
         payload = {

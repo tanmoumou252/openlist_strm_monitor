@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import threading
-from typing import Optional
 from dataclasses import dataclass
 import time
 import logging
 import json
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app_service_core import AppService
+    from webdav_client import OpenListAdminClient
 
 # PROJECT_ROOT = 项目根目录（配置文件目录）
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -59,7 +63,7 @@ class _StrmStorageInfo:
 class _StrmStorageManager:
     """STRM 存储管理器（内部使用，避免循环导入)"""
 
-    def __init__(self, client) -> None:
+    def __init__(self, client: OpenListAdminClient) -> None:
         self.client = client
 
     @staticmethod
@@ -125,7 +129,7 @@ class _StrmStorageManager:
 
 
 class RefreshService:
-    def __init__(self, app) -> None:
+    def __init__(self, app: AppService) -> None:
         self.app = app
         self._running = False
         self._thread: threading.Thread | None = None

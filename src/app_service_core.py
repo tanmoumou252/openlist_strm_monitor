@@ -22,8 +22,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Generator, Optional
-
 try:
     import tomllib
 except ImportError:
@@ -543,7 +541,66 @@ class AppService:
 
     def _verify_b_path_lineage(
             self, b_local_path: str, webdav_path: str, is_sync_phase: bool = False) -> bool:
+        """验证 B 区文件路径的血统关系，确保其合法存在于 B 区。"""
         fingerprint = make_strm_fingerprint(webdav_path)
+        b_local = Path(b_local_path).resolve()
+
+        # 1. 解析 A 区源文件
+        a_source = self._resolve_a_source(b_local_path, webdav_path, fingerprint)
+        if not a_source:
+            return False
+
+        a_local_path, a_root, a_rel_dir, b_rel_dir = a_source
+        a_parts = list(a_rel_dir.parts)
+        b_parts = list(b_rel_dir.parts)
+
+        # 2. 基础层级检查：目录完全一致
+        if self._check_basic_lineage(a_rel_dir, b_rel_dir, b_local_path):
+            return True
+
+        # 3. B 区自动添加 Season 层级
+        if self._check_season_layer_addition(a_parts, b_parts, b_local_path):
+            return True
+
+        # 4. 媒体名称匹配检查
+        a_media_name, b_media_name = self._extract_media_names_from_path_parts(a_parts, b_parts)
+        if a_media_name and b_media_name:
+            if self._check_media_name_match(a_media_name, b_media_name, b_local_path):
+                return True
+
+        # 5. 引擎配置与云端/物理名称解析
+        config, source_path, cloud_show_name, physical_media_folder_name, rel_parts = (
+            self._resolve_cloud_and_physical_names(
+                webdav_path, a_root, b_parts, fingerprint))
+        if config is None:
+            return True  # 无引擎配置，默认放行
+
+        # 6. 越界文件检查
+        if not self._check_boundary_files(b_parts, rel_parts, b_local_path):
+            return False
+
+        # 7. 边界映射匹配检查
+        if self._check_boundary_mappings(
+                fingerprint, cloud_show_name, physical_media_folder_name, b_local_path):
+            return True
+
+        # 8. 同步阶段边界记录
+        if is_sync_phase and cloud_show_name and physical_media_folder_name != cloud_show_name:
+            self._handle_sync_phase_boundary(
+                fingerprint, cloud_show_name, physical_media_folder_name)
+            return True
+
+        # 9. 单集/批量检测
+        if cloud_show_name and physical_media_folder_name != cloud_show_name:
+            return self._check_solo_episode(
+                fingerprint, cloud_show_name, physical_media_folder_name,
+                source_path, b_parts, b_local_path)
+
+        return True
+
+    def _resolve_a_source(
+            self, b_local_path: str, webdav_path: str, fingerprint: str) -> tuple | None:
+        """解析 A 区源文件路径，返回 (a_local_path, a_root, a_rel_dir, b_rel_dir) 或 None。"""
         b_local = Path(b_local_path).resolve()
         a_record = self.db.get_a_by_webdav(webdav_path)
         if not a_record:
@@ -554,75 +611,95 @@ class AppService:
                     a_record = (str(a_local_path), webdav_path, "", 0)
         if not a_record:
             logging.debug("[血统校验失败] 无A区源记录: %s", b_local_path)
-            return False
+            return None
         a_local_path = Path(a_record[0]).resolve()
         if not a_local_path.exists():
             logging.debug("[血统校验失败] A区源文件不存在: %s", a_local_path)
-            return False
+            return None
         a_root = self.get_a_root_for_path(a_local_path)
         if not a_root:
             logging.debug("[血统校验失败] A区源不在任何根目录下: %s", a_local_path)
-            return False
+            return None
         try:
             a_rel = a_local_path.relative_to(a_root)
             b_rel = b_local.relative_to(self.b_root)
         except ValueError:
             logging.debug("[血统校验失败] 路径超出根目录")
-            return False
-        a_rel_dir = a_rel.parent
-        b_rel_dir = b_rel.parent
+            return None
+        return (a_local_path, a_root, a_rel.parent, b_rel.parent)
+
+    def _check_basic_lineage(self, a_rel_dir: Path, b_rel_dir: Path, b_local_path: str) -> bool:
+        """检查基础血统：A/B 目录完全一致则放行。"""
         if a_rel_dir == b_rel_dir:
             self._log_lineage_pass_once("默认放行", b_local_path)
             return True
-        a_parts = list(a_rel_dir.parts)
-        b_parts = list(b_rel_dir.parts)
+        return False
+
+    def _check_season_layer_addition(
+            self, a_parts: list[str], b_parts: list[str], b_local_path: str) -> bool:
+        """检查 B 区是否自动添加了 Season 层级。"""
         if len(b_parts) == len(a_parts) + 1:
             if b_parts[:len(a_parts)] == a_parts:
                 last_part = b_parts[-1]
                 if re.match(r"(?i)^season\s*\d+$", last_part):
                     self._log_lineage_pass_once("B区自动添加Season层级", b_local_path)
                     return True
-        if len(a_parts) >= 1 and len(b_parts) >= 1:
-            a_media_name = None
-            b_media_name = None
-            for i, part in enumerate(a_parts):
-                if re.match(r"(?i)^season\s*\d+$", part):
-                    if i > 0:
-                        a_media_name = a_parts[i - 1]
-                    break
-            for i, part in enumerate(b_parts):
-                if re.match(r"(?i)^season\s*\d+$", part):
-                    if i > 0:
-                        b_media_name = b_parts[i - 1]
-                    break
-            if a_media_name and b_media_name:
-                if a_media_name == b_media_name:
-                    self._log_lineage_pass_once("同一媒体不同Season", b_local_path)
-                    return True
-                boundary = self.db.get_media_boundary_by_source_name_only(
-                    a_media_name)
-                if boundary:
-                    _, mapped_source, mapped_current, _, _ = boundary
-                    if b_media_name in (mapped_source, mapped_current):
-                        self._log_lineage_pass_once("边界映射Season变化", b_local_path)
-                        return True
-        if not hasattr(self, "engine_configs") or not self.engine_configs:
+        return False
+
+    @staticmethod
+    def _extract_media_name_from_parts(rel_parts: list[str]) -> str | None:
+        """从路径部件中提取媒体名称（Season 前一级的目录名）。"""
+        for i, part in enumerate(rel_parts):
+            if re.match(r"(?i)^season\s*\d+$", part):
+                if i > 0:
+                    return rel_parts[i - 1]
+                break
+        return None
+
+    def _extract_media_names_from_path_parts(
+            self, a_parts: list[str], b_parts: list[str]) -> tuple[str | None, str | None]:
+        """提取 A/B 路径的媒体名称。"""
+        a_media_name = self._extract_media_name_from_parts(a_parts)
+        b_media_name = self._extract_media_name_from_parts(b_parts)
+        return a_media_name, b_media_name
+
+    def _check_media_name_match(
+            self, a_media_name: str, b_media_name: str, b_local_path: str) -> bool:
+        """检查媒体名称匹配关系。"""
+        if a_media_name == b_media_name:
+            self._log_lineage_pass_once("同一媒体不同Season", b_local_path)
             return True
+        boundary = self.db.get_media_boundary_by_source_name_only(a_media_name)
+        if boundary:
+            _, mapped_source, mapped_current, _, _ = boundary
+            if b_media_name in (mapped_source, mapped_current):
+                self._log_lineage_pass_once("边界映射Season变化", b_local_path)
+                return True
+        return False
+
+    def _resolve_cloud_and_physical_names(
+            self, webdav_path: str, a_root: Path, b_parts: list[str], fingerprint: str) -> tuple:
+        """解析引擎配置、云端显示名称和物理媒体文件夹名称。"""
+        if not hasattr(self, "engine_configs") or not self.engine_configs:
+            return (None, None, None, None, None)
+
         a_root_norm = str(a_root.resolve())
         config = next(
-            (c for c in self.engine_configs if c["a_root_norm"]
-             == a_root_norm),
+            (c for c in self.engine_configs if c["a_root_norm"] == a_root_norm),
             None)
         if not config:
-            return True
+            return (None, None, None, None, None)
+
         source_path = next(
             (sp for sp in config["source_paths"] if webdav_path.startswith(
                 sp.rstrip("/") + "/")), None)
         if not source_path:
-            return True
+            return (None, None, None, None, None)
+
         rel_cloud_str = webdav_path[len(source_path.rstrip("/")):].lstrip("/")
         rel_parts = rel_cloud_str.split("/")
         cloud_show_name = rel_parts[0] if len(rel_parts) >= 2 else None
+
         physical_media_folder_name = None
         for i, part in enumerate(b_parts):
             if re.match(r"(?i)^season\s*\d+$", part):
@@ -631,20 +708,35 @@ class AppService:
                 break
         if physical_media_folder_name is None and b_parts:
             physical_media_folder_name = b_parts[-1]
+
+        return (config, source_path, cloud_show_name, physical_media_folder_name, rel_parts)
+
+    @staticmethod
+    def _check_boundary_files(
+            b_parts: list[str], rel_parts: list[str], b_local_path: str) -> bool:
+        """检查越界文件，返回 True 表示检查完成（无论放行还是拒绝）。"""
         if len(b_parts) < 2:
             if len(rel_parts) < 2:
                 return True
             logging.warning("[血统校验失败] 越界文件: %s", b_local_path)
             return False
-        boundary = self.db.get_media_boundary_by_fingerprint(fingerprint)
-        if boundary:
-            _, source_media_name, current_media_name, _, _ = boundary
-            if physical_media_folder_name == current_media_name:
-                self._log_lineage_pass_once("边界映射匹配", b_local_path)
-                return True
-            if physical_media_folder_name == source_media_name:
-                self._log_lineage_pass_once("回到源边界", b_local_path)
-                return True
+        return True
+
+    def _check_boundary_mappings(
+            self, fingerprint: str, cloud_show_name: str | None,
+            physical_media_folder_name: str | None, b_local_path: str) -> bool:
+        """检查边界映射匹配关系。"""
+        if fingerprint:
+            boundary = self.db.get_media_boundary_by_fingerprint(fingerprint)
+            if boundary:
+                _, source_media_name, current_media_name, _, _ = boundary
+                if physical_media_folder_name == current_media_name:
+                    self._log_lineage_pass_once("边界映射匹配", b_local_path)
+                    return True
+                if physical_media_folder_name == source_media_name:
+                    self._log_lineage_pass_once("回到源边界", b_local_path)
+                    return True
+
         if cloud_show_name and physical_media_folder_name:
             boundary_by_source = self.db.get_media_boundary_by_source_name_only(
                 physical_media_folder_name)
@@ -653,6 +745,7 @@ class AppService:
                 if cloud_show_name == mapped_source or cloud_show_name == mapped_current:
                     self._log_lineage_pass_once("交叉边界映射匹配(源->当前)", b_local_path)
                     return True
+
             boundary_by_current = self.db.get_media_boundary_by_current_name(
                 physical_media_folder_name, str(self.b_root))
             if boundary_by_current:
@@ -660,57 +753,67 @@ class AppService:
                 if cloud_show_name == mapped_source or cloud_show_name == mapped_current:
                     self._log_lineage_pass_once("交叉边界映射匹配(当前->源)", b_local_path)
                     return True
+
             boundary_by_cloud = self.db.get_media_boundary_by_source_name_only(
                 cloud_show_name)
             if boundary_by_cloud:
                 _, mapped_source, mapped_current, _, _ = boundary_by_cloud
-                if physical_media_folder_name in (
-                        mapped_source, mapped_current):
+                if physical_media_folder_name in (mapped_source, mapped_current):
                     self._log_lineage_pass_once("交叉边界映射匹配(云端)", b_local_path)
                     return True
-        if is_sync_phase and cloud_show_name and physical_media_folder_name != cloud_show_name:
-            existing = self.db.get_media_boundary_by_fingerprint(fingerprint)
-            if not existing:
-                self.db.upsert_media_boundary(
-                    fingerprint=fingerprint,
-                    source_media_name=cloud_show_name,
-                    current_media_name=physical_media_folder_name,
-                    engine_entry_path=str(
-                        self.b_root))
-                logging.info(
-                    "[边界映射] 记录新映射: %s -> %s",
-                    cloud_show_name,
-                    physical_media_folder_name)
-            elif existing[2] != physical_media_folder_name:
-                self.db.upsert_media_boundary(
-                    fingerprint=fingerprint,
-                    source_media_name=existing[1],
-                    current_media_name=physical_media_folder_name,
-                    engine_entry_path=str(
-                        self.b_root))
-                logging.info(
-                    "[边界映射] 更新映射: %s -> %s",
-                    existing[1],
-                    physical_media_folder_name)
-            return True
+
+        return False
+
+    def _handle_sync_phase_boundary(
+            self, fingerprint: str, cloud_show_name: str,
+            physical_media_folder_name: str) -> None:
+        """处理同步阶段的边界映射记录。"""
+        existing = self.db.get_media_boundary_by_fingerprint(fingerprint)
+        if not existing:
+            self.db.upsert_media_boundary(
+                fingerprint=fingerprint,
+                source_media_name=cloud_show_name,
+                current_media_name=physical_media_folder_name,
+                engine_entry_path=str(self.b_root))
+            logging.info(
+                "[边界映射] 记录新映射: %s -> %s",
+                cloud_show_name,
+                physical_media_folder_name)
+        elif existing[2] != physical_media_folder_name:
+            self.db.upsert_media_boundary(
+                fingerprint=fingerprint,
+                source_media_name=existing[1],
+                current_media_name=physical_media_folder_name,
+                engine_entry_path=str(self.b_root))
+            logging.info(
+                "[边界映射] 更新映射: %s -> %s",
+                existing[1],
+                physical_media_folder_name)
+
+    def _check_solo_episode(
+            self, fingerprint: str, cloud_show_name: str | None,
+            physical_media_folder_name: str | None, source_path: str,
+            b_parts: list[str], b_local_path: str) -> bool:
+        """检查是否为单集脱离集体的情况。"""
         if cloud_show_name and physical_media_folder_name != cloud_show_name:
             cloud_media_root = f"{source_path.rstrip('/')}/{cloud_show_name}"
             total_a_episodes = self.db.get_a_count_under_root(cloud_media_root)
             if total_a_episodes <= 1:
                 return True
+
             physical_media_root_dir = self.b_root
             for i, part in enumerate(b_parts):
                 if part == physical_media_folder_name:
-                    physical_media_root_dir = self.b_root / \
-                        Path(*b_parts[:i + 1])
+                    physical_media_root_dir = self.b_root / Path(*b_parts[:i + 1])
                     break
+
             local_matches = 0
             if physical_media_root_dir.exists():
                 for p in physical_media_root_dir.rglob("*.strm"):
                     s_webdav = read_strm_webdav_path(p)
-                    if s_webdav and s_webdav.startswith(
-                            cloud_media_root + "/"):
+                    if s_webdav and s_webdav.startswith(cloud_media_root + "/"):
                         local_matches += 1
+
             if local_matches <= 1:
                 self.trigger_delayed_solo_check(
                     str(physical_media_root_dir), cloud_media_root)

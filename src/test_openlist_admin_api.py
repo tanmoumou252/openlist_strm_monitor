@@ -15,7 +15,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Any
 
 # ---------- 路径配置 ----------
 _current_dir = Path(__file__).parent.resolve()
@@ -42,7 +42,7 @@ logging.basicConfig(
 log = logging.getLogger("openlist_api_test")
 
 
-def extract_paths_from_addition(addition: str) -> Optional[List[str]]:
+def extract_paths_from_addition(addition: str) -> list[str] | None:
     """从 addition 字段中提取 paths 列表"""
     if not addition:
         return None
@@ -59,7 +59,7 @@ def extract_paths_from_addition(addition: str) -> Optional[List[str]]:
         return None
 
 
-def extract_save_local_mode(addition: str) -> Optional[str]:
+def extract_save_local_mode(addition: str) -> str | None:
     """从 addition 字段中提取 SaveLocalMode"""
     if not addition:
         return None
@@ -70,7 +70,7 @@ def extract_save_local_mode(addition: str) -> Optional[str]:
         return None
 
 
-def extract_save_strm_local_path(addition: str) -> Optional[str]:
+def extract_save_strm_local_path(addition: str) -> str | None:
     """从 addition 字段中提取 SaveStrmLocalPath"""
     if not addition:
         return None

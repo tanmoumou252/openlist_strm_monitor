@@ -849,7 +849,7 @@ class Database:
 
             return rows
 
-    def get_all_b_by_fingerprint(self, fingerprint: str):
+    def get_all_b_by_fingerprint(self, fingerprint: str) -> list[tuple]:
         """
         返回该 fingerprint 下所有 B 实例
         """

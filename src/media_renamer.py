@@ -3,7 +3,6 @@
 import re
 import logging
 from pathlib import Path
-from typing import Generator
 
 log = logging.getLogger(__name__)
 
@@ -344,7 +343,7 @@ def process_subtitle_group(
     has_multiple = len(valid_detections) > 1
 
     # 按优先级排序
-    def sort_key(item: tuple[Path, tuple[str, str, int] | None]) -> tuple:
+    def sort_key(item: tuple[Path, tuple[str, str, int] | None]) -> tuple[int, int, str]:
         _, lang_info = item
         if lang_info is None:
             return (99, 99, "")
