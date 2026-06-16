@@ -9,7 +9,7 @@ from .strm_utils import (
     parse_strm_content,
     make_strm_fingerprint,
     read_strm_webdav_path,
-    _canonicalize_webdav_path,
+    canonicalize_webdav_path,
 )
 from .file_utils import (
     ensure_parent,
@@ -38,7 +38,7 @@ __all__ = [
     "parse_strm_content",
     "make_strm_fingerprint",
     "read_strm_webdav_path",
-    "_canonicalize_webdav_path",
+    "canonicalize_webdav_path",
     # File operations
     "ensure_parent",
     "copy_file",

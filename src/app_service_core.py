@@ -42,6 +42,7 @@ from utils import (
     safe_remove_file,
     remove_empty_dirs,
     move_file,
+    _canonicalize_webdav_path_for_cloud,
 )
 from webdav_client import OpenListAdminClient
 from media_renamer import (
@@ -1318,13 +1319,6 @@ class AppService:
             return True
         return False
 
-    def _canonicalize_webdav_path(self, path: str) -> str:
-        if not path:
-            return ""
-        path = path.replace("\\", "/")
-        path = urllib.parse.unquote(path)
-        return posixpath.normpath(path)
-
     def _b_file_score(self, path: str) -> tuple:
         p = Path(path)
         name = p.name.lower()
@@ -1339,7 +1333,7 @@ class AppService:
             if row:
                 webdav_path = row[1]
                 if webdav_path:
-                    canonical_webdav = self._canonicalize_webdav_path(
+                    canonical_webdav = _canonicalize_webdav_path_for_cloud(
                         webdav_path)
                     webdav_parts = [
                         part for part in canonical_webdav.strip("/").split("/") if part]

@@ -44,16 +44,16 @@ def parse_strm_content(content: str) -> str | None:
         if path.startswith("/d/"):
             path = "/" + path[3:]
 
-        return _canonicalize_webdav_path(path, case_sensitive=True)
+        return canonicalize_webdav_path(path, case_sensitive=True)
 
     if content.startswith("/"):
-        return _canonicalize_webdav_path(content, case_sensitive=True)
+        return canonicalize_webdav_path(content, case_sensitive=True)
 
     return None
 
 
-def _canonicalize_webdav_path(webdav_path: str, *,
-                              case_sensitive: bool = True) -> str:
+def canonicalize_webdav_path(webdav_path: str, *,
+                             case_sensitive: bool = True) -> str:
     """
     规范化 WebDAV 路径，用于稳定比较和生成身份指纹。
 
@@ -108,7 +108,7 @@ def make_strm_fingerprint(webdav_path: str, *,
     指纹输入格式带版本前缀，方便未来升级算法：
     - strmfp:v1:/挂载名/目录/文件.mp4
     """
-    canonical = _canonicalize_webdav_path(
+    canonical = canonicalize_webdav_path(
         webdav_path,
         case_sensitive=case_sensitive,
     )

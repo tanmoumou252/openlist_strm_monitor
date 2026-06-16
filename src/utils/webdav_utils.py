@@ -7,14 +7,14 @@ from __future__ import annotations
 
 import posixpath
 import urllib.parse
-from utils.strm_utils import _canonicalize_webdav_path
+from utils.strm_utils import canonicalize_webdav_path
 
 # autopep8: on
 # isort: on
 
 
 def webdav_parent(path: str) -> str:
-    path = _canonicalize_webdav_path(path, case_sensitive=True)
+    path = canonicalize_webdav_path(path, case_sensitive=True)
     parts = path.strip("/").split("/")
     if len(parts) <= 1:
         return "/"
@@ -22,13 +22,13 @@ def webdav_parent(path: str) -> str:
 
 
 def webdav_root_name(path: str) -> str:
-    path = _canonicalize_webdav_path(path, case_sensitive=True)
+    path = canonicalize_webdav_path(path, case_sensitive=True)
     parts = [p for p in path.strip("/").split("/") if p]
     return parts[0] if parts else ""
 
 
 def build_webdav_trash_path(webdav_path: str, trash_dir_name: str) -> str:
-    webdav_path = _canonicalize_webdav_path(webdav_path, case_sensitive=True)
+    webdav_path = canonicalize_webdav_path(webdav_path, case_sensitive=True)
 
     parts = [p for p in webdav_path.strip("/").split("/") if p]
     if len(parts) < 2:
