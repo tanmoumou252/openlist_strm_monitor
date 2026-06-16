@@ -78,6 +78,14 @@ class LogConfig:
 
 
 @dataclass(slots=True)
+class WebUIConfig:
+    enabled: bool = True
+    port: int = 8579
+    bind: str = "0.0.0.0"
+    password: str = ""
+
+
+@dataclass(slots=True)
 class LocalConfig:
     base_dir: str
     a_dir: str
@@ -90,7 +98,7 @@ class LocalConfig:
 class PathsConfig:
     strm_engine_paths: list[str]
     refresh_paths: list[str]
-    # strm_monitored_paths: list[str]
+    strm_monitored_paths: list[str] = field(default_factory=list)
     b_root: str = ""
     c_root: str = ""
 
@@ -151,6 +159,7 @@ class AppConfig:
     log: LogConfig
     local: LocalConfig
     paths: PathsConfig
+    webui: WebUIConfig = field(default_factory=WebUIConfig)
     a_folders: list[str] = field(default_factory=list)
     # STRM 存储映射 mount_path -> StrmStorageMapping
     strm_storage_map: dict[str, StrmStorageMapping] = field(
@@ -161,6 +170,8 @@ class AppConfig:
             return self.paths.strm_engine_paths
         if name == "refresh_paths":
             return self.paths.refresh_paths
+        if name == "strm_monitored_paths":
+            return self.paths.strm_monitored_paths
         raise AttributeError(
             f"'{self.__class__.__name__}' object has no attribute '{name}'"
         )
@@ -240,11 +251,11 @@ class AppConfig:
                 base_dir,
                 is_webdav=True,
             ),
-            # strm_monitored_paths=read_line_list(
-            #    paths_data.get("strm_monitored_paths_file", "strm_monitored_paths.txt"),
-            #    base_dir,
-            #    is_webdav=True,
-            # ),
+            strm_monitored_paths=read_line_list(
+                paths_data.get("strm_monitored_paths_file", "strm_monitored_paths.txt"),
+                base_dir,
+                is_webdav=True,
+            ),
             b_root=b_root,
             c_root=c_root,
         )
@@ -316,6 +327,15 @@ class AppConfig:
         except Exception as exc:
             logging.warning("[STRM存储API] 获取 STRM 存储信息失败: %s", exc)
 
+        # 解析 [webui] 配置
+        webui_data = data.get("webui", {})
+        webui = WebUIConfig(
+            enabled=webui_data.get("enabled", True),
+            port=int(webui_data.get("port", 8579)),
+            bind=webui_data.get("bind", "0.0.0.0"),
+            password=webui_data.get("password", ""),
+        )
+
         instance = cls.__new__(cls)
         instance.base_dir = base_dir
         instance.webdav = webdav
@@ -324,6 +344,7 @@ class AppConfig:
         instance.log = log
         instance.local = local
         instance.paths = paths
+        instance.webui = webui
         instance.a_folders = read_line_list(
             paths_data.get("a_folders_file", "a_folders.txt"),
             base_dir,

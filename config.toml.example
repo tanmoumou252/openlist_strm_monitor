@@ -68,6 +68,24 @@ refresh_paths_file = "./refresh_paths.txt"
 # /测试a
 strm_engine_paths_file = "./strm_engine_paths.txt"
 
+# STRM 引擎真实监控路径列表文件（可选，手动补充）。
+# 每行一个 OpenList 中的真实云端目录路径。
+#
+# 用途：
+# - 与 API 自动获取的 strm_engine_paths 做交叉验证
+# - 当 API 无法返回所有路径时（如网络异常、引擎未启动），手动补充
+# - 差异检测：程序会对比此列表与 API 返回的列表，记录不一致项
+#
+# 注意：
+# - 填写的是 STRM 引擎实际监控的真实云端路径（如 /天翼云盘家庭云30GB/番剧）
+# - 不是引擎入口路径（如 /strm），引擎入口路径在 strm_engine_paths.txt 中配置
+# - 如果留空或不创建文件，程序将完全依赖 API 自动获取
+#
+# 示例：
+# /天翼云盘家庭云30GB/番剧
+# /天翼云盘家庭云30GB/电影
+strm_monitored_paths_file = "./strm_monitored_paths.txt"
+
 # B 区根目录。
 # 这是媒体库实际扫描的目录。
 # 程序会把 A 区 STRM 同步到这里。
@@ -180,3 +198,22 @@ max_size_mb = 2
 
 # 保留的历史日志数量。
 backup_count = 5
+
+
+[webui]
+# 是否启用 WebUI 管理面板。
+enabled = true
+
+# WebUI 监听端口。
+# 建议使用不常见的端口，避免与其他服务冲突。
+# 注意：仅监听 localhost 和局域网，不开放公网。
+port = 8579
+
+# WebUI 监听地址。
+# 0.0.0.0 = 监听所有本地网络接口（localhost + 局域网）
+# 127.0.0.1 = 仅监听本机
+# 注意：即使设置 0.0.0.0，服务也只接受本地和局域网连接
+bind = "0.0.0.0"
+
+# WebUI 访问密码（留空则不需要密码）。
+password = ""

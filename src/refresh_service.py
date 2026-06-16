@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app_service_core import AppService
-    from webdav_client import OpenListAdminClient
 
 # PROJECT_ROOT = 项目根目录（配置文件目录）
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -36,93 +35,6 @@ class PathAnalysis:
     only_refresh: set[str]
     only_engine: set[str]
     engine_set: set[str]
-
-
-# ==================== 内联 STRM 存储管理类 ====================
-
-
-@dataclass(slots=True, frozen=True)
-class _StrmStorageInfo:
-    """STRM 存储信息（内部使用，避免循环导入)"""
-
-    id: int
-    mount_path: str
-    status: str
-    paths: list[str]
-    save_local_mode: str
-
-    @property
-    def is_working(self) -> bool:
-        return self.status == "work"
-
-    @property
-    def is_sync_mode(self) -> bool:
-        return self.save_local_mode.lower() == "update"
-
-
-class _StrmStorageManager:
-    """STRM 存储管理器（内部使用，避免循环导入)"""
-
-    def __init__(self, client: OpenListAdminClient) -> None:
-        self.client = client
-
-    @staticmethod
-    def _extract_paths_from_addition(addition: str) -> list[str]:
-        if not addition:
-            return []
-        try:
-            addition_dict = json.loads(addition)
-            paths = addition_dict.get("paths", "")
-            if isinstance(paths, str):
-                return [p.strip() for p in paths.split("\n") if p.strip()]
-            elif isinstance(paths, list):
-                return [str(p).strip() for p in paths if str(p).strip()]
-            return []
-        except json.JSONDecodeError:
-            logging.warning("解析 addition 失败: %s", addition[:200])
-            return []
-
-    @staticmethod
-    def _extract_save_local_mode(addition: str) -> str:
-        if not addition:
-            return ""
-        try:
-            addition_dict = json.loads(addition)
-            return addition_dict.get("SaveLocalMode", "")
-        except json.JSONDecodeError:
-            return ""
-
-    def get_strm_storages(self) -> list[_StrmStorageInfo]:
-        """获取所有 STRM 存储"""
-        storages = self.client.list_storages()
-        if not storages:
-            return []
-
-        data = storages.get("data", {})
-        content = data.get("content", []) if isinstance(data, dict) else []
-
-        result: list[_StrmStorageInfo] = []
-        for storage in content:
-            if storage.get("driver", "").lower() != "strm":
-                continue
-
-            addition = storage.get("addition", "")
-            result.append(
-                _StrmStorageInfo(
-                    id=storage.get("id", 0),
-                    mount_path=storage.get("mount_path", ""),
-                    status=storage.get("status", "unknown"),
-                    paths=self._extract_paths_from_addition(addition),
-                    save_local_mode=self._extract_save_local_mode(addition),
-                )
-            )
-
-        return result
-
-    def get_working_sync_storages(self) -> list[_StrmStorageInfo]:
-        """获取有效的更新模式存储"""
-        return [s for s in self.get_strm_storages(
-        ) if s.is_working and s.is_sync_mode]
 
 
 # =========================================================
@@ -202,9 +114,33 @@ class RefreshService:
         self.app.scan_removed_protected_roots()
 
     def _analyze_paths(self) -> PathAnalysis:
-        """分析 refresh_paths 和 strm_engine_paths 的关系。"""
+        """分析 refresh_paths 和 strm_engine_paths 的关系。
+
+        同时整合 strm_monitored_paths（用户手动声明的 STRM 引擎真实监控路径），
+        与 API 自动获取的 strm_engine_paths 做对比，发现差异时记录警告。
+        """
         refresh_set = set(self.app.config.refresh_paths)
         engine_set = set(self.app.config.strm_engine_paths)
+
+        # 整合用户手动声明的 STRM 引擎监控路径
+        monitored_set = set(self.app.config.strm_monitored_paths)
+        if monitored_set:
+            # 将手动声明的路径合并到 engine_set 中
+            engine_set = engine_set | monitored_set
+            # 对比手动声明与 API 获取的差异
+            api_set = set(self.app.config.strm_engine_paths)
+            manual_only = monitored_set - api_set
+            api_only = api_set - monitored_set
+            if manual_only:
+                logging.info(
+                    "[路径分析] 以下路径仅在 strm_monitored_paths 中声明，API 未返回: %s",
+                    manual_only,
+                )
+            if api_only:
+                logging.info(
+                    "[路径分析] 以下路径在 API 中存在但未在 strm_monitored_paths 中声明: %s",
+                    api_only,
+                )
 
         if not engine_set:
             return PathAnalysis(
@@ -269,8 +205,9 @@ class RefreshService:
                 logging.warning("[STRM存储API验证] Admin API 登录失败，回退到 WebDAV 检查")
                 return None
 
-            # 使用内联的 _StrmStorageManager
-            manager = _StrmStorageManager(admin_client)
+            # 使用 app_service_core 中的 StrmStorageManager（避免重复实现）
+            from app_service_core import StrmStorageManager
+            manager = StrmStorageManager(admin_client)
             all_storages = manager.get_strm_storages()
 
             # 只选择状态为 work 且是 sync 模式的存储

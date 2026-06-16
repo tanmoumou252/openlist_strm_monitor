@@ -530,6 +530,12 @@ class AppService:
                         "[引擎配置] 存储 [%s] 缺少 'SaveStrmLocalPath' 配置或为空，已跳过此引擎映射！", mount_path)
                     continue
                 resolved_save_path = str(Path(save_path).resolve())
+                if resolved_save_path not in {str(p) for p in self.a_roots}:
+                    logging.warning(
+                        "[引擎配置] SaveStrmLocalPath 未匹配本地 a_folders 配置: %s (mount=%s)",
+                        resolved_save_path,
+                        mount_path,
+                    )
                 self.engine_configs.append(
                     {"a_root_norm": resolved_save_path, "mount_path": mount_path, "source_paths": source_paths})
                 logging.info(
@@ -1827,45 +1833,201 @@ class AppService:
         return webdav_path
 
     def migrate_b_under_root_to_c(self, root_path: str) -> None:
-        del root_path
+        root_path = root_path.rstrip("/") or "/"
+        logging.warning("[B区迁移→C区] 开始迁移根路径下的 B 区文件: %s", root_path)
+        records = self.db.get_b_under_root(root_path)
+        migrated_count = 0
+        for local_path, webdav_path, _parent_webdav_path, source_a_path, _updated_at in records:
+            local = Path(local_path)
+            if not local.exists():
+                self.db.delete_b_by_local(local_path)
+                continue
+            try:
+                rel = local.resolve().relative_to(self.b_root)
+            except ValueError:
+                rel = Path(local.name)
+            target = self.c_root / rel
+            try:
+                move_file(local, target)
+                self.db.upsert_c(
+                    str(target),
+                    webdav_path,
+                    local_path,
+                    webdav_parent(webdav_path),
+                )
+                self.db.delete_b_by_local(local_path)
+                if fingerprint := make_strm_fingerprint(webdav_path):
+                    self.refresh_identity_current_b_path(fingerprint)
+                migrated_count += 1
+                logging.info("[B区迁移→C区] %s -> %s", local_path, target)
+            except OSError as exc:
+                logging.warning(
+                    "[B区迁移→C区] 迁移失败: %s -> %s (%s)",
+                    local_path,
+                    target,
+                    exc,
+                )
+        if migrated_count:
+            logging.warning("[B区迁移→C区] 完成迁移，共处理 %s 个文件", migrated_count)
 
     def cleanup_b_zombies_under_folder(self, root_path: str) -> None:
-        del root_path
+        root_path = root_path.rstrip("/") or "/"
+        logging.info("[B区僵尸清理] 开始扫描: %s", root_path)
+        records = self.db.get_b_under_root(root_path)
+        removed_count = 0
+        for local_path, webdav_path, _parent_webdav_path, _source_a_path, _updated_at in records:
+            if webdav_path and self.admin_api.check_exists(webdav_path):
+                continue
+            full_row = self.db.get_b_by_local_full(local_path)
+            fingerprint = full_row[4] if full_row else None
+            self._handle_b_zombie(local_path, webdav_path, fingerprint)
+            removed_count += 1
+        if removed_count:
+            logging.warning("[B区僵尸清理] 完成清理，共处理 %s 个文件", removed_count)
 
     def refresh_identity_current_b_path(self, fingerprint: str) -> None:
-        del fingerprint
+        if not fingerprint:
+            return
+        identity = self.db.get_identity_by_fingerprint(fingerprint)
+        b_instances = self.db.get_all_b_by_fingerprint(fingerprint)
+        valid_instances = [
+            row for row in b_instances
+            if row[5] == "valid" and Path(row[0]).exists()
+        ]
+        if not valid_instances:
+            self.db.clear_identity_b_path_by_fingerprint(fingerprint)
+            return
+        valid_instances.sort(key=lambda row: self._b_file_score(row[0]))
+        best = valid_instances[0]
+        if identity:
+            self.db.update_identity_b_path(fingerprint, best[0])
+        else:
+            self.db.upsert_identity(
+                fingerprint=fingerprint,
+                webdav_path=best[1],
+                source_a_path=best[3],
+                current_b_path=best[0],
+            )
 
     def _maybe_record_boundary_mapping(
             self, local: Path, webdav_path: str, fingerprint: str) -> None:
-        del local, webdav_path, fingerprint
+        if not webdav_path or not fingerprint or not local.exists():
+            return
+        try:
+            local_rel = local.resolve().relative_to(self.b_root)
+            physical_media_folder_name = None
+            for i, part in enumerate(local_rel.parts):
+                if re.match(r"(?i)^season\s*\d+$", part):
+                    if i > 0:
+                        physical_media_folder_name = local_rel.parts[i - 1]
+                    break
+            if physical_media_folder_name is None and local_rel.parts:
+                physical_media_folder_name = local_rel.parts[-1]
+        except Exception:
+            return
+
+        cloud_parts = [p for p in webdav_path.rstrip("/").split("/") if p]
+        cloud_show_name = None
+        for i, part in enumerate(cloud_parts):
+            if re.match(r"(?i)^season\s*\d+$", part):
+                if i > 0:
+                    cloud_show_name = cloud_parts[i - 1]
+                break
+        if cloud_show_name is None and len(cloud_parts) >= 2:
+            cloud_show_name = cloud_parts[-2]
+
+        if not cloud_show_name or not physical_media_folder_name:
+            return
+        if cloud_show_name == physical_media_folder_name:
+            return
+        self.db.upsert_media_boundary(
+            fingerprint=fingerprint,
+            source_media_name=cloud_show_name,
+            current_media_name=physical_media_folder_name,
+            engine_entry_path=str(self.b_root),
+        )
+        logging.info(
+            "[边界映射] 记录媒体映射: %s -> %s",
+            cloud_show_name,
+            physical_media_folder_name,
+        )
 
     def _handle_b_zombie(self, *args, **kwargs):
-        del args, kwargs
+        local_path = args[0] if args else kwargs.get("local_path")
+        webdav_path = kwargs.get("webdav_path")
+        fingerprint = kwargs.get("fingerprint")
+        if len(args) > 1 and webdav_path is None:
+            webdav_path = args[1]
+        if len(args) > 2 and fingerprint is None:
+            fingerprint = args[2]
+        if not local_path:
+            return
+        local = Path(local_path)
+        if local.exists():
+            safe_remove_file(local)
+        self.db.delete_b_by_local(str(local))
+        if fingerprint:
+            self.refresh_identity_current_b_path(fingerprint)
+        if webdav_path:
+            self.db.set_ghost_protection(
+                webdav_path,
+                self.config.behavior.ghost_protect_seconds,
+                reason="b_zombie",
+            )
 
     def trigger_delayed_cleanup(self, parent_webdav_path: str) -> None:
-        del parent_webdav_path
+        if not parent_webdav_path:
+            return
+        with self.cleanup_lock:
+            old_timer = self.pending_cleanups.pop(parent_webdav_path, None)
+            if old_timer:
+                old_timer.cancel()
+            timer = threading.Timer(
+                self.config.behavior.a_to_b_restore_delay_seconds,
+                self.cleanup_b_zombies_under_folder,
+                args=(parent_webdav_path,),
+            )
+            timer.daemon = True
+            self.pending_cleanups[parent_webdav_path] = timer
+            timer.start()
 
     def _build_trash_path(self, cloud_path: str) -> str | None:
         return build_webdav_trash_path(
             cloud_path, self.config.behavior.trash_dir_name)
 
     def _ensure_trash_dirs(self, trash_path: str) -> bool:
-        """确保 WebDAV 回收站目录存在（通过 admin_api.mkdir 创建远程目录）"""
+        """确保 WebDAV 回收站目录存在（递归逐层创建远程目录）。
+
+        trash_path 示例:
+            /天翼云盘家庭云30GB/strm_回收站_测试/番剧/[1998] 头文字D/Season 1/S01E01.mkv
+
+        需要依次创建:
+            /天翼云盘家庭云30GB/strm_回收站_测试
+            /天翼云盘家庭云30GB/strm_回收站_测试/番剧
+            ...
+            /天翼云盘家庭云30GB/strm_回收站_测试/番剧/[1998] 头文字D/Season 1
+        """
         try:
-            # trash_path 是 WebDAV 路径，如 /mount/trash_dir/subdir/file.mp4
-            # 需要提取父目录并使用 admin_api 创建远程目录
-            parts = trash_path.rstrip("/").split("/")
-            if len(parts) < 2:
-                logging.warning("[回收站] 路径格式异常: %s", trash_path)
-                return False
-            trash_parent = "/".join(parts[:-1])
-            logging.debug("[回收站] 创建远程目录: %s", trash_parent)
-            ok = self.admin_api.mkdir(trash_parent)
-            if not ok:
-                logging.warning("[回收站] 目录创建失败: %s", trash_parent)
-            else:
-                logging.debug("[回收站] 目录创建成功: %s", trash_parent)
-            return ok
+            parts = [p for p in trash_path.rstrip("/").split("/") if p]
+            if len(parts) < 3:
+                logging.warning("[回收站] 路径层级不足，跳过目录创建: %s", trash_path)
+                return True
+
+            # 从根目录开始逐层创建，跳过第一级（根挂载点，通常已存在）
+            # 例如 parts = ["天翼云盘家庭云30GB", "strm_回收站_测试", "番剧", ..., "Season 1", "S01E01.mkv"]
+            # 文件名最后一级不需要创建目录
+            dir_parts = parts[:-1]  # 去掉文件名
+
+            for depth in range(2, len(dir_parts) + 1):
+                sub_path = "/" + "/".join(dir_parts[:depth])
+                logging.debug("[回收站] 逐层创建目录: %s", sub_path)
+                ok = self.admin_api.mkdir(sub_path)
+                if not ok:
+                    logging.warning("[回收站] 目录创建失败: %s (将尝试继续)", sub_path)
+                    # mkdir 在目录已存在时仍返回 True（见 webdav_client.py）
+                    # 如果真的创建失败，继续尝试下一层，最坏情况由 move API 报错
+
+            return True
         except Exception as e:
-            logging.error("[回收站] 创建目录异常: %s", e)
+            logging.error("[回收站] 递归创建目录异常: %s", e)
             return False

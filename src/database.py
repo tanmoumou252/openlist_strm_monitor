@@ -10,6 +10,76 @@ from pathlib import Path
 from typing import Generator
 
 
+# ============================================================
+# 数据库连接池 - 针对 30000+ 条数据高并发读写优化
+# ============================================================
+class _ConnectionPool:
+    """
+    轻量级 SQLite 连接池。
+    核心策略：
+    - 读操作使用独立的只读连接，多个读可以并发
+    - 写操作通过写锁串行化，避免 SQLITE_BUSY
+    - WAL 模式允许读写并发不互阻
+    """
+
+    def __init__(self, db_path: str, max_readers: int = 8) -> None:
+        self._db_path = db_path
+        self._max_readers = max_readers
+        self._read_semaphore = threading.Semaphore(max_readers)
+        self._write_lock = threading.Lock()
+        self._local = threading.local()
+        # 用于追踪所有活跃连接（仅用于关闭）
+        self._all_conns: list[sqlite3.Connection] = []
+        self._all_conns_lock = threading.Lock()
+
+    def _make_conn(self, readonly: bool = False) -> sqlite3.Connection:
+        os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
+        if readonly:
+            uri = f"file:{self._db_path}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=30)
+        else:
+            conn = sqlite3.connect(self._db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA cache_size=-64000")  # 64MB page cache
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA mmap_size=268435456")  # 256MB mmap
+        with self._all_conns_lock:
+            self._all_conns.append(conn)
+        return conn
+
+    def _get_read_conn(self) -> sqlite3.Connection:
+        """获取一个只读连接（通过信号量控制并发数）"""
+        self._read_semaphore.acquire()
+        try:
+            conn = self._make_conn(readonly=True)
+            return conn
+        except Exception:
+            self._read_semaphore.release()
+            raise
+
+    def _release_read_conn(self, conn: sqlite3.Connection) -> None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        self._read_semaphore.release()
+
+    def get_write_conn(self) -> sqlite3.Connection:
+        """获取写连接（需要外部调用 acquire/release 写锁）"""
+        return self._make_conn(readonly=False)
+
+    def close_all(self) -> None:
+        with self._all_conns_lock:
+            for conn in self._all_conns:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._all_conns.clear()
+
+
 class Database:
 
     @contextmanager
@@ -24,15 +94,21 @@ class Database:
             try:
                 self._ensure_db_writable()
 
-                conn = sqlite3.connect(self.db_path)
+                conn = sqlite3.connect(self.db_path, timeout=30)
+                # ========== 性能优化 PRAGMA ==========
                 conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("PRAGMA busy_timeout=10000")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA cache_size=-64000")      # 64MB page cache
+                conn.execute("PRAGMA temp_store=MEMORY")
+                conn.execute("PRAGMA mmap_size=268435456")     # 256MB mmap
+                # =====================================
 
                 # 使用真正的写操作验证连接是否可写
                 try:
                     conn.execute(
                         "CREATE TABLE IF NOT EXISTS _write_test(x)")
-                    conn.execute("DROP TABLE IF EXISTS _write_test")
+                    conn.execute("DROP TABLE IF NOT EXISTS _write_test")
                     conn.commit()
                 except sqlite3.OperationalError as e:
                     conn.close()
@@ -64,6 +140,28 @@ class Database:
                     time.sleep(retry_delay)
                     continue
                 raise
+
+    @contextmanager
+    def read_connection(self) -> Generator[sqlite3.Connection, None, None]:
+        """只读连接上下文管理器 - 不持有写锁，允许并发读取 (WAL模式下安全)"""
+        os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=-64000")
+            conn.execute("PRAGMA temp_store=MEMORY")
+            conn.execute("PRAGMA mmap_size=268435456")
+            conn.execute("PRAGMA query_only=ON")
+            yield conn
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def _ensure_column(
         self,
@@ -1176,3 +1274,111 @@ class Database:
                         (local_path,)
                     )
             conn.commit()
+
+    # ========== 批量操作（30000+ 条数据性能优化）==========
+
+    def upsert_a_batch(self, records: list[tuple[str, str, str]]) -> int:
+        """
+        批量 upsert A 区记录。
+        records: [(local_path, webdav_path, parent_webdav_path), ...]
+        返回成功插入/更新的行数。
+        """
+        if not records:
+            return 0
+        now = time.time()
+        data = [(lp, wp, pwp, now) for lp, wp, pwp in records]
+        with self.lock, self.connection() as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                data,
+            )
+            conn.commit()
+            return len(data)
+
+    def upsert_b_batch(self, records: list[tuple]) -> int:
+        """
+        批量 upsert B 区记录。
+        records: [(local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status), ...]
+        返回成功行数。
+        """
+        if not records:
+            return 0
+        now = time.time()
+        data = [(*r, now) for r in records]
+        with self.lock, self.connection() as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO b_strm_files(
+                    local_path, webdav_path, parent_webdav_path,
+                    source_a_path, fingerprint, status, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                data,
+            )
+            conn.commit()
+            return len(data)
+
+    def delete_a_batch(self, local_paths: list[str]) -> int:
+        """批量删除 A 区记录"""
+        if not local_paths:
+            return 0
+        with self.lock, self.connection() as conn:
+            conn.executemany(
+                "DELETE FROM a_strm_files WHERE local_path = ?",
+                [(p,) for p in local_paths],
+            )
+            conn.commit()
+            return len(local_paths)
+
+    def delete_b_batch(self, local_paths: list[str]) -> int:
+        """批量删除 B 区记录"""
+        if not local_paths:
+            return 0
+        with self.lock, self.connection() as conn:
+            conn.executemany(
+                "DELETE FROM b_strm_files WHERE local_path = ?",
+                [(p,) for p in local_paths],
+            )
+            conn.commit()
+            return len(local_paths)
+
+    # ========== 统计方法（WebUI 仪表盘用）==========
+
+    def get_table_counts(self) -> dict[str, int]:
+        """获取各表记录数，用于 WebUI 仪表盘显示"""
+        tables = [
+            "a_strm_files", "b_strm_files", "c_ghost_files",
+            "strm_identity", "ghost_protection", "known_folders",
+            "subtitles", "strm_media_boundary",
+        ]
+        result = {}
+        with self.lock, self.connection() as conn:
+            for table in tables:
+                try:
+                    cur = conn.execute(f"SELECT COUNT(*) FROM {table}")
+                    result[table] = cur.fetchone()[0]
+                except sqlite3.OperationalError:
+                    result[table] = 0
+        return result
+
+    def get_b_status_counts(self) -> dict[str, int]:
+        """获取 B 区各状态记录数"""
+        result = {}
+        with self.lock, self.connection() as conn:
+            cur = conn.execute(
+                "SELECT status, COUNT(*) FROM b_strm_files GROUP BY status"
+            )
+            for row in cur.fetchall():
+                result[row[0] or "unknown"] = row[1]
+        return result
+
+    def get_db_file_size(self) -> int:
+        """获取数据库文件大小（字节）"""
+        try:
+            return os.path.getsize(self.db_path)
+        except OSError:
+            return 0

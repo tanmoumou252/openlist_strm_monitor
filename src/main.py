@@ -19,6 +19,7 @@ from webdav_client import OpenListAdminClient
 from logger_setup import setup_logging
 from database import Database
 from config import AppConfig
+from webui import WebUIServer
 
 import logging
 import time
@@ -58,8 +59,11 @@ def main() -> None:
         sys.exit(2)
     logging.info("[AdminAPI] 连接验证成功")
     app = AppService(config, db, admin_client)  # 只传 admin_client
+    # 启动 WebUI 管理面板
+    webui = WebUIServer(config.webui, db, app_config=config)
     try:
         app.start()
+        webui.start()
         # ---------- 启动后验证 STRM 存储 ----------
         try:
             validation = app.validate_strm_storages()
@@ -78,6 +82,7 @@ def main() -> None:
             except KeyboardInterrupt:
                 break
     finally:
+        webui.stop()
         app.stop()
         logging.info("[停止] 程序已退出")
 
