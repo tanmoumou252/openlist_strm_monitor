@@ -1,31 +1,45 @@
 """
-WebUI 管理面板 - 轻量级 HTTP 服务器
-仅监听 localhost 和局域网，不开放公网。
-使用 Python 内置 http.server，无需额外依赖。
+WebUI 管理面板 - SPA 架构
+导航/筛选/分页通过 JS 拦截链接，fetch 获取 HTML 片段，只替换 <main> 内容。
+壁纸层永不重建。
+ABC 三区两级浏览：
+  1. 子类列表（具体番剧名/电影名卡片）
+  2. 点击进入该子类下的 STRM 文件详情
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
-import socket
+import re
+import sqlite3
 import threading
 import time
-from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from math import ceil
+from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 import urllib.request
 
+from tmdb_watchlist_db import TmdbWatchlistDb
+
 if TYPE_CHECKING:
+    from tmdb_client import TmdbClient
     from config import WebUIConfig
     from database import Database
 
 
+PAGE_SIZE = 50
+STATIC_DIR = Path(__file__).resolve().parent / "webui_static"
+
+
 def _is_lan_ip(ip: str) -> bool:
-    """检查 IP 是否属于局域网地址段"""
     if ip in ("127.0.0.1", "::1", "localhost"):
         return True
+    if ip.startswith("::ffff:"):
+        ip = ip.rsplit(":", 1)[-1]
     parts = ip.split(".")
     if len(parts) != 4:
         return False
@@ -33,7 +47,6 @@ def _is_lan_ip(ip: str) -> bool:
         a, b = int(parts[0]), int(parts[1])
     except ValueError:
         return False
-    # 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
     if a == 10:
         return True
     if a == 172 and 16 <= b <= 31:
@@ -45,186 +58,858 @@ def _is_lan_ip(ip: str) -> bool:
     return False
 
 
+def _human_size(size: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _h(value: object) -> str:
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def _resolve_tmdb_proxy(app_config) -> str | None:
+    """统一 TMDB 代理解析逻辑（与客户端初始化一致）"""
+    tmdb_cfg = getattr(app_config, "tmdb", None)
+    if not tmdb_cfg:
+        return None
+    if getattr(tmdb_cfg, "host", ""):
+        return None  # 使用反代时不启用代理
+    proxy_cfg = getattr(tmdb_cfg, "proxy", None)
+    if proxy_cfg and proxy_cfg.enabled and proxy_cfg.http:
+        return proxy_cfg.http
+    return None
+
+
+_SEASON_RE = re.compile(
+    r"(?:^|[\\/._\-\s])(Season\s*\d+|S\d{1,2}|第[一二三四五六七八九十\d]+季)(?:[\\/._\-\s]|$)",
+    re.I)
+_EPISODE_RE = re.compile(
+    r"(?:S\d{1,2}E\d{1,3}|第\s*\d+\s*[集话]|EP?\s*\d{1,3})", re.I)
+_MOVIE_HINT_RE = re.compile(r"电影|movie|movies|film|films|cinema", re.I)
+_CATEGORY_DIRS = {"番剧", "电影", "动漫", "anime", "movie", "movies", "film", "tv"}
+
+_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+           "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15}
+
+
+def _cn_to_int(s: str) -> int | None:
+    s = s.strip()
+    if s.isdigit():
+        return int(s)
+    if s.startswith("十"):
+        if len(s) == 1:
+            return 10
+        return 10 + (_cn_to_int(s[1:]) or 0)
+    if "十" in s:
+        parts = s.split("十")
+        if len(parts) == 2:
+            return (_cn_to_int(parts[0]) or 0) * \
+                10 + (_cn_to_int(parts[1]) or 0)
+    return _CN_NUM.get(s)
+
+
+def _extract_season_int(part: str) -> int | None:
+    """从目录名/文件名中提取季数（支持中英文）"""
+    p = part.lower().strip()
+    # Season XX
+    m = re.match(r"^season\s*(\d{1,2})$", p)
+    if m:
+        return int(m.group(1))
+    # SXX (单独一个 S 开头的目录)
+    m = re.match(r"^s(\d{1,2})$", p)
+    if m:
+        return int(m.group(1))
+    # 第X季
+    m = re.match(r"^第([一二三四五六七八九十\d]+)季$", p)
+    if m:
+        return _cn_to_int(m.group(1))
+    return None
+
+
+def _path_parts(value: object) -> list[str]:
+    return [p for p in str(value or "").replace("\\", "/").split("/") if p]
+
+
+def _is_category_dir(name: str) -> bool:
+    """判断是否是顶级分类目录（番剧/电影等），而不是具体作品名"""
+    return name.strip().lower() in {item.lower() for item in _CATEGORY_DIRS}
+
+
+def _category_filter_value(kind: str) -> str:
+    """将分类名映射为统一的筛选值 (anime/movie/other)"""
+    k = kind.strip().lower()
+    if k in {"番剧", "动漫", "anime", "动画"}:
+        return "anime"
+    if k in {"电影", "movie", "movies"}:
+        return "movie"
+    return "other"
+
+
+def _media_info(row: dict) -> tuple[str, str]:
+    path = row.get("webdav_path") or row.get(
+        "original_b_path") or row.get("local_path") or ""
+    parts = _path_parts(path)
+    movie_hint = _MOVIE_HINT_RE.search(path) is not None
+    has_season = _SEASON_RE.search(path) is not None
+    has_episode = _EPISODE_RE.search(path) is not None
+    kind = "番剧" if (has_season or has_episode) else "电影"
+    if movie_hint and not (has_season or has_episode):
+        kind = "电影"
+    if len(parts) <= 2 and not (has_season or has_episode):
+        kind = "电影"
+    media_name = ""
+    if kind == "番剧":
+        # 寻找季目录，其前面的非分类目录就是番剧名
+        for idx, part in enumerate(parts):
+            if _extract_season_int(part) is not None and idx > 0:
+                parent = parts[idx - 1]
+                if not _is_category_dir(parent):
+                    media_name = parent
+                    break
+                # 父目录是分类目录，说明没有番剧名目录，取祖目录或用 boundary
+                if idx >= 2:
+                    candidate = parts[idx - 2]
+                    if not _is_category_dir(candidate):
+                        media_name = candidate
+                        break
+        # 没有季目录，但有 S01E01 格式的文件名
+        if not media_name:
+            for idx, part in enumerate(parts):
+                if _EPISODE_RE.search(part) and idx > 1:
+                    parent = parts[idx - 1]
+                    if not _is_category_dir(parent):
+                        media_name = parent
+                        break
+        # 兜底：取文件名的上一级目录
+        if not media_name and len(parts) >= 2:
+            media_name = parts[-2]
+    else:
+        media_name = Path(parts[-1]).stem if parts else "未分类电影"
+    return kind, media_name or (Path(parts[-1]).stem if parts else "未分类")
+
+
+def _extract_season_from_local_path(local_path: str) -> str:
+    """从本地路径中提取季信息，返回如 'S01' 或 '第一季' 的字符串"""
+    parts = _path_parts(local_path)
+    for part in reversed(parts[:-1]):  # 不看文件名本身
+        sn = _extract_season_int(part)
+        if sn is not None:
+            return f"S{sn:02d}"
+        # 也检查中文季名
+        m = re.match(r"^第([一二三四五六七八九十\d]+)季$", part.strip())
+        if m:
+            num = _cn_to_int(m.group(1))
+            if num:
+                return f"S{num:02d}"
+    # 从文件名提取
+    stem = Path(parts[-1]).stem if parts else ""
+    m = re.search(r"S(\d{1,2})E", stem, re.I)
+    if m:
+        return f"S{int(m.group(1)):02d}"
+    return ""
+
+
+# ============================================================
+# 工具函数
+# ============================================================
+
+def _build_img_opener(handler, use_proxy=True):
+    """构建用于图片/头像请求的 opener（从配置读取代理，不依赖 tmdb_client.proxy）。"""
+    cfg = handler.webui._config.tmdb
+    proxy_cfg = getattr(cfg, "proxy", None)
+    if use_proxy and proxy_cfg and proxy_cfg.enabled and proxy_cfg.http:
+        proxy_handler = urllib.request.ProxyHandler(
+            {"http": proxy_cfg.http, "https": proxy_cfg.http}
+        )
+        return urllib.request.build_opener(proxy_handler)
+    return urllib.request.build_opener()
+
+
+def _compute_media_root(path: str) -> str:
+    """计算媒体目录根路径（含媒体目录本身，保留原始分隔符与尾部分隔符）。
+
+    规则：媒体目录是"分类目录（番剧/电影等）"的下一级。
+    若找不到分类目录，则退化为第一级目录。
+    返回的根路径保留原字符串风格（Windows 反斜杠 / POSIX 斜杠），
+    并以分隔符结尾，便于前端直接做前缀剥离。
+    """
+    if not path:
+        return ""
+    sep = "\\" if "\\" in path else "/"
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    if not parts:
+        return ""
+    media_idx = None
+    for i, p in enumerate(parts):
+        if _is_category_dir(p):
+            media_idx = i + 1
+            break
+    if media_idx is None or media_idx >= len(parts):
+        media_idx = 1 if not parts[0].endswith(":") else 2
+    root_parts = parts[:media_idx + 1] if media_idx < len(parts) else parts
+    root = sep.join(root_parts)
+    if sep == "/" and path.startswith("/"):
+        root = "/" + root
+    return root + sep
+
+
+# ============================================================
+# TMDB 路由（嵌入到 handler 中）
+# ============================================================
+
+def _safe_int(val: str | None, default: int = 0) -> int:
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
+# 静态 TMDB Genre ID → 中文名映射表
+# TMDB genre 列表极为稳定，此表几乎不需要维护。
+# 来源: https://developer.themoviedb.org/reference/genre-movie-list
+#       https://developer.themoviedb.org/reference/genre-tv-list
+TMDB_GENRE_NAMES: dict[int, str] = {
+    # Movie genres
+    28: "动作",
+    12: "冒险",
+    16: "动画",
+    35: "喜剧",
+    80: "犯罪",
+    99: "纪录",
+    18: "剧情",
+    10751: "家庭",
+    14: "奇幻",
+    36: "历史",
+    27: "恐怖",
+    10402: "音乐",
+    9648: "悬疑",
+    10749: "爱情",
+    878: "科幻",
+    10770: "电视电影",
+    53: "惊悚",
+    10752: "战争",
+    37: "西部",
+    # TV genres (与 movie 共享部分 ID)
+    10759: "动作冒险",
+    10762: "儿童",
+    10763: "新闻",
+    10764: "真人秀",
+    10765: "科幻奇幻",
+    10766: "肥皂剧",
+    10767: "脱口秀",
+    10768: "战争政治",
+}
+
+
+def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
+                 path: str, params: dict,
+                 webui_server=None) -> bool:
+    """
+    处理 TMDB 相关路由。
+    返回 True 表示已处理，False 表示不匹配。
+    """
+    if path == "/api/tmdb/status":
+        if tmdb_client:
+            handler._send_json({
+                "configured": True,
+                "account_id": tmdb_client.account_id,
+                "username": tmdb_client.username,
+                "avatar_path": tmdb_client.avatar_path,
+                "proxy_enabled": bool(tmdb_client.proxy),
+                "proxy_url": tmdb_client.proxy or "",
+                "auth_mode": "api_key" if tmdb_client._use_api_key_auth else "access_token",
+            })
+        else:
+            handler._send_json({"configured": False})
+        return True
+
+    # Avatar proxy route — 支持 EdgeOne/custom host 反代
+    if path == "/api/tmdb/avatar":
+        avatar_hash = params.get("hash", [""])[0]
+        if not avatar_hash:
+            handler._send_json({"error": "missing hash"}, 400)
+            return True
+        _host = handler.webui._config.tmdb.host
+        if _host:
+            avatar_url = f"{_host.rstrip('/')}/avatar/{avatar_hash}"
+        else:
+            avatar_url = f"https://www.gravatar.com/avatar/{avatar_hash}?d=identicon&s=80"
+        try:
+            ava_req = urllib.request.Request(
+                avatar_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            )
+            opener = _build_img_opener(handler, use_proxy=not bool(_host))
+            resp = opener.open(ava_req, timeout=10)
+            img_data = resp.read()
+            handler.send_response(200)
+            handler.send_header("Content-Type", "image/png")
+            handler.send_header("Content-Length", str(len(img_data)))
+            handler.send_header("Cache-Control", "public, max-age=86400")
+            handler.end_headers()
+            handler.wfile.write(img_data)
+            return True
+        except Exception as e:
+            logging.warning("[TMDB] 头像代理失败: %s", e)
+            handler._send_json({"error": "avatar fetch failed"}, 502)
+            return True
+
+    # Poster proxy route — 后端代理加载 TMDB 海报
+    if path == "/api/tmdb/poster":
+        poster_path = params.get("path", [""])[0]
+        width = params.get("w", ["342"])[0]
+        if not poster_path:
+            handler._send_json({"error": "missing path"}, 400)
+            return True
+        if width not in ("92", "154", "185", "342", "500", "780"):
+            width = "342"
+        img_base = (tmdb_client.image_base() if tmdb_client
+                    else "https://image.tmdb.org/t/p")
+        poster_url = f"{img_base}/w{width}{poster_path}"
+        try:
+            poster_req = urllib.request.Request(
+                poster_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            )
+            opener = _build_img_opener(handler, use_proxy=False)
+            resp = opener.open(poster_req, timeout=15)
+            img_data = resp.read()
+            content_type = resp.headers.get("Content-Type", "image/jpeg")
+            handler.send_response(200)
+            handler.send_header("Content-Type", content_type)
+            handler.send_header("Content-Length", str(len(img_data)))
+            handler.send_header("Cache-Control", "public, max-age=604800")
+            handler.end_headers()
+            handler.wfile.write(img_data)
+            return True
+        except Exception as e:
+            logging.warning("[TMDB] 海报代理失败: %s", e)
+            handler._send_json({"error": "poster fetch failed"}, 502)
+            return True
+
+    if not tmdb_client:
+        auth_hint = "TMDB 未配置 access_token 或 api_key，请在 config.toml 的 [tmdb] 段配置"
+        handler._send_json({"error": auth_hint}, 503)
+        return True
+
+    if path == "/api/tmdb/watchlist/movies":
+        if params.get("all", ["0"])[0] == "1":
+            if webui_server and hasattr(webui_server, 'get_watchlist_cached'):
+                all_items = webui_server.get_watchlist_cached()
+                items = [i for i in all_items if i.get(
+                    "_media_type") == "movie"]
+            else:
+                items = tmdb_client.fetch_all_watchlist_movies()
+            handler._send_json({
+                "account_id": tmdb_client.account_id,
+                "media_type": "movie",
+                "count": len(items),
+                "results": items,
+            })
+        else:
+            page = _safe_int(params.get("page", ["1"])[0], 1)
+            items, has_next = tmdb_client.get_watchlist_movies(page=page)
+            handler._send_json({
+                "account_id": tmdb_client.account_id,
+                "media_type": "movie",
+                "page": page,
+                "has_next_page": has_next,
+                "count": len(items),
+                "results": items,
+            })
+        return True
+
+    if path == "/api/tmdb/watchlist/tv":
+        if params.get("all", ["0"])[0] == "1":
+            if webui_server and hasattr(webui_server, 'get_watchlist_cached'):
+                all_items = webui_server.get_watchlist_cached()
+                items = [i for i in all_items if i.get("_media_type") == "tv"]
+            else:
+                items = tmdb_client.fetch_all_watchlist_tv()
+            handler._send_json({
+                "account_id": tmdb_client.account_id,
+                "media_type": "tv",
+                "count": len(items),
+                "results": items,
+            })
+        else:
+            page = _safe_int(params.get("page", ["1"])[0], 1)
+            items, has_next = tmdb_client.get_watchlist_tv(page=page)
+            handler._send_json({
+                "account_id": tmdb_client.account_id,
+                "media_type": "tv",
+                "page": page,
+                "has_next_page": has_next,
+                "count": len(items),
+                "results": items,
+            })
+        return True
+
+    if path.startswith("/api/tmdb/alias/"):
+        parts = path.split("/")
+        if len(parts) == 6:
+            media_type = parts[4]
+            tmdb_id = _safe_int(parts[5])
+            if media_type == "movie":
+                aliases = tmdb_client.get_movie_aliases(tmdb_id)
+            elif media_type == "tv":
+                aliases = tmdb_client.get_tv_aliases(tmdb_id)
+            else:
+                handler._send_json({"error": "unsupported media_type"}, 400)
+                return True
+            handler._send_json(
+                {"id": tmdb_id, "type": media_type, "aliases": aliases[:20]})
+            return True
+
+    if path.startswith("/api/tmdb/detail/tv/"):
+        parts = path.split("/")
+        if len(parts) == 6:
+            tmdb_id = _safe_int(parts[5])
+            data = tmdb_client.get_tv_details(tmdb_id)
+            if not data:
+                handler._send_json({"error": "not found"}, 404)
+                return True
+            last_ep = data.get("last_episode_to_air")
+            handler._send_json({
+                "id": data.get("id"),
+                "name": data.get("name"),
+                "original_name": data.get("original_name"),
+                "first_air_date": data.get("first_air_date"),
+                "last_air_date": data.get("last_air_date"),
+                "number_of_seasons": data.get("number_of_seasons"),
+                "number_of_episodes": data.get("number_of_episodes"),
+                "status": data.get("status"),
+                "vote_average": data.get("vote_average"),
+                "last_episode_to_air": last_ep,
+            })
+            return True
+
+    # Season-count route — 供前端懒加载多季标签
+    if path.startswith("/api/tmdb/season-count/"):
+        # /api/tmdb/season-count/tv/12345
+        parts = path.split("/")
+        if len(parts) == 6:
+            media_type = parts[4]
+            tmdb_id = _safe_int(parts[5])
+            count = 0
+            if media_type == "tv" and tmdb_client:
+                # 先查 DB 缓存
+                if webui_server and hasattr(
+                    webui_server, '_watchlist_db'
+                ) and webui_server._watchlist_db:
+                    try:
+                        db_path = webui_server._watchlist_db._db_path
+                        with sqlite3.connect(db_path, timeout=5) as conn:
+                            conn.execute("PRAGMA busy_timeout=5000")
+                            row = conn.execute(
+                                "SELECT _season_count FROM tv WHERE id=?",
+                                (tmdb_id,)
+                            ).fetchone()
+                            if row and row[0] > 0:
+                                count = row[0]
+                    except Exception:
+                        pass
+                # DB 未命中 -> 调 API
+                if count == 0:
+                    try:
+                        count = tmdb_client.get_tv_seasons_info(tmdb_id)
+                    except Exception:
+                        count = 0
+                    # 结果写回 DB
+                    if webui_server and hasattr(
+                        webui_server, '_watchlist_db'
+                    ) and webui_server._watchlist_db:
+                        try:
+                            db_path = webui_server._watchlist_db._db_path
+                            with sqlite3.connect(db_path, timeout=5) as conn:
+                                conn.execute("PRAGMA busy_timeout=5000")
+                                conn.execute(
+                                    "UPDATE tv SET _season_count=? WHERE id=?",
+                                    (count, tmdb_id)
+                                )
+                                conn.commit()
+                        except Exception:
+                            pass
+            handler._send_json({"id": tmdb_id, "season_count": count})
+            return True
+
+    # Refresh route — 手动触发待看列表全量同步
+    if path == "/api/tmdb/watchlist/refresh":
+        if not tmdb_client:
+            handler._send_json({"error": "TMDB 未配置"}, 503)
+            return True
+        if webui_server and hasattr(
+            webui_server, '_watchlist_db'
+        ) and webui_server._watchlist_db:
+            try:
+                items = webui_server._watchlist_db.sync(
+                    tmdb_client, force=True
+                )
+                handler._send_json({
+                    "success": True,
+                    "count": len(items),
+                    "movies": sum(
+                        1 for i in items if i.get("_media_type") == "movie"),
+                    "tv": sum(
+                        1 for i in items if i.get("_media_type") == "tv"),
+                })
+            except Exception as e:
+                handler._send_json(
+                    {"success": False, "error": str(e)}, 500)
+        else:
+            handler._send_json(
+                {"success": False, "error": "数据库不可用"}, 500)
+        return True
+
+    # Credits route — 供卡片翻转时懒加载演员列表
+    if path.startswith("/api/tmdb/credits/"):
+        parts = path.split("/")
+        if len(parts) == 6:
+            media_type = parts[4]
+            tmdb_id = _safe_int(parts[5])
+            if media_type == "movie":
+                data = tmdb_client.get_movie_details(tmdb_id)
+            elif media_type == "tv":
+                data = tmdb_client.get_tv_details(tmdb_id)
+            else:
+                handler._send_json({"error": "unsupported media_type"}, 400)
+                return True
+            if not data:
+                handler._send_json({"error": "not found"}, 404)
+                return True
+            cast_raw = data.get("credits", {}).get("cast", [])
+            actors = [c for c in cast_raw
+                      if c.get("known_for_department", "Acting") == "Acting"]
+            cast = [{"name": c.get("name", ""), "character": c.get("character", "")}
+                    for c in actors[:4]]
+            handler._send_json({
+                "id": tmdb_id,
+                "type": media_type,
+                "cast": cast,
+            })
+            return True
+
+    # Genres route — 供卡片翻转时懒加载分类
+    # 从缓存 watchlist 的 genre_ids + 静态映射表反查，零 API 调用
+    if path.startswith("/api/tmdb/genres/"):
+        parts = path.split("/")
+        if len(parts) == 6:
+            media_type = parts[4]
+            tmdb_id = _safe_int(parts[5])
+            genres: list[str] = []
+            if webui_server:
+                # 优先用内存缓存（不触发全量重拉取）
+                items: list[dict] = []
+                if hasattr(webui_server, '_watchlist_cache') and webui_server._watchlist_cache is not None:
+                    items = webui_server._watchlist_cache
+                elif hasattr(webui_server, 'get_watchlist_cached'):
+                    items = webui_server.get_watchlist_cached()
+                for item in items:
+                    if item.get("id") == tmdb_id:
+                        gids = item.get("genre_ids", [])
+                        genres = [TMDB_GENRE_NAMES[gid]
+                                  for gid in gids if gid in TMDB_GENRE_NAMES]
+                        break
+            handler._send_json({
+                "id": tmdb_id,
+                "type": media_type,
+                "genres": genres[:3],
+            })
+            return True
+
+    if path == "/api/tmdb/search/movie":
+        query = params.get("query", ["Chronicle"])[0]
+        page = _safe_int(params.get("page", ["1"])[0], 1)
+        handler._send_json({
+            "query": query,
+            "page": page,
+            "results": tmdb_client.search_movie(query, page=page),
+        })
+        return True
+
+    if path == "/api/tmdb/search/tv":
+        query = params.get("query", ["Breaking Bad"])[0]
+        page = _safe_int(params.get("page", ["1"])[0], 1)
+        handler._send_json({
+            "query": query,
+            "page": page,
+            "results": tmdb_client.search_tv(query, page=page),
+        })
+        return True
+
+    if path == "/api/tmdb/watchlist/export.csv":
+        import csv
+        import io
+        all_items = (webui_server.get_watchlist_cached()
+                     if webui_server and hasattr(webui_server, 'get_watchlist_cached')
+                     else [])
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["状态", "TMDB ID", "类型", "标题", "原标题", "发布日期", "评分"])
+        for item in all_items:
+            media_type = item.get("_media_type", "movie")
+            title = item.get("title") or item.get("name") or ""
+            orig = item.get("original_title") or item.get(
+                "original_name") or ""
+            date = item.get("release_date") or item.get("first_air_date") or ""
+            rating = item.get("vote_average", 0)
+            status = item.get("_status", "out")
+            status_label = {
+                "in": "已收录",
+                "out": "待看",
+                "que": "有疑问"}.get(
+                status,
+                "待看")
+            writer.writerow([status_label, item.get("id", ""), media_type,
+                             title, orig, date, f"{rating:.1f}"])
+        csv_data = buf.getvalue().encode("utf-8-sig")
+        csv_path = handler.webui._config.tmdb.csv_watchlist_file
+        if csv_path:
+            try:
+                Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(csv_path, "wb") as f:
+                    f.write(csv_data)
+                logging.info("[TMDB] CSV 已保存到: %s", csv_path)
+                handler._send_json({
+                    "success": True,
+                    "message": f"已保存到 {csv_path}",
+                    "path": csv_path,
+                    "count": len(all_items)
+                })
+            except Exception as e:
+                logging.warning("[TMDB] 保存 CSV 失败: %s", e)
+                handler._send_json({
+                    "success": False,
+                    "message": f"保存失败: {e}"
+                }, 500)
+        else:
+            handler._send_json({
+                "success": False,
+                "message": "未配置 csv_watchlist_file"
+            }, 400)
+        return True
+
+    return False
+
+
 class _WebUIHandler(BaseHTTPRequestHandler):
-    """HTTP 请求处理器"""
     webui: WebUIServer
 
     def log_message(self, format, *args):
-        """抑制默认日志输出"""
         pass
 
     def _is_client_allowed(self) -> bool:
-        """只允许本机和局域网来源访问，避免公网暴露。"""
-        client_ip = self.client_address[0] if self.client_address else ""
-        return _is_lan_ip(client_ip)
+        ip = self.client_address[0] if self.client_address else ""
+        return _is_lan_ip(ip)
 
-    def _check_auth(self) -> bool:
-        """检查密码认证"""
-        pwd = self.webui._password
-        if not pwd:
-            return True
-        cookie = self.headers.get("Cookie", "")
-        return f"webui_auth={pwd}" in cookie
-
-    def _guard_request(self, allow_login: bool = False) -> bool:
-        """统一访问保护：限制来源 IP + 可选密码认证。"""
+    def _guard_request(self) -> bool:
         if not self._is_client_allowed():
-            self._send_json({"error": "forbidden: only localhost/LAN is allowed"}, 403)
-            return False
-        if allow_login:
-            return True
-        if not self._check_auth():
-            self._redirect("/login")
+            self._send_json({"error": "forbidden"}, 403)
             return False
         return True
 
-    def _send_json(self, data: dict | list, status: int = 200) -> None:
-        body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
+    def _send_json(self, data, status=200):
+        body = json.dumps(
+            data,
+            ensure_ascii=False,
+            default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass  # 客户端提前断开，可忽略
 
-    def _send_html(self, html: str, status: int = 200) -> None:
-        body = html.encode("utf-8")
+    def _send_html(self, body, status=200):
+        raw = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _send_static_file(self, filename: str = "index.html", status=200):
+        file_path = STATIC_DIR / filename
+        try:
+            body = file_path.read_bytes()
+        except OSError:
+            logging.error("_send_static_file: 无法读取静态文件 %s", file_path)
+            self.send_error(500, "static file not found")
+            return
+        self.send_response(status)
+        # 根据文件扩展名设置 Content-Type
+        ext = Path(filename).suffix.lower()
+        ctype_map = {
+            ".ico": "image/x-icon",
+            ".png": "image/png",
+            ".html": "text/html; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+        }
+        content_type = ctype_map.get(ext, "application/octet-stream")
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
-
-    def _redirect(self, url: str) -> None:
-        self.send_response(302)
-        self.send_header("Location", url)
-        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         params = parse_qs(parsed.query)
+        if not self._guard_request():
+            return
 
-        if path == "/login":
-            if not self._guard_request(allow_login=True):
+        # TMDB 路由
+        if path.startswith("/api/tmdb/"):
+            tmdb_client = getattr(self.webui, '_tmdb_client', None)
+            if _tmdb_routes(self, tmdb_client, path, params,
+                            webui_server=self.webui):
                 return
-            self._handle_login_page()
-        elif path == "/api/login":
-            if not self._guard_request(allow_login=True):
-                return
-            self._handle_login(params)
-        elif path == "/api/logout":
-            if not self._guard_request():
-                return
-            self._handle_logout()
+
+        # 原有路由
+        if path == "/" or path == "/api/page":
+            self._send_static_file()
+        elif path == "/favicon.ico":
+            self._send_static_file("favicon.ico")
+        elif path == "/logo.png":
+            self._send_static_file("logo.png")
         elif path == "/api/dashboard":
-            if not self._guard_request():
-                return
             self._handle_dashboard()
+        elif path == "/api/bing-wallpapers":
+            self._handle_bing_wallpapers()
+        elif path == "/api/logs":
+            self._handle_logs_api(params)
         elif path == "/api/records/a":
-            if not self._guard_request():
-                return
             self._handle_records("a")
         elif path == "/api/records/b":
-            if not self._guard_request():
-                return
             self._handle_records("b")
         elif path == "/api/records/c":
-            if not self._guard_request():
-                return
             self._handle_records("c")
-        elif path == "/api/records/subtitles":
-            if not self._guard_request():
-                return
-            self._handle_subtitles()
         elif path == "/api/config":
-            if not self._guard_request():
-                return
-            self._handle_config()
-        elif path == "/api/search":
-            if not self._guard_request():
-                return
-            self._handle_search(params)
-        elif path == "/api/logs":
-            if not self._guard_request():
-                return
-            self._handle_logs(params)
-        elif path == "/api/bing-wallpapers":
-            if not self._guard_request():
-                return
-            self._handle_bing_wallpapers()
-        elif path == "/" or path == "":
-            if not self._guard_request():
-                return
-            self._handle_index()
+            self._handle_config_api()
+        elif path.startswith("/api/area/"):
+            area = path.split("/api/area/")[1].split("/")[0].split("?")[0]
+            rest = path.split("/api/area/")[1]
+            sub = rest[len(area):] if len(rest) > len(area) else ""
+            if sub.startswith("/detail"):
+                self._handle_area_detail(area, params)
+            elif area:
+                self._handle_area(area, params)
+            else:
+                self._send_json({"error": "not found"}, 404)
         else:
-            if not self._guard_request():
-                return
             self._send_json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
-
-        if path == "/api/login":
-            if not self._guard_request(allow_login=True):
-                return
-        else:
-            if not self._guard_request():
-                return
-
+        if not self._guard_request():
+            return
         content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length) if content_length > 0 else b""
-        try:
-            data = json.loads(body) if body else {}
-        except json.JSONDecodeError:
-            data = {}
-
-        if path == "/api/login":
-            self._handle_login(data)
-        elif path == "/api/delete/b":
-            self._handle_delete_b(data)
-        elif path == "/api/delete/a":
-            self._handle_delete_a(data)
-        elif path == "/api/cleanup/ghosts":
-            self._handle_cleanup_ghosts()
+        body = self.rfile.read(content_length) if content_length else b"{}"
+        if path == "/api/tmdb/configure":
+            self._handle_tmdb_configure(body)
+        elif path == "/api/restart-webui":
+            self._handle_restart_webui()
         else:
             self._send_json({"error": "not found"}, 404)
 
-    # ==================== 页面 ====================
+    def _handle_tmdb_configure(self, body: bytes) -> None:
+        """处理 TMDB 配置更新请求。"""
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            self._send_json({"success": False, "error": "无效的 JSON"}, 400)
+            return
+        try:
+            tmdb_cfg = getattr(self.webui._config, "tmdb", None)
+            if not tmdb_cfg:
+                self._send_json({"success": False, "error": "TMDB 配置不可用"}, 500)
+                return
+            changed = False
+            for key in ("access_token", "api_key", "language", "host",
+                        "watchlist_db", "csv_watchlist_file"):
+                if key in data and data[key] is not None:
+                    val = data[key]
+                    # 验证 watchlist_db 路径
+                    if key == "watchlist_db" and val:
+                        val = str(val).strip()
+                        if val:
+                            # 相对路径转绝对路径
+                            p = Path(val)
+                            if not p.is_absolute():
+                                base_dir = getattr(
+                                    self.webui._config, "base_dir", str(Path.cwd()))
+                                val = str(Path(base_dir) / val)
+                    setattr(tmdb_cfg, key, val)
+                    changed = True
+            # Proxy settings — 前端发送扁平字段 proxy_http / proxy_enabled
+            # （与 index.html 的表单字段保持一致，便于跨 WebUI 实现复用）
+            if "proxy_http" in data:
+                tmdb_cfg.proxy.http = data["proxy_http"] or ""
+                changed = True
+            if "proxy_enabled" in data:
+                tmdb_cfg.proxy.enabled = bool(data["proxy_enabled"])
+                changed = True
+            if changed:
+                # 重新初始化 TMDB 客户端
+                self.webui._init_tmdb_client()
+                # 重建 watchlist DB（路径解析逻辑与 __init__ 一致）
+                self.webui._reinit_watchlist_db()
+                # 保存覆盖文件
+                self._save_tmdb_overrides(data)
+                self._send_json({
+                    "success": True,
+                    "message": "TMDB 配置已更新",
+                    "tmdb_configured": bool(self.webui._tmdb_client),
+                })
+            else:
+                self._send_json({"success": True, "message": "无变更"})
+        except Exception as e:
+            logging.error("[WebUI] 保存 TMDB 配置异常: %s", e, exc_info=True)
+            self._send_json({"success": False, "error": f"保存失败: {e}"}, 500)
 
-    def _handle_index(self) -> None:
-        self._send_html(_DASHBOARD_HTML)
+    def _save_tmdb_overrides(self, changes: dict) -> None:
+        """保存 TMDB 配置覆盖到 .tmdb_webui_config.json（不写 config.toml）。"""
+        overrides_file = Path(__file__).resolve().parent.parent / ".tmdb_webui_config.json"
+        try:
+            existing = {}
+            if overrides_file.exists():
+                with open(overrides_file, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            tmdb_sec = existing.get("tmdb", {})
+            for key, val in changes.items():
+                if val is not None:
+                    tmdb_sec[key] = val
+            existing["tmdb"] = tmdb_sec
+            with open(overrides_file, "w", encoding="utf-8") as f:
+                json.dump(existing, f, ensure_ascii=False, indent=2)
+            logging.info("[WebUI] TMDB 配置覆盖已保存: %s", overrides_file)
+        except Exception as e:
+            logging.warning("[WebUI] 保存配置覆盖失败: %s", e)
 
-    def _handle_login_page(self) -> None:
-        self._send_html(_LOGIN_HTML)
-
-    # ==================== API ====================
-
-    def _handle_login(self, params: dict) -> None:
-        raw_password = params.get("password", "")
-        if isinstance(raw_password, list):
-            password = raw_password[0] if raw_password else ""
-        else:
-            password = str(raw_password)
-        if password == self.webui._password:
-            body = json.dumps({"ok": True}).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Set-Cookie", f"webui_auth={password}; Path=/; Max-Age=86400")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        else:
-            self._send_json({"ok": False, "error": "密码错误"}, 401)
-
-    def _handle_logout(self) -> None:
-        body = b'{"ok":true}'
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Set-Cookie", "webui_auth=; Path=/; Max-Age=0")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    def _handle_restart_webui(self) -> None:
+        """重启 WebUI HTTP 服务。"""
+        logging.info("[WebUI] 正在重启 HTTP 服务...")
+        self._send_json({"success": True, "message": "正在重启 WebUI..."})
+        # 在新线程中延迟重启，确保响应已发送
+        def _do_restart():
+            time.sleep(0.5)
+            try:
+                self.webui.stop()
+                self.webui.start()
+                logging.info("[WebUI] HTTP 服务重启完成")
+            except Exception as e:
+                logging.error("[WebUI] 重启失败: %s", e)
+        threading.Thread(target=_do_restart, daemon=True).start()
 
     def _handle_dashboard(self) -> None:
         db: Database = self.webui._db
@@ -233,6 +918,14 @@ class _WebUIHandler(BaseHTTPRequestHandler):
             b_status = db.get_b_status_counts()
             db_size = db.get_db_file_size()
             self._send_json({
+                "a_count": counts.get("a_strm_files", 0),
+                "b_count": counts.get("b_strm_files", 0),
+                "c_count": counts.get("c_ghost_files", 0),
+                "b_valid": b_status.get("valid", 0),
+                "b_orphan": b_status.get("orphan", 0),
+                "b_unknown": b_status.get("unknown", 0),
+                "tmdb_configured": bool(self.webui._tmdb_client),
+                # 遗留字段（保持向后兼容）
                 "table_counts": counts,
                 "b_status_counts": b_status,
                 "db_file_size": db_size,
@@ -242,189 +935,348 @@ class _WebUIHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json({"error": str(e)}, 500)
 
+    def _handle_bing_wallpapers(self) -> None:
+        try:
+            url = "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=8&mkt=zh-CN"
+            req = urllib.request.Request(
+                url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                raw = json.loads(resp.read().decode("utf-8"))
+            wallpapers = []
+            for img in raw.get("images", []):
+                url_path = img.get("url", "")
+                if url_path:
+                    wallpapers.append(
+                        {"url": "https://www.bing.com" + url_path, "copyright": img.get("copyright", "")})
+            self._send_json({"wallpapers": wallpapers})
+        except Exception as e:
+            self._send_json({"wallpapers": [], "error": str(e)})
+
     def _handle_records(self, area: str) -> None:
-        db: Database = self.webui._db
-        try:
-            if area == "a":
-                records = db.get_all_a_records()
-                items = [{"local_path": r[0], "webdav_path": r[1],
-                          "parent_webdav_path": r[2], "updated_at": r[3]}
-                         for r in records]
-            elif area == "b":
-                records = db.get_all_b_records()
-                items = [{"local_path": r[0], "webdav_path": r[1],
-                          "parent_webdav_path": r[2], "source_a_path": r[3],
-                          "fingerprint": r[4], "status": r[5],
-                          "updated_at": r[6]}
-                         for r in records]
-            elif area == "c":
-                records = db.get_all_c()
-                items = [{"local_path": r[0], "webdav_path": r[1],
-                          "original_b_path": r[2], "ghost_root": r[3],
-                          "moved_at": r[4]}
-                         for r in records]
-            else:
-                items = []
-            self._send_json({"count": len(items), "items": items})
-        except Exception as e:
-            self._send_json({"error": str(e)}, 500)
+        items = self._get_records(area)
+        self._send_json({"count": len(items), "items": items})
 
-    def _handle_subtitles(self) -> None:
-        db: Database = self.webui._db
-        try:
-            with db.lock, db.connection() as conn:
-                cur = conn.execute("SELECT * FROM subtitles")
-                cols = [d[0] for d in cur.description] if cur.description else []
-                rows = cur.fetchall()
-                items = [dict(zip(cols, row)) for row in rows]
-            self._send_json({"count": len(items), "items": items})
-        except Exception as e:
-            self._send_json({"error": str(e)}, 500)
-
-    def _handle_config(self) -> None:
-        cfg = self.webui._config
+    def _handle_area(self, area, params):
+        """区域列表：返回按媒体分组的统计摘要（支持分页和排序）"""
+        if area not in ("a", "b", "c"):
+            self._send_json({"error": "invalid area"}, 400)
+            return
+        kind_filter = params.get("kind", ["all"])[0]
+        q = params.get("q", [""])[0].strip().lower()
+        sort_key = params.get("sort", ["name"])[0]
+        sort_order = params.get("order", ["asc"])[0]
+        page = _safe_int(params.get("page", ["1"])[0], 1)
+        page_size = _safe_int(params.get("page_size", ["50"])[0], 50)
+        records = self._get_records(area)
+        kind_label_map = {"anime": "番剧", "movie": "电影", "other": "其他", "all": "全部"}
+        media_groups: dict[tuple[str, str], dict] = {}
+        kind_counts: dict[str, int] = {}
+        from collections import defaultdict
+        kind_counts = defaultdict(int)
+        for rec in records:
+            kind, name = _media_info(rec)
+            key = (kind, name)
+            if key not in media_groups:
+                media_groups[key] = {"name": name, "kind": kind, "count": 0,
+                                     "season": "", "latest_ts": 0}
+            g = media_groups[key]
+            g["count"] += 1
+            cat = _category_filter_value(kind)
+            kind_counts[cat] += 1
+            season = _extract_season_from_local_path(rec.get("local_path", ""))
+            if season and not g["season"]:
+                g["season"] = season
+            ts = rec.get("updated_at") or rec.get("moved_at") or 0
+            if ts and ts > g["latest_ts"]:
+                g["latest_ts"] = ts
+        items = list(media_groups.values())
+        if kind_filter != "all":
+            items = [it for it in items if _category_filter_value(it["kind"]) == kind_filter]
+        if q:
+            items = [it for it in items if q in it["name"].lower()]
+        reverse = sort_order == "desc"
+        if sort_key == "count":
+            items.sort(key=lambda x: x["count"], reverse=reverse)
+        elif sort_key == "time":
+            items.sort(key=lambda x: x["latest_ts"], reverse=reverse)
+        elif sort_key == "kind":
+            items.sort(key=lambda x: x["kind"], reverse=reverse)
+        else:
+            items.sort(key=lambda x: x["name"], reverse=reverse)
+        total = len(items)
+        total_pages = max(1, ceil(total / page_size)) if total > 0 else 1
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * page_size
+        page_items = items[start:start + page_size]
         self._send_json({
+            "area": area,
+            "kind_label": kind_label_map.get(kind_filter, kind_filter),
+            "kind_counts": dict(kind_counts),
+            "media_items": page_items,
+            "total": total,
+            "page": page,
+            "total_pages": total_pages,
+            "page_size": page_size,
+        })
+
+    def _handle_area_detail(self, area, params):
+        """区域详情：返回指定媒体的所有记录，按季分组"""
+        if area not in ("a", "b", "c"):
+            self._send_json({"error": "invalid area"}, 400)
+            return
+        media_name = params.get("media", [""])[0]
+        sort_field = params.get("sort", ["local_path"])[0]
+        sort_order = params.get("order", ["asc"])[0]
+        page = _safe_int(params.get("page", ["1"])[0], 1)
+        records = self._get_records(area)
+        if media_name:
+            records = [r for r in records if media_name in (
+                r.get("local_path") or r.get("webdav_path", ""))]
+        local_root = ""
+        webdav_root = ""
+        if records:
+            local_root = _compute_media_root(records[0].get("local_path", ""))
+            webdav_root = _compute_media_root(records[0].get("webdav_path", ""))
+        total = len(records)
+        # Sort full record list before pagination
+        reverse = sort_order == "desc"
+        if records and sort_field in records[0]:
+            records.sort(key=lambda r: r.get(sort_field, ""), reverse=reverse)
+        total_pages = max(1, ceil(total / PAGE_SIZE)) if total else 1
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * PAGE_SIZE
+        end = start + PAGE_SIZE
+        page_records = records[start:end]
+        seasons_map: dict[str, list[dict]] = {}
+        for rec in page_records:
+            label = _extract_season_from_local_path(rec.get("local_path", "")) or "默认"
+            seasons_map.setdefault(label, []).append(rec)
+        seasons = [{"label": lbl, "records": recs} for lbl, recs in seasons_map.items()]
+        self._send_json({
+            "area": area,
+            "media": media_name,
+            "local_root": local_root,
+            "webdav_root": webdav_root,
+            "total": total,
+            "page": page,
+            "total_pages": total_pages,
+            "seasons": seasons,
+        })
+
+    def _handle_logs_api(self, params: dict[str, list[str]]) -> None:
+        lines = _safe_int(params.get("lines", ["200"])[0], 200)
+        log_file = Path(self.webui._config.log.file)
+        try:
+            if not log_file.exists():
+                self._send_json({"lines": [], "count": 0})
+                return
+            with log_file.open("r", encoding="utf-8", errors="replace") as f:
+                all_lines = f.readlines()
+            tail = all_lines[-lines:]
+            self._send_json({"lines": [line.rstrip()
+                            for line in tail], "count": len(tail)})
+        except Exception as e:
+            self._send_json({"error": str(e)}, 500)
+
+    def _handle_config_api(self) -> None:
+        cfg = self.webui._config
+        tmdb_client = self.webui._tmdb_client
+        token = cfg.tmdb.access_token
+        token_preview = (token[:16] + "...") if len(token) > 16 else (token or "")
+        self._send_json({
+            # 新字段
+            "db_file": cfg.local.db_file,
+            "db_exists": os.path.isfile(cfg.local.db_file),
+            "webui_port": cfg.webui.port,
+            "webui_bind": cfg.webui.bind,
+            "webui_has_password": bool(cfg.webui.password),
+            "tmdb_configured": bool(self.webui._tmdb_client),
+            "tmdb_token_preview": token_preview,
+            "tmdb_token": token,
+            "tmdb_language": cfg.tmdb.language,
+            "tmdb_host": cfg.tmdb.host or "",
+            "tmdb_api_key": cfg.tmdb.api_key or "",
+            "tmdb_api_key_configured": bool(cfg.tmdb.api_key),
+            "tmdb_proxy": _resolve_tmdb_proxy(cfg),
+            "tmdb_proxy_http": getattr(cfg.tmdb.proxy, "http", ""),
+            "tmdb_proxy_enabled": getattr(cfg.tmdb.proxy, "enabled", False),
+            "tmdb_account_id": tmdb_client.account_id if tmdb_client else None,
+            "tmdb_watchlist_db": getattr(cfg.tmdb, "watchlist_db", "") or "",
+            # 遗留字段（保持向后兼容）
             "b_root": cfg.paths.b_root,
             "c_root": cfg.paths.c_root,
             "a_folders": cfg.a_folders,
-            "strm_engine_paths": cfg.strm_engine_paths,
-            "refresh_paths": cfg.refresh_paths,
+            "strm_engine_paths": cfg.paths.strm_engine_paths,
+            "refresh_paths": cfg.paths.refresh_paths,
             "webdav_host": cfg.webdav.host,
             "webdav_user": cfg.webdav.user,
+            "webdav_password": bool(cfg.webdav.password),
             "refresh_enabled": cfg.refresh.enabled,
             "refresh_interval": cfg.refresh.interval_seconds,
             "behavior_action": cfg.behavior.action,
             "ghost_protect_seconds": cfg.behavior.ghost_protect_seconds,
         })
 
-    def _handle_search(self, params: dict) -> None:
-        q = params.get("q", [""])[0].strip()
-        area = params.get("area", ["all"])[0]
-        if not q:
-            self._send_json({"error": "缺少搜索关键词 q"}, 400)
-            return
+    def _get_records(self, area: str) -> list[dict]:
         db: Database = self.webui._db
-        results = []
         try:
-            if area in ("a", "all"):
-                with db.lock, db.connection() as conn:
-                    cur = conn.execute(
-                        "SELECT local_path, webdav_path FROM a_strm_files "
-                        "WHERE local_path LIKE ? OR webdav_path LIKE ?",
-                        (f"%{q}%", f"%{q}%"))
-                    for r in cur.fetchall():
-                        results.append({"area": "a", "local_path": r[0], "webdav_path": r[1]})
-            if area in ("b", "all"):
-                with db.lock, db.connection() as conn:
-                    cur = conn.execute(
-                        "SELECT local_path, webdav_path, fingerprint, status FROM b_strm_files "
-                        "WHERE local_path LIKE ? OR webdav_path LIKE ? OR fingerprint LIKE ?",
-                        (f"%{q}%", f"%{q}%", f"%{q}%"))
-                    for r in cur.fetchall():
-                        results.append({"area": "b", "local_path": r[0],
-                                        "webdav_path": r[1], "fingerprint": r[2],
-                                        "status": r[3]})
-            self._send_json({"count": len(results), "results": results})
-        except Exception as e:
-            self._send_json({"error": str(e)}, 500)
-
-    def _handle_logs(self, params: dict) -> None:
-        lines = int(params.get("lines", ["200"])[0])
-        log_file = self.webui._config.log.file
-        try:
-            if not os.path.exists(log_file):
-                self._send_json({"lines": [], "count": 0})
-                return
-            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-                all_lines = f.readlines()
-            tail = all_lines[-lines:]
-            self._send_json({"lines": [l.rstrip() for l in tail], "count": len(tail)})
-        except Exception as e:
-            self._send_json({"error": str(e)}, 500)
-
-    def _handle_delete_b(self, data: dict) -> None:
-        local_path = data.get("local_path", "")
-        if not local_path:
-            self._send_json({"error": "缺少 local_path"}, 400)
-            return
-        db: Database = self.webui._db
-        db.delete_b_by_local(local_path)
-        self._send_json({"ok": True, "deleted": local_path})
-
-    def _handle_delete_a(self, data: dict) -> None:
-        local_path = data.get("local_path", "")
-        if not local_path:
-            self._send_json({"error": "缺少 local_path"}, 400)
-            return
-        db: Database = self.webui._db
-        db.delete_a_by_local(local_path)
-        self._send_json({"ok": True, "deleted": local_path})
-
-    def _handle_cleanup_ghosts(self) -> None:
-        db: Database = self.webui._db
-        db.cleanup_expired_ghosts()
-        self._send_json({"ok": True})
-
-    def _handle_bing_wallpapers(self) -> None:
-        """获取最近 8 天的 Bing 壁纸 URL 列表"""
-        try:
-            url = "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=8&mkt=zh-CN"
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                raw = json.loads(resp.read().decode("utf-8"))
-            images = raw.get("images", [])
-            wallpapers = []
-            for img in images:
-                url_path = img.get("url", "")
-                if url_path:
-                    wallpapers.append({
-                        "url": "https://www.bing.com" + url_path,
-                        "copyright": img.get("copyright", ""),
-                    })
-            self._send_json({"wallpapers": wallpapers})
-        except Exception as e:
-            self._send_json({"wallpapers": [], "error": str(e)})
+            if area == "a":
+                return [{"local_path": r[0], "webdav_path": r[1], "parent_webdav_path": r[2],
+                         "updated_at": r[3]} for r in db.get_all_a_records()]
+            if area == "b":
+                return [{"local_path": r[0], "webdav_path": r[1], "parent_webdav_path": r[2], "source_a_path": r[3],
+                         "fingerprint": r[4], "status": r[5], "updated_at": r[6]} for r in db.get_all_b_records()]
+            if area == "c":
+                return [{"local_path": r[0], "webdav_path": r[1], "original_b_path": r[2],
+                         "ghost_root": r[3], "moved_at": r[4]} for r in db.get_all_c()]
+        except Exception:
+            logging.exception("[WebUI] 读取 %s 区失败", area)
+        return []
 
 
 class WebUIServer:
-    """WebUI HTTP 服务器"""
-
-    def __init__(self, config: WebUIConfig, db: Database, app_config=None) -> None:
+    def __init__(self, config: WebUIConfig, db: Database,
+                 app_config=None) -> None:
         self._config = app_config
         self._db = db
-        self._password = config.password
         self._port = config.port
         self._bind = config.bind
         self._enabled = config.enabled
+        self._start_time = time.time()
         self._server: HTTPServer | None = None
         self._thread: threading.Thread | None = None
-        self._start_time = time.time()
+
+        # 顺序很重要：先加载覆盖文件，再据此初始化客户端与 DB，
+        # 否则 .tmdb_webui_config.json 中的 token / host / watchlist_db 覆盖
+        # 不会在首次启动生效。
+        self._tmdb_client = None
+        self._watchlist_db: TmdbWatchlistDb | None = None
+
+        # 1) 先用 config.toml 原始值初始化客户端（覆盖不存在/失败时的兜底）
+        self._init_tmdb_client()
+        # 2) 再加载覆盖（内部会在覆盖生效后重新 _init_tmdb_client）
+        self._load_webui_overrides()
+        # 3) 最后据最终配置创建 watchlist DB（路径来自 self._config）
+        self._reinit_watchlist_db()
+
+    def _load_webui_overrides(self) -> None:
+        """加载 .tmdb_webui_config.json 覆盖文件（不写回 config.toml）。
+
+        JSON 中 proxy 采用扁平字段（proxy_http / proxy_enabled），
+        与前端表单及 test_webui.py 保持一致；读回时映射到嵌套的
+        TmdbConfig.proxy 对象。
+        """
+        overrides_file = Path(__file__).resolve().parent.parent / ".tmdb_webui_config.json"
+        if not overrides_file.exists():
+            return
+        try:
+            with open(overrides_file, "r", encoding="utf-8") as f:
+                overrides = json.load(f)
+            tmdb_overrides = overrides.get("tmdb", {})
+            if tmdb_overrides and hasattr(self._config, "tmdb"):
+                cfg_tmdb = self._config.tmdb
+                proxy_changed = False
+                for key, val in tmdb_overrides.items():
+                    if val is None:
+                        continue
+                    # proxy 扁平字段单独处理
+                    if key == "proxy_http":
+                        cfg_tmdb.proxy.http = val or ""
+                        proxy_changed = True
+                        continue
+                    if key == "proxy_enabled":
+                        cfg_tmdb.proxy.enabled = bool(val)
+                        proxy_changed = True
+                        continue
+                    # 其余字段需是 TmdbConfig 已声明槽位，避免 AttributeError
+                    if val != "" and hasattr(cfg_tmdb, key):
+                        setattr(cfg_tmdb, key, val)
+                logging.info(
+                    "[WebUI] 已加载 .tmdb_webui_config.json 配置覆盖"
+                    + (" (含代理设置)" if proxy_changed else "")
+                )
+                # 重新初始化 TMDB 客户端（覆盖可能改变了 token / host / proxy 等）
+                self._init_tmdb_client()
+        except Exception as e:
+            logging.debug("[WebUI] 加载 .tmdb_webui_config.json 失败: %s", e)
+
+    def _init_tmdb_client(self) -> None:
+        """初始化或重新初始化 TMDB 客户端。"""
+        self._tmdb_client = None
+        try:
+            from tmdb_client import create_tmdb_client
+            tmdb_cfg = getattr(self._config, "tmdb", None)
+            if tmdb_cfg:
+                has_token = bool(getattr(tmdb_cfg, "access_token", None))
+                has_key = bool(getattr(tmdb_cfg, "api_key", None))
+                if has_token or has_key:
+                    proxy = _resolve_tmdb_proxy(self._config)
+                    self._tmdb_client = create_tmdb_client(
+                        access_token=getattr(tmdb_cfg, "access_token", "") or "",
+                        language=getattr(tmdb_cfg, "language", "zh-CN"),
+                        proxy=proxy,
+                        host=getattr(tmdb_cfg, "host", ""),
+                        api_key=getattr(tmdb_cfg, "api_key", "") or "",
+                    )
+        except Exception as e:
+            logging.debug("[WebUI] TMDB 客户端初始化失败: %s", e)
+
+    def _reinit_watchlist_db(self) -> None:
+        """据当前配置重建 TMDB 待看列表 SQLite 数据库。
+
+        统一的 db 路径解析逻辑，供 __init__ 与配置变更后复用。
+        watchlist_db 留空时默认放在配置目录（base_dir）下。
+        """
+        tmdb_cfg = getattr(self._config, "tmdb", None)
+        if not tmdb_cfg:
+            self._watchlist_db = None
+            return
+        # 无凭据时不创建 DB（与原行为一致）
+        if not (bool(getattr(tmdb_cfg, "access_token", None))
+                or bool(getattr(tmdb_cfg, "api_key", None))):
+            self._watchlist_db = None
+            return
+        db_path = getattr(tmdb_cfg, "watchlist_db", "") or ""
+        if not db_path:
+            base_dir = getattr(self._config, "base_dir", str(Path.cwd()))
+            db_path = os.path.join(str(base_dir), "tmdb_watchlist.db")
+        ttl = float(getattr(tmdb_cfg, "watchlist_cache_ttl", 604800))
+        try:
+            self._watchlist_db = TmdbWatchlistDb(db_path, ttl)
+        except Exception as e:
+            logging.warning("[WebUI] 待看列表数据库初始化失败: %s", e)
+            self._watchlist_db = None
+
+    def get_watchlist_cached(self) -> list[dict]:
+        """获取待看列表（委托给 TmdbWatchlistDb，带 TTL 判断）。"""
+        if not self._tmdb_client or not self._watchlist_db:
+            return []
+        try:
+            return self._watchlist_db.sync(self._tmdb_client)
+        except Exception as e:
+            logging.warning("[TMDB] 同步失败，返回已有缓存: %s", e)
+            return self._watchlist_db.get_all()
 
     def start(self) -> None:
         if not self._enabled:
             logging.info("[WebUI] 已禁用，跳过启动")
             return
-        # 检查绑定地址是否为局域网/本地
         bind_ip = self._bind
-        if bind_ip != "127.0.0.1" and bind_ip != "0.0.0.0":
-            if not _is_lan_ip(bind_ip):
-                logging.warning("[WebUI] 绑定地址 %s 可能不是局域网地址", bind_ip)
-
-        # 捕获 config 和 db 到 handler 类
-        handler = type("_BoundHandler", (_WebUIHandler,), {
-            "webui": self,
-        })
-
+        if bind_ip not in ("127.0.0.1", "0.0.0.0") and not _is_lan_ip(bind_ip):
+            logging.warning("[WebUI] 绑定地址 %s 可能不是局域网地址", bind_ip)
+        handler_cls = type("_BoundHandler", (_WebUIHandler,), {})
+        handler_cls.webui = self
+        handler_cls.allow_reuse_address = True
         try:
-            self._server = HTTPServer((self._bind, self._port), handler)
-            self._server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._server = HTTPServer((self._bind, self._port), handler_cls)
             self._thread = threading.Thread(
                 target=self._server.serve_forever, daemon=True, name="WebUI")
             self._thread.start()
-            logging.info("[WebUI] 管理面板已启动: http://%s:%s", self._bind, self._port)
+            logging.info(
+                "[WebUI] 管理面板已启动: http://%s:%s",
+                self._bind,
+                self._port)
         except OSError as e:
             logging.error("[WebUI] 启动失败 (端口 %s): %s", self._port, e)
 
@@ -434,440 +1286,3 @@ class WebUIServer:
             self._server.server_close()
             self._server = None
             logging.info("[WebUI] 已停止")
-
-
-def _human_size(size: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024:
-            return f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} TB"
-
-
-# ==================== HTML 模板 ====================
-
-_DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>STRM Bridge 管理面板</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
-#wallpaper-bg { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: -2; background: #0f172a; background-size: cover; background-position: center; transition: opacity 2s ease-in-out; }
-#wallpaper-overlay { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: -1; background: linear-gradient(180deg, rgba(15,23,42,0.55) 0%, rgba(15,23,42,0.75) 50%, rgba(15,23,42,0.9) 100%); pointer-events: none; }
-#wallpaper-info { position: fixed; bottom: 12px; right: 16px; z-index: 1; font-size: 11px; color: rgba(148,163,184,0.6); max-width: 400px; text-align: right; }
-.header { background: linear-gradient(135deg, rgba(30,41,59,0.85) 0%, rgba(15,23,42,0.9) 100%); border-bottom: 1px solid #334155; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; backdrop-filter: blur(12px); }
-.header h1 { font-size: 20px; color: #38bdf8; }
-.header .subtitle { font-size: 12px; color: #64748b; margin-top: 2px; }
-.header .nav { display: flex; gap: 8px; }
-.header .nav button { background: #1e293b; border: 1px solid #475569; color: #94a3b8; padding: 6px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.2s; }
-.header .nav button:hover, .header .nav button.active { background: #334155; color: #38bdf8; border-color: #38bdf8; }
-.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
-.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; margin-bottom: 20px; }
-.stat-card { background: rgba(30,41,59,0.78); border: 1px solid rgba(51,65,85,0.9); border-radius: 10px; padding: 16px; backdrop-filter: blur(12px); box-shadow: 0 10px 30px rgba(0,0,0,0.22); }
-.stat-card .label { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
-.stat-card .value { font-size: 28px; font-weight: 700; color: #38bdf8; margin-top: 4px; }
-.stat-card .value.green { color: #4ade80; }
-.stat-card .value.yellow { color: #fbbf24; }
-.stat-card .value.red { color: #f87171; }
-.section { background: rgba(30,41,59,0.80); border: 1px solid rgba(51,65,85,0.9); border-radius: 10px; padding: 20px; margin-bottom: 16px; backdrop-filter: blur(12px); box-shadow: 0 10px 30px rgba(0,0,0,0.22); }
-.section h2 { font-size: 16px; color: #e2e8f0; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
-.section h2 .icon { font-size: 18px; }
-.search-box { display: flex; gap: 8px; margin-bottom: 12px; }
-.search-box input { flex: 1; background: #0f172a; border: 1px solid #475569; color: #e2e8f0; padding: 8px 12px; border-radius: 6px; font-size: 13px; }
-.search-box input:focus { outline: none; border-color: #38bdf8; }
-.search-box select { background: #0f172a; border: 1px solid #475569; color: #e2e8f0; padding: 8px; border-radius: 6px; font-size: 13px; }
-.search-box button { background: #2563eb; border: none; color: white; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 13px; }
-.search-box button:hover { background: #1d4ed8; }
-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-th { text-align: left; padding: 8px 10px; border-bottom: 2px solid #475569; color: #94a3b8; font-weight: 600; white-space: nowrap; }
-td { padding: 6px 10px; border-bottom: 1px solid #1e293b; color: #cbd5e1; word-break: break-all; max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
-tr:hover td { background: rgba(56, 189, 248, 0.05); }
-.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-.badge.valid { background: rgba(74, 222, 128, 0.15); color: #4ade80; }
-.badge.duplicate { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
-.badge.ghost { background: rgba(248, 113, 113, 0.15); color: #f87171; }
-.btn-sm { padding: 3px 10px; border-radius: 4px; border: 1px solid #475569; background: transparent; color: #94a3b8; cursor: pointer; font-size: 11px; }
-.btn-sm:hover { background: #334155; color: #f87171; border-color: #f87171; }
-.loading { text-align: center; padding: 40px; color: #64748b; }
-.log-area { background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 12px; font-family: "Cascadia Code", "Fira Code", monospace; font-size: 11px; line-height: 1.6; max-height: 500px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
-.log-line { padding: 1px 0; }
-.log-line.info { color: #38bdf8; }
-.log-line.warning { color: #fbbf24; }
-.log-line.error { color: #f87171; }
-.log-line.debug { color: #64748b; }
-.pagination { display: flex; justify-content: center; gap: 8px; margin-top: 12px; }
-.pagination button { background: #1e293b; border: 1px solid #475569; color: #94a3b8; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
-.pagination button:hover { background: #334155; }
-.pagination button:disabled { opacity: 0.4; cursor: default; }
-.hidden { display: none !important; }
-</style>
-</head>
-<body>
-<div id="wallpaper-bg"></div>
-<div id="wallpaper-overlay"></div>
-<div id="wallpaper-info"></div>
-<div class="header">
-  <div>
-    <h1>🎬 STRM Bridge 管理面板</h1>
-    <div class="subtitle">openlist_strm_bridge · 实时监控与管理</div>
-  </div>
-  <div class="nav">
-    <button class="active" onclick="showTab('dashboard')">📊 仪表盘</button>
-    <button onclick="showTab('area_b')">📁 B区</button>
-    <button onclick="showTab('area_a')">📂 A区</button>
-    <button onclick="showTab('area_c')">👻 C区</button>
-    <button onclick="showTab('search')">🔍 搜索</button>
-    <button onclick="showTab('logs')">📜 日志</button>
-    <button onclick="showTab('config')">⚙️ 配置</button>
-  </div>
-</div>
-<div class="container">
-  <!-- Dashboard -->
-  <div id="tab-dashboard">
-    <div class="stats" id="stats-grid"></div>
-    <div class="section">
-      <h2><span class="icon">📋</span> B区状态分布</h2>
-      <div id="b-status"></div>
-    </div>
-  </div>
-  <!-- Area B -->
-  <div id="tab-area_b" class="hidden">
-    <div class="section">
-      <h2><span class="icon">📁</span> B区文件记录 <span id="b-count" style="font-size:12px;color:#64748b"></span></h2>
-      <div id="b-table-area"></div>
-    </div>
-  </div>
-  <!-- Area A -->
-  <div id="tab-area_a" class="hidden">
-    <div class="section">
-      <h2><span class="icon">📂</span> A区文件记录 <span id="a-count" style="font-size:12px;color:#64748b"></span></h2>
-      <div id="a-table-area"></div>
-    </div>
-  </div>
-  <!-- Area C -->
-  <div id="tab-area_c" class="hidden">
-    <div class="section">
-      <h2><span class="icon">👻</span> C区幽灵文件 <span id="c-count" style="font-size:12px;color:#64748b"></span></h2>
-      <div id="c-table-area"></div>
-    </div>
-  </div>
-  <!-- Search -->
-  <div id="tab-search" class="hidden">
-    <div class="section">
-      <h2><span class="icon">🔍</span> 全局搜索</h2>
-      <div class="search-box">
-        <input id="search-input" placeholder="输入关键词搜索文件路径、指纹..." onkeydown="if(event.key==='Enter')doSearch()">
-        <select id="search-area">
-          <option value="all">全部区域</option>
-          <option value="a">A区</option>
-          <option value="b">B区</option>
-        </select>
-        <button onclick="doSearch()">搜索</button>
-      </div>
-      <div id="search-results"></div>
-    </div>
-  </div>
-  <!-- Logs -->
-  <div id="tab-logs" class="hidden">
-    <div class="section">
-      <h2><span class="icon">📜</span> 运行日志 <button class="btn-sm" onclick="loadLogs()" style="margin-left:auto">🔄 刷新</button></h2>
-      <div class="log-area" id="log-content">加载中...</div>
-    </div>
-  </div>
-  <!-- Config -->
-  <div id="tab-config" class="hidden">
-    <div class="section">
-      <h2><span class="icon">⚙️</span> 运行配置</h2>
-      <div id="config-content" style="font-size:13px;line-height:1.8;"></div>
-    </div>
-  </div>
-</div>
-
-<script>
-const API = '';
-let currentTab = 'dashboard';
-let allRecords = {a:[], b:[], c:[]};
-const PAGE_SIZE = 100;
-let pageState = {a:0, b:0, c:0};
-
-function showTab(tab) {
-  document.querySelectorAll('[id^="tab-"]').forEach(el => el.classList.add('hidden'));
-  document.getElementById('tab-' + tab).classList.remove('hidden');
-  document.querySelectorAll('.nav button').forEach(btn => btn.classList.remove('active'));
-  document.querySelectorAll('.nav button').forEach(btn => { if(btn.textContent.includes(tabLabel(tab))) btn.classList.add('active'); });
-  currentTab = tab;
-  if (tab === 'dashboard') loadDashboard();
-  if (tab === 'area_b') loadRecords('b');
-  if (tab === 'area_a') loadRecords('a');
-  if (tab === 'area_c') loadRecords('c');
-  if (tab === 'logs') loadLogs();
-  if (tab === 'config') loadConfig();
-}
-
-function tabLabel(t) {
-  const m = {dashboard:'仪表盘',area_b:'B区',area_a:'A区',area_c:'C区',search:'搜索',logs:'日志',config:'配置'};
-  return m[t]||t;
-}
-
-async function loadDashboard() {
-  try {
-    const r = await fetch(API + '/api/dashboard');
-    const d = await r.json();
-    const counts = d.table_counts || {};
-    const grid = document.getElementById('stats-grid');
-    grid.innerHTML = `
-      <div class="stat-card"><div class="label">A区 STRM</div><div class="value">${counts.a_strm_files||0}</div></div>
-      <div class="stat-card"><div class="label">B区 STRM</div><div class="value green">${counts.b_strm_files||0}</div></div>
-      <div class="stat-card"><div class="label">C区 幽灵文件</div><div class="value red">${counts.c_ghost_files||0}</div></div>
-      <div class="stat-card"><div class="label">身份映射</div><div class="value">${counts.strm_identity||0}</div></div>
-      <div class="stat-card"><div class="label">Ghost 保护</div><div class="value yellow">${counts.ghost_protection||0}</div></div>
-      <div class="stat-card"><div class="label">字幕记录</div><div class="value">${counts.subtitles||0}</div></div>
-      <div class="stat-card"><div class="label">数据库大小</div><div class="value">${d.db_file_size_human}</div></div>
-      <div class="stat-card"><div class="label">运行时间</div><div class="value">${fmtDuration(d.uptime)}</div></div>
-    `;
-    const bs = d.b_status_counts || {};
-    const bsArea = document.getElementById('b-status');
-    let bsHtml = '<div style="display:flex;gap:12px;flex-wrap:wrap;">';
-    for (const [k,v] of Object.entries(bs)) {
-      const cls = k === 'valid' ? 'valid' : (k === 'duplicate' ? 'duplicate' : 'ghost');
-      bsHtml += `<span class="badge ${cls}">${k}: ${v}</span>`;
-    }
-    bsHtml += '</div>';
-    bsArea.innerHTML = bsHtml;
-  } catch(e) { document.getElementById('stats-grid').innerHTML = '<div class="loading">加载失败</div>'; }
-}
-
-async function loadRecords(area) {
-  const container = document.getElementById(area + '-table-area');
-  container.innerHTML = '<div class="loading">加载中...</div>';
-  try {
-    const r = await fetch(API + '/api/records/' + area);
-    const d = await r.json();
-    allRecords[area] = d.items || [];
-    document.getElementById(area + '-count').textContent = `(${d.count} 条)`;
-    pageState[area] = 0;
-    renderTable(area);
-  } catch(e) { container.innerHTML = '<div class="loading">加载失败</div>'; }
-}
-
-function renderTable(area) {
-  const container = document.getElementById(area + '-table-area');
-  const items = allRecords[area];
-  const page = pageState[area];
-  const start = page * PAGE_SIZE;
-  const end = Math.min(start + PAGE_SIZE, items.length);
-  const pageItems = items.slice(start, end);
-  const totalPages = Math.ceil(items.length / PAGE_SIZE);
-
-  let html = '<table><thead><tr>';
-  if (area === 'a') html += '<th>#</th><th>本地路径</th><th>WebDAV 路径</th><th>更新时间</th><th>操作</th>';
-  if (area === 'b') html += '<th>#</th><th>本地路径</th><th>WebDAV 路径</th><th>指纹</th><th>状态</th><th>操作</th>';
-  if (area === 'c') html += '<th>#</th><th>本地路径</th><th>原始B路径</th><th>幽灵根</th><th>移动时间</th>';
-  html += '</tr></thead><tbody>';
-  pageItems.forEach((item, i) => {
-    const idx = start + i + 1;
-    html += '<tr>';
-    html += '<td>' + idx + '</td>';
-    if (area === 'a') {
-      html += '<td title="' + esc(item.local_path) + '">' + trunc(item.local_path) + '</td>';
-      html += '<td title="' + esc(item.webdav_path) + '">' + trunc(item.webdav_path) + '</td>';
-      html += '<td>' + fmtTime(item.updated_at) + '</td>';
-      html += '<td><button class="btn-sm" onclick="delA(\\'' + esc(item.local_path) + '\\')">删除</button></td>';
-    }
-    if (area === 'b') {
-      html += '<td title="' + esc(item.local_path) + '">' + trunc(item.local_path) + '</td>';
-      html += '<td title="' + esc(item.webdav_path) + '">' + trunc(item.webdav_path) + '</td>';
-      html += '<td title="' + esc(item.fingerprint||'') + '">' + trunc(item.fingerprint||'-', 16) + '</td>';
-      html += '<td><span class="badge ' + (item.status||'valid') + '">' + (item.status||'valid') + '</span></td>';
-      html += '<td><button class="btn-sm" onclick="delB(\\'' + esc(item.local_path) + '\\')">删除</button></td>';
-    }
-    if (area === 'c') {
-      html += '<td title="' + esc(item.local_path) + '">' + trunc(item.local_path) + '</td>';
-      html += '<td title="' + esc(item.original_b_path) + '">' + trunc(item.original_b_path) + '</td>';
-      html += '<td title="' + esc(item.ghost_root) + '">' + trunc(item.ghost_root) + '</td>';
-      html += '<td>' + fmtTime(item.moved_at) + '</td>';
-    }
-    html += '</tr>';
-  });
-  html += '</tbody></table>';
-
-  if (totalPages > 1) {
-    html += '<div class="pagination">';
-    html += '<button ' + (page===0?'disabled':'') + ' onclick="goPage(\\'' + area + '\\',' + (page-1) + ')">上一页</button>';
-    html += '<span style="color:#64748b;padding:4px 12px;font-size:12px;">第 ' + (page+1) + '/' + totalPages + ' 页 (共 ' + items.length + ' 条)</span>';
-    html += '<button ' + (page>=totalPages-1?'disabled':'') + ' onclick="goPage(\\'' + area + '\\',' + (page+1) + ')">下一页</button>';
-    html += '</div>';
-  }
-  container.innerHTML = html;
-}
-
-function goPage(area, page) {
-  pageState[area] = page;
-  renderTable(area);
-}
-
-async function delB(p) {
-  if (!confirm('确定删除B区记录？\\n' + p)) return;
-  await fetch(API + '/api/delete/b', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({local_path:p})});
-  loadRecords('b');
-}
-
-async function delA(p) {
-  if (!confirm('确定删除A区记录？\\n' + p)) return;
-  await fetch(API + '/api/delete/a', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({local_path:p})});
-  loadRecords('a');
-}
-
-async function doSearch() {
-  const q = document.getElementById('search-input').value.trim();
-  const area = document.getElementById('search-area').value;
-  if (!q) return;
-  const container = document.getElementById('search-results');
-  container.innerHTML = '<div class="loading">搜索中...</div>';
-  try {
-    const r = await fetch(API + '/api/search?q=' + encodeURIComponent(q) + '&area=' + area);
-    const d = await r.json();
-    if (d.error) { container.innerHTML = '<div class="loading">' + d.error + '</div>'; return; }
-    let html = '<div style="color:#64748b;font-size:12px;margin-bottom:8px;">找到 ' + d.count + ' 条结果</div>';
-    html += '<table><thead><tr><th>区域</th><th>本地路径</th><th>WebDAV 路径</th><th>指纹/状态</th></tr></thead><tbody>';
-    d.results.forEach(item => {
-      html += '<tr>';
-      html += '<td><span class="badge ' + (item.area==='b'?'valid':'ghost') + '">' + item.area + '</td>';
-      html += '<td title="' + esc(item.local_path) + '">' + trunc(item.local_path) + '</td>';
-      html += '<td title="' + esc(item.webdav_path) + '">' + trunc(item.webdav_path) + '</td>';
-      html += '<td>' + (item.fingerprint ? trunc(item.fingerprint, 16) : (item.status||'-')) + '</td>';
-      html += '</tr>';
-    });
-    html += '</tbody></table>';
-    container.innerHTML = html;
-  } catch(e) { container.innerHTML = '<div class="loading">搜索失败</div>'; }
-}
-
-async function loadLogs() {
-  try {
-    const r = await fetch(API + '/api/logs?lines=300');
-    const d = await r.json();
-    const el = document.getElementById('log-content');
-    el.innerHTML = (d.lines||[]).map(l => {
-      let cls = '';
-      if (l.includes('[ERROR]') || l.includes('ERROR')) cls = 'error';
-      else if (l.includes('[WARNING]') || l.includes('WARNING')) cls = 'warning';
-      else if (l.includes('[DEBUG]') || l.includes('DEBUG')) cls = 'debug';
-      else cls = 'info';
-      return '<div class="log-line ' + cls + '">' + esc(l) + '</div>';
-    }).join('');
-    el.scrollTop = el.scrollHeight;
-  } catch(e) { document.getElementById('log-content').textContent = '加载日志失败'; }
-}
-
-async function loadConfig() {
-  try {
-    const r = await fetch(API + '/api/config');
-    const d = await r.json();
-    const el = document.getElementById('config-content');
-    el.innerHTML = Object.entries(d).map(([k,v]) =>
-      '<div style="display:flex;border-bottom:1px solid #334155;padding:4px 0;"><span style="color:#64748b;width:220px;">' + k + '</span><span style="color:#e2e8f0;">' + esc(String(Array.isArray(v)?v.join(', '):v)) + '</span></div>'
-    ).join('');
-  } catch(e) { document.getElementById('config-content').textContent = '加载配置失败'; }
-}
-
-function fmtTime(ts) {
-  if (!ts) return '-';
-  return new Date(ts * 1000).toLocaleString('zh-CN');
-}
-function fmtDuration(s) {
-  if (!s) return '-';
-  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
-  return h > 0 ? h + '时' + m + '分' : m + '分' + Math.floor(s%60) + '秒';
-}
-function trunc(s, n) { n = n || 40; if (!s) return ''; return s.length > n ? s.substring(0, n) + '...' : s; }
-function esc(s) { const el = document.createElement('span'); el.textContent = s; return el.innerHTML; }
-
-let bingWallpapers = [];
-let wallpaperIndex = 0;
-let wallpaperTimer = null;
-
-async function loadBingWallpapers() {
-  try {
-    const r = await fetch(API + '/api/bing-wallpapers');
-    const d = await r.json();
-    bingWallpapers = d.wallpapers || [];
-    if (bingWallpapers.length > 0) {
-      setWallpaper(0);
-      if (wallpaperTimer) clearInterval(wallpaperTimer);
-      wallpaperTimer = setInterval(nextWallpaper, 45000);
-    }
-  } catch(e) {
-    console.warn('Bing 壁纸加载失败', e);
-  }
-}
-
-function setWallpaper(index) {
-  if (!bingWallpapers.length) return;
-  wallpaperIndex = index % bingWallpapers.length;
-  const item = bingWallpapers[wallpaperIndex];
-  const bg = document.getElementById('wallpaper-bg');
-  const info = document.getElementById('wallpaper-info');
-  if (!bg || !item) return;
-  bg.style.opacity = '0';
-  setTimeout(() => {
-    bg.style.backgroundImage = 'url("' + item.url + '")';
-    bg.style.opacity = '1';
-    if (info) info.textContent = item.copyright || '';
-  }, 350);
-}
-
-function nextWallpaper() {
-  if (!bingWallpapers.length) return;
-  setWallpaper((wallpaperIndex + 1) % bingWallpapers.length);
-}
-
-loadBingWallpapers();
-loadDashboard();
-</script>
-</body>
-</html>"""
-
-_LOGIN_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>STRM Bridge - 登录</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-.login-box { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 40px; width: 360px; text-align: center; }
-.login-box h1 { font-size: 22px; color: #38bdf8; margin-bottom: 8px; }
-.login-box p { font-size: 13px; color: #64748b; margin-bottom: 24px; }
-.login-box input { width: 100%; padding: 10px 14px; background: #0f172a; border: 1px solid #475569; color: #e2e8f0; border-radius: 6px; font-size: 14px; margin-bottom: 12px; }
-.login-box input:focus { outline: none; border-color: #38bdf8; }
-.login-box button { width: 100%; padding: 10px; background: #2563eb; border: none; color: white; border-radius: 6px; font-size: 14px; cursor: pointer; }
-.login-box button:hover { background: #1d4ed8; }
-.error { color: #f87171; font-size: 12px; margin-top: 8px; }
-</style>
-</head>
-<body>
-<div class="login-box">
-  <h1>🎬 STRM Bridge</h1>
-  <p>请输入管理密码</p>
-  <input type="password" id="pwd" placeholder="密码" onkeydown="if(event.key==='Enter')doLogin()">
-  <button onclick="doLogin()">登录</button>
-  <div id="err" class="error"></div>
-</div>
-<script>
-async function doLogin() {
-  const pwd = document.getElementById('pwd').value;
-  try {
-    const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({password:pwd})});
-    const d = await r.json();
-    if (d.ok) location.href = '/';
-    else document.getElementById('err').textContent = d.error || '登录失败';
-  } catch(e) { document.getElementById('err').textContent = '网络错误'; }
-}
-</script>
-</body>
-</html>"""

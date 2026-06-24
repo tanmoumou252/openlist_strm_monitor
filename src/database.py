@@ -108,7 +108,7 @@ class Database:
                 try:
                     conn.execute(
                         "CREATE TABLE IF NOT EXISTS _write_test(x)")
-                    conn.execute("DROP TABLE IF NOT EXISTS _write_test")
+                    conn.execute("DROP TABLE _write_test")
                     conn.commit()
                 except sqlite3.OperationalError as e:
                     conn.close()

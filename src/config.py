@@ -86,6 +86,34 @@ class WebUIConfig:
 
 
 @dataclass(slots=True)
+class TmdbProxyConfig:
+    """TMDB 代理配置"""
+    enabled: bool = False
+    http: str = ""
+    https: str = ""
+
+
+@dataclass(slots=True)
+class TmdbConfig:
+    """TMDB 待看列表配置"""
+    access_token: str = ""
+    api_enabled: bool = False  # DEPRECATED, will be removed in a future release
+    language: str = "zh-CN"
+    host: str = ""
+    api_key: str = ""
+    html_movie_file: str = "movie.htm"  # DEPRECATED, will be removed in a future release
+    html_tv_file: str = "tv.htm"  # DEPRECATED, will be removed in a future release
+    csv_watchlist_file: str = ""
+    watchlist_db: str = ""
+    watchlist_cache_ttl: float = 604800  # 默认 7 天
+    exact_threshold: float = 0.85
+    fuzzy_threshold: float = 0.60
+    anime_min_ep_ratio: float = 0.3
+    anime_max_season_diff: int = 1
+    proxy: TmdbProxyConfig = field(default_factory=TmdbProxyConfig)
+
+
+@dataclass(slots=True)
 class LocalConfig:
     base_dir: str
     a_dir: str
@@ -160,6 +188,7 @@ class AppConfig:
     local: LocalConfig
     paths: PathsConfig
     webui: WebUIConfig = field(default_factory=WebUIConfig)
+    tmdb: TmdbConfig = field(default_factory=TmdbConfig)
     a_folders: list[str] = field(default_factory=list)
     # STRM 存储映射 mount_path -> StrmStorageMapping
     strm_storage_map: dict[str, StrmStorageMapping] = field(
@@ -196,9 +225,9 @@ class AppConfig:
             a_dir=os.path.join(base_dir, "a"),
             b_dir=b_root,
             c_dir=c_root,
-            db_file=os.path.join(
+            db_file=os.path.normpath(os.path.join(
                 base_dir, local_data.get(
-                    "db_file", "bridge.db")),
+                    "db_file", "bridge.db"))),
         )
 
         webdav_data = data.get("webdav", {})
@@ -336,6 +365,29 @@ class AppConfig:
             password=webui_data.get("password", ""),
         )
 
+        # 解析 [tmdb] 配置
+        tmdb_data = data.get("tmdb", {})
+        proxy_data = tmdb_data.get("proxy", {})
+        proxy = TmdbProxyConfig(
+            enabled=proxy_data.get("enabled", False),
+            http=proxy_data.get("http", ""),
+            https=proxy_data.get("https", ""),
+        )
+        tmdb = TmdbConfig(
+            access_token=tmdb_data.get("access_token", ""),
+            language=tmdb_data.get("language", "zh-CN"),
+            host=tmdb_data.get("host", ""),
+            api_key=tmdb_data.get("api_key", ""),
+            csv_watchlist_file=tmdb_data.get("csv_watchlist_file", ""),
+            watchlist_db=tmdb_data.get("watchlist_db", ""),
+            watchlist_cache_ttl=float(tmdb_data.get("watchlist_cache_ttl", 604800)),
+            exact_threshold=float(tmdb_data.get("exact_threshold", 0.85)),
+            fuzzy_threshold=float(tmdb_data.get("fuzzy_threshold", 0.60)),
+            anime_min_ep_ratio=float(tmdb_data.get("anime_min_ep_ratio", 0.3)),
+            anime_max_season_diff=int(tmdb_data.get("anime_max_season_diff", 1)),
+            proxy=proxy,
+        )
+
         instance = cls.__new__(cls)
         instance.base_dir = base_dir
         instance.webdav = webdav
@@ -345,6 +397,7 @@ class AppConfig:
         instance.local = local
         instance.paths = paths
         instance.webui = webui
+        instance.tmdb = tmdb
         instance.a_folders = read_line_list(
             paths_data.get("a_folders_file", "a_folders.txt"),
             base_dir,
@@ -408,6 +461,7 @@ class AppConfig:
             c_root=os.path.join(base_dir, "c"),
         )
         self.a_folders = read_line_list("a_folders.txt", base_dir)
+        self.tmdb = TmdbConfig()
 
     @staticmethod
     def _read_single_line(file_path: str, base_dir: str | Path) -> str:

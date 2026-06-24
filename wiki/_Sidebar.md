@@ -8,3 +8,4 @@
 * [🎧 五、 字幕同步与标准化处理](Subtitle-Sync-&-Standardization)
 * [⚙️ 六、 配置系统与存储映射架构](Configuration-&-Storage-Mapping)
 * [🗃️ 七、 数据库结构参考](Database-Schema-Reference)
+* [🖥️ 八、 WebUI 管理面板与 TMDB](WebUI-Management-&-TMDB)

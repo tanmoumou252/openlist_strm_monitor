@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-system="fluent" data-mode="light" data-color="blue">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fluent 2 vs Material Design 3 风格实验室</title>
+    <style>
+        /* ==========================================================================
+           1. 设计系统基础变量 (Design Tokens)
+           ========================================================================== */
+
+        /* ----- FLUENT 2 核心特征 -----
+           - 强调清晰的实线边框 (1px border)
+           - 较小的圆角 (4px - 8px)
+           - 典型的直角投影与多层深度
+           - 字体使用 Segoe UI 家族
+        ---------------------------------- */
+        :root[data-system="fluent"] {
+            --font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+            --radius-card: 8px;
+            --radius-control: 4px;
+            --radius-pill: 100px;
+            
+            /* 深度/投影 */
+            --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+            --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.12), 0 0 2px rgba(0, 0, 0, 0.04);
+            
+            /* 交互反馈 */
+            --transition-speed: 0.15s;
+        }
+
+        /* ----- MATERIAL DESIGN 3 核心特征 -----
+           - 几乎无实线边框，依赖色块填充 (Tonal Surface) 和投影区分层级
+           - 极大的圆角 (12px - 28px)
+           - 药丸状控件 (Pill shape)
+           - 动态色调，背景带有主色调的微弱偏色
+        ---------------------------------- */
+        :root[data-system="material"] {
+            --font-family: 'Roboto', -apple-system, system-ui, sans-serif;
+            --radius-card: 24px;       /* M3 中型卡片通常为 12-24px */
+            --radius-control: 100px;  /* 按钮与输入框多为全圆角 */
+            --radius-pill: 100px;
+            
+            /* Tonal 投影 */
+            --shadow-sm: 0px 1px 3px 1px rgba(0, 0, 0, 0.15);
+            --shadow-md: 0px 2px 6px 2px rgba(0, 0, 0, 0.15);
+            
+            --transition-speed: 0.25s;
+        }
+
+        /* ==========================================================================
+           2. 动态主题色映射 (Blue, Purple, Green, Orange)
+           ========================================================================== */
+
+        /* --- Fluent 2 亮色色板 --- */
+        :root[data-system="fluent"][data-mode="light"] {
+            --bg-page: #fafafa;
+            --bg-card: #ffffff;
+            --bg-control: #ffffff;
+            --text-main: #242424;
+            --text-muted: #616161;
+            --border-color: #d1d1d1;
+            --border-hover: #8f8f8f;
+        }
+        :root[data-system="fluent"][data-mode="light"][data-color="blue"] {
+            --primary: #0f6cbd; --primary-hover: #115ea3; --primary-light: #eef6fc; --on-primary: #ffffff;
+        }
+        :root[data-system="fluent"][data-mode="light"][data-color="purple"] {
+            --primary: #8764b8; --primary-hover: #7252a1; --primary-light: #f4f0fa; --on-primary: #ffffff;
+        }
+        :root[data-system="fluent"][data-mode="light"][data-color="green"] {
+            --primary: #107c41; --primary-hover: #0b5930; --primary-light: #e6f4ea; --on-primary: #ffffff;
+        }
+        :root[data-system="fluent"][data-mode="light"][data-color="orange"] {
+            --primary: #d83b01; --primary-hover: #b83201; --primary-light: #fdf3eb; --on-primary: #ffffff;
+        }
+
+        /* --- Fluent 2 暗色色板 --- */
+        :root[data-system="fluent"][data-mode="dark"] {
+            --bg-page: #111111;
+            --bg-card: #1f1f1f;
+            --bg-control: #292929;
+            --text-main: #f5f5f5;
+            --text-muted: #adadad;
+            --border-color: #3d3d3d;
+            --border-hover: #525252;
+        }
+        :root[data-system="fluent"][data-mode="dark"][data-color="blue"] {
+            --primary: #2f80ed; --primary-hover: #4f96ee; --primary-light: #16243d; --on-primary: #ffffff;
+        }
+        :root[data-system="fluent"][data-mode="dark"][data-color="purple"] {
+            --primary: #b49fe6; --primary-hover: #c9bbfc; --primary-light: #2c1a4d; --on-primary: #120033;
+        }
+        :root[data-system="fluent"][data-mode="dark"][data-color="green"] {
+            --primary: #60c689; --primary-hover: #81d7a3; --primary-light: #0d301b; --on-primary: #002d13;
+        }
+        :root[data-system="fluent"][data-mode="dark"][data-color="orange"] {
+            --primary: #ff8c00; --primary-hover: #ffa500; --primary-light: #3d1b00; --on-primary: #ffffff;
+        }
+
+        /* --- Material 3 亮色色板 (含 Tonal Surface 偏色) --- */
+        :root[data-system="material"][data-mode="light"] {
+            --border-color: #79747e;
+            --text-main: #1d1b20;
+            --text-muted: #49454f;
+        }
+        :root[data-system="material"][data-mode="light"][data-color="blue"] {
+            --primary: #005faf; --primary-hover: #004581; --primary-light: #d4e3ff; --on-primary: #ffffff;
+            --bg-page: #f8f9ff; --bg-card: #eceef5; --bg-control: #e0e2e9;
+        }
+        :root[data-system="material"][data-mode="light"][data-color="purple"] {
+            --primary: #6750a4; --primary-hover: #533d8a; --primary-light: #eaddff; --on-primary: #ffffff;
+            --bg-page: #fdf7ff; --bg-card: #f3edf7; --bg-control: #e7e0ec;
+        }
+        :root[data-system="material"][data-mode="light"][data-color="green"] {
+            --primary: #386a20; --primary-hover: #2c5418; --primary-light: #b7f397; --on-primary: #ffffff;
+            --bg-page: #f7fbf1; --bg-card: #eef3e6; --bg-control: #e0e8d8;
+        }
+        :root[data-system="material"][data-mode="light"][data-color="orange"] {
+            --primary: #8b5000; --primary-hover: #6e3d00; --primary-light: #ffdcbe; --on-primary: #ffffff;
+            --bg-page: #fff8f5; --bg-card: #f9eee5; --bg-control: #eddcd1;
+        }
+
+        /* --- Material 3 暗色色板 --- */
+        :root[data-system="material"][data-mode="dark"] {
+            --border-color: #938f99;
+            --text-main: #e6e1e5;
+            --text-muted: #cac4d0;
+        }
+        :root[data-system="material"][data-mode="dark"][data-color="blue"] {
+            --primary: #a4c8ff; --primary-hover: #7baaff; --primary-light: #00325b; --on-primary: #002246;
+            --bg-page: #10141a; --bg-card: #1b2027; --bg-control: #252a32;
+        }
+        :root[data-system="material"][data-mode="dark"][data-color="purple"] {
+            --primary: #d0bcff; --primary-hover: #b69df8; --primary-light: #381e72; --on-primary: #381e72;
+            --bg-page: #141218; --bg-card: #211f26; --bg-control: #2b2930;
+        }
+        :root[data-system="material"][data-mode="dark"][data-color="green"] {
+            --primary: #9cd67d; --primary-hover: #83bd65; --primary-light: #205107; --on-primary: #113800;
+            --bg-page: #0f150b; --bg-card: #1b2116; --bg-control: #252b1f;
+        }
+        :root[data-system="material"][data-mode="dark"][data-color="orange"] {
+            --primary: #ffb85d; --primary-hover: #e09e3e; --primary-light: #5b3300; --on-primary: #4a2800;
+            --bg-page: #17130e; --bg-card: #231f18; --bg-control: #2f2a21;
+        }
+
+
+        /* ==========================================================================
+           3. 全局布局样式
+           ========================================================================== */
+        * {
+            box-sizing: border-box;
+            transition: background-color var(--transition-speed) ease, 
+                        border-color var(--transition-speed) ease, 
+                        border-radius var(--transition-speed) cubic-bezier(0.4, 0, 0.2, 1), 
+                        box-shadow var(--transition-speed) ease;
+        }
+
+        body {
+            margin: 0;
+            background-color: var(--bg-page);
+            color: var(--text-main);
+            font-family: var(--font-family);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding-bottom: 80px;
+        }
+
+        /* 控制台面板 */
+        .admin-bar {
+            width: 100%;
+            background-color: var(--bg-card);
+            border-bottom: 1px solid var(--border-color);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            padding: 16px 24px;
+            box-shadow: var(--shadow-sm);
+        }
+
+        /* Material 下控制台扁平化，不带边框 */
+        html[data-system="material"] .admin-bar {
+            border-bottom: none;
+            background-color: var(--bg-control);
+        }
+
+        .admin-container {
+            max-width: 1000px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .selectors {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        /* 颜色选项选择器 */
+        .color-palette {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .color-dot {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            cursor: pointer;
+            border: 2px solid transparent;
+            position: relative;
+        }
+        .color-dot.active {
+            border-color: var(--text-main);
+        }
+        .color-dot[data-val="blue"] { background-color: #0f6cbd; }
+        .color-dot[data-val="purple"] { background-color: #6750a4; }
+        .color-dot[data-val="green"] { background-color: #107c41; }
+        .color-dot[data-val="orange"] { background-color: #d83b01; }
+
+        main {
+            width: 100%;
+            max-width: 1000px;
+            padding: 32px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 28px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 24px;
+        }
+
+        /* ==========================================================================
+           4. 强化风格差异的组件设计
+           ========================================================================== */
+
+        /* --- 1. 卡片 (Cards) --- */
+        .card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-card);
+            padding: 24px;
+            box-shadow: var(--shadow-sm);
+        }
+        /* M3 移除边框，使用背景色差 */
+        html[data-system="material"] .card {
+            border: none;
+        }
+
+        .card-header {
+            margin-top: 0;
+            margin-bottom: 16px;
+            font-size: 1.15rem;
+            font-weight: 600;
+        }
+
+        /* --- 2. 按钮 (Buttons) --- */
+        .btn {
+            font-family: inherit;
+            font-weight: 500;
+            padding: 8px 16px;
+            border-radius: var(--radius-control);
+            cursor: pointer;
+            border: 1px solid transparent;
+            font-size: 0.9rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background-color: var(--primary);
+            color: var(--on-primary);
+            border: none;
+        }
+        .btn-primary:hover {
+            background-color: var(--primary-hover);
+        }
+
+        .btn-outline {
+            background-color: transparent;
+            border-color: var(--border-color);
+            color: var(--primary);
+        }
+        .btn-outline:hover {
+            background-color: var(--primary-light);
+        }
+
+        /* Fluent 按钮带有一点微弱的下底边框增加立体感 */
+        html[data-system="fluent"] .btn-primary {
+            border-bottom: 2px solid rgba(0, 0, 0, 0.2);
+        }
+
+        /* --- 3. 选项卡 (Tabs vs Segmented Control) --- */
+        .tab-bar {
+            display: flex;
+            gap: 8px;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 16px;
+        }
+
+        .tab-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 0.95rem;
+            position: relative;
+            color: var(--text-muted);
+        }
+
+        .tab-item.active {
+            color: var(--text-main);
+            font-weight: 600;
+        }
+
+        /* Fluent 风格选项卡：底部高亮线 */
+        html[data-system="fluent"] .tab-item.active::after {
+            content: '';
+            position: absolute;
+            bottom: -1px;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background-color: var(--primary);
+            border-radius: 3px 3px 0 0;
+        }
+
+        /* M3 风格选项卡：胶囊背景填充 */
+        html[data-system="material"] .tab-bar {
+            border-bottom: none;
+            background-color: var(--bg-control);
+            border-radius: var(--radius-pill);
+            padding: 4px;
+        }
+        html[data-system="material"] .tab-item {
+            flex: 1;
+            text-align: center;
+            border-radius: var(--radius-pill);
+            padding: 6px 12px;
+        }
+        html[data-system="material"] .tab-item.active {
+            background-color: var(--primary-light);
+            color: var(--primary);
+        }
+
+        /* --- 4. 纸片与微章 (Chips & Badges) --- */
+        .chip-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 12px 0;
+        }
+
+        .chip {
+            padding: 6px 12px;
+            font-size: 0.8rem;
+            border-radius: var(--radius-control);
+            background-color: var(--bg-control);
+            border: 1px solid var(--border-color);
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        /* M3 Chip：大圆角，轻边框或纯色填充 */
+        html[data-system="material"] .chip {
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background-color: transparent;
+        }
+
+        .badge {
+            padding: 2px 8px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            border-radius: 2px; /* Fluent 更方正 */
+            background-color: var(--primary);
+            color: var(--on-primary);
+        }
+        html[data-system="material"] .badge {
+            border-radius: 100px; /* M3 全圆角徽章 */
+        }
+
+        /* --- 5. 表单控件 (Inputs & Select) --- */
+        .form-group {
+            margin-bottom: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        input[type="text"] {
+            font-family: inherit;
+            background-color: var(--bg-control);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 8px 12px;
+            font-size: 0.95rem;
+            border-radius: var(--radius-control);
+            outline: none;
+        }
+
+        /* Fluent 风格输入框：仅底部高亮 */
+        html[data-system="fluent"] input[type="text"] {
+            border-bottom: 2px solid var(--border-color);
+        }
+        html[data-system="fluent"] input[type="text"]:focus {
+            border-bottom-color: var(--primary);
+        }
+
+        /* M3 风格输入框：填充型与粗下划线 */
+        html[data-system="material"] input[type="text"] {
+            border: none;
+            border-bottom: 1px solid var(--border-color);
+            border-radius: 4px 4px 0 0;
+            background-color: var(--bg-control);
+            padding: 12px 16px;
+        }
+        html[data-system="material"] input[type="text"]:focus {
+            border-bottom: 2px solid var(--primary);
+        }
+
+        /* --- 6. 交互式开关 (Switch) --- */
+        .switch-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            cursor: pointer;
+            margin: 12px 0;
+            font-size: 0.95rem;
+        }
+
+        .switch-track {
+            width: 44px;
+            height: 20px;
+            background-color: var(--border-color);
+            border-radius: var(--radius-pill);
+            position: relative;
+            display: inline-block;
+            transition: background-color 0.2s;
+        }
+
+        .switch-thumb {
+            width: 14px;
+            height: 14px;
+            background-color: var(--bg-card);
+            border-radius: 50%;
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            transition: transform 0.2s;
+            box-shadow: var(--shadow-sm);
+        }
+
+        input[type="checkbox"] {
+            display: none;
+        }
+
+        input[type="checkbox"]:checked + .switch-track {
+            background-color: var(--primary);
+        }
+
+        input[type="checkbox"]:checked + .switch-track .switch-thumb {
+            transform: translateX(24px);
+        }
+
+        /* M3 开关特性：打开时拇指变大 (Thumb scaling) */
+        html[data-system="material"] .switch-track {
+            width: 52px;
+            height: 32px;
+            border: 2px solid var(--border-color);
+            background-color: var(--bg-control);
+        }
+        html[data-system="material"] .switch-thumb {
+            width: 16px;
+            height: 16px;
+            top: 6px;
+            left: 6px;
+            background-color: var(--border-color);
+        }
+        html[data-system="material"] input[type="checkbox"]:checked + .switch-track {
+            background-color: var(--primary);
+            border-color: var(--primary);
+        }
+        html[data-system="material"] input[type="checkbox"]:checked + .switch-track .switch-thumb {
+            transform: translateX(20px);
+            width: 24px;
+            height: 24px;
+            top: 2px;
+            left: 2px;
+            background-color: var(--on-primary);
+        }
+
+        /* --- 7. 滑动条 (Slider) --- */
+        .slider-container {
+            margin: 16px 0;
+        }
+        input[type="range"] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
+            outline: none;
+        }
+        /* Fluent 轨道更细，滑块小 */
+        html[data-system="fluent"] input[type="range"]::-webkit-slider-runnable-track {
+            height: 4px;
+            background: var(--border-color);
+            border-radius: 2px;
+        }
+        html[data-system="fluent"] input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: var(--primary);
+            margin-top: -6px;
+            cursor: pointer;
+        }
+        /* M3 轨道粗，滑块呈现立柱药丸型 */
+        html[data-system="material"] input[type="range"]::-webkit-slider-runnable-track {
+            height: 16px;
+            background: var(--bg-control);
+            border-radius: 8px;
+        }
+        html[data-system="material"] input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 44px;
+            width: 4px;
+            border-radius: 2px;
+            background: var(--primary);
+            margin-top: -14px;
+            cursor: pointer;
+        }
+
+        /* --- 8. 浮动操作按钮 (Floating Action Button - M3 独有) --- */
+        .fab {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            width: 56px;
+            height: 56px;
+            border-radius: 16px; /* M3 特有的稍圆正方形 */
+            background-color: var(--primary-light);
+            color: var(--primary);
+            box-shadow: var(--shadow-md);
+            border: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            z-index: 99;
+        }
+
+        /* Fluent 系统不使用 FAB，此处将其伪装或隐去 */
+        html[data-system="fluent"] .fab {
+            display: none;
+        }
+
+    </style>
+</head>
+<body>
+
+    <!-- 1. 控制台 -->
+    <div class="admin-bar">
+        <div class="admin-container">
+            <div class="selectors">
+                <!-- 切换设计系统 -->
+                <select id="system-select">
+                    <option value="fluent">Microsoft Fluent 2</option>
+                    <option value="material">Material Design 3</option>
+                </select>
+                <!-- 切换亮暗 -->
+                <button id="mode-toggle" class="btn btn-outline">切换亮/暗</button>
+            </div>
+            <!-- 主题色板 -->
+            <div class="color-palette">
+                <span style="font-size:0.85rem; color: var(--text-muted)">色彩种子:</span>
+                <div class="color-dot active" data-val="blue"></div>
+                <div class="color-dot" data-val="purple"></div>
+                <div class="color-dot" data-val="green"></div>
+                <div class="color-dot" data-val="orange"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 2. 主演示区 -->
+    <main>
+        
+        <!-- 导航选项卡示例 -->
+        <div class="tab-bar">
+            <div class="tab-item active" onclick="switchTab(this)">仪表盘</div>
+            <div class="tab-item" onclick="switchTab(this)">系统配置</div>
+            <div class="tab-item" onclick="switchTab(this)">样式指标</div>
+        </div>
+
+        <div class="grid">
+            
+            <!-- 组件卡片 1：动作与层级 -->
+            <div class="card">
+                <div class="card-header">按钮与控制 <span class="badge">组件</span></div>
+                <p style="color:var(--text-muted); font-size:0.85rem; line-height:1.4; margin-bottom: 20px;">
+                    注意观察：在 Fluent 2 下按钮圆角细微并带有微妙实线，而在 M3 下主按钮呈现完全圆角，轮廓按钮呈现大边角。
+                </p>
+                <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                    <button class="btn btn-primary">Primary 动作</button>
+                    <button class="btn btn-outline">Outline 动作</button>
+                </div>
+
+                <div class="chip-container">
+                    <span class="chip">🏷️ 标签一</span>
+                    <span class="chip">⚡ 标签二</span>
+                    <span class="chip">⚙️ 标签三</span>
+                </div>
+            </div>
+
+            <!-- 组件卡片 2：表单输入 -->
+            <div class="card">
+                <div class="card-header">数据录入</div>
+                <div class="form-group">
+                    <label for="input-demo">单行文本域</label>
+                    <input type="text" id="input-demo" placeholder="点击查看焦点边缘动画...">
+                </div>
+
+                <div class="slider-container">
+                    <label style="display:block; margin-bottom:8px;">滑动调节 (Slider)</label>
+                    <input type="range" min="1" max="100" value="45">
+                </div>
+            </div>
+
+            <!-- 组件卡片 3：选择状态 -->
+            <div class="card">
+                <div class="card-header">选择控制</div>
+                <div>
+                    <label class="switch-label">
+                        <input type="checkbox" checked>
+                        <span class="switch-track">
+                            <span class="switch-thumb"></span>
+                        </span>
+                        <span>开关 (Toggle Switch)</span>
+                    </label>
+                </div>
+                
+                <p style="color:var(--text-muted); font-size:0.85rem; line-height: 1.4;">
+                    在 M3 下，开关在开启和关闭状态下，其中央圆点 (Thumb) 的物理大小会发生改变以增强触觉隐喻。
+                </p>
+            </div>
+
+        </div>
+    </main>
+
+    <!-- 3. M3 浮动操作按钮 (FAB) -->
+    <button class="fab" title="Material 3 FAB">＋</button>
+
+    <!-- 4. 逻辑脚本 -->
+    <script>
+        const html = document.documentElement;
+        const systemSelect = document.getElementById('system-select');
+        const modeToggle = document.getElementById('mode-toggle');
+        const colorDots = document.querySelectorAll('.color-dot');
+
+        // 系统切换
+        systemSelect.addEventListener('change', (e) => {
+            html.setAttribute('data-system', e.target.value);
+        });
+
+        // 亮暗切换
+        modeToggle.addEventListener('click', () => {
+            const currentMode = html.getAttribute('data-mode');
+            html.setAttribute('data-mode', currentMode === 'light' ? 'dark' : 'light');
+        });
+
+        // 主题色动态绑定
+        colorDots.forEach(dot => {
+            dot.addEventListener('click', (e) => {
+                colorDots.forEach(d => d.classList.remove('active'));
+                dot.classList.add('active');
+                
+                const targetColor = dot.getAttribute('data-val');
+                html.setAttribute('data-color', targetColor);
+            });
+        });
+
+        // 简易选项卡激活逻辑
+        function switchTab(el) {
+            const items = el.parentElement.querySelectorAll('.tab-item');
+            items.forEach(item => item.classList.remove('active'));
+            el.classList.add('active');
+        }
+    </script>
+</body>
+</html>

@@ -215,5 +215,67 @@ port = 8579
 # 注意：即使设置 0.0.0.0，服务也只接受本地和局域网连接
 bind = "0.0.0.0"
 
-# WebUI 访问密码（留空则不需要密码）。
-password = ""
+# WebUI 访问密码（可选，默认为空表示不设密码）。
+# 设置后访问管理面板需输入密码。
+# password = ""
+
+# 自定义 favicon 与 logo：
+#   将 favicon.ico 和 logo.png 放入 src/webui_static/ 目录即可生效。
+#   推荐 favicon: 32x32 或 48x48 ico
+#   推荐 logo: 400x100 或等比例 png（显示在仪表盘左上角）
+# 注意：通过 WebUI 面板修改的配置（如 TMDB 设置）保存至 .tmdb_webui_config.json，
+#       不会回写 config.toml。
+
+
+# ============================================================
+# TMDB 配置
+# ============================================================
+# 用于 TMDB 搜索、详情查看以及待看列表对比。
+#
+# 认证方式（二选一）：
+#   1. access_token（推荐）- TMDB v3 Read Access Token，完整功能（含 watchlist）
+#   2. api_key - TMDB API Key (v3)，仅搜索/详情等公开 API
+
+[tmdb]
+# TMDB v3 Read Access Token（从 TMDB 网站获取，可选，有则使用 Bearer 认证）
+access_token = ""
+
+# 自定义 TMDB 反代基础地址（完整 URL，含 scheme，可含子路径前缀，不要带尾部斜杠）
+# 留空则使用官方地址 api.themoviedb.org / image.tmdb.org / www.themoviedb.org。
+# 设置后，API 请求、图片、详情页、徽标资源均走该 host。
+# 反代需统一转发 /3、/t/p、/assets、/{media_type} 等路径。
+host = ""
+
+# TMDB API Key (v3)（可选，无 access_token 时通过 ?api_key=xxx 认证）
+# 也作为反代鉴权的 X-API-Key 请求头发送。
+api_key = ""
+
+# 待看列表语言代码（zh-CN / en-US / ja-JP 等）
+language = "zh-CN"
+
+# 待看 CSV 导出文件路径（可选）
+csv_watchlist_file = "./watchlist.csv"
+
+# 待看列表缓存过期时间，单位：秒（默认 86400 秒 = 1 天）
+# TMDB API 数据本身有延迟（通常 1 天才更新），频繁刷新无意义，建议设为  天
+# 此值也可通过 WebUI 面板 → TMDB 设置 → "缓存过期时间(秒)" 修改，
+# 修改后保存至 .tmdb_webui_config.json，不会回写 config.toml。
+watchlist_cache_ttl = 86400
+
+# 待看列表数据库（持久化缓存，自动管理）
+# 程序自动在 data/ 目录下维护 tmdb_watchlist_cache.json，
+# 包含已同步的 TMDB 待看条目及其 season_count 等元数据。
+# 无需手动创建或维护。
+
+# 匹配阈值
+exact_threshold = 0.85
+fuzzy_threshold = 0.60
+
+# 番剧匹配额外参数
+anime_min_ep_ratio = 0.3
+anime_max_season_diff = 1
+
+[tmdb.proxy]
+#enabled = true
+#http = "http://127.0.0.1:7890"
+#https = "http://127.0.0.1:7890"
