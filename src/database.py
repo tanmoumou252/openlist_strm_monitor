@@ -328,6 +328,10 @@ class Database:
             conn.commit()
             logging.info("[DB] 数据库核心表与索引核对并创建完成！")
 
+        # 创建 TMDB 操作日志表（延迟创建避免首次启动阻塞，但也可以在这里创建）
+        # 这里直接创建，因为表结构简单，开销极小
+        self.ensure_tmdb_log_table()
+
     def init_db(self) -> None:
         """初始化数据库（兼容旧调用，实际初始化已在 __init__ 中完成）"""
         logging.debug("[DB] init_db 被调用，数据库已在 __init__ 中初始化")
@@ -965,7 +969,7 @@ class Database:
 
     def get_all_b_records(self) -> list[tuple]:
         """获取所有 B 区记录（用于启动时对比）"""
-        with self.lock, self.connection() as conn:
+        with self.read_connection() as conn:
             cur = conn.execute("""
                     SELECT local_path,
                            webdav_path,
@@ -1356,7 +1360,7 @@ class Database:
             "subtitles", "strm_media_boundary",
         ]
         result = {}
-        with self.lock, self.connection() as conn:
+        with self.read_connection() as conn:
             for table in tables:
                 try:
                     cur = conn.execute(f"SELECT COUNT(*) FROM {table}")
@@ -1368,7 +1372,7 @@ class Database:
     def get_b_status_counts(self) -> dict[str, int]:
         """获取 B 区各状态记录数"""
         result = {}
-        with self.lock, self.connection() as conn:
+        with self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT status, COUNT(*) FROM b_strm_files GROUP BY status"
             )
@@ -1382,3 +1386,49 @@ class Database:
             return os.path.getsize(self.db_path)
         except OSError:
             return 0
+
+    # ============================================================
+    # TMDB 操作日志
+    # ============================================================
+    def ensure_tmdb_log_table(self) -> None:
+        """确保 tmdb_operation_log 表存在"""
+        with self.lock, self.connection() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tmdb_operation_log (
+                    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts       REAL    NOT NULL,      -- Unix timestamp (seconds)
+                    op       TEXT    NOT NULL,       -- sync/match_refresh/config_update/match_override/restart
+                    level    TEXT    NOT NULL DEFAULT 'info',  -- info/success/warn/error
+                    msg      TEXT    NOT NULL,       -- 日志消息
+                    detail   TEXT                    -- 可选 JSON 详情
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tmdb_log_ts ON tmdb_operation_log(ts DESC)
+            """)
+            conn.commit()
+
+    def log_tmdb_operation(self, op: str, level: str, msg: str, detail: str = None) -> None:
+        """写入一条 TMDB 操作日志"""
+        with self.lock, self.connection() as conn:
+            conn.execute(
+                "INSERT INTO tmdb_operation_log (ts, op, level, msg, detail) VALUES (?, ?, ?, ?, ?)",
+                (time.time(), op, level, msg, detail),
+            )
+            conn.commit()
+
+    def get_tmdb_logs(self, limit: int = 100) -> list[dict]:
+        """获取最近的 TMDB 操作日志（按时间倒序），超过 7 天的自动清理"""
+        # 清理 7 天前的旧数据
+        seven_days_ago = time.time() - 7 * 86400
+        with self.lock, self.connection() as conn:
+            conn.execute("DELETE FROM tmdb_operation_log WHERE ts < ?", (seven_days_ago,))
+            cur = conn.execute(
+                "SELECT id, ts, op, level, msg, detail FROM tmdb_operation_log ORDER BY ts DESC LIMIT ?",
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [
+            {"id": r[0], "ts": r[1], "op": r[2], "level": r[3], "msg": r[4], "detail": r[5]}
+            for r in rows
+        ]

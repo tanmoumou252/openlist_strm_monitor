@@ -51,14 +51,12 @@ try:
     proxy_data = tmdb_data.get("proxy", {})
 
     access_token = tmdb_data.get("access_token", "")
-    api_enabled = tmdb_data.get("api_enabled", False)
     language = tmdb_data.get("language", "zh-CN")
     proxy_enabled = proxy_data.get("enabled", False)
     proxy_http = proxy_data.get("http", "")
 
     logger.info("[CONFIG] ✓ TMDB 配置加载成功")
     logger.info("[CONFIG]   access_token: %s", "已配置" if access_token else "未配置")
-    logger.info("[CONFIG]   api_enabled: %s", api_enabled)
     logger.info("[CONFIG]   language: %s", language)
     logger.info("[CONFIG]   proxy_enabled: %s", proxy_enabled)
     if proxy_enabled:
@@ -66,7 +64,6 @@ try:
 
     cfg = type("TmdbCfg", (), {
         "access_token": access_token,
-        "api_enabled": api_enabled,
         "language": language,
         "proxy_enabled": proxy_enabled,
         "proxy_http": proxy_http,

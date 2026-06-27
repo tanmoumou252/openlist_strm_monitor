@@ -172,12 +172,23 @@ trash_dir_name = "strm_回收站"
 #
 # 建议：
 #   测试环境至少 300 秒，避免 OpenList / STRM 引擎同步延迟导致删除后回灌。
-ghost_protect_seconds = 10
+ghost_protect_seconds = 300
 
 # A/B 同步后的等待时间，单位：秒。
 #
 # 用于等待 OpenList / STRM 引擎 / 文件系统事件落地。
 a_to_b_restore_delay_seconds = 30
+
+# 启动时是否执行一次 A→B 同步。
+#
+# true：程序启动后立即执行一次 A→B 全量同步。
+# false：启动后不主动同步，仅依赖文件系统事件驱动。
+sync_on_startup = false
+
+# 启动同步前的等待时间，单位：秒。
+# sync_on_startup = true 时生效。
+# 用于等待 OpenList / STRM 引擎初始化完成后再开始同步。
+sync_on_startup_wait = 0
 
 
 [log]
@@ -215,18 +226,6 @@ port = 8579
 # 注意：即使设置 0.0.0.0，服务也只接受本地和局域网连接
 bind = "0.0.0.0"
 
-# WebUI 访问密码（可选，默认为空表示不设密码）。
-# 设置后访问管理面板需输入密码。
-# password = ""
-
-# 自定义 favicon 与 logo：
-#   将 favicon.ico 和 logo.png 放入 src/webui_static/ 目录即可生效。
-#   推荐 favicon: 32x32 或 48x48 ico
-#   推荐 logo: 400x100 或等比例 png（显示在仪表盘左上角）
-# 注意：通过 WebUI 面板修改的配置（如 TMDB 设置）保存至 .tmdb_webui_config.json，
-#       不会回写 config.toml。
-
-
 # ============================================================
 # TMDB 配置
 # ============================================================
@@ -253,27 +252,28 @@ api_key = ""
 # 待看列表语言代码（zh-CN / en-US / ja-JP 等）
 language = "zh-CN"
 
-# 待看 CSV 导出文件路径（可选）
-csv_watchlist_file = "./watchlist.csv"
+# 待看 CSV 导出文件路径（可选，如不填则不导出）
+csv_watchlist_file = ""
 
-# 待看列表缓存过期时间，单位：秒（默认 86400 秒 = 1 天）
-# TMDB API 数据本身有延迟（通常 1 天才更新），频繁刷新无意义，建议设为  天
+# 待看列表 SQLite 数据库文件路径（可选，留空则自动放在配置目录下）。
+# 用于缓存 TMDB 待看列表及匹配状态，配合 WebUI 面板使用。
+watchlist_db = ""
+
+# 待看列表缓存过期时间，单位：秒（默认 604800 秒 = 7 天）
+# TMDB API 数据本身有延迟，频繁刷新无意义，建议设为 7 天
 # 此值也可通过 WebUI 面板 → TMDB 设置 → "缓存过期时间(秒)" 修改，
 # 修改后保存至 .tmdb_webui_config.json，不会回写 config.toml。
-watchlist_cache_ttl = 86400
-
-# 待看列表数据库（持久化缓存，自动管理）
-# 程序自动在 data/ 目录下维护 tmdb_watchlist_cache.json，
-# 包含已同步的 TMDB 待看条目及其 season_count 等元数据。
-# 无需手动创建或维护。
+watchlist_cache_ttl = 604800
 
 # 匹配阈值
-exact_threshold = 0.85
+# fuzzy_threshold: SequenceMatcher 模糊匹配阈值，低于此分判定为"未收录"
 fuzzy_threshold = 0.60
 
 # 番剧匹配额外参数
+# anime_min_ep_ratio: 已下载集数/TMDB 总集数的最低比例，低于此比例判定为 fuzzy
+# 匹配流程：精确相等 → 子串匹配 → SequenceMatcher 模糊匹配 → 结构验证
+# 结构验证包括：季数范围、last_episode_to_air 交叉验证、集数比例检查
 anime_min_ep_ratio = 0.3
-anime_max_season_diff = 1
 
 [tmdb.proxy]
 #enabled = true

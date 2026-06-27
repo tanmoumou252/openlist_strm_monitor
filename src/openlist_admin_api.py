@@ -88,13 +88,13 @@ class OpenListAdminClient:
                 token = data.get("token")
             if token:
                 self.token = token
-                log.info("✅ 登录成功")
+                log.info("登录成功")
                 return True
             else:
-                log.error(f"❌ 登录失败：无法提取 token，响应：{data}")
+                log.error(f"登录失败：无法提取 token，响应：{data}")
                 return False
         except Exception as e:
-            log.error(f"❌ 登录请求异常：{e}")
+            log.error(f"登录请求异常：{e}")
             return False
 
     def _get_headers(self) -> dict[str, str]:
@@ -116,10 +116,10 @@ class OpenListAdminClient:
         try:
             res = requests.get(url, headers=self._get_headers(), params=params, timeout=10)
             res.raise_for_status()
-            log.info("✅ 获取存储列表成功")
+            log.info("获取存储列表成功")
             return res.json()
         except Exception as e:
-            log.error(f"❌ 获取存储列表失败：{e}")
+            log.error(f"获取存储列表失败：{e}")
             return None
 
     def get_storage_info(self, storage_id: int) -> dict[str, Any] | None:
@@ -132,16 +132,16 @@ class OpenListAdminClient:
             res.raise_for_status()
             # 检查响应体是否为空
             if not res.text.strip():
-                log.error(f"❌ 存储 {storage_id} 详情响应为空")
+                log.error(f"存储 {storage_id} 详情响应为空")
                 return None
             data = res.json()
-            log.info(f"✅ 获取存储 {storage_id} 详情成功")
+            log.info(f"获取存储 {storage_id} 详情成功")
             return data
         except requests.exceptions.JSONDecodeError as e:
-            log.error(f"❌ 存储 {storage_id} 详情响应非 JSON 格式：{res.text}")
+            log.error(f"存储 {storage_id} 详情响应非 JSON 格式：{res.text}")
             return None
         except Exception as e:
-            log.error(f"❌ 获取存储 {storage_id} 详情失败：{e}")
+            log.error(f"获取存储 {storage_id} 详情失败：{e}")
             return None
 
     # ==================================================================
@@ -167,10 +167,10 @@ class OpenListAdminClient:
         try:
             res = requests.post(url, headers=self._get_headers(), json=payload, timeout=10)
             res.raise_for_status()
-            log.info(f"✅ 列出目录 {path} 成功")
+            log.info(f"列出目录 {path} 成功")
             return res.json()
         except Exception as e:
-            log.error(f"❌ 列出目录失败：{e}")
+            log.error(f"列出目录失败：{e}")
             return None
 
     def mkdir(self, path: str) -> bool:
@@ -200,7 +200,7 @@ class OpenListAdminClient:
             res.raise_for_status()
             return True  # ← **直接返回 True**
         except Exception as e:
-            log.error(f"❌ 移动文件失败：{e}")
+            log.error(f"移动文件失败：{e}")
             return False
 
     def remove(self, path: str) -> bool:
@@ -216,5 +216,5 @@ class OpenListAdminClient:
             res.raise_for_status()
             return True  # ← **直接返回 True**
         except Exception as e:
-            log.error(f"❌ 删除文件失败：{e}")
+            log.error(f"删除文件失败：{e}")
             return False

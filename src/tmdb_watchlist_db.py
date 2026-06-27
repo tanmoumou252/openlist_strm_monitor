@@ -15,7 +15,7 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
     from tmdb_client import TmdbClient
@@ -41,7 +41,12 @@ CREATE TABLE IF NOT EXISTS movies (
     video           INTEGER DEFAULT 0,
     adult           INTEGER DEFAULT 0,
     _media_type     TEXT DEFAULT 'movie',
-    _synced_at      REAL NOT NULL DEFAULT 0
+    _synced_at      REAL NOT NULL DEFAULT 0,
+    match_status    TEXT DEFAULT 'uncomputed',
+    match_reason    TEXT DEFAULT '',
+    match_updated_at REAL DEFAULT 0,
+    manual_override_at REAL DEFAULT 0,
+    manual_override_by TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS tv (
@@ -59,8 +64,16 @@ CREATE TABLE IF NOT EXISTS tv (
     origin_country  TEXT DEFAULT '[]',
     original_language TEXT DEFAULT '',
     _season_count   INTEGER DEFAULT 0,
+    _episode_count         INTEGER DEFAULT 0,
+    _last_ep_season        INTEGER DEFAULT 0,
+    _last_ep_episode       INTEGER DEFAULT 0,
     _media_type     TEXT DEFAULT 'tv',
-    _synced_at      REAL NOT NULL DEFAULT 0
+    _synced_at      REAL NOT NULL DEFAULT 0,
+    match_status    TEXT DEFAULT 'uncomputed',
+    match_reason    TEXT DEFAULT '',
+    match_updated_at REAL DEFAULT 0,
+    manual_override_at REAL DEFAULT 0,
+    manual_override_by TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -68,6 +81,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 """
+
 
 
 class TmdbWatchlistDb:
@@ -92,11 +106,41 @@ class TmdbWatchlistDb:
     def _init_schema(self) -> None:
         with self._conn() as conn:
             conn.executescript(_SCHEMA_SQL)
+            self._ensure_column(conn, "movies", "match_status", "TEXT DEFAULT 'uncomputed'")
+            self._ensure_column(conn, "movies", "match_reason", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "movies", "match_updated_at", "REAL DEFAULT 0")
+            self._ensure_column(conn, "movies", "manual_override_at", "REAL DEFAULT 0")
+            self._ensure_column(conn, "movies", "manual_override_by", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "tv", "match_status", "TEXT DEFAULT 'uncomputed'")
+            self._ensure_column(conn, "tv", "match_reason", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "tv", "match_updated_at", "REAL DEFAULT 0")
+            self._ensure_column(conn, "tv", "manual_override_at", "REAL DEFAULT 0")
+            self._ensure_column(conn, "tv", "manual_override_by", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "tv", "_episode_count", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "tv", "_last_ep_season", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "tv", "_last_ep_episode", "INTEGER DEFAULT 0")
         logging.debug("[TMDB-DB] 数据库初始化完成: %s", self._db_path)
 
     # ----------------------------------------------------------
     # 元数据
     # ----------------------------------------------------------
+
+    def get_cache_status(self) -> dict:
+        """返回缓存状态（不触发同步，不加载全量数据）。"""
+        last_sync = self._get_meta("last_sync", "0")
+        try:
+            last_sync_time = float(last_sync) if last_sync else 0.0
+        except (ValueError, TypeError):
+            last_sync_time = 0.0
+        stale = not (last_sync_time > 0 and (time.time() - last_sync_time) < self._ttl)
+        with self._conn() as conn:
+            mc = conn.execute("SELECT COUNT(*) FROM movies").fetchone()[0]
+            tc = conn.execute("SELECT COUNT(*) FROM tv").fetchone()[0]
+        return {
+            "cache_stale": stale,
+            "cache_last_sync": last_sync_time,
+            "cache_item_count": mc + tc,
+        }
 
     def _get_meta(self, key: str, default: str = "") -> str:
         try:
@@ -114,6 +158,19 @@ class TmdbWatchlistDb:
                 "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                 (key, value),
             )
+            conn.commit()
+
+    def _ensure_column(
+        self,
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        column_def: str,
+    ) -> None:
+        cur = conn.execute(f"PRAGMA table_info({table_name})")
+        columns = {row[1] for row in cur.fetchall()}
+        if column_name not in columns:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
             conn.commit()
 
     # ----------------------------------------------------------
@@ -141,6 +198,89 @@ class TmdbWatchlistDb:
                         d[json_field] = []
             result.append(d)
         return result
+
+    def replace_match_state(
+        self,
+        media_type: str,
+        states: Iterable[tuple[int, str, str, float, float, str]],
+    ) -> None:
+        """批量写入收录状态。
+
+        对每个条目先尝试 UPDATE；若行不存在（sync 尚未写入该 ID），
+        则回退 INSERT（仅写入 match 列，其余列使用 DEFAULT）。
+        """
+        table = "movies" if media_type == "movie" else "tv"
+        update_sql = f"""UPDATE {table}
+            SET match_status=?, match_reason=?, match_updated_at=?,
+                manual_override_at=?, manual_override_by=?
+            WHERE id=?"""
+        insert_sql = f"""INSERT INTO {table}
+            (id, match_status, match_reason, match_updated_at,
+             manual_override_at, manual_override_by)
+            VALUES (?, ?, ?, ?, ?, ?)"""
+        with self._conn() as conn:
+            for item_id, status, reason, updated_at, override_at, override_by in states:
+                cursor = conn.execute(
+                    update_sql,
+                    (status, reason, updated_at, override_at, override_by, item_id),
+                )
+                if cursor.rowcount == 0:
+                    conn.execute(
+                        insert_sql,
+                        (item_id, status, reason, updated_at, override_at, override_by),
+                    )
+            conn.commit()
+
+    def set_match_state(
+        self,
+        media_type: str,
+        item_id: int,
+        status: str,
+        reason: str,
+        updated_at: float | None = None,
+        manual_override_at: float | None = None,
+        manual_override_by: str = "",
+    ) -> None:
+        table = "movies" if media_type == "movie" else "tv"
+        now = time.time() if updated_at is None else updated_at
+        override_at = manual_override_at or 0.0
+        with self._conn() as conn:
+            conn.execute(
+                f"""UPDATE {table}
+                SET match_status=?, match_reason=?, match_updated_at=?,
+                    manual_override_at=?, manual_override_by=?
+                WHERE id=?""",
+                (status, reason, now, override_at, manual_override_by, item_id),
+            )
+            conn.commit()
+
+    def override_match_state(
+        self,
+        media_type: str,
+        item_id: int,
+        status: str,
+        reason: str,
+        manual_override_by: str = "manual",
+    ) -> None:
+        now = time.time()
+        self.set_match_state(
+            media_type,
+            item_id,
+            status,
+            reason,
+            updated_at=now,
+            manual_override_at=now,
+            manual_override_by=manual_override_by,
+        )
+
+    def get_match_state(self, media_type: str, item_id: int) -> dict | None:
+        table = "movies" if media_type == "movie" else "tv"
+        with self._conn() as conn:
+            row = conn.execute(
+                f"SELECT match_status, match_reason, match_updated_at, manual_override_at, manual_override_by FROM {table} WHERE id=?",
+                (item_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     # ----------------------------------------------------------
     # 全量同步
@@ -257,9 +397,9 @@ class TmdbWatchlistDb:
         # ---- 批量补齐季数 ----
         if tv_sync_ok:
             try:
-                self._populate_season_counts(tmdb_client)
+                self._populate_tv_details(tmdb_client)
             except Exception as e:
-                logging.warning("[TMDB-DB] 批量获取季数失败: %s", e)
+                logging.warning("[TMDB-DB] 批量获取剧集详情失败: %s", e)
 
         # 只有至少一个成功才更新 last_sync
         if movie_sync_ok or tv_sync_ok:
@@ -287,12 +427,22 @@ class TmdbWatchlistDb:
 
     def _upsert_movie(self, item: dict, synced_at: float) -> None:
         with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT match_status, match_reason, match_updated_at, manual_override_at, manual_override_by FROM movies WHERE id=?",
+                (item["id"],),
+            ).fetchone()
+            match_status = existing[0] if existing else "uncomputed"
+            match_reason = existing[1] if existing else ""
+            match_updated_at = existing[2] if existing else 0.0
+            manual_override_at = existing[3] if existing else 0.0
+            manual_override_by = existing[4] if existing else ""
             conn.execute(
                 """INSERT OR REPLACE INTO movies
                 (id, title, original_title, overview, poster_path, backdrop_path,
                  release_date, vote_average, vote_count, genre_ids, popularity,
-                 original_language, video, adult, _media_type, _synced_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 original_language, video, adult, _media_type, _synced_at,
+                 match_status, match_reason, match_updated_at, manual_override_at, manual_override_by)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     item["id"],
                     self._val(item, "title"),
@@ -310,24 +460,42 @@ class TmdbWatchlistDb:
                     1 if item.get("adult") else 0,
                     "movie",
                     synced_at,
+                    match_status,
+                    match_reason,
+                    match_updated_at,
+                    manual_override_at,
+                    manual_override_by,
                 ),
             )
             conn.commit()
 
     def _upsert_tv(self, item: dict, synced_at: float) -> None:
         with self._conn() as conn:
-            # 先查已有 _season_count，保留旧值
+            # 先查已有 _season_count, _episode_count 和匹配状态，保留旧值
             existing = conn.execute(
-                "SELECT _season_count FROM tv WHERE id=?", (item["id"],)
+                "SELECT _season_count, _episode_count, match_status, match_reason, match_updated_at, manual_override_at, manual_override_by FROM tv WHERE id=?",
+                (item["id"],),
             ).fetchone()
             season_count = existing[0] if existing else 0
+            episode_count = existing[1] if existing else 0
+            match_status = existing[2] if existing else "uncomputed"
+            match_reason = existing[3] if existing else ""
+            match_updated_at = existing[4] if existing else 0.0
+            manual_override_at = existing[5] if existing else 0.0
+            manual_override_by = existing[6] if existing else ""
+
+            # 如果 item 有 number_of_episodes（watchlist API），用它填充 ep 计数
+            if existing is None and item.get("number_of_episodes"):
+                episode_count = int(item["number_of_episodes"])
 
             conn.execute(
                 """INSERT OR REPLACE INTO tv
                 (id, name, original_name, overview, poster_path, backdrop_path,
                  first_air_date, vote_average, vote_count, genre_ids, popularity,
-                 origin_country, original_language, _season_count, _media_type, _synced_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 origin_country, original_language, _season_count, _episode_count,
+                 _last_ep_season, _last_ep_episode, _media_type, _synced_at,
+                 match_status, match_reason, match_updated_at, manual_override_at, manual_override_by)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     item["id"],
                     self._val(item, "name"),
@@ -343,8 +511,16 @@ class TmdbWatchlistDb:
                     json.dumps(self._val(item, "origin_country", []), ensure_ascii=False),
                     self._val(item, "original_language"),
                     season_count,
+                    episode_count,
+                    0,  # _last_ep_season — 由 _populate_tv_details 填充
+                    0,  # _last_ep_episode — 由 _populate_tv_details 填充
                     "tv",
                     synced_at,
+                    match_status,
+                    match_reason,
+                    match_updated_at,
+                    manual_override_at,
+                    manual_override_by,
                 ),
             )
             conn.commit()
@@ -353,11 +529,11 @@ class TmdbWatchlistDb:
     # 批量获取季数（并发 + 限速）
     # ----------------------------------------------------------
 
-    def _populate_season_counts(self, tmdb_client: TmdbClient) -> None:
-        """批量补齐 TV 表的 _season_count。
+    def _populate_tv_details(self, tmdb_client: TmdbClient) -> None:
+        """批量补齐 TV 表的 _season_count, _episode_count, _last_ep 信息。
 
         同步后调用，查询所有 _season_count = 0 的剧集，
-        用线程池并发调用 TMDB API，每批 10 个请求后等待 2s 避免限速。
+        用线程池并发调用 TMDB API（get_tv_details），每批 10 个请求后等待 2s 避免限速。
         """
         with self._conn() as conn:
             rows = conn.execute(
@@ -368,16 +544,18 @@ class TmdbWatchlistDb:
             return
 
         logging.info(
-            "[TMDB-DB] 正在批量获取 %d 部剧集的季数...",
+            "[TMDB-DB] 正在批量获取 %d 部剧集的详情...",
             len(ids_to_fetch))
 
         BATCH_SIZE = 10
         BATCH_SLEEP = 2.0  # 每批间隔秒数
 
-        def _fetch(tid: int) -> tuple[int, int] | None:
+        def _fetch(tid: int) -> dict | None:
             try:
-                count = tmdb_client.get_tv_seasons_info(tid)
-                return (tid, count) if count > 0 else None
+                details = tmdb_client.get_tv_details(tid)
+                if details and isinstance(details, dict):
+                    return details
+                return None
             except Exception:
                 return None
 
@@ -387,14 +565,30 @@ class TmdbWatchlistDb:
             with ThreadPoolExecutor(max_workers=10) as pool:
                 futures = {pool.submit(_fetch, tid): tid for tid in batch}
                 for future in as_completed(futures):
-                    result = future.result()
-                    if result:
-                        tid, count = result
+                    details = future.result()
+                    if details:
+                        tid = details.get("id")
+                        if not tid:
+                            continue
+                        season_count = int(details.get("number_of_seasons") or 0)
+                        episode_count = int(details.get("number_of_episodes") or 0)
+                        last_ep = details.get("last_episode_to_air")
+                        last_ep_season = 0
+                        last_ep_episode = 0
+                        if last_ep and isinstance(last_ep, dict):
+                            last_ep_season = int(last_ep.get("season_number") or 0)
+                            last_ep_episode = int(last_ep.get("episode_number") or 0)
                         try:
                             with self._conn() as conn:
                                 conn.execute(
-                                    "UPDATE tv SET _season_count=? WHERE id=?",
-                                    (count, tid))
+                                    """UPDATE tv SET
+                                        _season_count=?,
+                                        _episode_count=?,
+                                        _last_ep_season=?,
+                                        _last_ep_episode=?
+                                    WHERE id=?""",
+                                    (season_count, episode_count,
+                                     last_ep_season, last_ep_episode, tid))
                                 conn.commit()
                             fetched += 1
                         except Exception:
@@ -404,6 +598,6 @@ class TmdbWatchlistDb:
 
         if fetched:
             logging.info(
-                "[TMDB-DB] 季数批量获取完成: %d/%d 部",
+                "[TMDB-DB] 剧集详情批量获取完成: %d/%d 部",
                 fetched,
                 len(ids_to_fetch))

@@ -83,9 +83,13 @@ TMDB API (watchlist)
 ### 待看列表对比
 
 每个待看条目会与本地数据库中的 STRM 文件做匹配，判断依据：
-- **精确匹配**：标题相同且年份一致（分数 >= exact_threshold）
-- **模糊匹配**：标题相似（分数 >= fuzzy_threshold）
-- **番剧额外逻辑**：检查已下载季数与 TMDB 总季数的比例（anime_min_ep_ratio），以及季数差异（anime_max_season_diff）
+- **精确匹配**：归一化后标题完全相等
+- **子串匹配**：任一方包含另一方（长度 >= 3）
+- **模糊匹配**：SequenceMatcher 相似度 >= fuzzy_threshold
+- **番剧结构验证**：
+  - 季数范围验证：本地季数 <= TMDB 总季数 + 1
+  - last_episode_to_air 交叉验证：TMDB 最新播出季数不得低于本地最大季数
+  - 集数比例检查：已下载集数 / TMDB 总集数 >= anime_min_ep_ratio
 
 匹配结果以不同颜色卡片展示。
 
@@ -127,8 +131,8 @@ TMDB API (watchlist)
 | `host` | TMDB 反代地址（可选） |
 | `language` | 待看列表语言（zh-CN / en-US / ja-JP） |
 | `watchlist_cache_ttl` | 缓存过期时间，单位秒（默认 86400） |
-| `exact_threshold` | 精确匹配阈值（默认 0.85） |
 | `fuzzy_threshold` | 模糊匹配阈值（默认 0.60） |
+| `anime_min_ep_ratio` | 番剧集数比例阈值（默认 0.3） |
 
 ---
 

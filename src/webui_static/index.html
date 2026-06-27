@@ -9,6 +9,7 @@
 <style>
 /* ===== CSS Variables & Themes ===== */
 :root{
+  --header-height:56px;
   --font-family:'Roboto',-apple-system,system-ui,sans-serif;
   --radius-card:16px;--radius-control:100px;--radius-pill:100px;
   --shadow-sm:0px 1px 3px 1px rgba(0,0,0,.15);
@@ -46,10 +47,9 @@
 
 /* ===== Base ===== */
 body{font-family:var(--font-family);font-size:var(--font-base,13px);background:var(--bg-page);color:var(--text-main);min-height:100vh;overflow-x:hidden;transition:background-color .2s ease,color .2s ease;margin:0}
-#wallpaper-a,#wallpaper-b{position:fixed;inset:0;background-size:cover;background-position:center;background-repeat:no-repeat;z-index:-4;transition:opacity 1.5s ease-in-out,transform 8s ease-in-out;filter:saturate(1.05) brightness(.72) contrast(1.02);transform:scale(1.03)}
+#wallpaper-a,#wallpaper-b{position:fixed;top:var(--header-height);left:0;right:0;height:calc(100vh - var(--header-height));background-size:cover;background-position:center;background-repeat:no-repeat;z-index:-4;transition:opacity 1.5s ease-in-out,transform 8s ease-in-out;filter:saturate(1.05) brightness(.72) contrast(1.02);transform:scale(1.03)}
 #wallpaper-a{opacity:1}
 #wallpaper-b{opacity:0}
-#overlay{position:fixed;inset:0;background:linear-gradient(180deg,color-mix(in srgb,var(--bg-page) 68%,transparent) 0%, color-mix(in srgb,var(--bg-page) 84%,transparent) 55%, color-mix(in srgb,var(--bg-page) 72%,transparent) 100%);backdrop-filter:blur(2px);z-index:-3;pointer-events:none}
 #wallpaper-info{position:fixed;bottom:8px;right:16px;font-size:11px;color:rgba(32,33,36,.55);z-index:10;pointer-events:none;background:color-mix(in srgb,var(--bg-card) 72%,transparent);border:1px solid color-mix(in srgb,var(--border-color) 18%,transparent);border-radius:999px;padding:6px 10px;box-shadow:0 8px 20px rgba(0,0,0,.08)}
 #toast-container{position:fixed;top:70px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:10px;pointer-events:none}
 
@@ -387,6 +387,14 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 .config-notes details{margin-bottom:6px;border-radius:var(--radius-card);border:1px solid color-mix(in srgb,var(--border-color) 14%,transparent);padding:8px 12px}
 .config-notes details[open]{background:color-mix(in srgb,var(--bg-control) 20%,transparent)}
 .config-notes summary{cursor:pointer;font-weight:500;color:var(--text-main);padding:2px 0}
+
+/* ===== Config Page: Left Nav Layout ===== */
+.config-layout{display:flex;gap:20px;align-items:flex-start}
+.config-sidebar{flex-shrink:0;width:180px;display:flex;flex-direction:column;gap:2px;background:color-mix(in srgb,var(--bg-card) 88%,transparent);border:1px solid color-mix(in srgb,var(--border-color) 18%,transparent);border-radius:18px;padding:8px;box-shadow:var(--shadow-sm);backdrop-filter:blur(12px)}
+.config-sidebar a{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:var(--radius-control);color:var(--text-muted);text-decoration:none;font-size:var(--font-base);font-weight:500;transition:all .15s;cursor:pointer}
+.config-sidebar a:hover{background:color-mix(in srgb,var(--primary) 10%,var(--bg-card));color:var(--primary)}
+.config-sidebar a.active{background:color-mix(in srgb,var(--primary) 14%,var(--bg-card));color:var(--primary);font-weight:600}
+.config-content{flex:1;min-width:0}
 .config-row-readonly .key{color:var(--text-muted);font-weight:500}
 .config-row-readonly .val{color:var(--text-main);font-weight:600;word-break:break-all;max-width:60%;text-align:right}
 
@@ -398,6 +406,22 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 .toast.toast-success{background:color-mix(in srgb,var(--primary) 16%,var(--bg-card));color:var(--primary);border-color:color-mix(in srgb,var(--primary) 24%,transparent)}
 .toast.toast-error{background:color-mix(in srgb,#d93025 16%,var(--bg-card));color:#d93025;border-color:color-mix(in srgb,#d93025 24%,transparent)}
 .toast.toast-info{background:color-mix(in srgb,var(--primary) 12%,var(--bg-card));color:var(--primary);border-color:color-mix(in srgb,var(--primary) 18%,transparent)}
+
+/* ===== Modal ===== */
+.modal-overlay{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center}
+.modal-box{background:var(--bg-card);border:1px solid var(--border-color);border-radius:14px;padding:28px 32px;max-width:420px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,.4)}
+.modal-title{font-size:16px;font-weight:600;margin-bottom:14px;color:var(--text-main);display:flex;align-items:center;gap:8px}
+.modal-body p{font-size:14px;color:var(--text-muted);margin:6px 0}
+.modal-checkbox{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:13px;color:var(--text-muted);cursor:pointer}
+.modal-checkbox input{accent-color:var(--primary)}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:20px}
+.modal-btn{padding:8px 20px;border-radius:8px;font-size:13px;cursor:pointer;border:1px solid color-mix(in srgb,var(--border-color) 40%,transparent);font-family:inherit;transition:background .18s}
+.modal-btn.primary{background:var(--primary);color:var(--on-primary);border-color:var(--primary)}
+.modal-btn.primary:hover{background:var(--primary-hover)}
+.modal-btn.secondary{background:transparent;color:var(--text-main)}
+.modal-btn.secondary:hover{background:color-mix(in srgb,var(--bg-control) 50%,var(--bg-card))}
+:root[data-system="fluent"] .modal-box{border-radius:8px}
+:root[data-system="material"] .modal-box{border-radius:20px}
 
 /* ===== Loading ===== */
 .loading{display:flex;align-items:center;justify-content:center;padding:60px;color:var(--text-muted);font-size:var(--font-base);gap:10px}
@@ -412,13 +436,12 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 <body>
 <div id="wallpaper-a"></div>
 <div id="wallpaper-b"></div>
-<div id="overlay"></div>
 
 <div id="toast-container"></div>
 <header>
   <div>
     <span class="brand" id="brand-title">
-      <img src="logo.png" alt="STRM Bridge" style="height:100px;border-radius:12px;object-fit:contain;vertical-align:middle">
+      <img src="logo.png" alt="STRM Bridge" style="height:5vh;border-radius:12px;object-fit:contain;vertical-align:middle">
       <span>STRM Bridge</span>
     </span>
     
@@ -586,6 +609,61 @@ function showToast(msg, type='info') {
   }, 3000);
 }
 
+// ============================================================
+// Cache Stale Modal
+// ============================================================
+function _formatTimeAgo(ts) {
+  const sec = Math.floor(Date.now() / 1000 - ts);
+  if (sec < 60) return `${sec} 秒前`;
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} 小时前`;
+  return `${Math.floor(sec / 86400)} 天前`;
+}
+
+function showCacheStaleModal(itemCount, lastSync) {
+  const existing = document.getElementById('cache-stale-modal');
+  if (existing) existing.remove();
+  const ago = lastSync ? _formatTimeAgo(lastSync) : '未知';
+  const overlay = document.createElement('div');
+  overlay.id = 'cache-stale-modal';
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box">
+      <div class="modal-title">${icon('warn')} TMDB 缓存已过期</div>
+      <div class="modal-body">
+        <p>当前缓存 ${itemCount} 项，上次同步：${ago}</p>
+        <p>是否后台刷新？（约 30 秒，期间可正常使用页面）</p>
+        <label class="modal-checkbox">
+          <input type="checkbox" id="cache-never-remind"> 不再提醒
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button class="modal-btn secondary" id="cache-modal-cancel">取消</button>
+        <button class="modal-btn primary" id="cache-modal-ok">好的</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  document.getElementById('cache-modal-cancel').onclick = () => {
+    const cb = document.getElementById('cache-never-remind');
+    if (cb.checked) localStorage.setItem('tmdb_cache_never_remind', '1');
+    overlay.remove();
+  };
+  document.getElementById('cache-modal-ok').onclick = async () => {
+    const cb = document.getElementById('cache-never-remind');
+    if (cb.checked) localStorage.setItem('tmdb_cache_never_remind', '1');
+    overlay.remove();
+    showToast('后台同步已启动...', 'info');
+    try {
+      const resp = await fetch('/api/tmdb/watchlist/sync', { method: 'POST' });
+      const data = await resp.json();
+      if (data.success) showToast('同步完成后刷新页面即可看到最新数据', 'success');
+      else showToast(data.message || '启动同步失败', 'error');
+    } catch(e) {
+      showToast('启动同步失败: ' + e.message, 'error');
+    }
+  };
+}
+
 // Copy path block content to clipboard
 function copyPathBlock(el) {
   const texts = [];
@@ -641,7 +719,7 @@ function buildNav(activeTab) {
     ['area_a','A 区','area_a'],
     ['area_c','C 区','area_c'],
     ['tmdb','TMDB','tmdb'],
-    ['logs','WebUI 日志','log'],
+    ['logs','TMDB 日志','log'],
     ['config','配置','config'],
   ];
   // Area links default to kind=anime filter
@@ -689,7 +767,7 @@ async function router() {
     else if (page.startsWith('area_')) await renderArea(mainEl, page.replace('area_',''), params);
     else if (page === 'tmdb') await renderTmdb(mainEl, params);
     else if (page === 'logs') await renderLogs(mainEl);
-    else if (page === 'config') await renderConfig(mainEl);
+    else if (page === 'config') await renderConfig(mainEl, params);
     else mainEl.innerHTML = '<div class="error-msg">页面不存在</div>';
   } catch(e) {
     console.error('Router error:', e);
@@ -975,6 +1053,20 @@ async function renderTmdb(el, params) {
     return;
   }
 
+  // 检查缓存是否过期 & 是否已设"从不提醒"
+  const neverRemind = localStorage.getItem('tmdb_cache_never_remind') === '1';
+  if (status.cache_stale && !neverRemind) {
+    showCacheStaleModal(status.cache_item_count || 0, status.cache_last_sync || 0);
+  }
+
+  // 收录状态未计算提示
+  if (status.match_uncomputed > 0 && status.match_total > 0) {
+    showToast(
+      `${status.match_uncomputed} / ${status.match_total} 个条目收录状态未计算，建议点击配置页「刷新收录状态」`,
+      'info'
+    );
+  }
+
   const mediaType = params.type || 'movie';
   const page = parseInt(params.page) || 1;
   const q = params.q || '';
@@ -1052,7 +1144,7 @@ async function renderTmdb(el, params) {
   // Merged header: left (h2+avatar) + center (legend badges) + right (tabs+page-info)
   let html = `<div class="status-legend" style="justify-content:flex-start;align-items:center;gap:8px;padding:10px 14px">
   <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-    <h2 style="font-size:17px;margin:0;color:var(--text-main);display:flex;align-items:center;gap:6px;white-space:nowrap"><img src="${tmdbLogoUrl}" alt="TMDB" style="height:22px;vertical-align:middle" onerror="this.src='${_TMDB_LOGO_FALLBACK}'" loading="lazy"> TMDB 待看列表</h2>
+    <h2 style="font-size:17px;margin:0;color:var(--text-main);display:flex;align-items:center;gap:6px;white-space:nowrap"><img src="${tmdbLogoUrl}" alt="TMDB" style="height:22px;vertical-align:middle" onerror="this.src='${_TMDB_LOGO_FALLBACK}'" loading="lazy"> 待看列表</h2>
     ${avatarUrl ? `<a href="${esc(avatarLinkUrl)}" target="_blank" rel="noopener" title="查看待看列表" style="line-height:0;display:flex"><img class="tmdb-avatar" src="${avatarUrl}" alt="avatar" referrerpolicy="no-referrer"></a>` : ''}
   </div>
   <div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap">`;
@@ -1355,37 +1447,96 @@ function _renderGenres(container, genres) {
 }
 
 // ============================================================
-// Render: Logs
+// Render: Logs (TMDB 操作日志)
 // ============================================================
 async function renderLogs(el) {
-  const data = await api('/api/logs');
-  const lines = data.lines || [];
-  const rendered = lines.map(line => {
-    let cls = 'log-line';
-    if (line.includes('ERROR')) cls += ' error';
-    else if (line.includes('WARN')) cls += ' warn';
-    else if (line.includes('INFO')) cls += ' info';
-    else if (line.includes('DEBUG')) cls += ' debug';
-    return `<div class="${cls}">${esc(line)}</div>`;
+  const data = await api('/api/tmdb/logs');
+  const logs = data.logs || [];
+
+  const levelColor = { 'info': 'var(--primary)', 'success': '#188038', 'warn': '#e37400', 'error': '#d93025' };
+  const levelIcon = { 'info': 'info', 'success': 'check', 'warn': 'warn', 'error': 'error' };
+  const opLabel = {
+    'sync_start': '同步启动', 'sync': '同步', 'match_refresh_start': '匹配刷新启动',
+    'match_refresh': '匹配刷新', 'config_update': '配置更新', 'match_override': '状态覆盖', 'restart': '重启'
+  };
+
+  const rows = logs.map(log => {
+    const lv = log.level || 'info';
+    const color = levelColor[lv] || 'var(--text-muted)';
+    const ic = levelIcon[lv] || 'info';
+    const opText = opLabel[log.op] || log.op;
+    const ts = log.ts ? fmtTime(log.ts) : '-';
+    return `<tr>
+      <td style="white-space:nowrap">${esc(ts)}</td>
+      <td><span style="color:var(--primary)">${esc(opText)}</span></td>
+      <td><span style="color:${color};display:inline-flex;align-items:center;gap:4px">${icon(ic)} ${esc(lv)}</span></td>
+      <td>${esc(log.msg)}</td>
+    </tr>`;
   }).join('');
 
   el.innerHTML = `
-<h2 style="font-size:20px;margin-bottom:16px;color:var(--text-main)">${icon('log','ui-icon-lg')} WebUI 日志</h2>
+<h2 style="font-size:20px;margin-bottom:16px;color:var(--text-main)">${icon('log','ui-icon-lg')} TMDB 日志</h2>
 <div class="toolbar">
   <button class="toolbar-btn" id="logs-refresh">${icon('refresh')} 刷新</button>
-  <span style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px)">最近 ${lines.length} 行</span>
+  <span style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px)">共 ${data.count} 条</span>
 </div>
-<div class="log-panel">${rendered || '<div style="color:var(--text-muted)">暂无日志</div>'}</div>`;
+<table>
+<thead><tr><th>时间</th><th>操作类型</th><th>级别</th><th>消息</th></tr></thead>
+<tbody>${rows || '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">暂无日志</td></tr>'}</tbody>
+</table>`;
 
   document.getElementById('logs-refresh').addEventListener('click', () => router());
 }
 
 // ============================================================
-// Render: Config
+// Render: Config（左侧导航 + 子页面）
 // ============================================================
-async function renderConfig(el) {
+async function renderConfig(el, params) {
   const cfg = await api('/api/config');
+  const sub = params.sub || 'config';
 
+  const sidebarLinks = [
+    { id: 'config', icon: 'config', label: '配置' },
+    { id: 'about', icon: 'info', label: '关于' },
+    { id: 'help', icon: 'help', label: '帮助' },
+  ];
+  const sidebarHtml = sidebarLinks.map(link => {
+    const active = sub === link.id ? ' active' : '';
+    return `<a class="config-nav-item${active}" data-sub="${link.id}" href="#config?sub=${link.id}">${icon(link.icon)} ${esc(link.label)}</a>`;
+  }).join('');
+
+  // Sidebar
+  let html = `<h2 style="font-size:20px;margin-bottom:20px;color:var(--text-main)">${icon('config','ui-icon-lg')} 配置</h2>
+<div class="config-layout">
+<div class="config-sidebar">${sidebarHtml}</div>
+<div class="config-content">`;
+
+  if (sub === 'config') {
+    html += _renderConfigContent(cfg);
+  } else if (sub === 'about') {
+    html += _renderConfigAbout();
+  } else if (sub === 'help') {
+    html += _renderConfigHelp();
+  }
+
+  html += '</div></div>';
+  el.innerHTML = html;
+
+  // Bind sidebar nav via click (prevent full reload)
+  document.querySelectorAll('.config-nav-item').forEach(a => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      const subPage = a.dataset.sub;
+      location.hash = `config?sub=${subPage}`;
+    });
+  });
+
+  if (sub === 'config') {
+    _bindConfigFormEvents(cfg);
+  }
+}
+
+function _renderConfigContent(cfg) {
   function section(titleIcon, title, rowsHtml) {
     return `<div class="config-section"><h3>${icon(titleIcon)} ${esc(title)}</h3>${rowsHtml}</div>`;
   }
@@ -1421,8 +1572,7 @@ async function renderConfig(el) {
     ['custom', '自定义'],
   ].map(([val, text]) => `<option value="${val}" ${langSelectValue === val ? 'selected' : ''}>${esc(text)}</option>`).join('');
 
-  let html = `<h2 style="font-size:20px;margin-bottom:20px;color:var(--text-main)">${icon('config','ui-icon-lg')} 配置</h2>`;
-  html += `<div class="config-blocks-wrapper">`;
+  let html = `<div class="config-blocks-wrapper">`;
   html += `<div class="config-blocks-row">`;
   html += section('database', '数据库', `
     <div class="config-row"><span class="key">路径</span><span class="val">${esc(cfg.db_file.replace(/^.*[\\\/]/, ''))}</span></div>
@@ -1431,7 +1581,6 @@ async function renderConfig(el) {
   const webuiRows = [];
   webuiRows.push(`<div class="config-row"><span class="key">端口</span><span class="val">${esc(cfg.webui_port)}</span></div>`);
   webuiRows.push(`<div class="config-row"><span class="key">绑定</span><span class="val">${esc(cfg.webui_bind)}</span></div>`);
-  if (cfg.webui_has_password) webuiRows.push(`<div class="config-row"><span class="key">密码</span><span class="val">***</span></div>`);
   html += section('globe', 'WebUI', webuiRows.join(''));
   html += `</div>`;
 
@@ -1468,60 +1617,75 @@ async function renderConfig(el) {
   html += field('cfg-tmdb-proxy', 'HTTP 代理', proxyValue, '例: http://127.0.0.1:7890', 'text', true);
   html += field('cfg-tmdb-wldb', 'Watchlist DB', watchlistDbValue, '留空默认 tmdb_watchlist.db', 'text', true);
   html += `</div>`;
-  html += `<div class="config-form-actions"><button class="toolbar-btn primary" id="cfg-tmdb-save">${icon('check')} 保存 TMDB 配置</button><button class="toolbar-btn" id="cfg-tmdb-refresh">${icon('refresh')} 刷新待看列表</button><button class="toolbar-btn secondary" id="cfg-tmdb-restart" style="color:#e37400;border-color:#e37400">${icon('refresh')} 重启 WebUI</button></div>`;
+  html += `<div class="config-form-actions"><button class="toolbar-btn primary" id="cfg-tmdb-save">${icon('check')} 保存 TMDB 配置</button><button class="toolbar-btn" id="cfg-tmdb-refresh">${icon('refresh')} 刷新待看列表</button><button class="toolbar-btn" id="cfg-tmdb-match-refresh" style="background:color-mix(in srgb,var(--primary) 15%,var(--bg-card));border-color:color-mix(in srgb,var(--primary) 30%,var(--border-color))">${icon('check')} 刷新收录状态</button><button class="toolbar-btn secondary" id="cfg-tmdb-restart" style="color:#e37400;border-color:#e37400">${icon('refresh')} 重启 WebUI</button></div>`;
+  html += `<div style="margin-top:12px;display:flex;align-items:center;gap:8px"><label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted);cursor:pointer"><input type="checkbox" id="cfg-restore-cache-reminder" style="accent-color:var(--primary)"> 取消"从不提醒"TMDB 缓存过期弹窗</label></div>`;
   html += '</div>';
-
-  html += section('info', '注意事项', `
-    <div class="config-notes">
-      <details>
-        <summary>反代 Host 是什么？</summary>
-        <p>CF Workers 版 TMDB 反代 API 的上游项目在 <code>https://github.com/qqcomeup/CF-TMDB-Proxy-</code>，但并不直接适配本项目。本仓库根目录提供了 <code>edgeone_tmdb_api.js</code>，专为腾讯云 EdgeOne 边缘函数改造。以下是部署步骤：</p>
-        <p><strong>先配置域名：</strong>进入 EdgeOne 控制台 → <strong>域名服务 → 域名管理</strong>，添加你的自定义域名并配置源站（源站随便填，如 <code>bing.com</code>）。EdgeOne 的 SSL 证书自动申请续期大约 10 分钟才生效，不需要等，可以先部署函数。</p>
-        <ol>
-          <li><strong>创建边缘函数：</strong>进入 <strong>边缘函数 → 函数管理 → 新建函数</strong>，创建一个 <strong>Hello World</strong> 函数，创建完点"下一步"进代码编辑页。</li>
-          <li><strong>部署代码：</strong>把仓库根目录的 <code>edgeone_tmdb_api.js</code> 全部代码粘贴进去，保存并部署。</li>
-        </ol>
-        <p><strong>添加触发规则：</strong>在函数中找到 <strong>触发规则</strong>，新增一条规则（host 等于你的托管域名），保存生效。这一步相当于 Cloudflare Worker 的路由绑定。</p>
-        <p><strong>验证是否成功：</strong>部署完成后访问 <code>/health</code> 或 <code>/ping</code>，如返回 <code>{"status":"ok","timestamp":"...","uptime":"active"}</code> 说明成功。</p>
-        <p><strong>支持的接口：</strong></p>
-        <ul>
-          <li><code>/3/*</code> — TMDB API 代理（需提供 <code>api_key</code>）</li>
-          <li><code>/t/p/*</code> — TMDB 图片代理（海报/背景/头像，支持缓存）</li>
-          <li><code>/assets/*</code> — TMDB 官方资源代理（如 Logo SVG）</li>
-          <li><code>/avatar/{hash}</code> — Gravatar 头像代理</li>
-          <li><code>/admin/status</code> — 管理状态接口</li>
-          <li><code>/health</code>、<code>/ping</code> — 健康检查</li>
-        </ul>
-        <p>函数默认返回 404 页面作为伪装。API Key 通过请求头 <code>X-API-Key</code>、查询参数 <code>api_key</code> 或 <code>key</code> 传递。</p>
-        <p>完成后域名填入反代 Host 即可加速 TMDB API 调用。</p>
-      </details>
-      <details>
-        <summary>API 速率限制说明</summary>
-        TMDB 对免费账户有速率限制（约 50 次/秒）。首次启动时会批量请求剧集信息，如遇限速返回 429，程序会自动等待重试。
-      </details>
-      <details>
-        <summary>首次启动 / 手动刷新待看列表</summary>
-        首次启动需要较长时间同步元数据，请耐心等待。在 TMDB 页面点击「刷新待看列表」按钮即可手动触发同步。
-      </details>
-      <details>
-        <summary>TMDB 卡片左上角竖条的含义</summary>
-        多季番剧的卡片左上角会显示 1~3 根彩色竖条，表示该剧的季数范围：<span style="color:#a5d6a7">1 根</span> = 2 季，<span style="color:#90caf9">2 根</span> = 3~4 季，<span style="color:#ce93d8">3 根</span> = 5 季以上（仅用于视觉区分，颜色无特殊含义）。
-      </details>
-      <details>
-        <summary>卡片上的状态标签含义</summary>
-        每张卡片右上角显示收录状态：<span style="color:var(--primary)">已收录</span> = 已入库，<span style="color:#e37400">有疑问</span> = 待确认，灰色 = 未收录。
-      </details>
-      <details>
-        <summary>WebUI 配置保存后不重启？</summary>
-        TMDB 配置（Token、API Key、语言等）保存后即时生效，无需重启 WebUI。仅更改 <code>config.toml</code> 中的服务端配置才需要重启。
-      </details>
-    </div>
-  `);
-
   html += '</div>';
+  return html;
+}
 
-  el.innerHTML = html;
+function _renderConfigAbout() {
+  const appName = 'STRM Bridge';
+  return `
+<div class="config-section"><h3>${icon('info')} 关于 ${esc(appName)}</h3>
+<div style="line-height:1.8;font-size:var(--font-base);color:var(--text-muted);padding:8px 0">
+  <p><strong>${esc(appName)}</strong> — 云盘 STRM 文件管理与 TMDB 待看列表同步工具。</p>
+  <p>技术栈：Python · SQLite · TMDB API · WebDAV</p>
+  <p>开源许可证：MIT License</p>
+  <p>GitHub 仓库：<a href="https://github.com/reruin/openlist-strm-bridge" target="_blank" rel="noopener" style="color:var(--primary)">reruin/openlist-strm-bridge</a></p>
+</div></div>`;
+}
 
+function _renderConfigHelp() {
+  return `
+<div class="config-section"><h3>${icon('help')} 帮助</h3>
+<div class="config-notes">
+  <details>
+    <summary>反代 Host 是什么？</summary>
+    <p>CF Workers 版 TMDB 反代 API 的上游项目在 <code>https://github.com/qqcomeup/CF-TMDB-Proxy-</code>，但并不直接适配本项目。本仓库根目录提供了 <code>edgeone_tmdb_api.js</code>，专为腾讯云 EdgeOne 边缘函数改造。以下是部署步骤：</p>
+    <p><strong>先配置域名：</strong>进入 EdgeOne 控制台 → <strong>域名服务 → 域名管理</strong>，添加你的自定义域名并配置源站（源站随便填，如 <code>bing.com</code>）。EdgeOne 的 SSL 证书自动申请续期大约 10 分钟才生效，不需要等，可以先部署函数。</p>
+    <ol>
+      <li><strong>创建边缘函数：</strong>进入 <strong>边缘函数 → 函数管理 → 新建函数</strong>，创建一个 <strong>Hello World</strong> 函数，创建完点"下一步"进代码编辑页。</li>
+      <li><strong>部署代码：</strong>把仓库根目录的 <code>edgeone_tmdb_api.js</code> 全部代码粘贴进去，保存并部署。</li>
+    </ol>
+    <p><strong>添加触发规则：</strong>在函数中找到 <strong>触发规则</strong>，新增一条规则（host 等于你的托管域名），保存生效。这一步相当于 Cloudflare Worker 的路由绑定。</p>
+    <p><strong>验证是否成功：</strong>部署完成后访问 <code>/health</code> 或 <code>/ping</code>，如返回 <code>{"status":"ok","timestamp":"...","uptime":"active"}</code> 说明成功。</p>
+    <p><strong>支持的接口：</strong></p>
+    <ul>
+      <li><code>/3/*</code> — TMDB API 代理（需提供 <code>api_key</code>）</li>
+      <li><code>/t/p/*</code> — TMDB 图片代理（海报/背景/头像，支持缓存）</li>
+      <li><code>/assets/*</code> — TMDB 官方资源代理（如 Logo SVG）</li>
+      <li><code>/avatar/{hash}</code> — Gravatar 头像代理</li>
+      <li><code>/admin/status</code> — 管理状态接口</li>
+      <li><code>/health</code>、<code>/ping</code> — 健康检查</li>
+    </ul>
+    <p>函数默认返回 404 页面作为伪装。API Key 通过请求头 <code>X-API-Key</code>、查询参数 <code>api_key</code> 或 <code>key</code> 传递。</p>
+    <p>完成后域名填入反代 Host 即可加速 TMDB API 调用。</p>
+  </details>
+  <details>
+    <summary>API 速率限制说明</summary>
+    TMDB 对免费账户有速率限制（约 50 次/秒）。首次启动时会批量请求剧集信息，如遇限速返回 429，程序会自动等待重试。
+  </details>
+  <details>
+    <summary>首次启动 / 手动刷新待看列表</summary>
+    首次启动需要较长时间同步元数据，请耐心等待。在 TMDB 页面点击「刷新待看列表」按钮即可手动触发同步。
+  </details>
+  <details>
+    <summary>TMDB 卡片左上角竖条的含义</summary>
+    多季番剧的卡片左上角会显示 1~3 根彩色竖条，表示该剧的季数范围：<span style="color:#a5d6a7">1 根</span> = 2 季，<span style="color:#90caf9">2 根</span> = 3~4 季，<span style="color:#ce93d8">3 根</span> = 5 季以上（仅用于视觉区分，颜色无特殊含义）。
+  </details>
+  <details>
+    <summary>卡片上的状态标签含义</summary>
+    每张卡片右上角显示收录状态：<span style="color:var(--primary)">已收录</span> = 已入库，<span style="color:#e37400">有疑问</span> = 待确认，灰色 = 未收录。
+  </details>
+  <details>
+    <summary>WebUI 配置保存后不重启？</summary>
+    TMDB 配置（Token、API Key、语言等）保存后即时生效，无需重启 WebUI。仅更改 <code>config.toml</code> 中的服务端配置才需要重启。
+  </details>
+</div></div>`;
+}
+
+function _bindConfigFormEvents(cfg) {
   const tokenInput = document.getElementById('cfg-tmdb-token');
   if (tokenInput) {
     tokenInput.addEventListener('focus', function(){ this.type = 'text'; });
@@ -1549,7 +1713,6 @@ async function renderConfig(el) {
   }
 
   document.querySelectorAll('.floating-field input, .floating-field select').forEach(elm => {
-    // 语言字段的标签始终浮动（下拉框总有值），单独处理，跳过通用逻辑
     if (elm.id === 'cfg-tmdb-lang-select' || elm.id === 'cfg-tmdb-lang') return;
     const wrapper = elm.closest('.floating-field');
     const label = wrapper && wrapper.querySelector('.floating-label');
@@ -1569,7 +1732,6 @@ async function renderConfig(el) {
     sync();
   });
 
-  // Bind save button
   document.getElementById('cfg-tmdb-save').addEventListener('click', async () => {
     const btn = document.getElementById('cfg-tmdb-save');
     btn.disabled = true;
@@ -1616,12 +1778,15 @@ async function renderConfig(el) {
   document.getElementById('cfg-tmdb-refresh').addEventListener('click', async () => {
     const btn = document.getElementById('cfg-tmdb-refresh');
     btn.disabled = true;
-    btn.innerHTML = '同步中...';
+    btn.innerHTML = '启动同步中...';
     try {
-      const resp = await fetch('/api/tmdb/watchlist/refresh');
+      const resp = await fetch('/api/tmdb/watchlist/sync', { method: 'POST' });
       const data = await resp.json();
-      if (data.success) showToast('同步完成: ' + data.count + ' 项 (电影 ' + data.movies + ', 剧集 ' + data.tv + ')', 'success');
-      else showToast(data.error || '同步失败', 'error');
+      if (data.success) {
+        showToast(data.message || '后台同步已启动', 'success');
+        _tmdbCache.movies = null;
+        _tmdbCache.tv = null;
+      } else showToast(data.message || data.error || '同步失败', 'error');
     } catch(e) {
       showToast('同步失败: ' + e.message, 'error');
     } finally {
@@ -1644,6 +1809,57 @@ async function renderConfig(el) {
       btn.innerHTML = `${icon('refresh')} 重启 WebUI`;
     }
   });
+
+  document.getElementById('cfg-tmdb-match-refresh').addEventListener('click', async () => {
+    const btn = document.getElementById('cfg-tmdb-match-refresh');
+    btn.disabled = true;
+    btn.innerHTML = '启动刷新中...';
+    try {
+      const resp = await fetch('/api/tmdb/watchlist/match/refresh', { method: 'POST' });
+      const data = await resp.json();
+      if (data.success) {
+        showToast(data.message || '后台收录状态刷新已启动', 'info');
+        btn.innerHTML = '刷新中...';
+        const maxPolls = 120;
+        for (let i = 0; i < maxPolls; i++) {
+          await new Promise(r => setTimeout(r, 1000));
+          try {
+            const st = await api('/api/tmdb/watchlist/match/status');
+            if (!st.running && st.result) {
+              const r = st.result;
+              if (r.error) {
+                showToast('收录状态刷新失败: ' + r.error, 'error');
+              } else {
+                showToast(`收录状态已刷新: ${r.matched} 已收录 / ${r.fuzzy} 待确认 / ${r.unmatched} 未收录 (共 ${r.total} 项)`, 'success');
+                _tmdbCache.movies = null;
+                _tmdbCache.tv = null;
+              }
+              break;
+            }
+          } catch(_) {}
+        }
+      } else {
+        showToast(data.message || '启动刷新失败', 'error');
+      }
+    } catch(e) {
+      showToast('刷新失败: ' + e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '刷新收录状态';
+    }
+  });
+
+  const restoreCb = document.getElementById('cfg-restore-cache-reminder');
+  if (restoreCb) {
+    restoreCb.checked = localStorage.getItem('tmdb_cache_never_remind') === '1';
+    restoreCb.addEventListener('change', () => {
+      if (restoreCb.checked) {
+        localStorage.removeItem('tmdb_cache_never_remind');
+        restoreCb.checked = false;
+        showToast('已恢复缓存过期弹窗提醒', 'success');
+      }
+    });
+  }
 }
 
 // ============================================================
@@ -1664,7 +1880,7 @@ function _setCachedWatchlist(type, data) {
 }
 
 // ============================================================
-// Bing Wallpaper Cycling
+// Local Wallpaper Cycling
 // ============================================================
 let _wallpapers = [];
 let _wpIdx = 0;
@@ -1672,7 +1888,7 @@ let _wpTarget = 'a';
 
 async function loadWallpapers() {
   try {
-    const resp = await fetch('/api/bing-wallpapers');
+    const resp = await fetch('/api/local-wallpapers');
     if (!resp.ok) return;
     const imgs = await resp.json();
     if (!imgs || !imgs.length) return;
@@ -1681,8 +1897,8 @@ async function loadWallpapers() {
     _wpTarget = 'a';
     // Show first wallpaper immediately
     setWallpaper(_wallpapers[0]);
-    // Cycle every 30 minutes
-    setInterval(cycleWallpaper, 30 * 60 * 1000);
+    // Cycle every 30 seconds
+    setInterval(cycleWallpaper, 30 * 1000);
   } catch(e) {
     // Fallback: keep CSS gradient overlay
   }

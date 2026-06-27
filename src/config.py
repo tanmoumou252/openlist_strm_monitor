@@ -54,7 +54,6 @@ class WebDAVConfig:
 @dataclass(slots=True)
 class RefreshConfig:
     interval_seconds: int
-    wait_seconds: int
     enabled: bool = True
     depth: int = 5
 
@@ -82,7 +81,6 @@ class WebUIConfig:
     enabled: bool = True
     port: int = 8579
     bind: str = "0.0.0.0"
-    password: str = ""
 
 
 @dataclass(slots=True)
@@ -97,20 +95,18 @@ class TmdbProxyConfig:
 class TmdbConfig:
     """TMDB 待看列表配置"""
     access_token: str = ""
-    api_enabled: bool = False  # DEPRECATED, will be removed in a future release
     language: str = "zh-CN"
     host: str = ""
     api_key: str = ""
-    html_movie_file: str = "movie.htm"  # DEPRECATED, will be removed in a future release
-    html_tv_file: str = "tv.htm"  # DEPRECATED, will be removed in a future release
     csv_watchlist_file: str = ""
     watchlist_db: str = ""
     watchlist_cache_ttl: float = 604800  # 默认 7 天
-    exact_threshold: float = 0.85
     fuzzy_threshold: float = 0.60
     anime_min_ep_ratio: float = 0.3
-    anime_max_season_diff: int = 1
     proxy: TmdbProxyConfig = field(default_factory=TmdbProxyConfig)
+    # 扁平化代理字段（供前端/测试 WebUI 直接读写，与嵌套 proxy 双向同步）
+    proxy_enabled: bool = False
+    proxy_http: str = ""
 
 
 @dataclass(slots=True)
@@ -241,7 +237,6 @@ class AppConfig:
         refresh_data = data.get("refresh", {})
         refresh = RefreshConfig(
             interval_seconds=refresh_data.get("interval_minutes", 5) * 60,
-            wait_seconds=refresh_data.get("depth", 5),
             enabled=refresh_data.get("enabled", True),
             depth=refresh_data.get("depth", 5),
         )
@@ -362,7 +357,6 @@ class AppConfig:
             enabled=webui_data.get("enabled", True),
             port=int(webui_data.get("port", 8579)),
             bind=webui_data.get("bind", "0.0.0.0"),
-            password=webui_data.get("password", ""),
         )
 
         # 解析 [tmdb] 配置
@@ -381,12 +375,13 @@ class AppConfig:
             csv_watchlist_file=tmdb_data.get("csv_watchlist_file", ""),
             watchlist_db=tmdb_data.get("watchlist_db", ""),
             watchlist_cache_ttl=float(tmdb_data.get("watchlist_cache_ttl", 604800)),
-            exact_threshold=float(tmdb_data.get("exact_threshold", 0.85)),
             fuzzy_threshold=float(tmdb_data.get("fuzzy_threshold", 0.60)),
             anime_min_ep_ratio=float(tmdb_data.get("anime_min_ep_ratio", 0.3)),
-            anime_max_season_diff=int(tmdb_data.get("anime_max_season_diff", 1)),
             proxy=proxy,
         )
+        # 同步扁平化代理字段（与嵌套 proxy 双向同步）
+        tmdb.proxy_enabled = proxy.enabled
+        tmdb.proxy_http = proxy.http
 
         instance = cls.__new__(cls)
         instance.base_dir = base_dir
@@ -419,9 +414,6 @@ class AppConfig:
             interval_seconds=int(
                 self._read_single_line(
                     "refresh_interval.txt", base_dir) or "300"
-            ),
-            wait_seconds=int(
-                self._read_single_line("refresh_wait.txt", base_dir) or "30"
             ),
             enabled=True,
             depth=5,
