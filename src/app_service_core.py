@@ -22,16 +22,17 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 try:
     import tomllib
 except ImportError:
-    import tomli as tomllib
+    import tomli as tomllib  # type: ignore[no-redef]
 
 from config import AppConfig
-from database import Database
+from database import Database, ARecord, BRecord, BoundaryRecord
 from domain.media.subtitle_handler import SubtitleHandler
 from domain.sync.sync_service import SyncService
-from domain.events.handlers import AAreaEventHandler, BAreaEventHandler, CAreaEventHandler
+from area_watchers import AAreaEventHandler, BAreaEventHandler, CAreaEventHandler
 from refresh_service import RefreshService
 from utils import (
     make_strm_fingerprint,
@@ -190,7 +191,7 @@ class AppService:
         self.db = db
         self.admin_api = admin_api
         self._observers: list[object] = []
-        self.observer = None
+        self.observer: Any = None
         self._running = False
         self.refresh_service = RefreshService(self)
         self._dav_write_lock = threading.Lock()
@@ -295,9 +296,9 @@ class AppService:
     def persist_current_roots_snapshot(
             self, valid_engine_paths: list[str] | None = None) -> None:
         roots = [
-            (root_path, trash_path)
-            for root_path, trash_path, active, _updated_at in self.db.get_protected_roots()
-            if active and (valid_engine_paths is None or root_path in valid_engine_paths)
+            (record.root_path, record.trash_path)
+            for record in self.db.get_protected_roots()
+            if record.active and (valid_engine_paths is None or record.root_path in valid_engine_paths)
         ]
         self.db.save_protected_roots_snapshot(roots)
 
@@ -342,11 +343,8 @@ class AppService:
                 current_depth,
                 max_depth)
         result = self.admin_api.list_contents(normalized_path)
-        if isinstance(result, str):
-            if result == "404_NOT_FOUND":
-                logging.warning("[WebDAV刷新] 路径不存在: %s", normalized_path)
-                return False
-            logging.error("[WebDAV刷新] 无法列出目录 %s: %s", normalized_path, result)
+        if result is None:
+            logging.warning("[WebDAV刷新] 路径不存在或无法列出: %s", normalized_path)
             return False
         self.db.save_known_folder(normalized_path, source="webdav_refresh")
         for folder in result.get("folders", []):
@@ -450,10 +448,7 @@ class AppService:
                 if suggested_name:
                     standard_name = suggested_name
                 else:
-                    standard_name = f"S{
-                        season:02d}E{
-                        episode:02d}{
-                        Path(a_local).suffix}"
+                    standard_name = f"S{season:02d}E{episode:02d}{Path(a_local).suffix}"
                 rel_parts = list(rel.parts)
                 has_season_dir = False
                 season_dir_index = -1
@@ -612,14 +607,14 @@ class AppService:
         a_record = self.db.get_a_by_webdav(webdav_path)
         if not a_record:
             identity = self.db.get_identity_by_fingerprint(fingerprint)
-            if identity and identity[2]:
-                a_local_path = Path(identity[2])
+            if identity and identity.source_a_path:
+                a_local_path = Path(identity.source_a_path)
                 if a_local_path.exists():
-                    a_record = (str(a_local_path), webdav_path, "", 0)
+                    a_record = ARecord(str(a_local_path), webdav_path, "", 0)
         if not a_record:
             logging.debug("[血统校验失败] 无A区源记录: %s", b_local_path)
             return None
-        a_local_path = Path(a_record[0]).resolve()
+        a_local_path = Path(a_record.local_path).resolve()
         if not a_local_path.exists():
             logging.debug("[血统校验失败] A区源文件不存在: %s", a_local_path)
             return None
@@ -678,8 +673,7 @@ class AppService:
             return True
         boundary = self.db.get_media_boundary_by_source_name_only(a_media_name)
         if boundary:
-            _, mapped_source, mapped_current, _, _ = boundary
-            if b_media_name in (mapped_source, mapped_current):
+            if b_media_name in (boundary.source_media_name, boundary.current_media_name):
                 self._log_lineage_pass_once("边界映射Season变化", b_local_path)
                 return True
         return False
@@ -736,7 +730,8 @@ class AppService:
         if fingerprint:
             boundary = self.db.get_media_boundary_by_fingerprint(fingerprint)
             if boundary:
-                _, source_media_name, current_media_name, _, _ = boundary
+                source_media_name = boundary.source_media_name
+                current_media_name = boundary.current_media_name
                 if physical_media_folder_name == current_media_name:
                     self._log_lineage_pass_once("边界映射匹配", b_local_path)
                     return True
@@ -748,7 +743,8 @@ class AppService:
             boundary_by_source = self.db.get_media_boundary_by_source_name_only(
                 physical_media_folder_name)
             if boundary_by_source:
-                _, mapped_source, mapped_current, _, _ = boundary_by_source
+                mapped_source = boundary_by_source.source_media_name
+                mapped_current = boundary_by_source.current_media_name
                 if cloud_show_name == mapped_source or cloud_show_name == mapped_current:
                     self._log_lineage_pass_once("交叉边界映射匹配(源->当前)", b_local_path)
                     return True
@@ -756,7 +752,8 @@ class AppService:
             boundary_by_current = self.db.get_media_boundary_by_current_name(
                 physical_media_folder_name, str(self.b_root))
             if boundary_by_current:
-                _, mapped_source, mapped_current, _, _ = boundary_by_current
+                mapped_source = boundary_by_current.source_media_name
+                mapped_current = boundary_by_current.current_media_name
                 if cloud_show_name == mapped_source or cloud_show_name == mapped_current:
                     self._log_lineage_pass_once("交叉边界映射匹配(当前->源)", b_local_path)
                     return True
@@ -764,7 +761,8 @@ class AppService:
             boundary_by_cloud = self.db.get_media_boundary_by_source_name_only(
                 cloud_show_name)
             if boundary_by_cloud:
-                _, mapped_source, mapped_current, _, _ = boundary_by_cloud
+                mapped_source = boundary_by_cloud.source_media_name
+                mapped_current = boundary_by_cloud.current_media_name
                 if physical_media_folder_name in (mapped_source, mapped_current):
                     self._log_lineage_pass_once("交叉边界映射匹配(云端)", b_local_path)
                     return True
@@ -786,15 +784,15 @@ class AppService:
                 "[边界映射] 记录新映射: %s -> %s",
                 cloud_show_name,
                 physical_media_folder_name)
-        elif existing[2] != physical_media_folder_name:
+        elif existing.current_media_name != physical_media_folder_name:
             self.db.upsert_media_boundary(
                 fingerprint=fingerprint,
-                source_media_name=existing[1],
+                source_media_name=existing.source_media_name,
                 current_media_name=physical_media_folder_name,
                 engine_entry_path=str(self.b_root))
             logging.info(
                 "[边界映射] 更新映射: %s -> %s",
-                existing[1],
+                existing.source_media_name,
                 physical_media_folder_name)
 
     def _check_solo_episode(
@@ -866,8 +864,8 @@ class AppService:
         if not b_root.exists():
             logging.info("[初始化] B 区根目录不存在，跳过扫描")
             return
-        disk_fingerprint_to_paths = {}
-        disk_path_to_data = {}
+        disk_fingerprint_to_paths: dict[str, set[str]] = {}
+        disk_path_to_data: dict[str, dict] = {}
         scanned_count = 0
         for strm_file in b_root.rglob("*.strm"):
             try:
@@ -892,8 +890,8 @@ class AppService:
             return
         processed_disk_paths = set()
         for row in all_b_records:
-            db_local_path = row[0]
-            db_fingerprint = row[4]
+            db_local_path = row.local_path
+            db_fingerprint = row.fingerprint
             if not db_fingerprint:
                 self.db.delete_b_by_local(db_local_path)
                 continue
@@ -929,7 +927,7 @@ class AppService:
             if valid_new_path:
                 self.db.move_b_record(db_local_path, valid_new_path)
                 identity = self.db.get_identity_by_fingerprint(db_fingerprint)
-                if identity and identity[3] == db_local_path:
+                if identity and identity.current_b_path == db_local_path:
                     self.db.update_identity_b_path(
                         db_fingerprint, valid_new_path)
                 try:
@@ -966,8 +964,12 @@ class AppService:
                 parent_webdav_path = webdav_parent(
                     webdav_path) if webdav_path else ""
                 identity = self.db.get_identity_by_fingerprint(fingerprint)
-                source_a_path = identity[2] if identity else self.find_a_source_by_webdav(
+                source_a_path = identity.source_a_path if identity else self.find_a_source_by_webdav(
                     webdav_path)
+                if source_a_path is None:
+                    logging.warning(
+                        "[B区] webdav_path=%s 无对应 A 区源文件，source_a_path 写入 NULL",
+                        webdav_path)
                 self.db.upsert_b(
                     local_path=disk_path,
                     webdav_path=webdav_path,
@@ -1024,10 +1026,10 @@ class AppService:
         removed_count = 0
         migrated_count = 0
         for row in all_b_records:
-            local_path = row[0]
-            webdav_path = row[1]
-            source_a_path = row[3]
-            fingerprint = row[4]
+            local_path = row.local_path
+            webdav_path = row.webdav_path
+            source_a_path = row.source_a_path
+            fingerprint = row.fingerprint
             if not webdav_path:
                 continue
             if self.db.is_ghost_protected(webdav_path):
@@ -1115,7 +1117,8 @@ class AppService:
         # 遍历 A 区，找出指向该引擎路径下但云端已不存在的 STRM 文件
         a_records = self.db.get_all_a_records()
         for record in a_records:
-            local_path, webdav_path, parent_path, _updated_at = record
+            local_path = record.local_path
+            webdav_path = record.webdav_path
             # 只处理属于当前 engine_path 范围的记录
             if not webdav_path.startswith(engine_path):
                 continue
@@ -1137,7 +1140,7 @@ class AppService:
         """验证 STRM 存储状态，返回验证结果"""
         logging.info("[STRM存储验证] 开始验证...")
         try:
-            storages = self.admin_api.list_storages() if hasattr(self.admin_api, 'list_storages') else {}
+            storages = self.admin_api.list_storages()
             data = storages.get("data", {}) if isinstance(storages, dict) else {}
             content = data.get("content", []) if isinstance(data, dict) else []
             total = len(content)
@@ -1180,7 +1183,7 @@ class AppService:
                 reason="webdav_not_exists")
             return
         old_identity = self.db.get_identity_by_fingerprint(fingerprint)
-        current_b_path = old_identity[3] if old_identity else None
+        current_b_path = old_identity.current_b_path if old_identity else None
         self.db.upsert_identity(
             fingerprint=fingerprint,
             webdav_path=webdav_path,
@@ -1197,7 +1200,7 @@ class AppService:
         valid_b_instance = self.db.get_valid_b_instance_by_fingerprint(
             fingerprint)
         if valid_b_instance:
-            existing_main_path = valid_b_instance[0]
+            existing_main_path = valid_b_instance.local_path
             if existing_main_path != str(b_local):
                 new_score = self._b_file_score(str(b_local))
                 old_score = self._b_file_score(existing_main_path)
@@ -1246,7 +1249,8 @@ class AppService:
         row = self.db.get_a_by_local(local_path)
         self.db.delete_a_by_local(local_path)
         if row:
-            _local_path, webdav_path, parent_webdav_path, _updated_at = row
+            webdav_path = row.webdav_path
+            parent_webdav_path = row.parent_webdav_path
             self.trigger_delayed_cleanup(parent_webdav_path)
             logging.debug("[A区删除] 已清理A索引并安排延迟清理: %s", webdav_path)
         else:
@@ -1261,23 +1265,6 @@ class AppService:
                            webdav_path: str, parent: str) -> bool | None:
         return self.sync_service.copy_a_record_to_b(
             a_local_path, webdav_path, parent)
-
-    def _find_related_subtitles(self, strm_path: str | Path) -> list[Path]:
-        strm = Path(strm_path)
-        if not strm.parent.exists():
-            return []
-        subtitles = []
-        for ext in SUBTITLE_EXTS:
-            subtitles.extend(strm.parent.glob(f"*{ext}"))
-            subtitles.extend(strm.parent.glob(f"*{ext.upper()}"))
-        seen = set()
-        result = []
-        for sub in subtitles:
-            key = sub.resolve()
-            if key not in seen:
-                seen.add(key)
-                result.append(sub)
-        return result
 
     def _should_treat_as_movie(
             self, a_local_path: str | Path, webdav_path: str | None = None) -> bool:
@@ -1337,7 +1324,7 @@ class AppService:
         try:
             row = self.db.get_b_by_local_full(path)
             if row:
-                webdav_path = row[1]
+                webdav_path = row.webdav_path
                 if webdav_path:
                     canonical_webdav = _canonicalize_webdav_path_for_cloud(
                         webdav_path)
@@ -1363,8 +1350,8 @@ class AppService:
         all_instances = self.db.get_all_b_by_fingerprint(fingerprint)
         if not all_instances:
             return
-        valid_files = [row[0] for row in all_instances if row[5]
-                       == "valid" and Path(row[0]).exists()]
+        valid_files = [row.local_path for row in all_instances if row.status
+                       == "valid" and Path(row.local_path).exists()]
         if not valid_files:
             return
         valid_files.sort(key=self._b_file_score)
@@ -1484,8 +1471,8 @@ class AppService:
         correct_b_path: str | None = None
         source_a_path: str | None = None
         if identity:
-            historical_b_path = identity[3]
-            source_a_path = identity[2]
+            historical_b_path = identity.current_b_path
+            source_a_path = identity.source_a_path
             if historical_b_path and historical_b_path != local_path:
                 historical = Path(historical_b_path)
                 if historical.exists():
@@ -1498,8 +1485,8 @@ class AppService:
             if not source_a_path or not Path(source_a_path).exists():
                 source_a_path = self.find_a_source_by_webdav(webdav_path)
             if source_a_path and Path(source_a_path).exists():
-                if identity and identity[3]:
-                    correct_b_path = identity[3]
+                if identity and identity.current_b_path:
+                    correct_b_path = identity.current_b_path
                 else:
                     src_webdav = read_strm_webdav_path(source_a_path)
                     correct_b_path = str(
@@ -1533,7 +1520,11 @@ class AppService:
         if correct_b_path:
             parent = webdav_parent(webdav_path)
             final_source_a = source_a_path or (
-                identity[2] if identity else self.find_a_source_by_webdav(webdav_path))
+                identity.source_a_path if identity else self.find_a_source_by_webdav(webdav_path))
+            if final_source_a is None:
+                logging.warning(
+                    "[B区] webdav_path=%s 无对应 A 区源文件，source_a_path 写入 NULL",
+                    webdav_path)
             self.db.upsert_b(
                 correct_b_path,
                 webdav_path,
@@ -1551,8 +1542,8 @@ class AppService:
     def _verify_a_source_exists(
             self, b_local_path: str, webdav_path: str, fingerprint: str) -> bool:
         identity = self.db.get_identity_by_fingerprint(fingerprint)
-        if identity and identity[2]:
-            if Path(identity[2]).exists():
+        if identity and identity.source_a_path:
+            if Path(identity.source_a_path).exists():
                 return True
         a_source = self.find_a_source_by_webdav(webdav_path)
         if a_source and Path(a_source).exists():
@@ -1597,9 +1588,11 @@ class AppService:
             return False
         return True
 
-    def _handle_unparseable_strm(self, local: Path, row: tuple | None) -> None:
+    def _handle_unparseable_strm(self, local: Path, row: BRecord | None) -> None:
         if row:
-            _, old_webdav_path, parent, source_a_path, _fingerprint, _status, _ = row
+            old_webdav_path = row.webdav_path
+            parent = row.parent_webdav_path
+            source_a_path = row.source_a_path
             if self.restore_b_file_from_a(
                     str(local), old_webdav_path, parent, source_a_path):
                 logging.warning("[B区修复] 已从A区恢复异常STRM: %s", local)
@@ -1617,8 +1610,12 @@ class AppService:
             logging.warning("[B区隔离失败] 无法解析STRM: %s", local)
 
     def _handle_existing_b_file(
-            self, local: Path, webdav_path: str, parent: str, fingerprint: str, row: tuple) -> None:
-        _, old_webdav_path, old_parent, source_a_path, old_fingerprint, status, _ = row
+            self, local: Path, webdav_path: str, parent: str, fingerprint: str, row: BRecord) -> None:
+        old_webdav_path = row.webdav_path
+        old_parent = row.parent_webdav_path
+        source_a_path = row.source_a_path
+        old_fingerprint = row.fingerprint
+        status = row.status
         if old_fingerprint == fingerprint or old_webdav_path == webdav_path:
             self._refresh_b_record(
                 local,
@@ -1662,8 +1659,12 @@ class AppService:
     def _handle_new_b_file(self, local: Path, webdav_path: str,
                            parent: str, fingerprint: str) -> None:
         identity = self.db.get_identity_by_fingerprint(fingerprint)
-        source_a_path = identity[2] if identity else self.find_a_source_by_webdav(
+        source_a_path = identity.source_a_path if identity else self.find_a_source_by_webdav(
             webdav_path)
+        if source_a_path is None:
+            logging.warning(
+                "[B区] webdav_path=%s 无对应 A 区源文件，source_a_path 写入 NULL",
+                webdav_path)
         self._maybe_record_boundary_mapping(local, webdav_path, fingerprint)
         self.db.upsert_b(
             str(local),
@@ -1685,8 +1686,7 @@ class AppService:
             for mp in mapping.paths:
                 if cloud_path.startswith(mp):
                     relative = cloud_path[len(mp.rstrip("/")):].lstrip("/")
-                    engine_path = f"{
-                        entry_path.rstrip('/')}/{relative}" if relative else entry_path
+                    engine_path = f"{entry_path.rstrip('/')}/{relative}" if relative else entry_path
                     result.append(engine_path)
                     break
         return result
@@ -1700,9 +1700,11 @@ class AppService:
                 "[OpenListAdmin] 无法映射引擎路径，跳过索引更新: %s",
                 parent_webdav_path)
             return
-        if not self.admin_api.token and not self.admin_api.login():
-            logging.warning("[OpenListAdmin] 登录失败，跳过索引更新")
-            return
+        if not self.admin_api.token:
+            if not self.admin_api.login():
+                error_msg = self.admin_api.last_error_message or "未知错误"
+                logging.warning("[OpenListAdmin] 登录失败: %s，跳过索引更新", error_msg)
+                return
         ok = self.admin_api.trigger_refresh_via_fs_list(engine_paths)
         if ok:
             logging.info("[OpenListAdmin] 已请求更新strm索引: %s", engine_paths)
@@ -1716,12 +1718,14 @@ class AppService:
             row = self.db.get_b_by_local_full(str(local))
             if not row:
                 return
-            _, webdav_path, _parent_webdav_path, _source_a_path, fingerprint, _status, _ = row
+            webdav_path = row.webdav_path
+            parent_webdav_path = row.parent_webdav_path
+            fingerprint = row.fingerprint
             with self._restoring_lock:
                 if fingerprint in self._restoring_markers:
                     logging.info("[B区删除] 检测到程序恢复操作，跳过追删: %s", local_path)
                     return
-            if self.db.has_other_b_instance(fingerprint, str(local)):
+            if fingerprint and self.db.has_other_b_instance(fingerprint, str(local)):
                 logging.info("[B区删除联动] B区中仍存在同指纹文件，跳过WebDAV删除: %s", local_path)
                 self.db.delete_b_by_local(str(local))
                 return
@@ -1733,7 +1737,7 @@ class AppService:
                 self.db.delete_b_by_local(str(local))
                 return
             if webdav_path:
-                self._execute_webdav_deletion(webdav_path, _parent_webdav_path)
+                self._execute_webdav_deletion(webdav_path, parent_webdav_path)
                 self._delete_a_file_by_webdav(webdav_path)
             self.db.delete_b_by_local(str(local))
             if fingerprint:
@@ -1743,7 +1747,7 @@ class AppService:
             self, fingerprint: str, exclude_path: str | None = None) -> bool:
         b_instances = self.db.get_b_instances_by_fingerprint(fingerprint)
         for instance in b_instances:
-            instance_path = instance[0]
+            instance_path = instance.local_path
             if exclude_path and instance_path == exclude_path:
                 continue
             if Path(instance_path).exists():
@@ -1790,7 +1794,7 @@ class AppService:
     def _delete_a_file_by_webdav(self, webdav_path: str) -> None:
         a_record = self.db.get_a_by_webdav(webdav_path)
         if a_record:
-            a_path = a_record[0]
+            a_path = a_record.local_path
             if Path(a_path).exists():
                 safe_remove_file(a_path)
                 logging.info("[A区删除] B区删除联动，清理A区: %s", a_path)
@@ -1837,7 +1841,10 @@ class AppService:
         logging.warning("[B区迁移→C区] 开始迁移根路径下的 B 区文件: %s", root_path)
         records = self.db.get_b_under_root(root_path)
         migrated_count = 0
-        for local_path, webdav_path, _parent_webdav_path, source_a_path, _updated_at in records:
+        for record in records:
+            local_path = record.local_path
+            webdav_path = record.webdav_path
+            source_a_path = record.source_a_path
             local = Path(local_path)
             if not local.exists():
                 self.db.delete_b_by_local(local_path)
@@ -1875,12 +1882,12 @@ class AppService:
         logging.info("[B区僵尸清理] 开始扫描: %s", root_path)
         records = self.db.get_b_under_root(root_path)
         removed_count = 0
-        for local_path, webdav_path, _parent_webdav_path, _source_a_path, _updated_at in records:
-            if webdav_path and self.admin_api.check_exists(webdav_path):
+        for record in records:
+            if record.webdav_path and self.admin_api.check_exists(record.webdav_path):
                 continue
-            full_row = self.db.get_b_by_local_full(local_path)
-            fingerprint = full_row[4] if full_row else None
-            self._handle_b_zombie(local_path, webdav_path, fingerprint)
+            full_row = self.db.get_b_by_local_full(record.local_path)
+            fingerprint = full_row.fingerprint if full_row else None
+            self._handle_b_zombie(record.local_path, record.webdav_path, fingerprint)
             removed_count += 1
         if removed_count:
             logging.warning("[B区僵尸清理] 完成清理，共处理 %s 个文件", removed_count)
@@ -1892,21 +1899,21 @@ class AppService:
         b_instances = self.db.get_all_b_by_fingerprint(fingerprint)
         valid_instances = [
             row for row in b_instances
-            if row[5] == "valid" and Path(row[0]).exists()
+            if row.status == "valid" and Path(row.local_path).exists()
         ]
         if not valid_instances:
             self.db.clear_identity_b_path_by_fingerprint(fingerprint)
             return
-        valid_instances.sort(key=lambda row: self._b_file_score(row[0]))
+        valid_instances.sort(key=lambda row: self._b_file_score(row.local_path))
         best = valid_instances[0]
         if identity:
-            self.db.update_identity_b_path(fingerprint, best[0])
+            self.db.update_identity_b_path(fingerprint, best.local_path)
         else:
             self.db.upsert_identity(
                 fingerprint=fingerprint,
-                webdav_path=best[1],
-                source_a_path=best[3],
-                current_b_path=best[0],
+                webdav_path=best.webdav_path,
+                source_a_path=best.source_a_path,
+                current_b_path=best.local_path,
             )
 
     def _maybe_record_boundary_mapping(
@@ -1952,14 +1959,19 @@ class AppService:
             physical_media_folder_name,
         )
 
-    def _handle_b_zombie(self, *args, **kwargs):
-        local_path = args[0] if args else kwargs.get("local_path")
-        webdav_path = kwargs.get("webdav_path")
-        fingerprint = kwargs.get("fingerprint")
-        if len(args) > 1 and webdav_path is None:
-            webdav_path = args[1]
-        if len(args) > 2 and fingerprint is None:
-            fingerprint = args[2]
+    def _handle_b_zombie(
+        self,
+        local_path: str,
+        webdav_path: str | None = None,
+        fingerprint: str | None = None,
+    ) -> None:
+        """处理 B 区僵尸文件（本地文件已删除但 B 区仍存在）。
+        
+        Args:
+            local_path: 本地文件路径
+            webdav_path: WebDAV 路径（可选，用于设置幽灵保护）
+            fingerprint: 文件指纹（可选，用于刷新身份记录）
+        """
         if not local_path:
             return
         local = Path(local_path)

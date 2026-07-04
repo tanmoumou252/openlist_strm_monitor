@@ -6,7 +6,7 @@ TMDB 待看列表收录状态匹配逻辑（共享模块）。
   - 将 TMDB 待看条目与 B 区候选进行匹配评分
   - 执行收录状态刷新并回写 tmdb_watchlist.db
 
-被 webui.py 和 test_webui.py 共同引用，避免循环依赖。
+被 webui.py 和 standalone_webui.py 共同引用，避免循环依赖。  
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from database import Database
     from tmdb_watchlist_db import TmdbWatchlistDb
+
+from media_renamer import detect_media_type_from_path
 
 
 # ============================================================
@@ -101,21 +103,26 @@ def _is_category_dir(name: str) -> bool:
 
 
 def _media_info(record: dict) -> tuple[str, str]:
-    """从记录中推断 media_kind 和 media_name（增强版）。
+    """从记录中推断 media_kind 和 media_name。
 
-    使用正则识别季/集/电影标志，从路径结构中提取媒体名。
+    分类直接读取 B 区路径中的分类目录名（电影/番剧等），
+    由 media_renamer.detect_media_type_from_path() 完成。
     """
-    path = record.get("webdav_path") or record.get(
-        "original_b_path") or record.get("local_path") or ""
+    path = record.get("webdav_path") or record.get("local_path") or ""
     parts = _path_parts(path)
-    movie_hint = _MOVIE_HINT_RE.search(path) is not None
-    has_season = _SEASON_RE.search(path) is not None
-    has_episode = _EPISODE_RE.search(path) is not None
-    kind = "番剧" if (has_season or has_episode) else "电影"
-    if movie_hint and not (has_season or has_episode):
+
+    # 直接从路径分类目录读取：B 区路径已包含"电影"/"番剧"等目录
+    detected = detect_media_type_from_path(path)
+    if detected == "movie":
         kind = "电影"
-    if len(parts) <= 2 and not (has_season or has_episode):
-        kind = "电影"
+    elif detected == "anime":
+        kind = "番剧"
+    else:
+        # 兜底：无分类目录时按季/集正则判断
+        has_season = _SEASON_RE.search(path) is not None
+        has_episode = _EPISODE_RE.search(path) is not None
+        kind = "番剧" if (has_season or has_episode) else "电影"
+
     media_name = ""
     if kind == "番剧":
         # 寻找季目录，其前面的非分类目录就是番剧名
@@ -125,7 +132,6 @@ def _media_info(record: dict) -> tuple[str, str]:
                 if not _is_category_dir(parent):
                     media_name = parent
                     break
-                # 父目录是分类目录，说明没有番剧名目录，取祖目录或用 boundary
                 if idx >= 2:
                     candidate = parts[idx - 2]
                     if not _is_category_dir(candidate):
@@ -143,7 +149,12 @@ def _media_info(record: dict) -> tuple[str, str]:
         if not media_name and len(parts) >= 2:
             media_name = parts[-2]
     else:
-        media_name = Path(parts[-1]).stem if parts else "未分类电影"
+        # 对于电影，取上一级目录的名称（电影文件夹名），而非 STRM 文件名
+        # 例：/b区/电影/a合集/电影1.strm → media_name = "a合集"
+        if len(parts) >= 2 and not _is_category_dir(parts[-2]):
+            media_name = parts[-2]
+        else:
+            media_name = Path(parts[-1]).stem if parts else "未分类电影"
     return kind, media_name or (Path(parts[-1]).stem if parts else "未分类")
 
 
@@ -439,15 +450,19 @@ def score_watchlist_item(
 
     season_num = int(best_candidate.get("season_num") or 0)
     episode_hint = bool(best_candidate.get("episode_hint"))
-    # _season_count 来自 DB 批量填充（_populate_tv_details），number_of_seasons 来自 API 原始字段
-    total_seasons = int(item.get("_season_count") or item.get("number_of_seasons") or 0)
+    # _season_count 来自 DB 批量填充（_populate_tv_details），number_of_seasons 来自 API
+    # 原始字段
+    total_seasons = int(item.get("_season_count")
+                        or item.get("number_of_seasons") or 0)
 
     # 名字匹配已命中，但无季/集结构证据
     # tv_fuzzy 仅通过低阈值模糊匹配命中，无结构证据时标记 fuzzy 而非 matched
     if not (season_num > 0 or episode_hint):
         if match_kind == "tv_fuzzy":
-            return "fuzzy", "%s:%s|no_structure" % (match_kind, best_candidate["name"])
-        return "matched", "%s:%s|no_structure" % (match_kind, best_candidate["name"])
+            return "fuzzy", "%s:%s|no_structure" % (
+                match_kind, best_candidate["name"])
+        return "matched", "%s:%s|no_structure" % (
+            match_kind, best_candidate["name"])
 
     # 路径有季/集证据
     # 季数严重不匹配（路径第5季但TMDB只有2季）
@@ -459,12 +474,14 @@ def score_watchlist_item(
     # 说明 TMDB 还没播到这个季，本地却有，可能是同名不同作品
     last_ep_season = int(item.get("_last_ep_season") or 0)
     if last_ep_season > 0 and season_num > 0 and last_ep_season < season_num:
-        return "fuzzy", "tv_future_season:L%d<B%d" % (last_ep_season, season_num)
+        return "fuzzy", "tv_future_season:L%d<B%d" % (
+            last_ep_season, season_num)
 
     if episode_hint:
         # 集数比例验证：已下载集数 / TMDB 总集数 < min_ep_ratio
         db_ep_count = int(best_candidate.get("episode_count") or 0)
-        tmdb_ep_count = int(item.get("_episode_count") or item.get("number_of_episodes") or 0)
+        tmdb_ep_count = int(item.get("_episode_count")
+                            or item.get("number_of_episodes") or 0)
         if db_ep_count > 0 and tmdb_ep_count > 0:
             ep_ratio = db_ep_count / tmdb_ep_count
             if ep_ratio < min_ep_ratio:

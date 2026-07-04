@@ -260,6 +260,90 @@ async function handleRequest(request) {
     }
   }
 
+  // 3. Google Fonts CSS 代理 (fonts.googleapis.com)
+  // 路径格式: /fonts/css/css2?family=...
+  if (pathname.startsWith("/fonts/css/")) {
+    try {
+      // 提取 Google Fonts 的路径部分
+      const fontsPath = pathname.replace("/fonts/css/", "");
+      const fontsUrl = `https://fonts.googleapis.com/${fontsPath}${search}`;
+      
+      const response = await fetch(fontsUrl, {
+        headers: {
+          "User-Agent": request.headers.get("User-Agent") || "Mozilla/5.0",
+          "Accept": "text/css,*/*;q=0.1"
+        }
+      });
+
+      if (!response.ok) {
+        return new Response(`/* Google Fonts CSS error: ${response.status} */`, {
+          status: response.status,
+          headers: { "Content-Type": "text/css", ...corsHeaders }
+        });
+      }
+
+      let cssText = await response.text();
+      
+      // 重写 CSS 中的 fonts.gstatic.com URL 为相对路径
+      // 将 https://fonts.gstatic.com/... 替换为 /fonts/gstatic/...
+      cssText = cssText.replace(/https:\/\/fonts\.gstatic\.com\//g, "/fonts/gstatic/");
+
+      const responseHeaders = new Headers(corsHeaders);
+      responseHeaders.set("Content-Type", "text/css; charset=utf-8");
+      responseHeaders.set("Cache-Control", "public, max-age=86400"); // 1 天缓存
+
+      return new Response(cssText, {
+        status: response.status,
+        headers: responseHeaders
+      });
+    } catch (error) {
+      return new Response(`/* Google Fonts proxy error: ${error.message} */`, {
+        status: 502,
+        headers: { "Content-Type": "text/css", ...corsHeaders }
+      });
+    }
+  }
+
+  // 4. Google Fonts 字体文件代理 (fonts.gstatic.com)
+  // 路径格式: /fonts/gstatic/s/...woff2
+  if (pathname.startsWith("/fonts/gstatic/")) {
+    try {
+      // 提取 gstatic 的路径部分
+      const gstaticPath = pathname.replace("/fonts/gstatic/", "");
+      const fontUrl = `https://fonts.gstatic.com/${gstaticPath}`;
+      
+      const response = await fetch(fontUrl, {
+        headers: {
+          "User-Agent": request.headers.get("User-Agent") || "Mozilla/5.0",
+          "Accept": "font/woff2,*/*;q=0.1",
+          "Origin": "https://fonts.googleapis.com"
+        }
+      });
+
+      if (!response.ok) {
+        return new Response("/* Font file not found */", {
+          status: response.status,
+          headers: { "Content-Type": "text/plain", ...corsHeaders }
+        });
+      }
+
+      const responseHeaders = new Headers(corsHeaders);
+      responseHeaders.set("Content-Type", response.headers.get("Content-Type") || "font/woff2");
+      responseHeaders.set("Cache-Control", "public, max-age=31536000, immutable"); // 1 年缓存
+      responseHeaders.set("Cross-Origin-Resource-Policy", "cross-origin");
+
+      return new Response(response.body, {
+        status: response.status,
+        headers: responseHeaders
+      });
+    } catch (error) {
+      return new Response("/* Font proxy error */", {
+        status: 502,
+        headers: { "Content-Type": "text/plain", ...corsHeaders }
+      });
+    }
+  }
+
   return new Response(getFake404HTML(), {
     status: 404,
     headers: { "Content-Type": "text/html; charset=utf-8", ...corsHeaders }

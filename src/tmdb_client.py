@@ -350,15 +350,19 @@ class TmdbClient:
         aid = self.account_id
         if not aid:
             return [], False
-        data = self.request(
-            f"/3/account/{aid}/watchlist/movies",
-            {"page": str(page)},
-        )
-        if not data or "results" not in data:
+        try:
+            data = self.request(
+                f"/3/account/{aid}/watchlist/movies",
+                {"page": str(page)},
+            )
+            if not data or "results" not in data:
+                return [], False
+            items = data["results"]
+            has_next = data.get("page", 1) < data.get("total_pages", 1)
+            return items, has_next
+        except Exception as e:
+            logging.error("[TMDB] 获取电影待看列表请求失败: %s", e)
             return [], False
-        items = data["results"]
-        has_next = data.get("page", 1) < data.get("total_pages", 1)
-        return items, has_next
 
     def get_watchlist_tv(self, page: int = 1) -> tuple[list[dict], bool]:
         """
@@ -372,15 +376,19 @@ class TmdbClient:
         aid = self.account_id
         if not aid:
             return [], False
-        data = self.request(
-            f"/3/account/{aid}/watchlist/tv",
-            {"page": str(page)},
-        )
-        if not data or "results" not in data:
+        try:
+            data = self.request(
+                f"/3/account/{aid}/watchlist/tv",
+                {"page": str(page)},
+            )
+            if not data or "results" not in data:
+                return [], False
+            items = data["results"]
+            has_next = data.get("page", 1) < data.get("total_pages", 1)
+            return items, has_next
+        except Exception as e:
+            logging.error("[TMDB] 获取剧集待看列表请求失败: %s", e)
             return [], False
-        items = data["results"]
-        has_next = data.get("page", 1) < data.get("total_pages", 1)
-        return items, has_next
 
     def fetch_all_watchlist_movies(self) -> list[dict]:
         """获取全部待看电影"""

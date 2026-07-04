@@ -4,18 +4,14 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 import logging
-import re
 import os
-import sys
 import json
 from pathlib import Path
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 try:
     import tomllib
 except ImportError:
-    import tomli as tomllib
+    import tomli as tomllib  # type: ignore[no-redef]
 
 # autopep8: on
 # isort: on
@@ -189,6 +185,9 @@ class AppConfig:
     # STRM 存储映射 mount_path -> StrmStorageMapping
     strm_storage_map: dict[str, StrmStorageMapping] = field(
         default_factory=dict)
+    # OpenList 配置（从 DB 加载）
+    openlist_strm_engines: list[dict] = field(default_factory=list)
+    openlist_refresh_paths: list[str] = field(default_factory=list)
 
     def __getattr__(self, name: str):
         if name == "strm_engine_paths":
@@ -201,9 +200,136 @@ class AppConfig:
             f"'{self.__class__.__name__}' object has no attribute '{name}'"
         )
 
+    def update_from_db(self, watchlist_db) -> None:
+        """从 DB 的 webui_config 表加载 OpenList 配置覆盖。
+        
+        优先级：DB > config.toml
+        """
+        if not watchlist_db:
+            return
+        try:
+            db_cfg = watchlist_db.get_all_config("openlist")
+            if not db_cfg:
+                return
+            
+            # WebDAV 配置
+            webdav_cfg = self.webdav
+            if "webdav_host" in db_cfg:
+                webdav_cfg.host = db_cfg["webdav_host"]
+            if "webdav_user" in db_cfg:
+                webdav_cfg.user = db_cfg["webdav_user"]
+            if "webdav_password" in db_cfg:
+                webdav_cfg.password = db_cfg["webdav_password"]
+            if "webdav_totp_secret" in db_cfg:
+                webdav_cfg.totp_secret = db_cfg["webdav_totp_secret"]
+            
+            # 路径配置
+            paths_cfg = self.paths
+            if "b_root" in db_cfg:
+                paths_cfg.b_root = db_cfg["b_root"]
+                self.local.b_dir = db_cfg["b_root"]
+            if "c_root" in db_cfg:
+                paths_cfg.c_root = db_cfg["c_root"]
+                self.local.c_dir = db_cfg["c_root"]
+            
+            # STRM 引擎配置（JSON 数组）
+            if "strm_engines" in db_cfg:
+                try:
+                    self.openlist_strm_engines = json.loads(db_cfg["strm_engines"])
+                    # 从 openlist_strm_engines 派生 strm_engine_paths 和 strm_monitored_paths
+                    strm_engine_paths = []
+                    strm_monitored_paths = []
+                    for engine in self.openlist_strm_engines:
+                        mount_path = engine.get("engine", "")
+                        if mount_path and mount_path not in strm_engine_paths:
+                            strm_engine_paths.append(mount_path)
+                        for mp in engine.get("monitored_paths", []):
+                            if mp not in strm_monitored_paths:
+                                strm_monitored_paths.append(mp)
+                    paths_cfg.strm_engine_paths = strm_engine_paths
+                    paths_cfg.strm_monitored_paths = strm_monitored_paths
+                except (json.JSONDecodeError, TypeError):
+                    self.openlist_strm_engines = []
+            
+            # 刷新路径（JSON 数组）
+            if "refresh_paths" in db_cfg:
+                try:
+                    self.openlist_refresh_paths = json.loads(db_cfg["refresh_paths"])
+                    paths_cfg.refresh_paths = self.openlist_refresh_paths
+                except (json.JSONDecodeError, TypeError):
+                    self.openlist_refresh_paths = []
+            
+            # 从 strm_storage_map 派生 a_folders
+            a_folders = []
+            for entry_path, mapping in self.strm_storage_map.items():
+                if mapping.local_path and mapping.local_path not in a_folders:
+                    a_folders.append(mapping.local_path)
+            self.a_folders = a_folders
+            
+            # 刷新配置
+            refresh_cfg = self.refresh
+            if "refresh_enabled" in db_cfg:
+                refresh_cfg.enabled = str(db_cfg["refresh_enabled"]).lower() in ("true", "1", "yes")
+            if "refresh_interval_minutes" in db_cfg:
+                try:
+                    refresh_cfg.interval_seconds = int(db_cfg["refresh_interval_minutes"]) * 60
+                except (ValueError, TypeError):
+                    pass
+            if "refresh_depth" in db_cfg:
+                try:
+                    refresh_cfg.depth = int(db_cfg["refresh_depth"])
+                except (ValueError, TypeError):
+                    pass
+            
+            # 行为配置
+            behavior_cfg = self.behavior
+            if "behavior_action" in db_cfg:
+                behavior_cfg.action = db_cfg["behavior_action"]
+            if "behavior_trash_dir_name" in db_cfg:
+                behavior_cfg.trash_dir_name = db_cfg["behavior_trash_dir_name"]
+            if "behavior_ghost_protect_seconds" in db_cfg:
+                try:
+                    behavior_cfg.ghost_protect_seconds = int(db_cfg["behavior_ghost_protect_seconds"])
+                except (ValueError, TypeError):
+                    pass
+            if "behavior_a_to_b_restore_delay_seconds" in db_cfg:
+                try:
+                    behavior_cfg.a_to_b_restore_delay_seconds = int(db_cfg["behavior_a_to_b_restore_delay_seconds"])
+                except (ValueError, TypeError):
+                    pass
+            if "behavior_sync_on_startup" in db_cfg:
+                behavior_cfg.sync_on_startup = str(db_cfg["behavior_sync_on_startup"]).lower() in ("true", "1", "yes")
+            if "behavior_sync_on_startup_wait" in db_cfg:
+                try:
+                    behavior_cfg.sync_on_startup_wait = int(db_cfg["behavior_sync_on_startup_wait"])
+                except (ValueError, TypeError):
+                    pass
+            
+            # 日志配置
+            log_cfg = self.log
+            if "log_level" in db_cfg:
+                log_cfg.level = db_cfg["log_level"]
+            if "log_max_size_mb" in db_cfg:
+                try:
+                    log_cfg.max_size_mb = int(db_cfg["log_max_size_mb"])
+                except (ValueError, TypeError):
+                    pass
+            if "log_backup_count" in db_cfg:
+                try:
+                    log_cfg.backup_count = int(db_cfg["log_backup_count"])
+                except (ValueError, TypeError):
+                    pass
+            
+            logging.info("[Config] 已从 DB 加载 OpenList 配置 (%d 项)", len(db_cfg))
+        except Exception as e:
+            logging.warning("[Config] 从 DB 加载 OpenList 配置失败: %s", e)
+
     @classmethod
     def from_file(cls, toml_path: str) -> "AppConfig":
-        """从 config.toml 文件加载配置"""
+        """从 config.toml 文件加载配置（纯文件解析，无网络调用）。
+        
+        STRM 存储映射需要后续调用 load_strm_storage_from_api() 显式加载。
+        """
         with open(toml_path, "rb") as f:
             data = tomllib.load(f)
 
@@ -263,93 +389,16 @@ class AppConfig:
         )
 
         paths = PathsConfig(
-            strm_engine_paths=read_line_list(
-                paths_data.get(
-                    "strm_engine_paths_file",
-                    "strm_engine_paths.txt"),
-                base_dir,
-                is_webdav=True,
-            ),
+            strm_engine_paths=[],  # 从 API 或 DB 加载
             refresh_paths=read_line_list(
                 paths_data.get("refresh_paths_file", "refresh_paths.txt"),
                 base_dir,
                 is_webdav=True,
             ),
-            strm_monitored_paths=read_line_list(
-                paths_data.get("strm_monitored_paths_file", "strm_monitored_paths.txt"),
-                base_dir,
-                is_webdav=True,
-            ),
+            strm_monitored_paths=[],  # 从 API 或 DB 加载
             b_root=b_root,
             c_root=c_root,
         )
-
-        # 从 API 获取 STRM 存储信息
-        strm_storage_map = {}
-        try:
-            from webdav_client import OpenListAdminClient
-
-            admin_client = OpenListAdminClient(
-                host=webdav.host,
-                user=webdav.user,
-                password=webdav.password,
-                totp_secret=webdav.totp_secret,
-            )
-            if admin_client.login():
-                storages = admin_client.list_storages()
-                if storages and isinstance(storages, dict):
-                    data = storages.get("data", {})
-                    content = data.get(
-                        "content", []) if isinstance(
-                        data, dict) else []
-                    for storage in content:
-                        if storage.get("driver", "").lower() != "strm":
-                            continue
-                        mount_path = storage.get("mount_path", "")
-                        addition_str = storage.get("addition", "{}")
-                        try:
-                            addition = json.loads(addition_str)
-
-                            # 容 paths 为字符串和列表的两种情况
-                            paths_val = addition.get("paths", "")
-                            if isinstance(paths_val, list):
-                                storage_paths = [
-                                    str(p).strip() for p in paths_val if str(p).strip()
-                                ]
-                            else:
-                                storage_paths = [
-                                    p.strip()
-                                    for p in paths_val.split("\n")
-                                    if p.strip()
-                                ]
-
-                            local_path = addition.get("SaveStrmLocalPath", "")
-
-                            # 合并相同最后一级的 paths
-                            path_groups = {}
-                            for p in storage_paths:
-                                last_dir = p.rstrip("/").split("/")[-1]
-                                if last_dir not in path_groups:
-                                    path_groups[last_dir] = []
-                                path_groups[last_dir].append(p)
-
-                            # 为每个 group 创建 StrmStorageMapping
-                            for last_dir, group_paths in path_groups.items():
-                                entry_path = f"{mount_path.rstrip('/')}/{last_dir}"
-                                strm_storage_map[entry_path] = StrmStorageMapping(
-                                    mount_path=mount_path,
-                                    paths=group_paths,
-                                    local_path=local_path,
-                                )
-                        except json.JSONDecodeError:
-                            logging.warning(
-                                "[STRM存储解析] 解析 addition 失败: %s",
-                                addition_str[:200],
-                            )
-            else:
-                logging.warning("[STRM存储API] 登录失败，跳过 STRM 存储映射")
-        except Exception as exc:
-            logging.warning("[STRM存储API] 获取 STRM 存储信息失败: %s", exc)
 
         # 解析 [webui] 配置
         webui_data = data.get("webui", {})
@@ -359,29 +408,9 @@ class AppConfig:
             bind=webui_data.get("bind", "0.0.0.0"),
         )
 
-        # 解析 [tmdb] 配置
-        tmdb_data = data.get("tmdb", {})
-        proxy_data = tmdb_data.get("proxy", {})
-        proxy = TmdbProxyConfig(
-            enabled=proxy_data.get("enabled", False),
-            http=proxy_data.get("http", ""),
-            https=proxy_data.get("https", ""),
-        )
-        tmdb = TmdbConfig(
-            access_token=tmdb_data.get("access_token", ""),
-            language=tmdb_data.get("language", "zh-CN"),
-            host=tmdb_data.get("host", ""),
-            api_key=tmdb_data.get("api_key", ""),
-            csv_watchlist_file=tmdb_data.get("csv_watchlist_file", ""),
-            watchlist_db=tmdb_data.get("watchlist_db", ""),
-            watchlist_cache_ttl=float(tmdb_data.get("watchlist_cache_ttl", 604800)),
-            fuzzy_threshold=float(tmdb_data.get("fuzzy_threshold", 0.60)),
-            anime_min_ep_ratio=float(tmdb_data.get("anime_min_ep_ratio", 0.3)),
-            proxy=proxy,
-        )
-        # 同步扁平化代理字段（与嵌套 proxy 双向同步）
-        tmdb.proxy_enabled = proxy.enabled
-        tmdb.proxy_http = proxy.http
+        # 解析 [tmdb] 配置 — 已废弃，TMDB 配置迁移至 DB (webui_config 表)
+        # TmdbConfig 使用默认值初始化，运行时从 DB 加载覆盖
+        tmdb = TmdbConfig()
 
         instance = cls.__new__(cls)
         instance.base_dir = base_dir
@@ -393,76 +422,193 @@ class AppConfig:
         instance.paths = paths
         instance.webui = webui
         instance.tmdb = tmdb
-        instance.a_folders = read_line_list(
-            paths_data.get("a_folders_file", "a_folders.txt"),
-            base_dir,
-        )
-        instance.strm_storage_map = strm_storage_map
+        
+        # 初始化为空，后续由 load_strm_storage_from_api() 填充
+        instance.a_folders = []
+        instance.strm_storage_map = {}
+        instance.openlist_strm_engines = []
+        instance.openlist_refresh_paths = []
+        
         return instance
 
-    def __init__(self, base_dir: str) -> None:
-        """从 .txt 文件读取配置（保留原有逻辑）"""
-        self.base_dir = base_dir
-        self.webdav = WebDAVConfig(
-            host=self._read_single_line("webdav_host.txt", base_dir),
-            user=self._read_single_line("webdav_user.txt", base_dir),
-            password=self._read_single_line("webdav_password.txt", base_dir),
-            totp_secret=self._read_single_line(
-                "webdav_totp_secret.txt", base_dir),
-        )
-        self.refresh = RefreshConfig(
-            interval_seconds=int(
-                self._read_single_line(
-                    "refresh_interval.txt", base_dir) or "300"
-            ),
-            enabled=True,
-            depth=5,
-        )
-        self.behavior = BehaviorConfig(
-            sync_on_startup=self._read_single_line(
-                "sync_on_startup.txt", base_dir
-            ).lower()
-            == "true",
-            sync_on_startup_wait=int(
-                self._read_single_line(
-                    "sync_on_startup_wait.txt", base_dir) or "0"
-            ),
-        )
-        self.log = LogConfig(
-            level=self._read_single_line("log_level.txt", base_dir) or "INFO",
-            max_size_mb=int(
-                self._read_single_line("log_max_size_mb.txt", base_dir) or "2"
-            ),
-            backup_count=int(
-                self._read_single_line("log_backup_count.txt", base_dir) or "5"
-            ),
-        )
-        self.local = LocalConfig(
-            base_dir=base_dir,
-            a_dir=os.path.join(base_dir, "a"),
-            b_dir=os.path.join(base_dir, "b"),
-            c_dir=os.path.join(base_dir, "c"),
-        )
-        self.paths = PathsConfig(
-            strm_engine_paths=read_line_list(
-                "strm_engine_paths.txt", base_dir, is_webdav=True
-            ),
-            refresh_paths=read_line_list(
-                "refresh_paths.txt", base_dir, is_webdav=True),
-            b_root=os.path.join(base_dir, "b"),
-            c_root=os.path.join(base_dir, "c"),
-        )
-        self.a_folders = read_line_list("a_folders.txt", base_dir)
-        self.tmdb = TmdbConfig()
+    def load_strm_storage_from_api(self) -> None:
+        """从 OpenList API 加载 STRM 存储映射（需要网络）。
+        
+        此方法会创建临时的 AdminClient 并登录，获取所有 STRM 存储的映射信息。
+        调用后，a_folders、strm_engine_paths、strm_monitored_paths 会被更新。
+        """
+        try:
+            from webdav_client import OpenListAdminClient
 
-    @staticmethod
-    def _read_single_line(file_path: str, base_dir: str | Path) -> str:
-        full_path = Path(base_dir) / file_path
-        if not full_path.exists():
-            return ""
-        with open(full_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    return line
-        return ""
+            admin_client = OpenListAdminClient(
+                host=self.webdav.host,
+                user=self.webdav.user,
+                password=self.webdav.password,
+                totp_secret=self.webdav.totp_secret,
+            )
+            if not admin_client.login():
+                logging.warning("[STRM存储API] 登录失败，跳过 STRM 存储映射")
+                return
+
+            storages = admin_client.list_storages()
+            if not storages or not isinstance(storages, dict):
+                logging.warning("[STRM存储API] 获取存储列表失败")
+                return
+
+            data = storages.get("data", {})
+            content = data.get("content", []) if isinstance(data, dict) else []
+
+            strm_storage_map: dict[str, StrmStorageMapping] = {}
+            for storage in content:
+                if storage.get("driver", "").lower() != "strm":
+                    continue
+                mount_path = storage.get("mount_path", "")
+                addition_str = storage.get("addition", "{}")
+                try:
+                    addition = json.loads(addition_str)
+
+                    # 兼容 paths 为字符串和列表的两种情况
+                    paths_val = addition.get("paths", "")
+                    if isinstance(paths_val, list):
+                        storage_paths = [
+                            str(p).strip() for p in paths_val if str(p).strip()
+                        ]
+                    else:
+                        storage_paths = [
+                            p.strip()
+                            for p in paths_val.split("\n")
+                            if p.strip()
+                        ]
+
+                    local_path = addition.get("SaveStrmLocalPath", "")
+
+                    # 合并相同最后一级的 paths
+                    path_groups: dict[str, list[str]] = {}
+                    for p in storage_paths:
+                        last_dir = p.rstrip("/").split("/")[-1]
+                        if last_dir not in path_groups:
+                            path_groups[last_dir] = []
+                        path_groups[last_dir].append(p)
+
+                    # 为每个 group 创建 StrmStorageMapping
+                    for last_dir, group_paths in path_groups.items():
+                        entry_path = f"{mount_path.rstrip('/')}/{last_dir}"
+                        strm_storage_map[entry_path] = StrmStorageMapping(
+                            mount_path=mount_path,
+                            paths=group_paths,
+                            local_path=local_path,
+                        )
+                except json.JSONDecodeError:
+                    logging.warning(
+                        "[STRM存储解析] 解析 addition 失败: %s",
+                        addition_str[:200],
+                    )
+
+            # 从 strm_storage_map 派生 a_folders、strm_engine_paths、strm_monitored_paths
+            a_folders = []
+            strm_engine_paths = []
+            strm_monitored_paths = []
+            for entry_path, mapping in strm_storage_map.items():
+                if mapping.local_path and mapping.local_path not in a_folders:
+                    a_folders.append(mapping.local_path)
+                if mapping.mount_path not in strm_engine_paths:
+                    strm_engine_paths.append(mapping.mount_path)
+                for p in mapping.paths:
+                    if p not in strm_monitored_paths:
+                        strm_monitored_paths.append(p)
+
+            self.a_folders = a_folders
+            self.paths.strm_engine_paths = strm_engine_paths
+            self.paths.strm_monitored_paths = strm_monitored_paths
+            self.strm_storage_map = strm_storage_map
+            logging.info("[STRM存储API] 成功加载 %d 个 STRM 存储映射", len(strm_storage_map))
+
+        except Exception as exc:
+            logging.warning("[STRM存储API] 获取 STRM 存储信息失败: %s", exc)
+
+
+def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
+    """将 config.toml 和 txt 文件中的配置迁移到 DB。
+    
+    检查 migration scope 的 config_toml_migrated key：
+    - 如果已迁移，返回 False
+    - 如果未迁移，从 config 读取旧配置写入 DB openlist scope，返回 True
+    """
+    if not watchlist_db:
+        return False
+    
+    # 检查是否已迁移
+    migrated = watchlist_db.get_config("migration", "config_toml_migrated", "")
+    if migrated == "true":
+        logging.debug("[Migration] OpenList 配置已迁移，跳过")
+        return False
+    
+    logging.info("[Migration] 首次启动，正在将 config.toml 配置迁移到 DB...")
+    
+    try:
+        # WebDAV 配置
+        watchlist_db.set_config("openlist", "webdav_host", config.webdav.host)
+        watchlist_db.set_config("openlist", "webdav_user", config.webdav.user)
+        watchlist_db.set_config("openlist", "webdav_password", config.webdav.password)
+        watchlist_db.set_config("openlist", "webdav_totp_secret", config.webdav.totp_secret)
+        
+        # 路径配置
+        watchlist_db.set_config("openlist", "b_root", config.paths.b_root)
+        watchlist_db.set_config("openlist", "c_root", config.paths.c_root)
+        
+        # 刷新路径（JSON 数组）
+        watchlist_db.set_config("openlist", "refresh_paths", 
+                                json.dumps(config.paths.refresh_paths, ensure_ascii=False))
+        
+        # STRM 引擎配置（从 strm_storage_map 推导）
+        strm_engines = []
+        if config.strm_storage_map:
+            engine_groups: dict[str, list[str]] = {}
+            for entry_path, mapping in config.strm_storage_map.items():
+                mount_path = mapping.mount_path
+                if mount_path not in engine_groups:
+                    engine_groups[mount_path] = []
+                for mp in mapping.paths:
+                    if mp not in engine_groups[mount_path]:
+                        engine_groups[mount_path].append(mp)
+            for mount_path, monitored_paths in engine_groups.items():
+                strm_engines.append({
+                    "engine": mount_path,
+                    "monitored_paths": monitored_paths,
+                })
+        watchlist_db.set_config("openlist", "strm_engines",
+                                json.dumps(strm_engines, ensure_ascii=False))
+        
+        # 刷新配置
+        watchlist_db.set_config("openlist", "refresh_enabled",
+                                str(config.refresh.enabled).lower())
+        watchlist_db.set_config("openlist", "refresh_interval_minutes",
+                                str(config.refresh.interval_seconds // 60))
+        watchlist_db.set_config("openlist", "refresh_depth",
+                                str(config.refresh.depth))
+        
+        # 行为配置
+        watchlist_db.set_config("openlist", "behavior_action", config.behavior.action)
+        watchlist_db.set_config("openlist", "behavior_trash_dir_name", config.behavior.trash_dir_name)
+        watchlist_db.set_config("openlist", "behavior_ghost_protect_seconds",
+                                str(config.behavior.ghost_protect_seconds))
+        watchlist_db.set_config("openlist", "behavior_a_to_b_restore_delay_seconds",
+                                str(config.behavior.a_to_b_restore_delay_seconds))
+        watchlist_db.set_config("openlist", "behavior_sync_on_startup",
+                                str(config.behavior.sync_on_startup).lower())
+        watchlist_db.set_config("openlist", "behavior_sync_on_startup_wait",
+                                str(config.behavior.sync_on_startup_wait))
+        
+        # 日志配置
+        watchlist_db.set_config("openlist", "log_level", config.log.level)
+        watchlist_db.set_config("openlist", "log_max_size_mb", str(config.log.max_size_mb))
+        watchlist_db.set_config("openlist", "log_backup_count", str(config.log.backup_count))
+        
+        # 标记已迁移
+        watchlist_db.set_config("migration", "config_toml_migrated", "true")
+        
+        logging.info("[Migration] OpenList 配置已迁移到 DB (20 个键 + 1 个迁移标记)")
+        return True
+    except Exception as e:
+        logging.error("[Migration] 配置迁移失败: %s", e, exc_info=True)
+        return False

@@ -6,81 +6,98 @@ import threading
 import time
 import logging
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator
 
 
 # ============================================================
-# 数据库连接池 - 针对 30000+ 条数据高并发读写优化
+# 数据库记录类型定义
 # ============================================================
-class _ConnectionPool:
-    """
-    轻量级 SQLite 连接池。
-    核心策略：
-    - 读操作使用独立的只读连接，多个读可以并发
-    - 写操作通过写锁串行化，避免 SQLITE_BUSY
-    - WAL 模式允许读写并发不互阻
-    """
 
-    def __init__(self, db_path: str, max_readers: int = 8) -> None:
-        self._db_path = db_path
-        self._max_readers = max_readers
-        self._read_semaphore = threading.Semaphore(max_readers)
-        self._write_lock = threading.Lock()
-        self._local = threading.local()
-        # 用于追踪所有活跃连接（仅用于关闭）
-        self._all_conns: list[sqlite3.Connection] = []
-        self._all_conns_lock = threading.Lock()
 
-    def _make_conn(self, readonly: bool = False) -> sqlite3.Connection:
-        os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
-        if readonly:
-            uri = f"file:{self._db_path}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True, timeout=30)
-        else:
-            conn = sqlite3.connect(self._db_path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("PRAGMA cache_size=-64000")  # 64MB page cache
-        conn.execute("PRAGMA temp_store=MEMORY")
-        conn.execute("PRAGMA mmap_size=268435456")  # 256MB mmap
-        with self._all_conns_lock:
-            self._all_conns.append(conn)
-        return conn
+@dataclass(frozen=True)
+class ARecord:
+    """A 区 STRM 文件记录"""
+    local_path: str
+    webdav_path: str
+    parent_webdav_path: str
+    updated_at: float
 
-    def _get_read_conn(self) -> sqlite3.Connection:
-        """获取一个只读连接（通过信号量控制并发数）"""
-        self._read_semaphore.acquire()
-        try:
-            conn = self._make_conn(readonly=True)
-            return conn
-        except Exception:
-            self._read_semaphore.release()
-            raise
 
-    def _release_read_conn(self, conn: sqlite3.Connection) -> None:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        self._read_semaphore.release()
+@dataclass(frozen=True)
+class BRecord:
+    """B 区 STRM 文件记录"""
+    local_path: str
+    webdav_path: str
+    parent_webdav_path: str
+    source_a_path: str | None
+    fingerprint: str | None
+    status: str
+    updated_at: float
 
-    def get_write_conn(self) -> sqlite3.Connection:
-        """获取写连接（需要外部调用 acquire/release 写锁）"""
-        return self._make_conn(readonly=False)
 
-    def close_all(self) -> None:
-        with self._all_conns_lock:
-            for conn in self._all_conns:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-            self._all_conns.clear()
+@dataclass(frozen=True)
+class IdentityRecord:
+    """STRM 身份记录"""
+    fingerprint: str
+    webdav_path: str
+    source_a_path: str | None
+    current_b_path: str | None
+    updated_at: float
+
+
+@dataclass(frozen=True)
+class CRecord:
+    """C 区（幽灵文件）记录"""
+    local_path: str
+    webdav_path: str
+    original_b_path: str
+    ghost_root: str
+    moved_at: float
+
+
+@dataclass(frozen=True)
+class BoundaryRecord:
+    """媒体边界映射记录"""
+    fingerprint: str
+    source_media_name: str
+    current_media_name: str
+    engine_entry_path: str
+    updated_at: float
+
+
+@dataclass(frozen=True)
+class ProtectedRootRecord:
+    """受保护根目录记录"""
+    root_path: str
+    trash_path: str
+    active: bool
+    updated_at: float
+
+
+@dataclass(frozen=True)
+class SubtitleRecord:
+    """字幕记录"""
+    id: int
+    local_path: str
+    target_path: str
+    fingerprint: str
+    season: int | None
+    episode: int | None
+    lang_code: str | None
+    status: str
+    created_at: str
+    updated_at: str
+
+
+# ============================================================
+# 数据库操作
+# ============================================================
 
 
 class Database:
+    _last_ghost_cleanup: float
 
     @contextmanager
     def connection(self) -> Generator[sqlite3.Connection, None, None]:
@@ -328,10 +345,6 @@ class Database:
             conn.commit()
             logging.info("[DB] 数据库核心表与索引核对并创建完成！")
 
-        # 创建 TMDB 操作日志表（延迟创建避免首次启动阻塞，但也可以在这里创建）
-        # 这里直接创建，因为表结构简单，开销极小
-        self.ensure_tmdb_log_table()
-
     def init_db(self) -> None:
         """初始化数据库（兼容旧调用，实际初始化已在 __init__ 中完成）"""
         logging.debug("[DB] init_db 被调用，数据库已在 __init__ 中初始化")
@@ -422,65 +435,68 @@ class Database:
                 "DELETE FROM c_ghost_files WHERE local_path = ?", (local_path,))
             conn.commit()
 
-    def get_a_by_local(self, local_path: str) -> tuple | None:
+    def get_a_by_local(self, local_path: str) -> ARecord | None:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files WHERE local_path = ?",
                 (local_path,),
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            return ARecord(*row) if row else None
 
-    def get_b_by_local(self, local_path: str) -> tuple | None:
+    def get_b_by_local(self, local_path: str) -> BRecord | None:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 """
-                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, updated_at
+                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
                 FROM b_strm_files WHERE local_path = ?
                 """,
                 (local_path,),
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            return BRecord(*row) if row else None
 
-    def get_a_by_webdav(self, webdav_path: str) -> tuple | None:
+    def get_a_by_webdav(self, webdav_path: str) -> ARecord | None:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files WHERE webdav_path = ?",
                 (webdav_path,),
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            return ARecord(*row) if row else None
 
-    def get_b_by_webdav(self, webdav_path: str) -> list[tuple]:
+    def get_b_by_webdav(self, webdav_path: str) -> list[BRecord]:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 """
-                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, updated_at
+                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
                 FROM b_strm_files WHERE webdav_path = ?
                 """,
                 (webdav_path,),
             )
-            return cur.fetchall()
+            return [BRecord(*row) for row in cur.fetchall()]
 
-    def get_all_a_records(self) -> list[tuple]:
+    def get_all_a_records(self) -> list[ARecord]:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files")
-            return cur.fetchall()
+            return [ARecord(*row) for row in cur.fetchall()]
 
-    def get_all_b(self) -> list[tuple]:
+    def get_all_b(self) -> list[BRecord]:
         with self.lock, self.connection() as conn:
             cur = conn.execute("""
-                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, updated_at
+                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
                 FROM b_strm_files
                 """)
-            return cur.fetchall()
+            return [BRecord(*row) for row in cur.fetchall()]
 
-    def get_all_c(self) -> list[tuple]:
+    def get_all_c(self) -> list[CRecord]:
         with self.lock, self.connection() as conn:
             cur = conn.execute("""
                 SELECT local_path, webdav_path, original_b_path, ghost_root, moved_at
                 FROM c_ghost_files
                 """)
-            return cur.fetchall()
+            return [CRecord(*row) for row in cur.fetchall()]
 
     def save_known_folder(self, folder_path: str,
                           source: str = "unknown") -> None:
@@ -531,14 +547,23 @@ class Database:
             conn.commit()
 
     def is_ghost_protected(self, webdav_path: str) -> bool:
-        self.cleanup_expired_ghosts()
+        """检查路径是否受幽灵保护。
+        
+        优化：每 60 秒最多执行一次过期清理，避免热路径中的频繁 DELETE 查询。
+        """
+        now = time.time()
+        # 每 60 秒执行一次过期清理
+        if not hasattr(self, "_last_ghost_cleanup") or now - self._last_ghost_cleanup > 60:
+            self.cleanup_expired_ghosts()
+            self._last_ghost_cleanup = now
+        
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 "SELECT expire_time FROM ghost_protection WHERE webdav_path = ?",
                 (webdav_path,),
             )
             row = cur.fetchone()
-            return bool(row and row[0] > time.time())
+            return bool(row and row[0] > now)
 
     def set_protected_root(self, root_path: str,
                            trash_path: str, active: bool = True) -> None:
@@ -567,11 +592,11 @@ class Database:
             )
             conn.commit()
 
-    def get_protected_roots(self) -> list[tuple]:
+    def get_protected_roots(self) -> list[ProtectedRootRecord]:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 "SELECT root_path, trash_path, active, updated_at FROM protected_roots")
-            return cur.fetchall()
+            return [ProtectedRootRecord(r[0], r[1], bool(r[2]), r[3]) for r in cur.fetchall()]
 
     def get_protected_root_paths(self) -> list[str]:
         with self.lock, self.connection() as conn:
@@ -620,18 +645,18 @@ class Database:
             row = cur.fetchone()
             return row[0] if row else default
 
-    def get_b_under_root(self, webdav_root: str) -> list[tuple]:
+    def get_b_under_root(self, webdav_root: str) -> list[BRecord]:
         pattern = webdav_root.rstrip("/") + "/%"
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 """
-                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, updated_at
+                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
                 FROM b_strm_files
                 WHERE webdav_path = ? OR webdav_path LIKE ?
                 """,
                 (webdav_root, pattern),
             )
-            return cur.fetchall()
+            return [BRecord(*row) for row in cur.fetchall()]
 
     def delete_b_under_root(self, webdav_root: str) -> None:
         pattern = webdav_root.rstrip("/") + "/%"
@@ -666,7 +691,7 @@ class Database:
             )
             conn.commit()
 
-    def get_identity_by_fingerprint(self, fingerprint: str) -> tuple | None:
+    def get_identity_by_fingerprint(self, fingerprint: str) -> IdentityRecord | None:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 """
@@ -676,9 +701,10 @@ class Database:
                 """,
                 (fingerprint,),
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            return IdentityRecord(*row) if row else None
 
-    def get_identity_by_webdav(self, webdav_path: str) -> tuple | None:
+    def get_identity_by_webdav(self, webdav_path: str) -> IdentityRecord | None:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 """
@@ -688,7 +714,8 @@ class Database:
                 """,
                 (webdav_path,),
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            return IdentityRecord(*row) if row else None
 
     def update_identity_b_path(self, fingerprint: str,
                                current_b_path: str | None) -> None:
@@ -730,7 +757,7 @@ class Database:
         """
         B 区文件被重命名/隔离后，把 b_strm_files 的 local_path
         从旧路径迁移到新路径，并保留 fingerprint/status。
-        
+
         使用 INSERT OR REPLACE 实现原子操作，避免先 DELETE 再 INSERT
         时中间失败导致的数据丢失。
         """
@@ -819,7 +846,7 @@ class Database:
             row = cur.fetchone()
             return row[0] if row else None
 
-    def get_b_instances_by_fingerprint(self, fingerprint: str) -> list[tuple]:
+    def get_b_instances_by_fingerprint(self, fingerprint: str) -> list[BRecord]:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 """
@@ -835,7 +862,7 @@ class Database:
                 """,
                 (fingerprint,),
             )
-            return cur.fetchall()
+            return [BRecord(*row) for row in cur.fetchall()]
 
     def mark_b_instance_status(self, local_path: str, status: str) -> None:
         now = time.time()
@@ -858,7 +885,7 @@ class Database:
             )
             conn.commit()
 
-    def get_b_by_local_full(self, local_path: str) -> tuple | None:
+    def get_b_by_local_full(self, local_path: str) -> BRecord | None:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 """
@@ -874,7 +901,8 @@ class Database:
                 """,
                 (local_path,),
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            return BRecord(*row) if row else None
 
     def clear_identity_b_path_by_fingerprint(self, fingerprint: str) -> None:
         now = time.time()
@@ -891,7 +919,7 @@ class Database:
             conn.commit()
 
     def get_valid_b_instance_by_fingerprint(
-            self, fingerprint: str) -> tuple | None:
+            self, fingerprint: str) -> BRecord | None:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 """
@@ -911,7 +939,7 @@ class Database:
                 (fingerprint,),
             )
             row = cur.fetchone()
-            return row if row else None
+            return BRecord(*row) if row else None
 
     def mark_other_b_instances_duplicate(
         self,
@@ -951,7 +979,7 @@ class Database:
 
             return rows
 
-    def get_all_b_by_fingerprint(self, fingerprint: str) -> list[tuple]:
+    def get_all_b_by_fingerprint(self, fingerprint: str) -> list[BRecord]:
         """
         返回该 fingerprint 下所有 B 实例
         """
@@ -965,9 +993,9 @@ class Database:
                 """,
                 (fingerprint,),
             )
-            return cur.fetchall()
+            return [BRecord(*row) for row in cur.fetchall()]
 
-    def get_all_b_records(self) -> list[tuple]:
+    def get_all_b_records(self) -> list[BRecord]:
         """获取所有 B 区记录（用于启动时对比）"""
         with self.read_connection() as conn:
             cur = conn.execute("""
@@ -980,7 +1008,7 @@ class Database:
                            updated_at
                     FROM b_strm_files
                 """)
-            return cur.fetchall()
+            return [BRecord(*row) for row in cur.fetchall()]
 
     def b_fingerprint_exists(self, fingerprint: str) -> bool:
         """检查 B 区数据库中是否已存在该指纹"""
@@ -996,6 +1024,7 @@ class Database:
                 "UPDATE b_strm_files SET local_path = ? WHERE local_path = ?",
                 (new_path,
                  old_path))
+            conn.commit()
             return cur.rowcount > 0
 
     def insert_b_strm_file(
@@ -1030,6 +1059,7 @@ class Database:
                         updated_at,
                     ),
                 )
+                conn.commit()
                 return True
             except sqlite3.Error as e:
                 logging.error("[DB] 插入 B 区记录失败: %s", e)
@@ -1043,7 +1073,8 @@ class Database:
                 "SELECT COUNT(*) FROM a_strm_files WHERE webdav_path LIKE ?",
                 (pattern,)
             )
-            return cur.fetchone()[0]
+            row = cur.fetchone()
+            return row[0] if row else 0
 
     def has_other_b_instance(self, fingerprint: str,
                              exclude_local_path: str) -> bool:
@@ -1081,7 +1112,7 @@ class Database:
             conn.commit()
 
     def get_media_boundary_by_fingerprint(
-            self, fingerprint: str) -> tuple | None:
+            self, fingerprint: str) -> BoundaryRecord | None:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 """
@@ -1091,11 +1122,12 @@ class Database:
                 """,
                 (fingerprint,),
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            return BoundaryRecord(*row) if row else None
 
     def get_media_boundaries_by_source_name(
         self, source_media_name: str, engine_entry_path: str
-    ) -> list[tuple]:
+    ) -> list[BoundaryRecord]:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 """
@@ -1105,11 +1137,11 @@ class Database:
                 """,
                 (source_media_name, engine_entry_path),
             )
-            return cur.fetchall()
+            return [BoundaryRecord(*row) for row in cur.fetchall()]
 
     def get_media_boundary_by_current_name(
         self, current_media_name: str, engine_entry_path: str
-    ) -> tuple | None:
+    ) -> BoundaryRecord | None:
         with self.lock, self.connection() as conn:
             cur = conn.execute(
                 """
@@ -1121,11 +1153,12 @@ class Database:
                 """,
                 (current_media_name, engine_entry_path),
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            return BoundaryRecord(*row) if row else None
 
     def get_media_boundary_by_source_name_only(
         self, source_media_name: str
-    ) -> tuple | None:
+    ) -> BoundaryRecord | None:
         """根据源媒体名查找边界映射（不限制引擎路径，取最新的）"""
         with self.lock, self.connection() as conn:
             cur = conn.execute(
@@ -1138,7 +1171,8 @@ class Database:
                 """,
                 (source_media_name,),
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            return BoundaryRecord(*row) if row else None
 
     def _ensure_db_writable(self) -> None:
         """确保数据库文件及其父目录可写。"""
@@ -1180,7 +1214,7 @@ class Database:
 
     def init_subtitle_table(self) -> None:
         """初始化字幕表"""
-        with self.connection() as conn:
+        with self.lock, self.connection() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS subtitles (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1203,6 +1237,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_subtitle_target
                 ON subtitles(target_path)
             """)
+            conn.commit()
 
     def upsert_subtitle(
         self,
@@ -1215,7 +1250,7 @@ class Database:
         status: str = "valid",
     ) -> None:
         """插入或更新字幕记录"""
-        with self.connection() as conn:
+        with self.lock, self.connection() as conn:
             conn.execute("""
                 INSERT INTO subtitles
                 (local_path, target_path, fingerprint, season, episode, lang_code, status)
@@ -1231,36 +1266,37 @@ class Database:
             """, (local_path, target_path, fingerprint, season, episode, lang_code, status))
             conn.commit()
 
-    def get_subtitle_by_local(self, local_path: str) -> tuple | None:
+    def get_subtitle_by_local(self, local_path: str) -> SubtitleRecord | None:
         """根据本地路径查询字幕记录"""
-        with self.connection() as conn:
+        with self.lock, self.connection() as conn:
             cur = conn.execute(
-                "SELECT * FROM subtitles WHERE local_path = ?",
+                "SELECT id, local_path, target_path, fingerprint, season, episode, lang_code, status, created_at, updated_at FROM subtitles WHERE local_path = ?",
                 (local_path,)
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            return SubtitleRecord(*row) if row else None
 
     def subtitle_exists(self, local_path: str) -> bool:
         """检查字幕是否已存在"""
-        with self.connection() as conn:
+        with self.lock, self.connection() as conn:
             cur = conn.execute(
                 "SELECT 1 FROM subtitles WHERE local_path = ?",
                 (local_path,)
             )
             return cur.fetchone() is not None
 
-    def get_subtitles_by_fingerprint(self, fingerprint: str) -> list[tuple]:
+    def get_subtitles_by_fingerprint(self, fingerprint: str) -> list[SubtitleRecord]:
         """根据指纹获取所有字幕"""
-        with self.connection() as conn:
+        with self.lock, self.connection() as conn:
             cur = conn.execute(
-                "SELECT * FROM subtitles WHERE fingerprint = ?",
+                "SELECT id, local_path, target_path, fingerprint, season, episode, lang_code, status, created_at, updated_at FROM subtitles WHERE fingerprint = ?",
                 (fingerprint,)
             )
-            return cur.fetchall()
+            return [SubtitleRecord(*row) for row in cur.fetchall()]
 
     def delete_subtitle_by_local(self, local_path: str) -> None:
         """删除字幕记录"""
-        with self.connection() as conn:
+        with self.lock, self.connection() as conn:
             conn.execute(
                 "DELETE FROM subtitles WHERE local_path = ?",
                 (local_path,)
@@ -1269,7 +1305,7 @@ class Database:
 
     def cleanup_invalid_subtitles(self) -> None:
         """清理目标文件已不存在的字幕记录"""
-        with self.connection() as conn:
+        with self.lock, self.connection() as conn:
             cur = conn.execute("SELECT local_path, target_path FROM subtitles")
             for local_path, target_path in cur.fetchall():
                 if not Path(target_path).exists():
@@ -1386,49 +1422,3 @@ class Database:
             return os.path.getsize(self.db_path)
         except OSError:
             return 0
-
-    # ============================================================
-    # TMDB 操作日志
-    # ============================================================
-    def ensure_tmdb_log_table(self) -> None:
-        """确保 tmdb_operation_log 表存在"""
-        with self.lock, self.connection() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS tmdb_operation_log (
-                    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ts       REAL    NOT NULL,      -- Unix timestamp (seconds)
-                    op       TEXT    NOT NULL,       -- sync/match_refresh/config_update/match_override/restart
-                    level    TEXT    NOT NULL DEFAULT 'info',  -- info/success/warn/error
-                    msg      TEXT    NOT NULL,       -- 日志消息
-                    detail   TEXT                    -- 可选 JSON 详情
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_tmdb_log_ts ON tmdb_operation_log(ts DESC)
-            """)
-            conn.commit()
-
-    def log_tmdb_operation(self, op: str, level: str, msg: str, detail: str = None) -> None:
-        """写入一条 TMDB 操作日志"""
-        with self.lock, self.connection() as conn:
-            conn.execute(
-                "INSERT INTO tmdb_operation_log (ts, op, level, msg, detail) VALUES (?, ?, ?, ?, ?)",
-                (time.time(), op, level, msg, detail),
-            )
-            conn.commit()
-
-    def get_tmdb_logs(self, limit: int = 100) -> list[dict]:
-        """获取最近的 TMDB 操作日志（按时间倒序），超过 7 天的自动清理"""
-        # 清理 7 天前的旧数据
-        seven_days_ago = time.time() - 7 * 86400
-        with self.lock, self.connection() as conn:
-            conn.execute("DELETE FROM tmdb_operation_log WHERE ts < ?", (seven_days_ago,))
-            cur = conn.execute(
-                "SELECT id, ts, op, level, msg, detail FROM tmdb_operation_log ORDER BY ts DESC LIMIT ?",
-                (limit,),
-            )
-            rows = cur.fetchall()
-        return [
-            {"id": r[0], "ts": r[1], "op": r[2], "level": r[3], "msg": r[4], "detail": r[5]}
-            for r in rows
-        ]

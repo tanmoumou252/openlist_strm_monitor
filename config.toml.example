@@ -20,195 +20,27 @@
 #   - 日常使用频率不高，但建议保留
 #
 # ============================================================
+#
+# ⚠️ 重要变更说明：
+# 以下配置已迁移到 WebUI 管理面板（配置页面 → OpenList 配置），
+# 所有配置存储在 tmdb_watchlist.db 的 webui_config 表中：
+#   - [webdav] WebDAV 连接配置
+#   - [paths] 路径配置（b_root / c_root / refresh_paths / strm_engines）
+#   - [refresh] 主动刷新配置
+#   - [behavior] 行为配置
+#   - [log] 日志配置
+#
+# 首次启动时，程序会自动将 config.toml 中的旧配置迁移到数据库。
+# 迁移完成后，修改此文件中的废弃字段不再生效。
+# 请通过 WebUI 管理面板修改配置。
+#
+# ============================================================
 
 
 [local]
 # SQLite 数据库文件路径。
 # 可以使用相对路径，相对路径以 config.toml 所在目录为基准。
 db_file = "./bridge.db"
-
-
-[paths]
-# A 区路径列表文件。
-# 每行一个本地目录路径。
-# 这些目录通常是 OpenList STRM 引擎的输出目录。
-a_folders_file = "./a_folders.txt"
-
-# WebDAV 主动刷新路径列表文件。
-# 每行一个 OpenList 中的目录路径。
-# 
-# 用途：
-# - 调用 Admin API 触发索引更新
-# - 让 OpenList 重新扫描这些目录
-# - 检测云端目录变化
-# - 清理 B 区冗余 STRM
-#
-# 注意：
-# - 如果 config.toml 中 [refresh].enabled = false，本文件不会参与周期刷新。
-# - 填写的是 OpenList 中的路径，不是本地路径。
-#
-# 示例：
-# /天翼云盘家庭云1TB/番剧
-# /阿里云盘/电影
-refresh_paths_file = "./refresh_paths.txt"
-
-# STRM 引擎入口路径列表文件。
-# 每行一个 OpenList 中 STRM 引擎的入口路径。
-#
-# 用途：
-# - 访问引擎入口，触发引擎生成/更新 STRM
-# - 检查引擎是否正常运行
-#
-# 注意：
-# - 这是引擎的入口路径，不是被索引的媒体目录。
-# - 通常是一个顶层目录，如 /strm 或 /测试a
-#
-# 示例：
-# /strm
-# /测试a
-strm_engine_paths_file = "./strm_engine_paths.txt"
-
-# STRM 引擎真实监控路径列表文件（可选，手动补充）。
-# 每行一个 OpenList 中的真实云端目录路径。
-#
-# 用途：
-# - 与 API 自动获取的 strm_engine_paths 做交叉验证
-# - 当 API 无法返回所有路径时（如网络异常、引擎未启动），手动补充
-# - 差异检测：程序会对比此列表与 API 返回的列表，记录不一致项
-#
-# 注意：
-# - 填写的是 STRM 引擎实际监控的真实云端路径（如 /天翼云盘家庭云30GB/番剧）
-# - 不是引擎入口路径（如 /strm），引擎入口路径在 strm_engine_paths.txt 中配置
-# - 如果留空或不创建文件，程序将完全依赖 API 自动获取
-#
-# 示例：
-# /天翼云盘家庭云30GB/番剧
-# /天翼云盘家庭云30GB/电影
-strm_monitored_paths_file = "./strm_monitored_paths.txt"
-
-# B 区根目录。
-# 这是媒体库实际扫描的目录。
-# 程序会把 A 区 STRM 同步到这里。
-# 这里不能设置多文件夹
-# 注意路径斜杠的方向
-# 路径需要用 / 去隔开 不要直接使用Windows资源管理器里复制出来的路径
-b_root = "C:/Users/1/Downloads/测试b"
-
-# C 区根目录。
-# 用于幽灵迁移、异常隔离等场景。
-# 日常可能很少用到，但建议保留。
-# 注意路径斜杠的方向
-# 路径需要用 / 去隔开 不要直接使用Windows资源管理器里复制出来的路径
-c_root = "C:/Users/1/Downloads/测试c"
-
-
-[webdav]
-# OpenList WebDAV 地址。
-# 通常格式：
-#   http://127.0.0.1:5244/dav
-host = "http://127.0.0.1:5243/dav"
-
-# WebDAV 用户名,如果使用主动刷新功能 必须使用admin权限账户以调用api刷新路径
-user = "admin"
-
-# WebDAV 密码。
-password = ""
-
-# 2FA 密钥 如果开启了二次密钥就需要填写
-totp_secret = ""
-
-[refresh]
-# 是否启用主动刷新。
-#
-# false：
-#   只依赖文件系统事件和删除后的延迟清理。
-#   推荐用于调试 B 删除联动。
-#
-# true：
-#   程序会周期性扫描 refresh_paths.txt 中的 WebDAV 路径。
-#   用于主动发现云端目录变化，并清理 B 区冗余 STRM。
-enabled = true
-
-# 主动刷新间隔，单位：分钟。
-# enabled = true 时生效。
-interval_minutes = 10
-
-# WebDAV 主动刷新递归深度。
-# 数值越大，请求越多。
-# 建议：
-#   测试：2~3
-#   正式：3~5
-depth = 5
-
-
-[behavior]
-# B 区 STRM 被删除后，对 WebDAV 源文件执行的动作。
-#
-# MOVE：
-#   移动到 WebDAV 回收站目录。推荐。
-#
-# DELETE：
-#   直接删除 WebDAV 源文件。危险，不建议初期使用。
-action = "MOVE"
-
-# WebDAV 回收站目录名。
-# 当 action = "MOVE" 时生效。
-#
-# 例如源文件：
-#   /天翼云盘个人云1TB/番剧/xxx/S01E01.mp4
-#
-# 会移动到：
-#   /天翼云盘个人云1TB/strm_回收站_测试/番剧/xxx/S01E01.mp4
-#
-#   移动的路径是由strm文件的内容反向拼凑的 所以和strm引擎的路径无关 
-#   因此不会恢复到不可写的 http://127.0.0.1:5243/strm/回收站
-trash_dir_name = "strm_回收站"
-
-# ghost 保护时间，单位：秒。
-#
-# 用途：
-#   B 区删除 STRM 后，A 区可能因为 OpenList 同步延迟又短暂生成同一 STRM。
-#   ghost 保护用于阻止刚删除的内容被立刻重新同步回 B 区。
-#
-# 建议：
-#   测试环境至少 300 秒，避免 OpenList / STRM 引擎同步延迟导致删除后回灌。
-ghost_protect_seconds = 300
-
-# A/B 同步后的等待时间，单位：秒。
-#
-# 用于等待 OpenList / STRM 引擎 / 文件系统事件落地。
-a_to_b_restore_delay_seconds = 30
-
-# 启动时是否执行一次 A→B 同步。
-#
-# true：程序启动后立即执行一次 A→B 全量同步。
-# false：启动后不主动同步，仅依赖文件系统事件驱动。
-sync_on_startup = false
-
-# 启动同步前的等待时间，单位：秒。
-# sync_on_startup = true 时生效。
-# 用于等待 OpenList / STRM 引擎初始化完成后再开始同步。
-sync_on_startup_wait = 0
-
-
-[log]
-# 日志级别。
-#
-# INFO：
-#   默认推荐，只输出阶段、汇总和重要事件。
-#
-# DEBUG：
-#   排障使用。
-level = "INFO"
-
-# 日志文件路径。
-file = "./activity.log"
-
-# 单个日志文件最大大小，单位 MB。
-max_size_mb = 2
-
-# 保留的历史日志数量。
-backup_count = 5
 
 
 [webui]
@@ -227,55 +59,11 @@ port = 8579
 bind = "0.0.0.0"
 
 # ============================================================
-# TMDB 配置
+# 以下字段已废弃（迁移至 WebUI 数据库）
 # ============================================================
-# 用于 TMDB 搜索、详情查看以及待看列表对比。
+# TMDB 配置已移至 WebUI 面板（配置页面 → TMDB 设置），
+# 所有配置存储在 tmdb_watchlist.db 的 webui_config 表中。
 #
-# 认证方式（二选一）：
-#   1. access_token（推荐）- TMDB v3 Read Access Token，完整功能（含 watchlist）
-#   2. api_key - TMDB API Key (v3)，仅搜索/详情等公开 API
-
-[tmdb]
-# TMDB v3 Read Access Token（从 TMDB 网站获取，可选，有则使用 Bearer 认证）
-access_token = ""
-
-# 自定义 TMDB 反代基础地址（完整 URL，含 scheme，可含子路径前缀，不要带尾部斜杠）
-# 留空则使用官方地址 api.themoviedb.org / image.tmdb.org / www.themoviedb.org。
-# 设置后，API 请求、图片、详情页、徽标资源均走该 host。
-# 反代需统一转发 /3、/t/p、/assets、/{media_type} 等路径。
-host = ""
-
-# TMDB API Key (v3)（可选，无 access_token 时通过 ?api_key=xxx 认证）
-# 也作为反代鉴权的 X-API-Key 请求头发送。
-api_key = ""
-
-# 待看列表语言代码（zh-CN / en-US / ja-JP 等）
-language = "zh-CN"
-
-# 待看 CSV 导出文件路径（可选，如不填则不导出）
-csv_watchlist_file = ""
-
-# 待看列表 SQLite 数据库文件路径（可选，留空则自动放在配置目录下）。
-# 用于缓存 TMDB 待看列表及匹配状态，配合 WebUI 面板使用。
-watchlist_db = ""
-
-# 待看列表缓存过期时间，单位：秒（默认 604800 秒 = 7 天）
-# TMDB API 数据本身有延迟，频繁刷新无意义，建议设为 7 天
-# 此值也可通过 WebUI 面板 → TMDB 设置 → "缓存过期时间(秒)" 修改，
-# 修改后保存至 .tmdb_webui_config.json，不会回写 config.toml。
-watchlist_cache_ttl = 604800
-
-# 匹配阈值
-# fuzzy_threshold: SequenceMatcher 模糊匹配阈值，低于此分判定为"未收录"
-fuzzy_threshold = 0.60
-
-# 番剧匹配额外参数
-# anime_min_ep_ratio: 已下载集数/TMDB 总集数的最低比例，低于此比例判定为 fuzzy
-# 匹配流程：精确相等 → 子串匹配 → SequenceMatcher 模糊匹配 → 结构验证
-# 结构验证包括：季数范围、last_episode_to_air 交叉验证、集数比例检查
-anime_min_ep_ratio = 0.3
-
-[tmdb.proxy]
-#enabled = true
-#http = "http://127.0.0.1:7890"
-#https = "http://127.0.0.1:7890"
+# OpenList 配置已移至 WebUI 面板（配置页面 → OpenList 配置），
+# 包括：webdav 连接、路径、刷新、行为、日志等所有配置。
+# 首次启动时自动从 config.toml 迁移到数据库。

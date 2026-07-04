@@ -23,7 +23,7 @@ ensure_base_dir_first()
 try:
     import tomllib
 except ImportError:
-    import tomli as tomllib
+    import tomli as tomllib  # type: ignore[no-redef]
 
 
 # ==================== PathAnalysis 定义 ====================
@@ -202,7 +202,8 @@ class RefreshService:
                 return None
 
             if not admin_client.login():
-                logging.warning("[STRM存储API验证] Admin API 登录失败，回退到 WebDAV 检查")
+                error_msg = admin_client.last_error_message or "未知错误"
+                logging.warning("[STRM存储API验证] Admin API 登录失败: %s，回退到 WebDAV 检查", error_msg)
                 return None
 
             # 使用 app_service_core 中的 StrmStorageManager（避免重复实现）

@@ -1,0 +1,970 @@
+"""
+WebUI 服务器模块（合并自 standalone_webui.py + webui.py + webui_font_proxy.py）。
+
+职责：
+1. 提供 FontProxyMixin（字体代理，EdgeOne CDN / 本地 Google Fonts 代理）
+2. 提供 _WebUIHandler HTTP 请求处理器（SPA 架构，所有路由分发）
+3. 提供 WebUIServer 服务器（启动/停止 HTTP 服务）
+4. 提供 main() 独立入口
+
+合并说明：
+- webui.py 的 WebUIServer（使用 AppConfig，生产环境）作为主服务器
+- webui_font_proxy.py 的 FontProxyMixin 内联为模块级类
+- 路由与处理器统一从 webui.routes 引入
+- 独立运行模式使用 AppConfig.from_file 加载配置
+"""
+# autopep8: off
+# isort: off
+from __future__ import annotations
+
+import json
+import logging
+import os
+import random
+import sys
+import threading
+import time
+import tomllib
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlparse
+import urllib.request
+
+# ============================================================
+# 路径设置（必须在项目模块导入之前）
+# ============================================================
+# webui/ 是 src/webui/，所以 parent 是 src/，parent.parent 是项目根
+SRC_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from tmdb_watchlist_db import TmdbWatchlistDb
+from watchlist_match import (
+    refresh_watchlist_match_state as _refresh_watchlist_match_state,
+)
+
+# ============================================================
+# 日志
+# ============================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("webui")
+
+# ============================================================
+# 导入项目模块（sys.path 已设置，可以正常导入）
+# ============================================================
+from tmdb_client import create_tmdb_client  # noqa: E402
+from database import Database  # noqa: E402
+# 路由与处理器统一从 webui.routes 引入
+from webui.routes import (  # noqa: E402
+    _tmdb_routes, _is_lan_ip, _try_bind_port,
+    _handle_tmdb_configure, _handle_tmdb_watchlist_match_refresh,
+    _handle_tmdb_watchlist_match_override, _handle_tmdb_watchlist_bg_sync,
+    _handle_restart_webui, _handle_webui_config_get, _handle_webui_config_post,
+    _handle_openlist_test_connection, _handle_openlist_strm_engines,
+    _handle_openlist_monitored_paths, _handle_openlist_status,
+    _handle_openlist_paths,
+    handle_dashboard, handle_area, handle_area_detail,
+    handle_records_api, handle_logs_api, handle_config_api,
+)
+
+if TYPE_CHECKING:
+    from config import WebUIConfig
+
+# autopep8: on
+# isort: on
+
+
+# ============================================================
+# 静态文件目录（webui/static/）
+# ============================================================
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+
+
+
+# ============================================================
+# 字体代理 Mixin（合并自 webui_font_proxy.py）
+# ============================================================
+
+class FontProxyMixin:
+    """字体代理 Mixin，供 _WebUIHandler 继承。
+
+    职责：
+    1. 读取 [tmdb].host 作为 EdgeOne CDN Host（可选）。
+    2. 当配置了 tmdb.host 时，将 /fonts/css/* 和 /fonts/gstatic/* 请求 302 到该 Host。
+    3. 当未配置 tmdb.host 时，保持原有本地字体代理逻辑
+       （fonts.googleapis.com / fonts.gstatic.com）。
+    4. 修复原有本地代理 CSS 请求丢失 query string 的问题。
+
+    要求宿主类提供：
+    - self.webui（或 self._config）用于读取配置
+    - self.send_response / self.send_header / self.end_headers / self.wfile
+    - self.send_error
+    - self.headers（HTTP 请求头）
+    """
+
+    # ----------------------------------------------------------
+    # 配置读取
+    # ----------------------------------------------------------
+    def _configured_cdn_host(self) -> str:
+        """读取 config.toml 中配置的 EdgeOne CDN / Function Host。
+
+        当前项目中复用 [tmdb].host 作为 EdgeOne 反代 Host。
+        当该值为空时，表示未启用 EdgeOne 反代。
+        """
+        # 优先从 self.webui._config 读取
+        webui_server = getattr(self, "webui", None)
+        cfg = getattr(webui_server, "_config", None) if webui_server else None
+
+        # 如果 webui 没有 _config，尝试直接从 self 读取
+        if cfg is None:
+            cfg = getattr(self, "_config", None)
+
+        tmdb_cfg = getattr(cfg, "tmdb", None) if cfg else None
+        host = str(getattr(tmdb_cfg, "host", "") or "").strip().rstrip("/")
+
+        if host and not host.startswith(("http://", "https://")):
+            host = "https://" + host
+
+        return host
+
+    # ----------------------------------------------------------
+    # 302 跳转到配置的 CDN Host
+    # ----------------------------------------------------------
+    def _redirect_to_configured_cdn(self, path: str, query: str = "") -> None:
+        """将本地 /fonts/* 请求路由到 config.toml 中配置的 EdgeOne CDN Host。
+
+        用途：
+        - HTML 继续使用相对路径 /fonts/css/...
+        - 本地 WebUI 根据 [tmdb].host 判断是否启用 EdgeOne
+        - 启用后，本地不再直接代理字体上游，而是 302 到 EdgeOne
+        """
+        cdn_host = self._configured_cdn_host()
+
+        if not cdn_host:
+            self.send_error(502, "cdn host not configured")  # type: ignore[attr-defined]
+            return
+
+        location = f"{cdn_host}{path}"
+        if query:
+            location += f"?{query}"
+
+        self.send_response(302)  # type: ignore[attr-defined]
+        self.send_header("Location", location)  # type: ignore[attr-defined]
+        self.send_header("Cache-Control", "no-store")  # type: ignore[attr-defined]
+        self.send_header("Access-Control-Allow-Origin", "*")  # type: ignore[attr-defined]
+        self.end_headers()  # type: ignore[attr-defined]
+
+    # ----------------------------------------------------------
+    # 本地字体代理（未配置 tmdb.host 时使用）
+    # ----------------------------------------------------------
+    def _proxy_google_font_css(self, path: str, query: str = "") -> None:
+        """代理 CSS：/fonts/css/<rest>?<query> → fonts.googleapis.com/<rest>?<query>
+        重写 CSS 中的 fonts.gstatic.com URL 为 /fonts/gstatic/ 相对路径。
+        失败时返回 502，触发客户端 onerror 回退。
+        """
+        rest = path[len("/fonts/css/"):]
+        url = f"https://fonts.googleapis.com/{rest}"
+        if query:
+            url += f"?{query}"
+
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": self.headers.get("User-Agent", ""),  # type: ignore[attr-defined]
+                "Accept": "text/css,*/*;q=0.1",
+            })
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = resp.read()
+                # 将 CSS 中的 fonts.gstatic.com URL 替换为本地代理路径
+                body_text = body.decode("utf-8", errors="replace")
+                body_text = body_text.replace(
+                    "https://fonts.gstatic.com/", "/fonts/gstatic/")
+                body = body_text.encode("utf-8")
+
+            self.send_response(200)  # type: ignore[attr-defined]
+            self.send_header("Content-Type", "text/css; charset=utf-8")  # type: ignore[attr-defined]
+            self.send_header("Cache-Control", "public, max-age=86400")  # type: ignore[attr-defined]
+            self.send_header("Access-Control-Allow-Origin", "*")  # type: ignore[attr-defined]
+            self.send_header("Content-Length", str(len(body)))  # type: ignore[attr-defined]
+            self.end_headers()  # type: ignore[attr-defined]
+            try:
+                self.wfile.write(body)  # type: ignore[attr-defined]
+            except (ConnectionAbortedError, BrokenPipeError):
+                pass
+
+        except Exception as e:
+            logging.debug("[WebUI] 字体 CSS 代理失败 (%s): %s", url, e)
+            self.send_error(502, "font proxy failed")  # type: ignore[attr-defined]
+
+    def _proxy_google_font_file(self, path: str) -> None:
+        """代理字体文件：/fonts/gstatic/<rest> → fonts.gstatic.com/<rest>
+        失败时返回 502。
+        """
+        rest = path[len("/fonts/gstatic/"):]
+        url = f"https://fonts.gstatic.com/{rest}"
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": self.headers.get("User-Agent", ""),  # type: ignore[attr-defined]
+                "Origin": "https://fonts.googleapis.com",
+            })
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                body = resp.read()
+                content_type = resp.headers.get("Content-Type", "font/woff2")
+            self.send_response(200)  # type: ignore[attr-defined]
+            self.send_header("Content-Type", content_type)  # type: ignore[attr-defined]
+            self.send_header("Cache-Control", "public, max-age=31536000")  # type: ignore[attr-defined]
+            self.send_header("Access-Control-Allow-Origin", "*")  # type: ignore[attr-defined]
+            self.send_header("Content-Length", str(len(body)))  # type: ignore[attr-defined]
+            self.end_headers()  # type: ignore[attr-defined]
+            try:
+                self.wfile.write(body)  # type: ignore[attr-defined]
+            except (ConnectionAbortedError, BrokenPipeError):
+                pass
+
+        except Exception as e:
+            logging.debug("[WebUI] 字体文件代理失败 (%s): %s", url, e)
+            self.send_error(502, "font proxy failed")  # type: ignore[attr-defined]
+
+
+# ============================================================
+# Handler 类（合并自 webui.py 的 _WebUIHandler 和
+#                standalone_webui.py 的 _TestWebUIHandler）
+# ============================================================
+
+class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
+    """WebUI HTTP 请求处理器（SPA 架构）。
+
+    合并自 webui.py 和 standalone_webui.py 的处理器，
+    两者路由逻辑完全一致，统一在此维护。
+    """
+
+    # 由 WebUIServer.start() 动态设置
+    webui: "WebUIServer"
+
+    def log_message(self, format, *args):
+        pass  # 静默默认日志
+
+    # ----------------------------------------------------------
+    # 安全
+    # ----------------------------------------------------------
+    def _is_client_allowed(self) -> bool:
+        ip = self.client_address[0] if self.client_address else ""
+        return _is_lan_ip(ip)
+
+    def _guard_request(self) -> bool:
+        if not self._is_client_allowed():
+            self._send_json({"error": "forbidden"}, 403)
+            return False
+        return True
+
+    # ----------------------------------------------------------
+    # 响应工具
+    # ----------------------------------------------------------
+    def _send_json(self, data, status=200):
+        body = json.dumps(
+            data,
+            ensure_ascii=False,
+            default=str).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass  # 客户端提前断开，可忽略
+
+    def _send_html(self, body: str, status=200):
+        encoded = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        try:
+            self.wfile.write(encoded)
+        except (ConnectionAbortedError, BrokenPipeError) as e:
+            # 客户端提前断开连接（如刷新页面、快速切换 tab），静默忽略
+            logging.debug("_send_html: 客户端已断开连接: %s", e)
+
+    def _send_static_file(self, filename: str = "index.html", status=200):
+        file_path = STATIC_DIR / filename
+        try:
+            body = file_path.read_bytes()
+        except OSError as e:
+            logging.error("_send_static_file: 无法读取静态文件 %s: %s", file_path, e)
+            self.send_error(500, "static file not found")
+            return
+        # 根据文件扩展名设置 Content-Type
+        ext = Path(filename).suffix.lower()
+        ctype_map = {
+            ".ico": "image/x-icon",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".svg": "image/svg+xml",
+            ".html": "text/html; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".woff2": "font/woff2",
+            ".woff": "font/woff",
+            ".ttf": "font/ttf",
+        }
+        content_type = ctype_map.get(ext, "application/octet-stream")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        # Font files are stable — cache for 7 days; others no-store
+        if ext in (".woff2", ".woff", ".ttf"):
+            self.send_header("Cache-Control", "public, max-age=604800")
+        else:
+            self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass
+
+    def _try_serve_static(self, path: str) -> bool:
+        """尝试从 static/ 目录提供静态文件。返回 True 表示已处理，False 表示未找到。"""
+        # 安全检查：禁止路径穿越
+        if ".." in path or path.startswith("//"):
+            return False
+        
+        # 移除开头的 /
+        fname = path.lstrip("/")
+        if not fname:
+            return False
+        
+        # 检查文件是否存在
+        file_path = STATIC_DIR / fname
+        if not file_path.is_file():
+            return False
+        
+        # 确保文件在 STATIC_DIR 内（防止符号链接攻击）
+        try:
+            file_path.resolve().relative_to(STATIC_DIR.resolve())
+        except ValueError:
+            return False
+        
+        self._send_static_file(fname)
+        return True
+
+    # ----------------------------------------------------------
+    # 路由分发
+    # ----------------------------------------------------------
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        params = parse_qs(parsed.query)
+
+        if not self._guard_request():
+            return
+
+        # TMDB 路由（复用 webui.routes 的增强版）
+        if path.startswith("/api/tmdb/"):
+            tmdb_client = getattr(self.webui, '_tmdb_client', None)
+            if _tmdb_routes(self, tmdb_client, path, params,
+                            webui_server=self.webui):
+                return
+
+        # SPA 初始页面（从 static/index.html 提供）
+        if path == "/" or path == "/api/page":
+            self._send_static_file()
+        elif path == "/favicon.ico":
+            self._send_static_file("favicon.ico")
+        elif path == "/logo.png":
+            logos = sorted(STATIC_DIR.glob("logo.*.png"))
+            self._send_static_file(
+                random.choice(logos).name if logos else "logo.01.png")
+        elif path == "/api/dashboard":
+            handle_dashboard(self)
+        elif path.startswith("/api/area/"):
+            area = path.split("/api/area/")[1].split("/")[0].split("?")[0]
+            rest = path.split("/api/area/")[1]
+            sub = rest[len(area):] if len(rest) > len(area) else ""
+            if sub.startswith("/detail"):
+                handle_area_detail(self, area, params)
+            elif area:
+                handle_area(self, area, params)
+            else:
+                self._send_json({"error": "not found"}, 404)
+        elif path == "/openlist_strm_bridge.png":
+            self._send_static_file("openlist_strm_bridge.png")
+        elif path.startswith("/fonts/css/"):
+            # 配置了 tmdb.host：路由到 EdgeOne CDN
+            # 未配置 tmdb.host：保留原来的本地 Google Fonts CSS 代理
+            if self._configured_cdn_host():
+                self._redirect_to_configured_cdn(path, parsed.query)
+            else:
+                self._proxy_google_font_css(path, parsed.query)
+        elif path.startswith("/fonts/gstatic/"):
+            # 配置了 tmdb.host：路由到 EdgeOne CDN
+            # 未配置 tmdb.host：保留原来的本地 Google Fonts 字体文件代理
+            if self._configured_cdn_host():
+                self._redirect_to_configured_cdn(path, parsed.query)
+            else:
+                self._proxy_google_font_file(path)
+        elif path.endswith(".woff2") or path.endswith(".woff") or path.endswith(".ttf"):
+            # Font files served from static/
+            fname = path.lstrip("/")
+            if ".." in fname or "/" in fname or "\\" in fname:
+                self._send_json({"error": "invalid path"}, 400)
+            else:
+                self._send_static_file(fname)
+        elif path == "/api/logs":
+            handle_logs_api(self, params)
+        elif path == "/api/records":
+            handle_records_api(self, params)
+        elif path == "/api/config":
+            handle_config_api(self)
+        elif path.startswith("/api/webui/config/"):
+            scope = path.split(
+                "/api/webui/config/")[1].split("/")[0].split("?")[0]
+            if scope:
+                _handle_webui_config_get(self, self.webui, scope)
+            else:
+                self._send_json({"error": "scope required"}, 400)
+        # OpenList API 路由
+        elif path == "/api/openlist/status":
+            _handle_openlist_status(self, self.webui)
+        elif path == "/api/openlist/strm-engines":
+            _handle_openlist_strm_engines(self, self.webui)
+        elif path == "/api/openlist/monitored-paths":
+            _handle_openlist_monitored_paths(self, self.webui, params)
+        elif path == "/api/openlist/paths":
+            _handle_openlist_paths(self, self.webui)
+        # 主程序控制路由
+        elif path == "/api/main/status":
+            _handle_main_status(self, self.webui)
+        # 通用静态文件处理（.js / .css / .svg / .png / .jpg / .ico / .woff2 等）
+        elif self._try_serve_static(path):
+            pass
+        else:
+            self._send_json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        if not self._guard_request():
+            return
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length) if content_length else b"{}"
+        if path == "/api/tmdb/configure":
+            _handle_tmdb_configure(self, self.webui, body)
+        elif path == "/api/tmdb/watchlist/match/refresh":
+            _handle_tmdb_watchlist_match_refresh(self, self.webui)
+        elif path == "/api/tmdb/watchlist/match/override":
+            _handle_tmdb_watchlist_match_override(self, self.webui, body)
+        elif path == "/api/tmdb/watchlist/sync":
+            _handle_tmdb_watchlist_bg_sync(self, self.webui)
+        elif path == "/api/restart-webui":
+            _handle_restart_webui(self, self.webui)
+        elif path == "/api/openlist/test-connection":
+            _handle_openlist_test_connection(self, self.webui, body)
+        elif path == "/api/main/start":
+            _handle_main_start(self, self.webui, body)
+        elif path == "/api/main/stop":
+            _handle_main_stop(self, self.webui)
+        elif path.startswith("/api/webui/config/"):
+            scope = path.split(
+                "/api/webui/config/")[1].split("/")[0].split("?")[0]
+            if scope:
+                _handle_webui_config_post(self, self.webui, scope, body)
+            else:
+                self._send_json({"error": "scope required"}, 400)
+        else:
+            self._send_json({"error": "not found"}, 404)
+
+
+# ============================================================
+# 服务器（合并自 webui.py 的 WebUIServer 和
+#              standalone_webui.py 的 TestWebUIServer）
+# ============================================================
+
+class WebUIServer:
+    """WebUI 管理面板服务器。
+
+    使用 AppConfig 加载配置，支持生产环境和独立运行模式。
+
+    通过 app_config 参数区分：
+    - 生产环境（main.py）：传入 AppConfig 实例，自动从 DB 加载配置覆盖
+    - 独立运行（main()）：传入 AppConfig 实例，从 DB 加载 OpenList 配置
+    """
+
+    def __init__(self, config: WebUIConfig, db: Database,
+                 app_config=None) -> None:
+        self._config = app_config
+        self._db = db
+        self._port = config.port
+        self._bind = config.bind
+        self._enabled = config.enabled
+        self._start_time = time.time()
+        self._server: HTTPServer | None = None
+        self._thread: threading.Thread | None = None
+        self._project_root = PROJECT_ROOT
+
+        # AppService 管理（主程序）
+        self._app_service: object | None = None
+        self._app_running = False
+        self._app_start_lock = threading.Lock()
+
+        # 顺序很重要：
+        # 1) 无条件创建 watchlist DB（用于存储 webui_config）
+        # 2) 从 DB 读取 TMDB 配置覆盖
+        # 3) 从 DB 读取 OpenList 配置覆盖（仅 AppConfig 支持）
+        # 4) 用最终配置初始化 TMDB 客户端
+        self._tmdb_client: object | None = None
+        self._watchlist_db: TmdbWatchlistDb | None = None
+        self._sync_lock = threading.Lock()
+        self._sync_running = False
+        self._match_refresh_lock = threading.Lock()
+        self._match_refresh_running = False
+        self._match_refresh_result: dict | None = None
+
+        # 尝试查找日志文件（独立运行模式使用）
+        self._log_file: str | None = None
+        log_candidates = [
+            PROJECT_ROOT / "strm_bridge.log",
+            PROJECT_ROOT / "logs" / "strm_bridge.log",
+            SRC_DIR / "strm_bridge.log",
+        ]
+        for p in log_candidates:
+            if p.exists():
+                self._log_file = str(p)
+                break
+
+        # 1) 无条件创建 DB（存储配置 + 待看列表数据）
+        self._reinit_watchlist_db()
+
+        # 2) 从 DB 加载 TMDB 配置覆盖
+        self._raise_on_start_failure = False  # 生产模式：失败时记录日志并返回
+        if app_config is not None:
+            self._load_db_config()
+            # 3) 从 DB 加载 OpenList 配置覆盖
+            self._load_openlist_db_config()
+        else:
+            # 独立运行模式：失败时抛出异常，让调用方感知
+            self._raise_on_start_failure = True
+
+        # 4) 用最终配置初始化 TMDB 客户端
+        self._init_tmdb_client()
+
+    def _load_db_config(self) -> None:
+        """从 DB 的 webui_config 表加载 TMDB 配置覆盖。
+
+        替代原 _load_webui_overrides()（读取 .tmdb_webui_config.json）。
+        DB 为唯一配置来源。
+        """
+        if not self._watchlist_db:
+            return
+        try:
+            db_cfg = self._watchlist_db.get_all_config("tmdb")
+            if not db_cfg or not hasattr(self._config, "tmdb"):
+                return
+            cfg_tmdb = self._config.tmdb
+            proxy_changed = False
+            for key, val in db_cfg.items():
+                if val is None:
+                    continue
+                # proxy 扁平字段单独处理
+                if key == "proxy_http":
+                    cfg_tmdb.proxy_http = val or ""
+                    cfg_tmdb.proxy.http = val or ""
+                    proxy_changed = True
+                    continue
+                if key == "proxy_enabled":
+                    cfg_tmdb.proxy_enabled = str(
+                        val).lower() in ("true", "1", "yes")
+                    cfg_tmdb.proxy.enabled = cfg_tmdb.proxy_enabled
+                    proxy_changed = True
+                    continue
+                # 数值类型字段
+                if key in ("watchlist_cache_ttl", "fuzzy_threshold",
+                           "anime_min_ep_ratio"):
+                    try:
+                        setattr(cfg_tmdb, key, float(val))
+                    except (ValueError, TypeError):
+                        pass
+                    continue
+                # 其余字段需是 TmdbConfig 已声明槽位，避免 AttributeError
+                if val != "" and hasattr(cfg_tmdb, key):
+                    setattr(cfg_tmdb, key, val)
+            logging.info(
+                "[WebUI] 已从 DB 加载 TMDB 配置 (%d 项)"
+                + (" (含代理设置)" if proxy_changed else ""),
+                len(db_cfg),
+            )
+        except Exception as e:
+            logging.debug("[WebUI] 从 DB 加载 TMDB 配置失败: %s", e)
+
+    def _load_openlist_db_config(self) -> None:
+        """从 DB 加载 OpenList 配置覆盖到 AppConfig。"""
+        if not self._watchlist_db:
+            return
+        try:
+            self._config.update_from_db(self._watchlist_db)
+        except Exception as e:
+            logging.debug("[WebUI] 从 DB 加载 OpenList 配置失败: %s", e)
+
+    def _init_tmdb_client(self) -> None:
+        """初始化 TMDB 客户端（仅当配置了 API key/token 时）"""
+        self._tmdb_client = None  # type: ignore[assignment]
+        try:
+            from tmdb_client import create_tmdb_client
+            tmdb_cfg = getattr(self._config, "tmdb", None)
+            if tmdb_cfg:
+                has_token = bool(getattr(tmdb_cfg, "access_token", None))
+                has_key = bool(getattr(tmdb_cfg, "api_key", None))
+                if has_token or has_key:
+                    from webui.routes import _resolve_tmdb_proxy
+                    proxy = _resolve_tmdb_proxy(self._config)
+                    self._tmdb_client = create_tmdb_client(
+                        access_token=getattr(
+                            tmdb_cfg, "access_token", "") or "",
+                        language=getattr(tmdb_cfg, "language", "zh-CN"),
+                        proxy=proxy,
+                        host=getattr(tmdb_cfg, "host", ""),
+                        api_key=getattr(tmdb_cfg, "api_key", "") or "",
+                    )
+        except Exception as e:
+            logging.debug("[WebUI] TMDB 客户端初始化失败: %s", e)
+
+    def _reinit_watchlist_db(self) -> None:
+        """据当前配置重建 TMDB 待看列表 SQLite 数据库。
+
+        DB 无条件创建（用于存储 webui_config 配置），
+        固定路径：{project_root}/tmdb_watchlist.db。
+        """
+        tmdb_cfg = getattr(self._config, "tmdb", None)
+        # 固定使用 project_root 下的 tmdb_watchlist.db
+        db_path = str(self._project_root / "tmdb_watchlist.db")
+        ttl = float(
+            getattr(
+                tmdb_cfg,
+                "watchlist_cache_ttl",
+                604800)) if tmdb_cfg else 604800
+        try:
+            self._watchlist_db = TmdbWatchlistDb(db_path, ttl)
+        except Exception as e:
+            logging.warning("[WebUI] 待看列表数据库初始化失败: %s", e)
+            self._watchlist_db = None
+
+    def get_watchlist_cached(self) -> list[dict]:
+        """获取待看列表。缓存过期时直接返回旧数据，不自动同步。"""
+        if not self._tmdb_client or not self._watchlist_db:
+            return []
+        return self._watchlist_db.get_all()
+
+    def refresh_watchlist_match_state(self) -> dict[str, int]:
+        """刷新收录状态（独立运行模式使用）。"""
+        if not self._watchlist_db or not self._db:
+            return {"matched": 0, "fuzzy": 0, "unmatched": 0, "total": 0}
+        tmdb_cfg = getattr(self._config, "tmdb", None)
+        fuzzy = float(
+            getattr(
+                tmdb_cfg,
+                "fuzzy_threshold",
+                0.60)) if tmdb_cfg else 0.60
+        min_ep = float(
+            getattr(
+                tmdb_cfg,
+                "anime_min_ep_ratio",
+                0.3)) if tmdb_cfg else 0.3
+        return _refresh_watchlist_match_state(self, fuzzy, min_ep)
+
+    def start(self):
+        """启动 WebUI 服务器
+
+        失败时：生产模式记录日志后返回（不中断主程序），
+        独立运行模式抛出 RuntimeError（让调用方感知）。
+        """
+        if not self._enabled:
+            logging.info("[WebUI] 已禁用，跳过启动")
+            return
+
+        port = self._port
+        bind = self._bind
+
+        if bind not in ("127.0.0.1", "0.0.0.0") and not _is_lan_ip(bind):
+            logging.warning("[WebUI] 绑定地址 %s 可能不是局域网地址", bind)
+
+        # 端口预检
+        if not _try_bind_port(bind, port):
+            msg = f"端口 {port} 已被占用，请关闭占用程序或修改 config.toml 中的端口配置"
+            if self._raise_on_start_failure:
+                raise RuntimeError(msg)
+            logging.error("[WebUI] %s", msg)
+            return
+
+        # 动态绑定 handler 类
+        handler_cls = type("_BoundHandler", (_WebUIHandler,), {})
+        handler_cls.webui = self
+        handler_cls.allow_reuse_address = True
+
+        try:
+            self._server = HTTPServer((bind, port), handler_cls)
+        except OSError as e:
+            err = getattr(
+                e,
+                'winerror',
+                None) or getattr(
+                e,
+                'errno',
+                None) or 0
+            if err in (10048, 98):
+                msg = f"端口 {port} 已被占用，请关闭占用程序或修改端口配置"
+            else:
+                msg = f"启动 HTTP 服务器失败: {e}"
+            if self._raise_on_start_failure:
+                raise RuntimeError(msg) from e
+            logging.error("[WebUI] %s", msg)
+            return
+
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, daemon=True, name="WebUI")
+        self._thread.start()
+
+        tmdb_info = "已配置" if self._tmdb_client else "未配置"
+        logging.info(
+            "[WebUI] 管理面板已启动: http://%s:%d (TMDB: %s)",
+            bind,
+            port,
+            tmdb_info)
+
+    def stop(self):
+        """停止 WebUI 服务器"""
+        if self._server:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+            logging.info("[WebUI] 已停止")
+        if self._thread:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    # ============================================================
+    # AppService 管理（主程序）
+    # ============================================================
+
+    def start_main(self) -> dict:
+        """启动主程序（AppService）
+        
+        Returns:
+            {"success": bool, "message": str}
+        """
+        with self._app_start_lock:
+            if self._app_running:
+                return {"success": False, "message": "主程序已在运行中"}
+            
+            if not self._config:
+                return {"success": False, "message": "配置未加载"}
+            
+            try:
+                from app_service import AppService
+                from webdav_client import OpenListAdminClient
+                
+                # 创建 OpenListAdminClient
+                admin_client = OpenListAdminClient(
+                    self._config.webdav.host,
+                    self._config.webdav.user,
+                    self._config.webdav.password,
+                    totp_secret=self._config.webdav.totp_secret,
+                )
+                
+                # 登录验证
+                if not admin_client.login():
+                    error_msg = admin_client.last_error_message or "未知错误"
+                    return {"success": False, "message": f"OpenList 登录失败: {error_msg}"}
+                
+                # 创建 AppService
+                self._app_service = AppService(self._config, self._db, admin_client)
+                self._app_service.start()
+                self._app_running = True
+                
+                logging.info("[Main] 主程序已启动")
+                return {"success": True, "message": "主程序已启动"}
+                
+            except Exception as e:
+                logging.error("[Main] 启动失败: %s", e)
+                return {"success": False, "message": f"启动失败: {e}"}
+
+    def stop_main(self) -> dict:
+        """停止主程序（AppService）
+        
+        Returns:
+            {"success": bool, "message": str}
+        """
+        with self._app_start_lock:
+            if not self._app_running:
+                return {"success": False, "message": "主程序未在运行"}
+            
+            try:
+                if self._app_service:
+                    self._app_service.stop()
+                    self._app_service = None
+                self._app_running = False
+                
+                logging.info("[Main] 主程序已停止")
+                return {"success": True, "message": "主程序已停止"}
+                
+            except Exception as e:
+                logging.error("[Main] 停止失败: %s", e)
+                return {"success": False, "message": f"停止失败: {e}"}
+
+    def get_main_status(self) -> dict:
+        """获取主程序状态
+        
+        Returns:
+            {"running": bool, "uptime": int | None}
+        """
+        return {
+            "running": self._app_running,
+            "uptime": int(time.time() - self._start_time) if self._app_running else None,
+        }
+
+
+# ============================================================
+# 独立运行入口
+# ============================================================
+
+def main():
+    """独立运行入口函数（替代原 standalone_webui.py 的 main）"""
+    config_path = PROJECT_ROOT / "config.toml"
+
+    if not config_path.exists():
+        logger.error("未找到配置文件: %s", config_path)
+        sys.exit(1)
+
+    # 加载配置（使用 AppConfig 统一配置系统）
+    logger.info("加载配置: %s", config_path)
+    from config import AppConfig
+    cfg = AppConfig.from_file(str(config_path))
+
+    # 从 DB 加载 TMDB 配置覆盖（DB 为唯一来源，替代 .tmdb_webui_config.json）
+    db_path = str(PROJECT_ROOT / "tmdb_watchlist.db")
+    try:
+        _tmp_db = TmdbWatchlistDb(db_path)
+        db_cfg = _tmp_db.get_all_config("tmdb")
+        if db_cfg:
+            tmdb_cfg = cfg.tmdb
+            for key, val in db_cfg.items():
+                if val is None or val == "":
+                    continue
+                if key == "proxy_enabled":
+                    tmdb_cfg.proxy_enabled = str(
+                        val).lower() in ("true", "1", "yes")
+                    continue
+                if key in ("watchlist_cache_ttl", "fuzzy_threshold",
+                           "anime_min_ep_ratio"):
+                    try:
+                        setattr(tmdb_cfg, key, float(val))
+                    except (ValueError, TypeError):
+                        pass
+                    continue
+                if hasattr(tmdb_cfg, key):
+                    setattr(tmdb_cfg, key, val)
+            logger.info(
+                "[WebUI] 已从 DB 加载 TMDB 配置 (%d 项)", len(db_cfg))
+    except Exception as e:
+        logger.debug("[WebUI] 从 DB 加载 TMDB 配置失败: %s", e)
+
+    # 初始化数据库
+    if not os.path.exists(cfg.local.db_file):
+        logger.error("数据库文件不存在: %s", cfg.local.db_file)
+        sys.exit(1)
+
+    logger.info("打开数据库: %s", cfg.local.db_file)
+    db = Database(cfg.local.db_file)
+
+    # 初始化 TMDB 客户端
+    tmdb_client = None
+    if cfg.tmdb.access_token:
+        # 配置了自定义 host 时不再需要本地代理
+        proxy = None if cfg.tmdb.host else (
+            cfg.tmdb.proxy_http if cfg.tmdb.proxy_enabled else None)
+        try:
+            tmdb_client = create_tmdb_client(
+                access_token=cfg.tmdb.access_token,
+                language=cfg.tmdb.language,
+                proxy=proxy,
+                host=cfg.tmdb.host,
+                api_key=cfg.tmdb.api_key,
+                auto_validate=False,
+            )
+            logger.info(
+                "TMDB 客户端已初始化 (account_id: %s)",
+                tmdb_client.account_id)
+        except Exception as e:
+            logger.warning("TMDB 客户端初始化失败: %s", e)
+    else:
+        logger.info("未配置 TMDB access_token，跳过初始化")
+
+    # 启动 WebUI
+    server = WebUIServer(cfg.webui, db, app_config=cfg)
+    try:
+        server.start()
+    except RuntimeError as e:
+        logger.error("[WebUI] %s", e)
+        sys.exit(1)
+
+    port = cfg.webui.port
+    logger.info("=" * 50)
+    logger.info("  管理面板已就绪: http://127.0.0.1:%d", port)
+    logger.info("=" * 50)
+
+    # 询问是否自动启动主程序
+    auto_start_main = False
+    if '--daemon' not in sys.argv:
+        print("\n请选择启动模式:")
+        print("  1. 自动启动主程序 (AppService)")
+        print("  2. 仅启动 WebUI")
+        try:
+            choice = input("请输入选项 [1/2] (默认 2): ").strip().lower()
+            if choice == "1":
+                auto_start_main = True
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+    # 如果选择自动启动主程序
+    if auto_start_main:
+        logger.info("正在启动主程序...")
+        result = server.start_main()
+        if result.get("success"):
+            logger.info("主程序已启动")
+        else:
+            logger.error("主程序启动失败: %s", result.get("message"))
+
+    logger.info("按 Ctrl+C 或输入 q 退出")
+
+    try:
+        if '--daemon' not in sys.argv:
+            while True:
+                cmd = input().strip().lower()
+                if cmd in ("q", "quit", "exit"):
+                    break
+        else:
+            # 守护模式：挂起主线程等待服务器终止
+            server._thread.join()
+    except (KeyboardInterrupt, EOFError):
+        pass
+
+    # 退出时停止主程序（如果在运行）
+    if server._app_running:
+        logger.info("正在停止主程序...")
+        server.stop_main()
+
+    server.stop()
+    logger.info("已退出")
+
+
+if __name__ == "__main__":
+    main()

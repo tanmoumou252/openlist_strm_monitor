@@ -196,3 +196,4 @@ tmdb_watchlist_cache.json
 .kilo/*
 svg_temp.html
 .tmdb_webui_config.json
+src/.admin_token.json

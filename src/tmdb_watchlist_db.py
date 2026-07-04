@@ -4,7 +4,7 @@ TMDB 待看列表独立 SQLite 数据库模块。
 职责：
   - 管理 tmdb_watchlist.db 的建表、CRUD、全量同步
   - 不持有持久连接（每次操作新建 sqlite3.connect，WAL 模式）
-  - 不依赖 webui.py / test_webui.py 内部状态
+- 不依赖 webui.py / standalone_webui.py 内部状态    
 """
 
 from __future__ import annotations
@@ -80,8 +80,15 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-"""
 
+CREATE TABLE IF NOT EXISTS webui_config (
+    scope      TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope, key)
+);
+"""
 
 
 class TmdbWatchlistDb:
@@ -106,19 +113,79 @@ class TmdbWatchlistDb:
     def _init_schema(self) -> None:
         with self._conn() as conn:
             conn.executescript(_SCHEMA_SQL)
-            self._ensure_column(conn, "movies", "match_status", "TEXT DEFAULT 'uncomputed'")
-            self._ensure_column(conn, "movies", "match_reason", "TEXT DEFAULT ''")
-            self._ensure_column(conn, "movies", "match_updated_at", "REAL DEFAULT 0")
-            self._ensure_column(conn, "movies", "manual_override_at", "REAL DEFAULT 0")
-            self._ensure_column(conn, "movies", "manual_override_by", "TEXT DEFAULT ''")
-            self._ensure_column(conn, "tv", "match_status", "TEXT DEFAULT 'uncomputed'")
+            self._ensure_column(
+                conn,
+                "movies",
+                "match_status",
+                "TEXT DEFAULT 'uncomputed'")
+            self._ensure_column(
+                conn,
+                "movies",
+                "match_reason",
+                "TEXT DEFAULT ''")
+            self._ensure_column(
+                conn,
+                "movies",
+                "match_updated_at",
+                "REAL DEFAULT 0")
+            self._ensure_column(
+                conn,
+                "movies",
+                "manual_override_at",
+                "REAL DEFAULT 0")
+            self._ensure_column(
+                conn,
+                "movies",
+                "manual_override_by",
+                "TEXT DEFAULT ''")
+            self._ensure_column(conn, "tv", "match_status",
+                                "TEXT DEFAULT 'uncomputed'")
             self._ensure_column(conn, "tv", "match_reason", "TEXT DEFAULT ''")
-            self._ensure_column(conn, "tv", "match_updated_at", "REAL DEFAULT 0")
-            self._ensure_column(conn, "tv", "manual_override_at", "REAL DEFAULT 0")
-            self._ensure_column(conn, "tv", "manual_override_by", "TEXT DEFAULT ''")
-            self._ensure_column(conn, "tv", "_episode_count", "INTEGER DEFAULT 0")
-            self._ensure_column(conn, "tv", "_last_ep_season", "INTEGER DEFAULT 0")
-            self._ensure_column(conn, "tv", "_last_ep_episode", "INTEGER DEFAULT 0")
+            self._ensure_column(
+                conn,
+                "tv",
+                "match_updated_at",
+                "REAL DEFAULT 0")
+            self._ensure_column(
+                conn,
+                "tv",
+                "manual_override_at",
+                "REAL DEFAULT 0")
+            self._ensure_column(
+                conn,
+                "tv",
+                "manual_override_by",
+                "TEXT DEFAULT ''")
+            self._ensure_column(
+                conn,
+                "tv",
+                "_episode_count",
+                "INTEGER DEFAULT 0")
+            self._ensure_column(
+                conn,
+                "tv",
+                "_last_ep_season",
+                "INTEGER DEFAULT 0")
+            self._ensure_column(
+                conn,
+                "tv",
+                "_last_ep_episode",
+                "INTEGER DEFAULT 0")
+            # TMDB 操作日志表
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tmdb_operation_log (
+                    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts       REAL    NOT NULL,
+                    op       TEXT    NOT NULL,
+                    level    TEXT    NOT NULL DEFAULT 'info',
+                    msg      TEXT    NOT NULL,
+                    detail   TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tmdb_log_ts ON tmdb_operation_log(ts DESC)
+            """)
+            conn.commit()
         logging.debug("[TMDB-DB] 数据库初始化完成: %s", self._db_path)
 
     # ----------------------------------------------------------
@@ -132,7 +199,10 @@ class TmdbWatchlistDb:
             last_sync_time = float(last_sync) if last_sync else 0.0
         except (ValueError, TypeError):
             last_sync_time = 0.0
-        stale = not (last_sync_time > 0 and (time.time() - last_sync_time) < self._ttl)
+        stale = not (
+            last_sync_time > 0 and (
+                time.time() -
+                last_sync_time) < self._ttl)
         with self._conn() as conn:
             mc = conn.execute("SELECT COUNT(*) FROM movies").fetchone()[0]
             tc = conn.execute("SELECT COUNT(*) FROM tv").fetchone()[0]
@@ -170,7 +240,8 @@ class TmdbWatchlistDb:
         cur = conn.execute(f"PRAGMA table_info({table_name})")
         columns = {row[1] for row in cur.fetchall()}
         if column_name not in columns:
-            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
+            conn.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
             conn.commit()
 
     # ----------------------------------------------------------
@@ -227,7 +298,8 @@ class TmdbWatchlistDb:
                 if cursor.rowcount == 0:
                     conn.execute(
                         insert_sql,
-                        (item_id, status, reason, updated_at, override_at, override_by),
+                        (item_id, status, reason, updated_at,
+                         override_at, override_by),
                     )
             conn.commit()
 
@@ -299,7 +371,8 @@ class TmdbWatchlistDb:
             last_sync = self._get_meta("last_sync", "0")
             try:
                 last_sync_time = float(last_sync) if last_sync else 0.0
-                if last_sync_time > 0 and (time.time() - last_sync_time) < self._ttl:
+                if last_sync_time > 0 and (
+                        time.time() - last_sync_time) < self._ttl:
                     logging.debug("[TMDB-DB] 缓存未过期,跳过同步")
                     return self.get_all()
             except (ValueError, TypeError):
@@ -316,7 +389,8 @@ class TmdbWatchlistDb:
             page = 1
             while True:
                 result = tmdb_client.get_watchlist_movies(page)
-                if not result or not isinstance(result, tuple) or len(result) != 2:
+                if not result or not isinstance(
+                        result, tuple) or len(result) != 2:
                     logging.warning("[TMDB] 电影 API 返回格式异常: %s", result)
                     break
                 items, has_next = result
@@ -359,7 +433,8 @@ class TmdbWatchlistDb:
             page = 1
             while True:
                 result = tmdb_client.get_watchlist_tv(page)
-                if not result or not isinstance(result, tuple) or len(result) != 2:
+                if not result or not isinstance(
+                        result, tuple) or len(result) != 2:
                     logging.warning("[TMDB] 剧集 API 返回格式异常: %s", result)
                     break
                 items, has_next = result
@@ -453,7 +528,12 @@ class TmdbWatchlistDb:
                     self._val(item, "release_date"),
                     float(self._val(item, "vote_average", 0)),
                     int(self._val(item, "vote_count", 0)),
-                    json.dumps(self._val(item, "genre_ids", []), ensure_ascii=False),
+                    json.dumps(
+                        self._val(
+                            item,
+                            "genre_ids",
+                            []),
+                        ensure_ascii=False),
                     float(self._val(item, "popularity", 0)),
                     self._val(item, "original_language"),
                     1 if item.get("video") else 0,
@@ -506,9 +586,19 @@ class TmdbWatchlistDb:
                     self._val(item, "first_air_date"),
                     float(self._val(item, "vote_average", 0)),
                     int(self._val(item, "vote_count", 0)),
-                    json.dumps(self._val(item, "genre_ids", []), ensure_ascii=False),
+                    json.dumps(
+                        self._val(
+                            item,
+                            "genre_ids",
+                            []),
+                        ensure_ascii=False),
                     float(self._val(item, "popularity", 0)),
-                    json.dumps(self._val(item, "origin_country", []), ensure_ascii=False),
+                    json.dumps(
+                        self._val(
+                            item,
+                            "origin_country",
+                            []),
+                        ensure_ascii=False),
                     self._val(item, "original_language"),
                     season_count,
                     episode_count,
@@ -570,14 +660,18 @@ class TmdbWatchlistDb:
                         tid = details.get("id")
                         if not tid:
                             continue
-                        season_count = int(details.get("number_of_seasons") or 0)
-                        episode_count = int(details.get("number_of_episodes") or 0)
+                        season_count = int(
+                            details.get("number_of_seasons") or 0)
+                        episode_count = int(
+                            details.get("number_of_episodes") or 0)
                         last_ep = details.get("last_episode_to_air")
                         last_ep_season = 0
                         last_ep_episode = 0
                         if last_ep and isinstance(last_ep, dict):
-                            last_ep_season = int(last_ep.get("season_number") or 0)
-                            last_ep_episode = int(last_ep.get("episode_number") or 0)
+                            last_ep_season = int(
+                                last_ep.get("season_number") or 0)
+                            last_ep_episode = int(
+                                last_ep.get("episode_number") or 0)
                         try:
                             with self._conn() as conn:
                                 conn.execute(
@@ -601,3 +695,83 @@ class TmdbWatchlistDb:
                 "[TMDB-DB] 剧集详情批量获取完成: %d/%d 部",
                 fetched,
                 len(ids_to_fetch))
+
+    # ----------------------------------------------------------
+    # TMDB 操作日志
+    # ----------------------------------------------------------
+
+    def log_tmdb_operation(self, op: str, level: str,
+                           msg: str, detail: str | None = None) -> None:
+        """写入一条 TMDB 操作日志"""
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO tmdb_operation_log (ts, op, level, msg, detail) VALUES (?, ?, ?, ?, ?)",
+                (time.time(), op, level, msg, detail),
+            )
+            conn.commit()
+
+    def get_tmdb_logs(self, limit: int = 100) -> list[dict]:
+        """获取最近的 TMDB 操作日志（按时间倒序），超过 7 天的自动清理"""
+        seven_days_ago = time.time() - 7 * 86400
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM tmdb_operation_log WHERE ts < ?", (seven_days_ago,))
+            cur = conn.execute(
+                "SELECT id, ts, op, level, msg, detail FROM tmdb_operation_log ORDER BY ts DESC LIMIT ?",
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [
+            {"id": r["id"], "ts": r["ts"], "op": r["op"], "level": r["level"],
+             "msg": r["msg"], "detail": r["detail"]}
+            for r in rows
+        ]
+
+    # ----------------------------------------------------------
+    # webui_config CRUD
+    # ----------------------------------------------------------
+
+    def get_config(self, scope: str, key: str, default: str = "") -> str:
+        """读取单个配置值。"""
+        try:
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT value FROM webui_config WHERE scope=? AND key=?",
+                    (scope, key),
+                ).fetchone()
+                return row[0] if row else default
+        except Exception:
+            return default
+
+    def set_config(self, scope: str, key: str, value: str) -> None:
+        """写入单个配置值（UPSERT）。"""
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO webui_config (scope, key, value, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(scope, key) DO UPDATE SET
+                       value=excluded.value, updated_at=excluded.updated_at""",
+                (scope, key, value, time.time()),
+            )
+            conn.commit()
+
+    def get_all_config(self, scope: str) -> dict[str, str]:
+        """读取某个 scope 下所有配置，返回 {key: value} 字典。"""
+        try:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    "SELECT key, value FROM webui_config WHERE scope=?",
+                    (scope,),
+                ).fetchall()
+                return {r["key"]: r["value"] for r in rows}
+        except Exception:
+            return {}
+
+    def delete_config(self, scope: str, key: str) -> None:
+        """删除单个配置。"""
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM webui_config WHERE scope=? AND key=?",
+                (scope, key),
+            )
+            conn.commit()

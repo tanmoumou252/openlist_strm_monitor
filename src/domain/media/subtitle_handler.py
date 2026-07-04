@@ -56,7 +56,7 @@ class SubtitleHandler:
         # 检查数据库：已存在且目标文件仍在，跳过
         existing = self.db.get_subtitle_by_local(str(sub_file))
         if existing:
-            target_path = existing[2]
+            target_path = existing.target_path
             if Path(target_path).exists():
                 return  # 已处理且目标存在，静默跳过
             # 目标不存在，重新处理
@@ -122,8 +122,7 @@ class SubtitleHandler:
             new_name = f"{movie_stem}.forced.zho.中文{sub_file.suffix.lower()}"
         else:
             _code, _label, _priority = lang_info
-            new_name = f"{movie_stem}.forced.{_code}.{_label}{
-                sub_file.suffix.lower()}"
+            new_name = f"{movie_stem}.forced.{_code}.{_label}{sub_file.suffix.lower()}"
 
         target = b_target_dir / new_name
 

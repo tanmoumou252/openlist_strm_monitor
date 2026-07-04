@@ -78,6 +78,9 @@ def extract_season_from_path(path: str | Path) -> int | None:
 
 def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
     """从文件名中提取季和集数（增强版）"""
+    season: int | None
+    episode: int | None
+
     # 1. 优先匹配 S01E01 格式
     for pattern, _ in SEASON_EPISODE_PATTERNS[:2]:
         match = pattern.search(filename)

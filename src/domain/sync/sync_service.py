@@ -53,7 +53,10 @@ class SyncService:
         success_count = 0
         fail_count = 0
         skip_count = 0
-        for local_path, webdav_path, parent_webdav_path, _ in self.db.get_all_a_records():
+        for record in self.db.get_all_a_records():
+            local_path = record.local_path
+            webdav_path = record.webdav_path
+            parent_webdav_path = record.parent_webdav_path
             if not Path(local_path).exists():
                 logging.warning("[A->B跳过] 源文件不存在: %s", local_path)
                 continue
