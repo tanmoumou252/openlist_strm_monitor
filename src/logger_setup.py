@@ -46,6 +46,14 @@ def setup_logging(
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     root = logging.getLogger()
+    # 显式关闭旧 handler（尤其 RotatingFileHandler 持有的未 flush 缓冲区），
+    # 否则热更新时切换 log_file 会让被困在缓冲区的日志丢失/到达错文件。
+    for old_handler in list(root.handlers):
+        try:
+            old_handler.flush()
+            old_handler.close()
+        except Exception:
+            pass
     root.handlers.clear()
     root.setLevel(logging.DEBUG)
 

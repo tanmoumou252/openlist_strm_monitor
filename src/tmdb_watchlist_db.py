@@ -212,6 +212,33 @@ class TmdbWatchlistDb:
             "cache_item_count": mc + tc,
         }
 
+    def get_match_statistics(self) -> dict:
+        """获取匹配统计信息（uncomputed 与 total）。
+
+        将原 routes.py 中直接访问 `_conn()` 的查询封装为公共方法，
+        避免外部绕过数据库访问层，并在异常时返回安全默认值。
+        """
+        result = {"uncomputed": 0, "total": 0}
+        try:
+            with self._conn() as conn:
+                uncomputed = conn.execute(
+                    "SELECT COUNT(*) FROM ("
+                    "  SELECT id FROM movies WHERE match_status='uncomputed'"
+                    "  UNION ALL"
+                    "  SELECT id FROM tv WHERE match_status='uncomputed'"
+                    ")"
+                ).fetchone()[0]
+                total = conn.execute(
+                    "SELECT (SELECT COUNT(*) FROM movies)"
+                    " + (SELECT COUNT(*) FROM tv)"
+                ).fetchone()[0]
+                result["uncomputed"] = uncomputed or 0
+                result["total"] = total or 0
+        except Exception as e:
+            logging.warning("[TMDB] 获取匹配统计失败: %s", e)
+        return result
+
+
     def _get_meta(self, key: str, default: str = "") -> str:
         try:
             with self._conn() as conn:

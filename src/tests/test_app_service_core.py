@@ -89,44 +89,36 @@ class TestStrmStorageManager:
         mode = self.manager._extract_save_local_mode(addition)
         assert mode == "update"
 
-    def test_get_strm_storages_filters_strm_driver(self):
-        self.mock_client.list_storages.return_value = {
-            "data": {
-                "content": [
-                    {"id": 1, "mount_path": "/s1", "driver": "Strm",
-                     "addition": '{"SaveLocalMode":"update"}', "status": "work"},
-                    {"id": 2, "mount_path": "/w", "driver": "WebDAV",
-                     "addition": "", "status": "work"},
-                ]
-            }
-        }
+    def test_get_strm_storages_returns_full_info(self):
+        # get_strm_storages_full_info 已经按 driver 过滤，返回扁平 STRM 列表（含完整 addition）
+        self.mock_client.get_strm_storages_full_info.return_value = [
+            {"id": 1, "mount_path": "/s1", "driver": "Strm",
+             "addition": '{"SaveLocalMode":"update"}', "status": "work"},
+        ]
         storages = self.manager.get_strm_storages()
         assert len(storages) == 1
         assert storages[0].mount_path == "/s1"
 
     def test_get_working_sync_storages(self):
-        self.mock_client.list_storages.return_value = {
-            "data": {
-                "content": [
-                    {"id": 1, "mount_path": "/ok", "driver": "Strm", "status": "work",
-                     "addition": '{"SaveLocalMode":"update"}'},
-                    {"id": 2, "mount_path": "/err", "driver": "Strm", "status": "error",
-                     "addition": '{"SaveLocalMode":"update"}'},
-                    {"id": 3, "mount_path": "/nosync", "driver": "Strm", "status": "work",
-                     "addition": '{"SaveLocalMode":"sync"}'},
-                ]
-            }
-        }
+        # get_strm_storages_full_info returns flat list of STRM storages with full addition
+        self.mock_client.get_strm_storages_full_info.return_value = [
+            {"id": 1, "mount_path": "/ok", "driver": "Strm", "status": "work",
+             "addition": '{"SaveLocalMode":"update"}'},
+            {"id": 2, "mount_path": "/err", "driver": "Strm", "status": "error",
+             "addition": '{"SaveLocalMode":"update"}'},
+            {"id": 3, "mount_path": "/nosync", "driver": "Strm", "status": "work",
+             "addition": '{"SaveLocalMode":"sync"}'},
+        ]
         storages = self.manager.get_working_sync_storages()
         assert len(storages) == 1
         assert storages[0].mount_path == "/ok"
 
     def test_get_strm_storages_empty_list(self):
-        self.mock_client.list_storages.return_value = {"data": {"content": []}}
+        self.mock_client.get_strm_storages_full_info.return_value = []
         assert self.manager.get_strm_storages() == []
 
     def test_get_strm_storages_no_response(self):
-        self.mock_client.list_storages.return_value = None
+        self.mock_client.get_strm_storages_full_info.return_value = None
         assert self.manager.get_strm_storages() == []
 
 
@@ -1052,10 +1044,24 @@ class TestInitialScanB:
         """B has files but DB is empty → insert new records."""
         b_file = self.b_dir / "file.strm"
         b_file.write_text("/mount/file.mp4", encoding="utf-8")
+        from utils import make_strm_fingerprint
+        fp = make_strm_fingerprint("/mount/file.mp4")
         self.db.get_all_b_records.return_value = []
         self.db.get_identity_by_fingerprint.return_value = None
         self.db.get_a_local_path_by_webdav.return_value = None
-        self.db.get_all_b_by_fingerprint.return_value = []
+        # 模拟 upsert_b 后 DB 已含新记录的真实联动：返回与磁盘文件匹配的 valid 实例
+        new_record = BRecord(
+            local_path=str(b_file),
+            webdav_path="/mount/file.mp4",
+            parent_webdav_path="/mount",
+            source_a_path=None,
+            fingerprint=fp,
+            status="valid",
+            updated_at=0,
+        )
+        self.db.get_all_b_by_fingerprint.return_value = [new_record]
+        # ensure_single_visible_instance 会用 mark_other_b_instances_duplicate 的返回值迭代
+        self.db.mark_other_b_instances_duplicate.return_value = []
 
         with patch.object(self.app, "_verify_b_path_lineage", return_value=True):
             self.app.initial_scan_b()

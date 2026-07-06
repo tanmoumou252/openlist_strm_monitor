@@ -188,6 +188,7 @@ class AppConfig:
     # OpenList 配置（从 DB 加载）
     openlist_strm_engines: list[dict] = field(default_factory=list)
     openlist_refresh_paths: list[str] = field(default_factory=list)
+    engines_initialized: bool = field(default=False)
 
     def __getattr__(self, name: str):
         if name == "strm_engine_paths":
@@ -204,6 +205,7 @@ class AppConfig:
         """从 DB 的 webui_config 表加载 OpenList 配置覆盖。
         
         优先级：DB > config.toml
+        使用映射表简化重复代码，避免大量 if-statement。
         """
         if not watchlist_db:
             return
@@ -212,27 +214,69 @@ class AppConfig:
             if not db_cfg:
                 return
             
-            # WebDAV 配置
-            webdav_cfg = self.webdav
-            if "webdav_host" in db_cfg:
-                webdav_cfg.host = db_cfg["webdav_host"]
-            if "webdav_user" in db_cfg:
-                webdav_cfg.user = db_cfg["webdav_user"]
-            if "webdav_password" in db_cfg:
-                webdav_cfg.password = db_cfg["webdav_password"]
-            if "webdav_totp_secret" in db_cfg:
-                webdav_cfg.totp_secret = db_cfg["webdav_totp_secret"]
+            # 配置映射：(DB key, 目标对象, 属性名, 转换函数)
+            config_mappings = [
+                # WebDAV 配置
+                ("webdav_host", self.webdav, "host", str),
+                ("webdav_user", self.webdav, "user", str),
+                ("webdav_password", self.webdav, "password", str),
+                ("webdav_totp_secret", self.webdav, "totp_secret", str),
+                
+                # 路径配置
+                ("b_root", self.paths, "b_root", str),
+                ("c_root", self.paths, "c_root", str),
+                
+                # 行为配置
+                ("behavior_action", self.behavior, "action", str),
+                ("behavior_trash_dir_name", self.behavior, "trash_dir_name", str),
+                ("behavior_ghost_protect_seconds", self.behavior, "ghost_protect_seconds", int),
+                ("behavior_a_to_b_restore_delay_seconds", self.behavior, "a_to_b_restore_delay_seconds", int),
+                ("behavior_sync_on_startup", self.behavior, "sync_on_startup", self._to_bool),
+                ("behavior_sync_on_startup_wait", self.behavior, "sync_on_startup_wait", int),
+                
+                # 日志配置
+                ("log_level", self.log, "level", str),
+                ("log_max_size_mb", self.log, "max_size_mb", int),
+                ("log_backup_count", self.log, "backup_count", int),
+                # 日志保存路径（DB 往返的关键键，勿删；留空时回退 ./activity.log）
+                ("log_file", self.log, "file", str),
+            ]
             
-            # 路径配置
-            paths_cfg = self.paths
+            # 应用简单配置
+            for db_key, target, attr, converter in config_mappings:
+                if db_key in db_cfg:
+                    try:
+                        value = converter(db_cfg[db_key])
+                        setattr(target, attr, value)
+                    except (ValueError, TypeError) as e:
+                        logging.warning("[Config] 转换 %s 失败: %s", db_key, e)
+            
+            # 特殊处理：b_root 和 c_root 需要同步到 local 配置
             if "b_root" in db_cfg:
-                paths_cfg.b_root = db_cfg["b_root"]
                 self.local.b_dir = db_cfg["b_root"]
             if "c_root" in db_cfg:
-                paths_cfg.c_root = db_cfg["c_root"]
                 self.local.c_dir = db_cfg["c_root"]
             
-            # STRM 引擎配置（JSON 数组）
+            # 刷新配置（需要特殊处理：分钟转秒）
+            refresh_cfg = self.refresh
+            if "refresh_enabled" in db_cfg:
+                refresh_cfg.enabled = self._to_bool(db_cfg["refresh_enabled"])
+            if "refresh_interval_minutes" in db_cfg:
+                try:
+                    refresh_cfg.interval_seconds = int(db_cfg["refresh_interval_minutes"]) * 60
+                except (ValueError, TypeError) as e:
+                    logging.warning("[Config] 转换 refresh_interval_minutes 失败: %s", e)
+            if "refresh_depth" in db_cfg:
+                try:
+                    refresh_cfg.depth = int(db_cfg["refresh_depth"])
+                except (ValueError, TypeError) as e:
+                    logging.warning("[Config] 转换 refresh_depth 失败: %s", e)
+            
+            # OpenList 初始化标志
+            if "engines_initialized" in db_cfg:
+                self.engines_initialized = self._to_bool(db_cfg["engines_initialized"])
+
+            # JSON 数组字段
             if "strm_engines" in db_cfg:
                 try:
                     self.openlist_strm_engines = json.loads(db_cfg["strm_engines"])
@@ -246,83 +290,46 @@ class AppConfig:
                         for mp in engine.get("monitored_paths", []):
                             if mp not in strm_monitored_paths:
                                 strm_monitored_paths.append(mp)
-                    paths_cfg.strm_engine_paths = strm_engine_paths
-                    paths_cfg.strm_monitored_paths = strm_monitored_paths
-                except (json.JSONDecodeError, TypeError):
+                    self.paths.strm_engine_paths = strm_engine_paths
+                    self.paths.strm_monitored_paths = strm_monitored_paths
+                except (json.JSONDecodeError, TypeError) as e:
+                    logging.warning("[Config] 解析 strm_engines 失败: %s", e)
                     self.openlist_strm_engines = []
             
-            # 刷新路径（JSON 数组）
             if "refresh_paths" in db_cfg:
                 try:
                     self.openlist_refresh_paths = json.loads(db_cfg["refresh_paths"])
-                    paths_cfg.refresh_paths = self.openlist_refresh_paths
-                except (json.JSONDecodeError, TypeError):
+                    self.paths.refresh_paths = self.openlist_refresh_paths
+                except (json.JSONDecodeError, TypeError) as e:
+                    logging.warning("[Config] 解析 refresh_paths 失败: %s", e)
                     self.openlist_refresh_paths = []
             
-            # 从 strm_storage_map 派生 a_folders
+            # 从 strm_storage_map 派生 a_folders（仅限用户配置的引擎，
+            # 与 load_strm_storage_from_api 的派生逻辑保持一致）
+            configured_engines = set(
+                e.get("engine", "").rstrip("/")
+                for e in self.openlist_strm_engines
+                if e.get("engine", "").strip()
+            )
             a_folders = []
             for entry_path, mapping in self.strm_storage_map.items():
+                if mapping.mount_path.rstrip("/") not in configured_engines:
+                    continue
                 if mapping.local_path and mapping.local_path not in a_folders:
                     a_folders.append(mapping.local_path)
             self.a_folders = a_folders
-            
-            # 刷新配置
-            refresh_cfg = self.refresh
-            if "refresh_enabled" in db_cfg:
-                refresh_cfg.enabled = str(db_cfg["refresh_enabled"]).lower() in ("true", "1", "yes")
-            if "refresh_interval_minutes" in db_cfg:
-                try:
-                    refresh_cfg.interval_seconds = int(db_cfg["refresh_interval_minutes"]) * 60
-                except (ValueError, TypeError):
-                    pass
-            if "refresh_depth" in db_cfg:
-                try:
-                    refresh_cfg.depth = int(db_cfg["refresh_depth"])
-                except (ValueError, TypeError):
-                    pass
-            
-            # 行为配置
-            behavior_cfg = self.behavior
-            if "behavior_action" in db_cfg:
-                behavior_cfg.action = db_cfg["behavior_action"]
-            if "behavior_trash_dir_name" in db_cfg:
-                behavior_cfg.trash_dir_name = db_cfg["behavior_trash_dir_name"]
-            if "behavior_ghost_protect_seconds" in db_cfg:
-                try:
-                    behavior_cfg.ghost_protect_seconds = int(db_cfg["behavior_ghost_protect_seconds"])
-                except (ValueError, TypeError):
-                    pass
-            if "behavior_a_to_b_restore_delay_seconds" in db_cfg:
-                try:
-                    behavior_cfg.a_to_b_restore_delay_seconds = int(db_cfg["behavior_a_to_b_restore_delay_seconds"])
-                except (ValueError, TypeError):
-                    pass
-            if "behavior_sync_on_startup" in db_cfg:
-                behavior_cfg.sync_on_startup = str(db_cfg["behavior_sync_on_startup"]).lower() in ("true", "1", "yes")
-            if "behavior_sync_on_startup_wait" in db_cfg:
-                try:
-                    behavior_cfg.sync_on_startup_wait = int(db_cfg["behavior_sync_on_startup_wait"])
-                except (ValueError, TypeError):
-                    pass
-            
-            # 日志配置
-            log_cfg = self.log
-            if "log_level" in db_cfg:
-                log_cfg.level = db_cfg["log_level"]
-            if "log_max_size_mb" in db_cfg:
-                try:
-                    log_cfg.max_size_mb = int(db_cfg["log_max_size_mb"])
-                except (ValueError, TypeError):
-                    pass
-            if "log_backup_count" in db_cfg:
-                try:
-                    log_cfg.backup_count = int(db_cfg["log_backup_count"])
-                except (ValueError, TypeError):
-                    pass
-            
+
             logging.info("[Config] 已从 DB 加载 OpenList 配置 (%d 项)", len(db_cfg))
         except Exception as e:
             logging.warning("[Config] 从 DB 加载 OpenList 配置失败: %s", e)
+    
+    def _to_bool(self, value) -> bool:
+        """转换为布尔值（支持字符串和布尔类型）"""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes")
+        return bool(value)
 
     @classmethod
     def from_file(cls, toml_path: str) -> "AppConfig":
@@ -369,7 +376,7 @@ class AppConfig:
 
         behavior_data = data.get("behavior", {})
         behavior = BehaviorConfig(
-            sync_on_startup=behavior_data.get("sync_on_startup", False),
+            sync_on_startup=behavior_data.get("sync_on_startup", True),
             sync_on_startup_wait=behavior_data.get("sync_on_startup_wait", 0),
             trash_dir_name=behavior_data.get("trash_dir_name", "trash"),
             action=behavior_data.get("action", "MOVE"),
@@ -431,37 +438,47 @@ class AppConfig:
         
         return instance
 
-    def load_strm_storage_from_api(self) -> None:
+    def load_strm_storage_from_api(self, admin_client=None) -> None:
         """从 OpenList API 加载 STRM 存储映射（需要网络）。
-        
-        此方法会创建临时的 AdminClient 并登录，获取所有 STRM 存储的映射信息。
+
+        Args:
+            admin_client: 可选的已初始化 OpenListAdminClient。传入时直接复用，
+                避免重复登录；不传时内部创建临时 client（保持向后兼容）。
+                传入的 client 应已登录或可自动登录（token 缓存有效）。
+
         调用后，a_folders、strm_engine_paths、strm_monitored_paths 会被更新。
         """
         try:
             from webdav_client import OpenListAdminClient
 
-            admin_client = OpenListAdminClient(
-                host=self.webdav.host,
-                user=self.webdav.user,
-                password=self.webdav.password,
-                totp_secret=self.webdav.totp_secret,
+            # 复用外部 client 避免重复登录；未传入时自建（向后兼容）
+            owns_client = admin_client is None
+            if owns_client:
+                admin_client = OpenListAdminClient(
+                    host=self.webdav.host,
+                    user=self.webdav.user,
+                    password=self.webdav.password,
+                    totp_secret=self.webdav.totp_secret,
+                )
+                if not admin_client.login():
+                    logging.warning("[STRM存储API] 登录失败，跳过 STRM 存储映射")
+                    return
+
+            content = admin_client.get_strm_storages_full_info()
+            if not content:
+                logging.warning("[STRM存储 API] 获取 STRM 存储完整信息失败")
+                return
+
+            # strm_storage_map 加载全部引擎（供 UI 下拉框发现）；
+            # a_folders / 扫描范围则严格只从用户配置的引擎派生（见下方）
+            configured_engines = set(
+                e.get("engine", "").rstrip("/")
+                for e in self.openlist_strm_engines
+                if e.get("engine", "").strip()
             )
-            if not admin_client.login():
-                logging.warning("[STRM存储API] 登录失败，跳过 STRM 存储映射")
-                return
-
-            storages = admin_client.list_storages()
-            if not storages or not isinstance(storages, dict):
-                logging.warning("[STRM存储API] 获取存储列表失败")
-                return
-
-            data = storages.get("data", {})
-            content = data.get("content", []) if isinstance(data, dict) else []
 
             strm_storage_map: dict[str, StrmStorageMapping] = {}
             for storage in content:
-                if storage.get("driver", "").lower() != "strm":
-                    continue
                 mount_path = storage.get("mount_path", "")
                 addition_str = storage.get("addition", "{}")
                 try:
@@ -500,15 +517,22 @@ class AppConfig:
                         )
                 except json.JSONDecodeError:
                     logging.warning(
-                        "[STRM存储解析] 解析 addition 失败: %s",
+                        "[STRM存储解析] 解析 addition 失败：%s",
                         addition_str[:200],
                     )
 
-            # 从 strm_storage_map 派生 a_folders、strm_engine_paths、strm_monitored_paths
+            # a_folders / 扫描范围严格只从用户配置的引擎派生；
+            # strm_storage_map 仍保留全部引擎供 UI 下拉框发现。
+            # engines_initialized 用于区分"首次运行"（不限制）与"用户已保存配置"：
+            #   - 首次运行（未初始化）：configured_engines 为空 → a_folders 也为空，
+            #     避免把 OpenList 端全部引擎错误注入扫描范围；
+            #   - 用户已保存：仅保留用户显式配置的引擎。
             a_folders = []
             strm_engine_paths = []
             strm_monitored_paths = []
             for entry_path, mapping in strm_storage_map.items():
+                if mapping.mount_path.rstrip("/") not in configured_engines:
+                    continue
                 if mapping.local_path and mapping.local_path not in a_folders:
                     a_folders.append(mapping.local_path)
                 if mapping.mount_path not in strm_engine_paths:
@@ -521,7 +545,9 @@ class AppConfig:
             self.paths.strm_engine_paths = strm_engine_paths
             self.paths.strm_monitored_paths = strm_monitored_paths
             self.strm_storage_map = strm_storage_map
-            logging.info("[STRM存储API] 成功加载 %d 个 STRM 存储映射", len(strm_storage_map))
+            logging.info(
+                "[STRM存储API] 成功加载 %d 个 STRM 存储映射，其中 %d 个为用户配置引擎",
+                len(strm_storage_map), len(configured_engines))
 
         except Exception as exc:
             logging.warning("[STRM存储API] 获取 STRM 存储信息失败: %s", exc)
@@ -560,24 +586,21 @@ def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
         watchlist_db.set_config("openlist", "refresh_paths", 
                                 json.dumps(config.paths.refresh_paths, ensure_ascii=False))
         
-        # STRM 引擎配置（从 strm_storage_map 推导）
-        strm_engines = []
-        if config.strm_storage_map:
-            engine_groups: dict[str, list[str]] = {}
-            for entry_path, mapping in config.strm_storage_map.items():
-                mount_path = mapping.mount_path
-                if mount_path not in engine_groups:
-                    engine_groups[mount_path] = []
-                for mp in mapping.paths:
-                    if mp not in engine_groups[mount_path]:
-                        engine_groups[mount_path].append(mp)
-            for mount_path, monitored_paths in engine_groups.items():
-                strm_engines.append({
-                    "engine": mount_path,
-                    "monitored_paths": monitored_paths,
-                })
+        # STRM 引擎配置
+        # ⚠️ a 区来源仅以 "用户在 WebUI 手动添加并保存的引擎" 为唯一真相来源
+        # （DB 键 openlist.strm_engines，由 WebUI POST 写入）。
+        # 迁移时【绝不】把 OpenList 端自动发现的引擎注入为"用户已配置"：
+        # 即使 OpenList 存在 strm 引擎而用户没显式添加，也不进入 a_folders / b 区
+        # / protected_roots。因此迁移阶段写入空数组 []，仅标记 engines_initialized
+        # 表示"迁移已完成、等待用户在 WebUI 配置"。
+        # 关联：load_strm_storage_from_api() 仅对 openlist_strm_engines 中的引擎
+        # 派生 a_folders（configured_engines 过滤），本函数不应改写它。
         watchlist_db.set_config("openlist", "strm_engines",
-                                json.dumps(strm_engines, ensure_ascii=False))
+                                json.dumps([], ensure_ascii=False))
+        # 迁移时即标记 engines_initialized=true：表示配置迁移已完成，
+        # 让 load_strm_storage_from_api 走"用户已保存（可能为空）"分支而非"首次运行"
+        # 分支，避免后续误注入全部 OpenList 引擎。
+        watchlist_db.set_config("openlist", "engines_initialized", "true")
         
         # 刷新配置
         watchlist_db.set_config("openlist", "refresh_enabled",
@@ -603,6 +626,8 @@ def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
         watchlist_db.set_config("openlist", "log_level", config.log.level)
         watchlist_db.set_config("openlist", "log_max_size_mb", str(config.log.max_size_mb))
         watchlist_db.set_config("openlist", "log_backup_count", str(config.log.backup_count))
+        # 日志保存路径：迁移写入 DB，保证后续 update_from_db 能读回（勿删此键）
+        watchlist_db.set_config("openlist", "log_file", config.log.file)
         
         # 标记已迁移
         watchlist_db.set_config("migration", "config_toml_migrated", "true")

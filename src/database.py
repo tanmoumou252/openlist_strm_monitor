@@ -99,64 +99,43 @@ class SubtitleRecord:
 class Database:
     _last_ghost_cleanup: float
 
+    # 性能优化 PRAGMA 配置（共享于 connection / read_connection）
+    _PRAGMA_STATEMENTS: tuple[str, ...] = (
+        "PRAGMA journal_mode=WAL",
+        "PRAGMA busy_timeout=10000",
+        "PRAGMA synchronous=NORMAL",
+        "PRAGMA cache_size=-64000",      # 64MB page cache
+        "PRAGMA temp_store=MEMORY",
+        "PRAGMA mmap_size=268435456",     # 256MB mmap
+    )
+
+    def _apply_pragmas(self, conn: sqlite3.Connection) -> None:
+        """为新建连接应用统一的性能优化 PRAGMA。"""
+        for stmt in self._PRAGMA_STATEMENTS:
+            conn.execute(stmt)
+
     @contextmanager
     def connection(self) -> Generator[sqlite3.Connection, None, None]:
+        """写连接上下文管理器 - 用于修改数据库的操作
+        
+        注意：不在每次连接时调用 _ensure_db_writable()，因为：
+        1. __init__ 已经确保数据库文件存在且可写
+        2. 在 Windows 上，_ensure_db_writable 创建临时连接会导致文件锁竞争
+        3. 如果数据库真的不可写，sqlite3.connect 会抛出异常
+        """
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
 
-        max_retries = 3
-        retry_delay = 0.1
-
         conn = None
-        for attempt in range(max_retries):
-            try:
-                self._ensure_db_writable()
-
-                conn = sqlite3.connect(self.db_path, timeout=30)
-                # ========== 性能优化 PRAGMA ==========
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA busy_timeout=10000")
-                conn.execute("PRAGMA synchronous=NORMAL")
-                conn.execute("PRAGMA cache_size=-64000")      # 64MB page cache
-                conn.execute("PRAGMA temp_store=MEMORY")
-                conn.execute("PRAGMA mmap_size=268435456")     # 256MB mmap
-                # =====================================
-
-                # 使用真正的写操作验证连接是否可写
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            self._apply_pragmas(conn)
+            yield conn
+        finally:
+            if conn is not None:
                 try:
-                    conn.execute(
-                        "CREATE TABLE IF NOT EXISTS _write_test(x)")
-                    conn.execute("DROP TABLE _write_test")
-                    conn.commit()
-                except sqlite3.OperationalError as e:
                     conn.close()
-                    conn = None
-                    raise sqlite3.OperationalError(
-                        f"readonly connection: {e}")
-
-                # 验证通过，yield 连接给调用者
-                yield conn
-                # 使用完毕后关闭连接
-                conn.close()
-                conn = None
-                return
-
-            except sqlite3.OperationalError as e:
-                # 确保连接被关闭
-                if conn is not None:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-                    conn = None
-
-                if "readonly" in str(e).lower() and attempt < max_retries - 1:
-                    logging.warning(
-                        "[DB] 数据库只读错误，尝试修复权限 (尝试 %s/%s): %s",
-                        attempt + 1, max_retries, e
-                    )
-                    time.sleep(retry_delay)
-                    continue
-                raise
+                except Exception:
+                    pass
 
     @contextmanager
     def read_connection(self) -> Generator[sqlite3.Connection, None, None]:
@@ -165,12 +144,7 @@ class Database:
         conn = None
         try:
             conn = sqlite3.connect(self.db_path, timeout=30)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=10000")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA cache_size=-64000")
-            conn.execute("PRAGMA temp_store=MEMORY")
-            conn.execute("PRAGMA mmap_size=268435456")
+            self._apply_pragmas(conn)
             conn.execute("PRAGMA query_only=ON")
             yield conn
         finally:
@@ -346,9 +320,115 @@ class Database:
             logging.info("[DB] 数据库核心表与索引核对并创建完成！")
 
     def init_db(self) -> None:
-        """初始化数据库（兼容旧调用，实际初始化已在 __init__ 中完成）"""
-        logging.debug("[DB] init_db 被调用，数据库已在 __init__ 中初始化")
-        pass
+        """初始化数据库表结构（幂等操作，可安全重复调用）。"""
+        logging.debug("[DB] init_db 被调用，确保所有表已创建")
+        with self.lock, self.connection() as conn:
+            cur = conn.cursor()
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS a_strm_files (
+                    local_path TEXT PRIMARY KEY,
+                    webdav_path TEXT NOT NULL,
+                    parent_webdav_path TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS b_strm_files (
+                    local_path TEXT PRIMARY KEY,
+                    webdav_path TEXT NOT NULL,
+                    parent_webdav_path TEXT NOT NULL,
+                    source_a_path TEXT,
+                    fingerprint TEXT,
+                    status TEXT DEFAULT 'valid',
+                    updated_at REAL NOT NULL
+                )
+                """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS strm_identity (
+                    fingerprint TEXT PRIMARY KEY,
+                    webdav_path TEXT NOT NULL,
+                    source_a_path TEXT,
+                    current_b_path TEXT,
+                    updated_at REAL NOT NULL
+                )
+                """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS c_ghost_files (
+                    local_path TEXT PRIMARY KEY,
+                    webdav_path TEXT NOT NULL,
+                    original_b_path TEXT NOT NULL,
+                    ghost_root TEXT NOT NULL,
+                    moved_at REAL NOT NULL
+                )
+                """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ghost_protection (
+                    webdav_path TEXT PRIMARY KEY,
+                    expire_time REAL NOT NULL,
+                    reason TEXT
+                )
+                """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS known_folders (
+                    folder_path TEXT PRIMARY KEY,
+                    source TEXT,
+                    updated_at REAL NOT NULL
+                )
+                """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS protected_roots (
+                    root_path TEXT PRIMARY KEY,
+                    trash_path TEXT NOT NULL,
+                    active INTEGER NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS protected_roots_snapshot (
+                    root_path TEXT PRIMARY KEY,
+                    trash_path TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sync_control (
+                    control_key TEXT PRIMARY KEY,
+                    control_value TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS strm_media_boundary (
+                    fingerprint TEXT PRIMARY KEY,
+                    source_media_name TEXT NOT NULL,
+                    current_media_name TEXT NOT NULL,
+                    engine_entry_path TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """)
+
+            # 创建索引
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_a_strm_webdav_path ON a_strm_files(webdav_path)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_b_strm_webdav_path ON b_strm_files(webdav_path)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_b_strm_fingerprint ON b_strm_files(fingerprint)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_b_strm_status ON b_strm_files(status)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_identity_webdav_path ON strm_identity(webdav_path)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_identity_current_b_path ON strm_identity(current_b_path)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_boundary_source_name ON strm_media_boundary(source_media_name)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_boundary_current_name ON strm_media_boundary(current_media_name)")
+
+            conn.commit()
+        logging.info("[DB] 数据库表结构初始化完成")
 
     def upsert_a(self, local_path: str, webdav_path: str,
                  parent_webdav_path: str) -> None:
@@ -1200,11 +1280,15 @@ class Database:
                 except Exception as e:
                     logging.error("[DB] 无法修复数据库文件权限: %s", e)
         else:
-            # ===== 修复：数据库文件不存在时，尝试创建空文件以确保可写 =====
+            # ===== 修复：数据库文件不存在时，创建空文件并立即应用
+            # WAL / busy_timeout 等 PRAGMA，避免裸文件引发后续锁竞争 =====
             try:
-                # 创建一个临时连接来创建数据库文件
-                temp_conn = sqlite3.connect(str(db_path))
-                temp_conn.close()
+                temp_conn = sqlite3.connect(str(db_path), timeout=30)
+                try:
+                    self._apply_pragmas(temp_conn)
+                    temp_conn.commit()
+                finally:
+                    temp_conn.close()
                 logging.info("[DB] 已创建数据库文件: %s", db_path)
             except Exception as e:
                 logging.error("[DB] 无法创建数据库文件: %s", e)
@@ -1389,20 +1473,35 @@ class Database:
     # ========== 统计方法（WebUI 仪表盘用）==========
 
     def get_table_counts(self) -> dict[str, int]:
-        """获取各表记录数，用于 WebUI 仪表盘显示"""
-        tables = [
-            "a_strm_files", "b_strm_files", "c_ghost_files",
-            "strm_identity", "ghost_protection", "known_folders",
-            "subtitles", "strm_media_boundary",
-        ]
+        """获取各表记录数，使用单次查询优化性能。
+        
+        使用 UNION ALL 将多个 COUNT 查询合并为单次查询，
+        减少数据库连接开销和查询次数。
+        """
+        sql = """
+            SELECT 'a_strm_files' as table_name, COUNT(*) as count FROM a_strm_files
+            UNION ALL
+            SELECT 'b_strm_files', COUNT(*) FROM b_strm_files
+            UNION ALL
+            SELECT 'c_ghost_files', COUNT(*) FROM c_ghost_files
+            UNION ALL
+            SELECT 'strm_identity', COUNT(*) FROM strm_identity
+            UNION ALL
+            SELECT 'ghost_protection', COUNT(*) FROM ghost_protection
+            UNION ALL
+            SELECT 'known_folders', COUNT(*) FROM known_folders
+            UNION ALL
+            SELECT 'subtitles', COUNT(*) FROM subtitles
+            UNION ALL
+            SELECT 'strm_media_boundary', COUNT(*) FROM strm_media_boundary
+        """
         result = {}
         with self.read_connection() as conn:
-            for table in tables:
-                try:
-                    cur = conn.execute(f"SELECT COUNT(*) FROM {table}")
-                    result[table] = cur.fetchone()[0]
-                except sqlite3.OperationalError:
-                    result[table] = 0
+            try:
+                for row in conn.execute(sql).fetchall():
+                    result[row[0]] = row[1]
+            except sqlite3.OperationalError as e:
+                logging.warning("[DB] 获取表统计失败: %s", e)
         return result
 
     def get_b_status_counts(self) -> dict[str, int]:

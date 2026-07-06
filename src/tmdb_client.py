@@ -195,14 +195,20 @@ class TmdbClient:
     # ----------------------------------------------------------
 
     def request(
-        self, endpoint: str, params: dict | None = None
+        self, endpoint: str, params: dict | None = None,
+        retries: int = 3, backoff: float = 1.0
     ) -> dict | None:
-        """发送 GET 请求。
+        """发送 GET 请求，支持自动重试和指数退避。
 
         认证方式（按优先级）：
         1. access_token — Bearer Token
         2. api_key — 查询参数 ?api_key=xxx
         3. 两者都为空 — 返回 None
+        
+        重试策略：
+        - 429 速率限制：使用 Retry-After 头或指数退避
+        - 网络错误：指数退避重试
+        - 其他 HTTP 错误：不重试
         """
         if not self.access_token and not self.api_key:
             logging.warning("[TMDB] 未配置 access_token 或 api_key")
@@ -244,14 +250,37 @@ class TmdbClient:
         else:
             opener = urllib.request.build_opener()
 
-        try:
-            req = urllib.request.Request(
-                full_url, headers=headers, method="GET")
-            with opener.open(req, timeout=30) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except Exception as e:
-            logging.error("[TMDB] 请求失败 %s: %s", endpoint, e)
-            return None
+        # 重试循环
+        for attempt in range(retries):
+            try:
+                req = urllib.request.Request(
+                    full_url, headers=headers, method="GET")
+                with opener.open(req, timeout=30) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                # 429 速率限制：重试
+                if e.code == 429 and attempt < retries - 1:
+                    retry_after = float(e.headers.get("Retry-After", backoff * (2 ** attempt)))
+                    logging.warning("[TMDB] 速率限制，等待 %.1f 秒后重试 (%d/%d)", 
+                                   retry_after, attempt + 1, retries)
+                    time.sleep(retry_after)
+                    continue
+                # 其他 HTTP 错误：不重试
+                logging.error("[TMDB] 请求失败 %s: HTTP %d", endpoint, e.code)
+                return None
+            except Exception as e:
+                # 网络错误：重试
+                if attempt < retries - 1:
+                    wait = backoff * (2 ** attempt)
+                    logging.warning("[TMDB] 请求失败，%.1f 秒后重试 (%d/%d): %s",
+                                   wait, attempt + 1, retries, e)
+                    time.sleep(wait)
+                    continue
+                # 最终失败
+                logging.error("[TMDB] 请求失败 %s: %s", endpoint, e)
+                return None
+        
+        return None
 
     # ----------------------------------------------------------
     # 认证 / 验证

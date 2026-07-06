@@ -188,12 +188,27 @@ _STATUS_MAP = {
 # ============================================================
 
 def _bg_sync_refresh(server) -> None:
-    """后台执行待看列表同步（供 GET /api/tmdb/watchlist/refresh 调用）。"""
+    """后台执行待看列表同步，带完整的错误处理"""
+    _wdb = getattr(server, '_watchlist_db', None)
     try:
+        if not _wdb:
+            raise RuntimeError("watchlist_db 未初始化")
+        if not server._tmdb_client:
+            raise RuntimeError("tmdb_client 未初始化")
+        
         server._watchlist_db.sync(server._tmdb_client, force=True)
         logging.info("[TMDB] 后台同步完成")
+        
+        if _wdb:
+            _wdb.log_tmdb_operation("sync", "success", "后台同步完成")
     except Exception as e:
-        logging.warning("[TMDB] 后台同步失败: %s", e)
+        error_msg = f"后台同步失败: {e}"
+        logging.error("[TMDB] %s", error_msg, exc_info=True)
+        if _wdb:
+            try:
+                _wdb.log_tmdb_operation("sync", "error", error_msg)
+            except Exception as log_err:
+                logging.error("[TMDB] 日志记录失败: %s", log_err)
     finally:
         with server._sync_lock:
             server._sync_running = False
@@ -229,20 +244,13 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 except Exception:
                     pass
                 try:
-                    with _wdb._conn() as conn:
-                        uncomputed = conn.execute(
-                            "SELECT COUNT(*) FROM ("
-                            "  SELECT id FROM movies WHERE match_status='uncomputed'"
-                            "  UNION ALL"
-                            "  SELECT id FROM tv WHERE match_status='uncomputed'"
-                            ")").fetchone()[0]
-                        total = conn.execute(
-                            "SELECT (SELECT COUNT(*) FROM movies) + (SELECT COUNT(*) FROM tv)"
-                        ).fetchone()[0]
-                    result["match_uncomputed"] = uncomputed
-                    result["match_total"] = total
-                except Exception:
-                    pass
+                    stats = _wdb.get_match_statistics()
+                    result["match_uncomputed"] = stats.get("uncomputed", 0)
+                    result["match_total"] = stats.get("total", 0)
+                except Exception as e:
+                    logging.warning("[TMDB] 获取匹配统计失败: %s", e)
+                    result["match_uncomputed"] = 0
+                    result["match_total"] = 0
             handler._send_json(result)
         else:
             handler._send_json({"configured": False})
@@ -340,6 +348,49 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 handler._send_json({"logs": [], "count": 0})
         else:
             handler._send_json({"logs": [], "count": 0})
+        return True
+
+    # CSV 导出 — 即使 TMDB 客户端未初始化，也可从 DB 缓存导出
+    if path == "/api/tmdb/watchlist/export.csv":
+        import csv
+        import io
+        all_items = (webui_server.get_watchlist_cached()
+                     if webui_server and hasattr(webui_server, 'get_watchlist_cached')
+                     else [])
+        # CSV 使用的 items 没有经过 _STATUS_MAP 映射（watchlist/movies?all=1 路由才有）
+        # 在此补上映射；_status 不存在时通过 match_status 回退
+        for item in all_items:
+            item["_status"] = _STATUS_MAP.get(
+                item.get("match_status", "uncomputed"), "out")
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["状态", "TMDB ID", "类型", "标题", "原标题", "发布日期", "评分"])
+        for item in all_items:
+            media_type = item.get("_media_type", "movie")
+            title = item.get("title") or item.get("name") or ""
+            orig = item.get("original_title") or item.get(
+                "original_name") or ""
+            date = item.get("release_date") or item.get("first_air_date") or ""
+            rating = item.get("vote_average", 0)
+            status = item.get("_status", "out")
+            status_label = {
+                "in": "已收录",
+                "out": "待看",
+                "que": "有疑问"}.get(
+                status,
+                "待看")
+            writer.writerow([status_label, item.get("id", ""), media_type,
+                             title, orig, date, f"{rating:.1f}"])
+        csv_data = buf.getvalue().encode("utf-8-sig")
+        
+        # 直接返回 CSV 数据作为浏览器下载
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/csv; charset=utf-8")
+        handler.send_header("Content-Disposition", "attachment; filename=watchlist.csv")
+        handler.send_header("Content-Length", str(len(csv_data)))
+        handler.end_headers()
+        handler.wfile.write(csv_data)
+        logging.info("[TMDB] CSV 导出 %d 项", len(all_items))
         return True
 
     if not tmdb_client:
@@ -586,63 +637,6 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         })
         return True
 
-    if path == "/api/tmdb/watchlist/export.csv":
-        import csv
-        import io
-        all_items = (webui_server.get_watchlist_cached()
-                     if webui_server and hasattr(webui_server, 'get_watchlist_cached')
-                     else [])
-        # CSV 使用的 items 没有经过 _STATUS_MAP 映射（watchlist/movies?all=1 路由才有）
-        # 在此补上映射；_status 不存在时通过 match_status 回退
-        for item in all_items:
-            item["_status"] = _STATUS_MAP.get(
-                item.get("match_status", "uncomputed"), "out")
-        buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(["状态", "TMDB ID", "类型", "标题", "原标题", "发布日期", "评分"])
-        for item in all_items:
-            media_type = item.get("_media_type", "movie")
-            title = item.get("title") or item.get("name") or ""
-            orig = item.get("original_title") or item.get(
-                "original_name") or ""
-            date = item.get("release_date") or item.get("first_air_date") or ""
-            rating = item.get("vote_average", 0)
-            status = item.get("_status", "out")
-            status_label = {
-                "in": "已收录",
-                "out": "待看",
-                "que": "有疑问"}.get(
-                status,
-                "待看")
-            writer.writerow([status_label, item.get("id", ""), media_type,
-                             title, orig, date, f"{rating:.1f}"])
-        csv_data = buf.getvalue().encode("utf-8-sig")
-        csv_path = handler.webui._config.tmdb.csv_watchlist_file
-        if csv_path:
-            try:
-                Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(csv_path, "wb") as f:
-                    f.write(csv_data)
-                logging.info("[TMDB] CSV 已保存到: %s", csv_path)
-                handler._send_json({
-                    "success": True,
-                    "message": f"已保存到 {csv_path}",
-                    "path": csv_path,
-                    "count": len(all_items)
-                })
-            except Exception as e:
-                logging.warning("[TMDB] 保存 CSV 失败: %s", e)
-                handler._send_json({
-                    "success": False,
-                    "message": f"保存失败: {e}"
-                }, 500)
-        else:
-            handler._send_json({
-                "success": False,
-                "message": "未配置 csv_watchlist_file"
-            }, 400)
-        return True
-
     return False
 
 
@@ -838,8 +832,12 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
         for key, val in data.items():
             _wdb.set_config(scope, str(key), str(val) if val is not None else "")
         
-        # OpenList 配置保存后触发热更新
+        # OpenList 配置保存后：
+        # 1. 标记 engines_initialized=True（区分首次运行 vs 用户已保存配置）
+        # 2. 触发热更新
         if scope == "openlist":
+            if "strm_engines" in data:
+                _wdb.set_config("openlist", "engines_initialized", "true")
             _hot_reload_openlist_config(webui_server)
         
         handler._send_json(
@@ -858,16 +856,45 @@ def _hot_reload_openlist_config(webui_server) -> None:
         _wdb = getattr(webui_server, '_watchlist_db', None)
         if not _wdb:
             return
-        
+
         # 保存旧的 webdav 连接信息
         old_host = cfg.webdav.host
         old_user = cfg.webdav.user
         old_password = cfg.webdav.password
         old_totp = cfg.webdav.totp_secret
-        
+
+        # 【新增】保存旧的日志配置（必须在 update_from_db 之前，否则新旧值会被覆盖）
+        old_log_level = cfg.log.level
+        old_log_max_size = cfg.log.max_size_mb
+        old_log_backup_count = cfg.log.backup_count
+        old_log_file = cfg.log.file
+
         # 从 DB 重新加载配置
         cfg.update_from_db(_wdb)
-        
+
+        # 【新增】检查日志配置是否变更，如果变更则重新初始化日志系统
+        log_changed = (
+            cfg.log.level != old_log_level
+            or cfg.log.max_size_mb != old_log_max_size
+            or cfg.log.backup_count != old_log_backup_count
+            or cfg.log.file != old_log_file
+        )
+        if log_changed:
+            try:
+                from logger_setup import setup_logging
+                setup_logging(
+                    level=cfg.log.level,
+                    log_file=cfg.log.file,
+                    max_size_mb=cfg.log.max_size_mb,
+                    backup_count=cfg.log.backup_count,
+                )
+                logging.info(
+                    "[HotReload] 日志配置已重新初始化: level=%s, max_size_mb=%s, backup_count=%s, file=%s",
+                    cfg.log.level, cfg.log.max_size_mb, cfg.log.backup_count, cfg.log.file,
+                )
+            except Exception as log_exc:
+                logging.warning("[HotReload] 日志配置重新初始化失败: %s", log_exc)
+
         # 如果 webdav 连接信息变更，重新初始化 OpenListAdminClient
         new_host = cfg.webdav.host
         new_user = cfg.webdav.user
@@ -877,6 +904,13 @@ def _hot_reload_openlist_config(webui_server) -> None:
         if (old_host != new_host or old_user != new_user or 
             old_password != new_password or old_totp != new_totp):
             _reinit_admin_client(webui_server)
+            # 重新从 API 加载 STRM 存储映射（复用刚初始化的 client，避免重复登录）
+            new_client = getattr(webui_server, '_admin_client', None)
+            try:
+                cfg.load_strm_storage_from_api(admin_client=new_client)
+                logging.info("[HotReload] STRM 存储映射已重新加载")
+            except Exception as exc:
+                logging.warning("[HotReload] 重新加载 STRM 存储映射失败: %s", exc)
             logging.info("[HotReload] WebDAV 连接已更新，OpenListAdminClient 已重新初始化")
         else:
             logging.info("[HotReload] OpenList 配置已热更新（WebDAV 连接未变）")
@@ -968,108 +1002,55 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
 
 
 def _fetch_strm_storages(cfg) -> list[dict]:
-    """从 OpenList API 获取 STRM 存储列表。
-    
-    返回格式:
+    """确保 STRM 存储映射已加载，并返回按 entry_path 展开的存储列表。
+
+    单一数据源：始终从 cfg.strm_storage_map 派生，避免与 load_strm_storage_from_api()
+    重复解析 API、重复登录，并保证分组粒度（entry_path = mount_path/last_dir）一致。
+    若内存映射为空，则先调用 load_strm_storage_from_api() 加载（有副作用：会填充缓存）。
+
+    返回格式（每个 entry_path 一条，未按 mount_path 聚合）:
     [
-        {
-            "mount_path": "/strm",
-            "paths": ["/strm/path1", "/strm/path2"],
-            "local_path": "/local/path"
-        },
+        {"entry_path": "/strm/movies", "mount_path": "/strm", "paths": [...], "local_path": "/local"},
         ...
     ]
-    
-    如果获取失败，返回空列表。
+    失败返回空列表。
     """
-    from webdav_client import OpenListAdminClient
-    
+    if not getattr(cfg, "strm_storage_map", None):
+        try:
+            cfg.load_strm_storage_from_api()
+        except Exception as exc:
+            logging.warning("[OpenList] 动态加载 STRM 存储映射失败: %s", exc)
+            return []
+
     result: list[dict] = []
-    try:
-        client = OpenListAdminClient(
-            cfg.webdav.host, cfg.webdav.user, cfg.webdav.password,
-            totp_secret=cfg.webdav.totp_secret,
-        )
-        if not client.login():
-            logging.warning("[OpenList] API 登录失败，无法获取 STRM 存储列表")
-            return result
-        
-        storages = client.list_storages()
-        if not storages or not isinstance(storages, dict):
-            return result
-        
-        data = storages.get("data", {})
-        content = data.get("content", []) if isinstance(data, dict) else []
-        
-        for storage in content:
-            if storage.get("driver", "").lower() != "strm":
-                continue
-            
-            mount_path = storage.get("mount_path", "")
-            addition_str = storage.get("addition", "{}")
-            
-            try:
-                # 确保 addition_str 是字符串
-                if not isinstance(addition_str, str):
-                    addition_str = str(addition_str)
-                addition = json.loads(addition_str)
-                paths_val = addition.get("paths", "")
-                
-                # 解析 paths：可能是列表或换行分隔的字符串
-                if isinstance(paths_val, list):
-                    storage_paths = [str(p).strip() for p in paths_val if str(p).strip()]
-                else:
-                    storage_paths = [p.strip() for p in paths_val.split("\n") if p.strip()]
-                
-                local_path = addition.get("SaveStrmLocalPath", "")
-                
-                result.append({
-                    "mount_path": mount_path,
-                    "paths": storage_paths,
-                    "local_path": local_path,
-                })
-            except json.JSONDecodeError:
-                logging.warning("[OpenList] 解析 storage addition 失败: %s", addition_str[:200])
-        
-        logging.info("[OpenList] 从 API 获取到 %d 个 STRM 存储", len(result))
-    except Exception as e:
-        logging.warning("[OpenList] 获取 STRM 存储列表失败: %s", e)
-    
+    for entry_path, mapping in cfg.strm_storage_map.items():
+        result.append({
+            "entry_path": entry_path,
+            "mount_path": mapping.mount_path,
+            "paths": list(mapping.paths),
+            "local_path": mapping.local_path,
+        })
     return result
 
 
 def _handle_openlist_strm_engines(handler, webui_server) -> None:
     """处理 GET /api/openlist/strm-engines — 获取 STRM 引擎列表。
-    
-    优先从 cfg.strm_storage_map 读取，如果为空则从 OpenList API 动态获取。
+
+    统一从 cfg.strm_storage_map 派生（必要时由 _fetch_strm_storages 触发加载）。
     结果按 mount_path 聚合，确保下拉框不重复。
     """
     cfg = webui_server._config
-    strm_map = cfg.strm_storage_map
+    # 统一数据源：若内存映射为空，先由 _fetch_strm_storages 触发 load_strm_storage_from_api
+    strm_storages = _fetch_strm_storages(cfg)
     raw_engines = []
-    
-    # 优先从 strm_storage_map 读取
-    if strm_map:
-        for entry_path, mapping in strm_map.items():
-            raw_engines.append({
-                "entry_path": entry_path,
-                "mount_path": mapping.mount_path,
-                "paths": mapping.paths,
-                "local_path": mapping.local_path,
-            })
-        logging.debug("[OpenList] 从 strm_storage_map 读取到 %d 个引擎", len(raw_engines))
-    else:
-        # strm_storage_map 为空，尝试从 OpenList API 动态获取
-        logging.info("[OpenList] strm_storage_map 为空，尝试从 API 动态获取 STRM 引擎列表")
-        strm_storages = _fetch_strm_storages(cfg)
-        for storage in strm_storages:
-            raw_engines.append({
-                "entry_path": storage["mount_path"],
-                "mount_path": storage["mount_path"],
-                "paths": storage["paths"],
-                "local_path": storage["local_path"],
-            })
-    
+    for storage in strm_storages:
+        raw_engines.append({
+            "entry_path": storage["entry_path"],
+            "mount_path": storage["mount_path"],
+            "paths": storage["paths"],
+            "local_path": storage["local_path"],
+        })
+
     # 按 mount_path 聚合：合并同 mount_path 的所有 paths，去重
     engines: list[dict] = []
     mount_path_map = {}  # mount_path -> index in engines
@@ -1108,44 +1089,69 @@ def _handle_openlist_monitored_paths(handler, webui_server, params) -> None:
     cfg = webui_server._config
     strm_map = cfg.strm_storage_map
     paths = []
-    
-    # 优先从 strm_storage_map 读取
-    if strm_map:
-        # 查找以 engine 为 mount_path 前缀的所有条目
-        for entry_path, mapping in strm_map.items():
-            if mapping.mount_path == engine or entry_path == engine or entry_path.startswith(engine.rstrip("/") + "/"):
-                paths.extend(mapping.paths)
-        logging.debug("[OpenList] 从 strm_storage_map 读取到 %d 个监控目录 (engine=%s)", len(paths), engine)
-    else:
-        # strm_storage_map 为空，尝试从 OpenList API 动态获取
-        logging.info("[OpenList] strm_storage_map 为空，尝试从 API 动态获取监控目录 (engine=%s)", engine)
-        strm_storages = _fetch_strm_storages(cfg)
-        for storage in strm_storages:
-            if storage["mount_path"] == engine:
-                paths.extend(storage["paths"])
-        logging.info("[OpenList] 从 API 动态获取到 %d 个监控目录 (engine=%s)", len(paths), engine)
-    
+
+    # 统一数据源：若内存映射为空，先由 _fetch_strm_storages 触发 load_strm_storage_from_api
+    if not strm_map:
+        _fetch_strm_storages(cfg)
+        strm_map = cfg.strm_storage_map
+
+    # 查找以 engine 为 mount_path 前缀的所有条目
+    for entry_path, mapping in strm_map.items():
+        if mapping.mount_path == engine or entry_path == engine or entry_path.startswith(engine.rstrip("/") + "/"):
+            paths.extend(mapping.paths)
+    logging.debug("[OpenList] 读取到 %d 个监控目录 (engine=%s)", len(paths), engine)
+
     handler._send_json({"success": True, "engine": engine, "paths": paths})
 
 
-def _handle_openlist_status(handler, webui_server) -> None:
-    """处理 GET /api/openlist/status — API 状态探测。"""
+def _openlist_merged_webdav_cfg(webui_server):
+    """合并 DB/config.toml 的 WebDAV 配置，返回 (host, user, password, totp_secret)。"""
     cfg = webui_server._config
-    if not cfg.webdav.host:
+    _wdb = getattr(webui_server, '_watchlist_db', None)
+    db_cfg = {}
+    if _wdb:
+        try:
+            db_cfg = _wdb.get_all_config("openlist") or {}
+        except Exception:
+            pass
+    host = db_cfg.get("webdav_host", "") or cfg.webdav.host
+    user = db_cfg.get("webdav_user", "") or cfg.webdav.user
+    password = db_cfg.get("webdav_password", "") or cfg.webdav.password
+    totp_secret = db_cfg.get("webdav_totp_secret", "") or cfg.webdav.totp_secret
+    return host, user, password, totp_secret
+
+
+def _handle_openlist_status(handler, webui_server) -> None:
+    """处理 GET /api/openlist/status — 仅判断是否已配置（不解耦在线性）。
+
+    根据 DB/配置中 host 是否非空返回 configured / unconfigured，
+    不再调用 client.login()，以解耦"是否配置"与"是否在线"。
+    在线探测请使用 GET /api/openlist/ping。
+    """
+    host, _user, _password, _totp = _openlist_merged_webdav_cfg(webui_server)
+    if not host:
         handler._send_json({"success": True, "status": "unconfigured"})
         return
-    
+    handler._send_json({"success": True, "status": "configured", "host": host})
+
+
+def _handle_openlist_ping(handler, webui_server) -> None:
+    """处理 GET /api/openlist/ping — 探测 OpenList 服务在线状态。
+
+    仅用于在线性检测，不影响"是否已配置"状态。
+    返回 status: online / auth_failed_password / auth_failed_2fa / auth_failed / offline。
+    """
+    host, user, password, totp_secret = _openlist_merged_webdav_cfg(webui_server)
+    if not host:
+        handler._send_json({"success": True, "status": "unconfigured"})
+        return
     try:
         from webdav_client import OpenListAdminClient
-        client = OpenListAdminClient(
-            cfg.webdav.host, cfg.webdav.user, cfg.webdav.password,
-            totp_secret=cfg.webdav.totp_secret,
-        )
+        client = OpenListAdminClient(host, user, password, totp_secret=totp_secret)
         if client.login():
-            handler._send_json({"success": True, "status": "online", "host": cfg.webdav.host})
+            handler._send_json({"success": True, "status": "online", "host": host})
         else:
             error_type = client.last_error_type or "unknown"
-            # 映射到前端状态码
             status_map = {
                 "wrong_password": "auth_failed_password",
                 "wrong_2fa": "auth_failed_2fa",
@@ -1160,14 +1166,32 @@ def _handle_openlist_status(handler, webui_server) -> None:
 
 
 def _handle_openlist_paths(handler, webui_server) -> None:
-    """处理 GET /api/openlist/paths — 路径自动获取。"""
+    """处理 GET /api/openlist/paths — 路径自动获取。
+    
+    只返回用户配置的 STRM 引擎对应的 a_folders，不返回所有可用引擎。
+    """
     cfg = webui_server._config
+    _wdb = getattr(webui_server, '_watchlist_db', None)
     strm_map = cfg.strm_storage_map
     
+    # 从 DB 读取用户配置的 strm_engines
     a_folders = []
-    for mapping in strm_map.values():
-        if mapping.local_path and mapping.local_path not in a_folders:
-            a_folders.append(mapping.local_path)
+    try:
+        db_openlist_cfg = _wdb.get_all_config("openlist") if _wdb else {}
+        strm_engines_json = db_openlist_cfg.get("strm_engines", "[]")
+        import json
+        strm_engines = json.loads(strm_engines_json) if strm_engines_json else []
+        
+        # 从用户配置的引擎中提取 local_path
+        for eng in strm_engines:
+            if eng.get("engine"):
+                mount_path = eng["engine"]
+                if mount_path in strm_map:
+                    local_path = strm_map[mount_path].local_path
+                    if local_path and local_path not in a_folders:
+                        a_folders.append(local_path)
+    except Exception as e:
+        logging.debug("[OpenList] 从用户配置获取 a_folders 失败: %s", e)
     
     handler._send_json({
         "success": True,
@@ -1183,6 +1207,14 @@ def _handle_tmdb_watchlist_match_refresh(handler, webui_server) -> None:
         handler._send_json(
             {"success": False, "message": "TMDB 待看数据库未启用"}, 400)
         return
+    # 检查 watchlist_enabled 开关（只有明确设为 "false" 才禁用，未设置/空字符串默认启用）
+    _wdb_enabled_check = getattr(webui_server, '_watchlist_db', None)
+    if _wdb_enabled_check:
+        enabled_raw = _wdb_enabled_check.get_config("tmdb", "watchlist_enabled")
+        if str(enabled_raw).lower() == "false":
+            handler._send_json(
+                {"success": False, "message": "TMDB 待看列表已禁用"}, 400)
+            return
     if not getattr(webui_server, '_db', None):
         handler._send_json({"success": False, "message": "主数据库未连接"}, 400)
         return
@@ -1298,6 +1330,14 @@ def _handle_tmdb_watchlist_bg_sync(handler, webui_server) -> None:
             webui_server, '_watchlist_db', None):
         handler._send_json({"success": False, "message": "TMDB 未配置"}, 400)
         return
+    # 检查 watchlist_enabled 开关（只有明确设为 "false" 才禁用，未设置/空字符串默认启用）
+    _wdb_enabled_check = getattr(webui_server, '_watchlist_db', None)
+    if _wdb_enabled_check:
+        enabled_raw = _wdb_enabled_check.get_config("tmdb", "watchlist_enabled")
+        if str(enabled_raw).lower() == "false":
+            handler._send_json(
+                {"success": False, "message": "TMDB 待看列表已禁用"}, 400)
+            return
     with webui_server._sync_lock:
         if webui_server._sync_running:
             handler._send_json({"success": True, "message": "已在同步中"})
@@ -1339,24 +1379,40 @@ def _do_bg_sync(webui_server) -> None:
 
 
 def _handle_restart_webui(handler, webui_server) -> None:
-    """重启 WebUI HTTP 服务。"""
-    logging.info("[WebUI] 正在重启 HTTP 服务...")
+    """重启主程序（AppService）和 WebUI HTTP 服务。"""
+    logging.info("[WebUI] 正在重启主程序和 HTTP 服务...")
     _wdb = getattr(webui_server, '_watchlist_db', None)
     if _wdb:
         try:
-            _wdb.log_tmdb_operation("restart", "info", "WebUI 重启")
+            _wdb.log_tmdb_operation("restart", "info", "主程序重启")
         except Exception:
             pass
-    handler._send_json({"success": True, "message": "正在重启 WebUI..."})
+    handler._send_json({"success": True, "message": "正在重启主程序..."})
 
     def _do_restart():
         time.sleep(0.5)
         try:
+            # 1. 停止主程序（如果在运行）
+            if webui_server._app_running:
+                logging.info("[Restart] 正在停止主程序...")
+                webui_server.stop_main()
+
+            # 2. 重新启动主程序
+            #    start_main() 内部会调用 load_strm_storage_from_api() 加载 STRM 存储映射，
+            #    此处不再重复加载，避免二次登录 + 二次拉取。
+            logging.info("[Restart] 正在启动主程序...")
+            result = webui_server.start_main()
+            if result.get("success"):
+                logging.info("[Restart] 主程序已重启")
+            else:
+                logging.error("[Restart] 主程序启动失败: %s", result.get("message"))
+
+            # 3. 重启 HTTP 服务
             webui_server.stop()
             webui_server.start()
-            logging.info("[WebUI] HTTP 服务重启完成")
+            logging.info("[Restart] HTTP 服务重启完成")
         except Exception as e:
-            logging.error("[WebUI] 重启失败: %s", e)
+            logging.error("[Restart] 重启失败: %s", e)
     threading.Thread(target=_do_restart, daemon=True).start()
 
 
@@ -1533,6 +1589,82 @@ def handle_records_api(handler, params) -> None:
     handler._send_json(result)
 
 
+# SQL 提取 kind 的逻辑（与 Python _media_info 一致）
+# 根据路径中的分类目录判断（番剧/电影/其他）
+# 使用模块级常量避免重复定义
+_KIND_SQL = """
+    CASE 
+        WHEN webdav_path LIKE '%/电影/%' OR webdav_path LIKE '%/movies/%' OR webdav_path LIKE '%/movie/%' 
+             OR local_path LIKE '%/电影/%' OR local_path LIKE '%\\电影\\%' 
+             OR local_path LIKE '%/movies/%' OR local_path LIKE '%/movie/%'
+        THEN '电影'
+        WHEN webdav_path LIKE '%/番剧/%' OR webdav_path LIKE '%/anime/%' OR webdav_path LIKE '%/动漫/%' OR webdav_path LIKE '%/动画/%'
+             OR local_path LIKE '%/番剧/%' OR local_path LIKE '%\\番剧\\%'
+             OR local_path LIKE '%/anime/%' OR local_path LIKE '%/动漫/%' OR local_path LIKE '%/动画/%'
+        THEN '番剧'
+        ELSE '其他'
+    END
+"""
+
+# 提取媒体名称：找到分类目录后的第一级目录名
+_MEDIA_NAME_SQL = f"""
+    CASE 
+        WHEN {_KIND_SQL} = '番剧' THEN
+            CASE 
+                WHEN INSTR(REPLACE(webdav_path, '\\', '/'), '/番剧/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/番剧/') + 4),
+                        1,
+                        INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/番剧/') + 4) || '/', '/') - 1
+                    )
+                WHEN INSTR(REPLACE(local_path, '\\', '/'), '/番剧/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/番剧/') + 4),
+                        1,
+                        INSTR(SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/番剧/') + 4) || '/', '/') - 1
+                    )
+                ELSE '未分类'
+            END
+        WHEN {_KIND_SQL} = '电影' THEN
+            CASE 
+                WHEN INSTR(REPLACE(webdav_path, '\\', '/'), '/电影/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/电影/') + 4),
+                        1,
+                        INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/电影/') + 4) || '/', '/') - 1
+                    )
+                WHEN INSTR(REPLACE(local_path, '\\', '/'), '/电影/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/电影/') + 4),
+                        1,
+                        INSTR(SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/电影/') + 4) || '/', '/') - 1
+                    )
+                ELSE '未分类'
+            END
+        ELSE
+            CASE 
+                WHEN INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), 2), '/') > 0 THEN
+                    SUBSTR(REPLACE(webdav_path, '\\', '/'), 2, INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), 2), '/') - 1)
+                ELSE REPLACE(webdav_path, '\\', '/')
+            END
+    END
+"""
+
+# 表名和时间字段映射（白名单验证）
+_AREA_TABLE_MAP = {
+    "a": ("a_strm_files", "updated_at"),
+    "b": ("b_strm_files", "updated_at"),
+    "c": ("c_ghost_files", "moved_at"),
+}
+
+# kind 筛选值映射（白名单验证）
+_KIND_FILTER_MAP = {
+    "anime": "番剧",
+    "movie": "电影",
+    "other": "其他",
+}
+
+
 def _get_media_groups_paginated(handler, area: str, kind_filter: str, 
                                  q: str, sort_key: str, sort_order: str,
                                  page: int, page_size: int) -> dict:
@@ -1542,85 +1674,11 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
     """
     db = handler.webui._db
     
-    # 确定表名和时间字段
-    if area == "a":
-        table = "a_strm_files"
-        time_field = "updated_at"
-    elif area == "b":
-        table = "b_strm_files"
-        time_field = "updated_at"
-    elif area == "c":
-        table = "c_ghost_files"
-        time_field = "moved_at"
-    else:
+    # 确定表名和时间字段（使用白名单映射）
+    if area not in _AREA_TABLE_MAP:
         return {"total": 0, "page": page, "page_size": page_size, 
                 "media_items": [], "kind_counts": {}}
-    
-    # SQL 提取 kind 的逻辑（与 Python _media_info 一致）
-    # 根据路径中的分类目录判断（番剧/电影/其他）
-    kind_sql = f"""
-        CASE 
-            WHEN webdav_path LIKE '%/电影/%' OR webdav_path LIKE '%/movies/%' OR webdav_path LIKE '%/movie/%' 
-                 OR local_path LIKE '%/电影/%' OR local_path LIKE '%\\电影\\%' 
-                 OR local_path LIKE '%/movies/%' OR local_path LIKE '%/movie/%'
-            THEN '电影'
-            WHEN webdav_path LIKE '%/番剧/%' OR webdav_path LIKE '%/anime/%' OR webdav_path LIKE '%/动漫/%' OR webdav_path LIKE '%/动画/%'
-                 OR local_path LIKE '%/番剧/%' OR local_path LIKE '%\\番剧\\%'
-                 OR local_path LIKE '%/anime/%' OR local_path LIKE '%/动漫/%' OR local_path LIKE '%/动画/%'
-            THEN '番剧'
-            ELSE '其他'
-        END
-    """
-    
-    # 提取媒体名称：找到分类目录后的第一级目录名
-    # 例：/strm/番剧/进击的巨人/S01/ep01.strm -> 进击的巨人
-    # 例：/strm/电影/合集/电影1.strm -> 合集
-    # 使用 INSTR 和 SUBSTR 提取
-    media_name_sql = f"""
-        CASE 
-            WHEN {kind_sql} = '番剧' THEN
-                -- 番剧：找到 "番剧/" 后的第一级目录
-                CASE 
-                    WHEN INSTR(REPLACE(webdav_path, '\\', '/'), '/番剧/') > 0 THEN
-                        SUBSTR(
-                            SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/番剧/') + 4),
-                            1,
-                            INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/番剧/') + 4) || '/', '/') - 1
-                        )
-                    WHEN INSTR(REPLACE(local_path, '\\', '/'), '/番剧/') > 0 THEN
-                        SUBSTR(
-                            SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/番剧/') + 4),
-                            1,
-                            INSTR(SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/番剧/') + 4) || '/', '/') - 1
-                        )
-                    ELSE '未分类'
-                END
-            WHEN {kind_sql} = '电影' THEN
-                -- 电影：找到 "电影/" 后的第一级目录
-                CASE 
-                    WHEN INSTR(REPLACE(webdav_path, '\\', '/'), '/电影/') > 0 THEN
-                        SUBSTR(
-                            SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/电影/') + 4),
-                            1,
-                            INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/电影/') + 4) || '/', '/') - 1
-                        )
-                    WHEN INSTR(REPLACE(local_path, '\\', '/'), '/电影/') > 0 THEN
-                        SUBSTR(
-                            SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/电影/') + 4),
-                            1,
-                            INSTR(SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/电影/') + 4) || '/', '/') - 1
-                        )
-                    ELSE '未分类'
-                END
-            ELSE
-                -- 其他：取第一级目录
-                CASE 
-                    WHEN INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), 2), '/') > 0 THEN
-                        SUBSTR(REPLACE(webdav_path, '\\', '/'), 2, INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), 2), '/') - 1)
-                    ELSE REPLACE(webdav_path, '\\', '/')
-                END
-        END
-    """
+    table, time_field = _AREA_TABLE_MAP[area]
     
     # 构建基础查询条件
     base_where = ""
@@ -1634,11 +1692,11 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
     kind_counts_sql = f"""
         SELECT 
             CASE 
-                WHEN {kind_sql} = '番剧' THEN 'anime'
-                WHEN {kind_sql} = '电影' THEN 'movie'
+                WHEN {_KIND_SQL} = '番剧' THEN 'anime'
+                WHEN {_KIND_SQL} = '电影' THEN 'movie'
                 ELSE 'other'
             END AS kind_category,
-            COUNT(DISTINCT ({media_name_sql})) AS count
+            COUNT(DISTINCT ({_MEDIA_NAME_SQL})) AS count
         FROM {table}
         WHERE 1=1 {base_where}
         GROUP BY kind_category
@@ -1658,20 +1716,16 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
     else:  # name
         order_clause += "media_name " + ("DESC" if sort_order == "desc" else "ASC")
     
-    # 筛选 kind
+    # 筛选 kind（使用白名单映射）
     kind_where = ""
-    if kind_filter != "all":
-        if kind_filter == "anime":
-            kind_where = f" AND {kind_sql} = '番剧'"
-        elif kind_filter == "movie":
-            kind_where = f" AND {kind_sql} = '电影'"
-        elif kind_filter == "other":
-            kind_where = f" AND {kind_sql} = '其他'"
+    if kind_filter != "all" and kind_filter in _KIND_FILTER_MAP:
+        kind_value = _KIND_FILTER_MAP[kind_filter]
+        kind_where = f" AND {_KIND_SQL} = '{kind_value}'"
     
     media_groups_sql = f"""
         SELECT 
-            {kind_sql} AS kind,
-            {media_name_sql} AS media_name,
+            {_KIND_SQL} AS kind,
+            {_MEDIA_NAME_SQL} AS media_name,
             COUNT(*) AS file_count,
             MAX({time_field}) AS latest_ts
         FROM {table}
@@ -1683,7 +1737,7 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
     
     # 总数查询
     total_sql = f"""
-        SELECT COUNT(DISTINCT ({kind_sql} || '|' || {media_name_sql})) AS total
+        SELECT COUNT(DISTINCT ({_KIND_SQL} || '|' || {_MEDIA_NAME_SQL})) AS total
         FROM {table}
         WHERE 1=1 {base_where} {kind_where}
     """
@@ -1919,14 +1973,16 @@ def handle_config_api(handler) -> None:
 
     TMDB 配置优先从 DB (webui_config scope=tmdb) 读取，
     如果 DB 无数据则回退到内存 TmdbConfig 对象。
+    OpenList 配置优先从 DB (webui_config scope=openlist) 读取。
     """
     cfg = handler.webui._config
     tmdb_client = handler.webui._tmdb_client
     tmdb_cfg = getattr(cfg, "tmdb", None)
 
-    # 尝试从 DB 读取 TMDB 配置
+    # 尝试从 DB 读取配置
     _wdb = getattr(handler.webui, '_watchlist_db', None)
     db_tmdb_cfg = _wdb.get_all_config("tmdb") if _wdb else {}
+    db_openlist_cfg = _wdb.get_all_config("openlist") if _wdb else {}
 
     # TMDB token 相关 — DB 优先
     token = db_tmdb_cfg.get("access_token", "") or (
@@ -1955,18 +2011,40 @@ def handle_config_api(handler) -> None:
         "refresh_paths",
         []) if paths_cfg else []
 
-    # a_folders
-    a_folders = getattr(cfg, "a_folders", [])
-
-    # WebDAV
+    # WebDAV - 优先从 DB 读取
     webdav_cfg = getattr(cfg, "webdav", None)
-    webdav_host = getattr(webdav_cfg, "host", "") if webdav_cfg else ""
-    webdav_user = getattr(webdav_cfg, "user", "") if webdav_cfg else ""
+    db_openlist_cfg = _wdb.get_all_config("openlist") if _wdb else {}
+    webdav_host = db_openlist_cfg.get("webdav_host", "") or (
+        getattr(webdav_cfg, "host", "") if webdav_cfg else "")
+    webdav_user = db_openlist_cfg.get("webdav_user", "") or (
+        getattr(webdav_cfg, "user", "") if webdav_cfg else "")
     webdav_password = bool(
-        getattr(
-            webdav_cfg,
-            "password",
-            "")) if webdav_cfg else False
+        db_openlist_cfg.get("webdav_password", "") or (
+            getattr(webdav_cfg, "password", "") if webdav_cfg else ""))
+    webdav_totp_secret = bool(
+        db_openlist_cfg.get("webdav_totp_secret", "") or (
+            getattr(webdav_cfg, "totp_secret", "") if webdav_cfg else ""))
+
+    # a_folders — 只从用户配置的 STRM 引擎获取，不自动加载所有引擎
+    # 从 DB 读取用户配置的 strm_engines
+    a_folders = []
+    strm_map = getattr(cfg, "strm_storage_map", {})
+    try:
+        strm_engines_json = db_openlist_cfg.get("strm_engines", "[]")
+        import json
+        strm_engines = json.loads(strm_engines_json) if strm_engines_json else []
+        
+        # 从用户配置的引擎中提取 local_path
+        for eng in strm_engines:
+            if eng.get("engine"):
+                # 从 strm_storage_map 获取对应的 local_path
+                mount_path = eng["engine"]
+                if mount_path in strm_map:
+                    local_path = strm_map[mount_path].local_path
+                    if local_path and local_path not in a_folders:
+                        a_folders.append(local_path)
+    except Exception as e:
+        logging.debug("[Config] 从用户配置获取 a_folders 失败: %s", e)
 
     # Refresh
     refresh_cfg = getattr(cfg, "refresh", None)
@@ -2056,6 +2134,7 @@ def handle_config_api(handler) -> None:
         "webdav_host": webdav_host,
         "webdav_user": webdav_user,
         "webdav_password": webdav_password,
+        "webdav_totp_secret": webdav_totp_secret,
         # Refresh
         "refresh_enabled": refresh_enabled,
         "refresh_interval": refresh_interval,

@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import json
 import logging
-import struct
 import os
 import time
 from urllib.parse import unquote
@@ -90,12 +89,21 @@ class OpenListAdminClient:
 
     # ================= 内部辅助方法 =================
 
+    # JWT Token 缓存有效期（秒）：与 OpenList 默认 JWT 过期时间对齐（通常 24 小时）
+    _TOKEN_CACHE_TTL = 24 * 3600
+
     def _load_token_from_cache(self) -> None:
-        """从文件加载缓存的 Token"""
+        """从文件加载缓存的 Token，检查过期时间"""
         if os.path.exists(self.token_cache_path):
             try:
                 with open(self.token_cache_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    cached_ts = data.get("ts", 0)
+                    # 检查 Token 是否过期
+                    if cached_ts and (time.time() - cached_ts) > self._TOKEN_CACHE_TTL:
+                        log.info("[OpenList] 缓存 Token 已过期，将重新登录")
+                        self.token = None
+                        return
                     self.token = data.get("token")
                     log.debug("已从本地缓存加载 JWT Token")
             except Exception:
@@ -343,6 +351,40 @@ class OpenListAdminClient:
                     "data": {"content": aggregated, "total": total},
                 }
 
+    def get_strm_storages_full_info(self) -> list[dict[str, Any]]:
+        """获取所有 STRM 类型存储的完整信息。
+        
+        list 接口返回的 addition 是精简版，不含 SaveStrmLocalPath。
+        此方法先 list 筛选 STRM 存储，再对每个调用 get_storage_info 拿完整 addition。
+        
+        返回格式与 get_storage_info 返回的 data 一致，包含完整 addition。
+        如果获取失败返回空列表。
+        """
+        storages = self.list_storages()
+        if not storages or not isinstance(storages, dict):
+            return []
+        
+        content = storages.get("data", {}).get("content", [])
+        strm_storages = [s for s in content if s.get("driver", "").lower() == "strm"]
+        
+        result = []
+        for storage in strm_storages:
+            storage_id = storage.get("id")
+            if not storage_id:
+                continue
+            full_info = self.get_storage_info(storage_id)
+            if full_info and isinstance(full_info, dict):
+                data = full_info.get("data", {})
+                if isinstance(data, dict) and data.get("id"):
+                    result.append(data)
+                else:
+                    result.append(storage)
+            else:
+                log.warning("get_strm_storages_full_info: 获取存储 %s 详情失败", storage_id)
+                result.append(storage)
+        
+        return result
+
     # 2. 获取存储详情 (Admin API) - 【补全】
     def get_storage_info(self, storage_id: int) -> dict[str, Any] | None:
         url = f"{self.host}/api/admin/storage/get"
@@ -400,7 +442,7 @@ class OpenListAdminClient:
             return True
         # 目录已存在视为成功（幂等），但其他业务错误视为失败
         message = str(data.get("message", "")).lower()
-        if "exist" in message or "already" in message or code == 403:
+        if "exist" in message or "already" in message:
             log.debug("[建目录] 目录已存在，视为成功: %s", path)
             return True
         log.warning("[建目录] 业务失败: code=%s message=%s (path=%s)", code, data.get("message", ""), path)

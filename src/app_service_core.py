@@ -127,15 +127,13 @@ class StrmStorageManager:
             return ""
 
     def get_strm_storages(self) -> list[StrmStorageInfo]:
-        storages = self.client.list_storages()
-        if not storages:
+        # 注意：list 接口返回的 addition 是精简版，不含 SaveStrmLocalPath / SaveLocalMode，
+        # 必须通过 get_strm_storages_full_info() 对每个 STRM 存储调用 get 接口拿完整 addition。
+        content = self.client.get_strm_storages_full_info()
+        if not content:
             return []
-        data = storages.get("data", {})
-        content = data.get("content", []) if isinstance(data, dict) else []
         result: list[StrmStorageInfo] = []
         for storage in content:
-            if storage.get("driver", "").lower() != "strm":
-                continue
             addition = storage.get("addition", "")
             result.append(
                 StrmStorageInfo(
@@ -185,6 +183,19 @@ class StrmStorageManager:
 
 
 class AppService:
+    """应用核心服务。
+
+    锁获取顺序（必须严格遵守，避免死锁）：
+      1. _path_locks_lock（获取 path_lock 时）
+      2. _path_locks[path]（单个路径操作）
+      3. _dav_write_lock（WebDAV 写操作）
+      4. _b_file_lock（B 区文件操作：移动 / 修复共用同一把锁）
+      5. _cleanup_lock（延迟清理定时器管理）
+      6. _restoring_lock（恢复标记）
+      7. _lineage_log_lock（日志记录）
+    规则：只能按编号从小到大获取，释放时反向；禁止同时持有非相邻的锁。
+    """
+
     def __init__(self, config: AppConfig, db: Database,
                  admin_api: OpenListAdminClient) -> None:
         self.config = config
@@ -195,12 +206,15 @@ class AppService:
         self._running = False
         self.refresh_service = RefreshService(self)
         self._dav_write_lock = threading.Lock()
-        self._b_move_lock = threading.Lock()
-        self._b_repair_lock = threading.Lock()
+        # B 区移动与修复共享同一把锁（原 _b_move_lock / _b_repair_lock 合并）
+        self._b_file_lock = threading.Lock()
         self._path_locks_lock = threading.Lock()
         self._path_locks: dict[str, threading.Lock] = {}
-        self.cleanup_lock = threading.Lock()
-        self.pending_cleanups: dict[str, threading.Timer] = {}
+        self._cleanup_lock = threading.Lock()
+        self._pending_cleanups: dict[str, threading.Timer] = {}
+        # 向后兼容别名（外部只读访问场景）
+        self.cleanup_lock = self._cleanup_lock
+        self.pending_cleanups = self._pending_cleanups
         self.a_roots = [Path(p).resolve() for p in config.a_folders]
         self.b_root = Path(config.paths.b_root).resolve()
         self.c_root = Path(config.paths.c_root).resolve()
@@ -365,21 +379,33 @@ class AppService:
         logging.info("[启动] 数据库初始化完成")
         self.update_engine_configs()
         logging.info("[启动] 引擎配置加载完成")
+        # 启动等待（无论是否执行全量同步，都等待，让 OpenList 服务就绪）
+        wait_seconds = int(getattr(self.config.behavior, "sync_on_startup_wait", 0) or 0)
+        if wait_seconds > 0:
+            logging.info("[启动] 等待 %d 秒，让 OpenList 服务就绪...", wait_seconds)
+            time.sleep(wait_seconds)
         self.initial_scan_b()
         self.sync_protected_roots_from_config()
         self.scan_removed_protected_roots()
         self.persist_current_roots_snapshot()
         self.initial_scan_a()
-        self.scan_a_to_b_full_sync()
+        # 根据配置决定是否执行 A→B 全量同步（实际复制文件）
+        if getattr(self.config.behavior, "sync_on_startup", True):
+            self.scan_a_to_b_full_sync(
+                valid_engine_paths=list(self.config.paths.strm_engine_paths))
+        else:
+            logging.info("[启动] 跳过 A→B 全量同步（sync_on_startup=false）")
         self.cleanup_b_redundant()
         self.start_watchers()
         self.refresh_service.start()
         logging.info("嗨嗨，应用启动成功咯！")
 
     def stop(self) -> None:
-        for timer in list(self.pending_cleanups.values()):
-            timer.cancel()
-        self.pending_cleanups.clear()
+        # 取消所有待执行的延迟清理定时器
+        with self._cleanup_lock:
+            for timer in list(self._pending_cleanups.values()):
+                timer.cancel()
+            self._pending_cleanups.clear()
         self.refresh_service.stop()
         if self.observer is not None and self.observer.is_alive():
             self.observer.stop()
@@ -489,21 +515,34 @@ class AppService:
 
     def update_engine_configs(self):
         logging.info("[引擎配置] 正在向服务器请求 STRM 存储配置...")
-        storages = self.admin_api.list_storages()
+        content = self.admin_api.get_strm_storages_full_info()
         self.engine_configs = []
-        if not storages:
-            logging.warning("[引擎配置] 无法获取存储列表，API 返回为空！")
+        if not content:
+            logging.warning("[引擎配置] 无法获取 STRM 存储完整信息！")
             return
-        content = storages.get("data", {}).get("content", [])
-        logging.info("[引擎配置] 服务器共返回 %d 个存储设备", len(content))
+        logging.info("[引擎配置] 获取到 %d 个 STRM 存储", len(content))
+
+        # 严格只加载用户在 WebUI 中显式配置的 STRM 引擎。
+        # 首次运行（engines_initialized=False）时 config.strm_engine_paths 已为空，
+        # 因此 configured_engines 也为空 → 不会扫描任何引擎到 B 区，符合用户意图。
+        configured_engines = set(
+            p.rstrip("/") for p in self.config.strm_engine_paths if p.strip()
+        )
+        if configured_engines:
+            logging.info(
+                "[引擎配置] 仅加载用户配置的 %d 个引擎: %s",
+                len(configured_engines), configured_engines)
+        else:
+            logging.info(
+                "[引擎配置] 用户尚未配置任何 STRM 引擎（engines_initialized=%s），"
+                "本次启动不加载任何引擎映射",
+                getattr(self.config, "engines_initialized", False))
+
         for s in content:
-            driver = s.get("driver", "")
             mount_path = s.get("mount_path", "unknown")
-            if driver.lower() != "strm":
-                logging.debug(
-                    "[引擎配置] 忽略非 STRM 驱动存储: %s (driver=%s)",
-                    mount_path,
-                    driver)
+            # 跳过未配置的引擎（configured_engines 为空时全部跳过）
+            if mount_path.rstrip("/") not in configured_engines:
+                logging.debug("[引擎配置] 跳过未配置的引擎: %s", mount_path)
                 continue
             addition_str = s.get("addition", "{}")
             logging.debug(
@@ -827,16 +866,24 @@ class AppService:
 
     def trigger_delayed_solo_check(
             self, physical_dir: str, cloud_media_root: str):
-        with self.cleanup_lock:
-            old_timer = self.pending_cleanups.pop(physical_dir, None)
+        with self._cleanup_lock:
+            old_timer = self._pending_cleanups.pop(physical_dir, None)
             if old_timer:
                 old_timer.cancel()
             timer = threading.Timer(
-                30, self.execute_solo_judgment, args=(
+                30, self._execute_solo_judgment_safe, args=(
                     physical_dir, cloud_media_root))
             timer.daemon = True
-            self.pending_cleanups[physical_dir] = timer
+            self._pending_cleanups[physical_dir] = timer
             timer.start()
+
+    def _execute_solo_judgment_safe(self, physical_dir: str, cloud_media_root: str):
+        """安全执行单兵审判，完成后自动清理定时器引用"""
+        try:
+            self.execute_solo_judgment(physical_dir, cloud_media_root)
+        finally:
+            with self._cleanup_lock:
+                self._pending_cleanups.pop(physical_dir, None)
 
     def execute_solo_judgment(self, physical_dir: str, cloud_media_root: str):
         logging.info("[单兵审判] 观察期结束，开始判定: %s", physical_dir)
@@ -859,14 +906,39 @@ class AppService:
             logging.info("[单兵审判] 审判结果：判定为合法的批量操作或单集作品，予以保留。")
 
     def initial_scan_b(self) -> None:
+        """初始化扫描 B 区现有文件，与数据库记录进行同步。
+        
+        拆分为多个子函数以提高可读性：
+        1. _scan_b_disk: 扫描磁盘文件
+        2. _load_b_db_records: 加载数据库记录
+        3. _reconcile_b_historical_records: 对比历史 DB 记录与磁盘数据
+        4. _insert_new_b_records: 插入磁盘上新的 B 区记录
+        """
         logging.info("[初始化] 开始扫描 B 区现有文件...")
+        disk_data = self._scan_b_disk()
+        if disk_data is None:
+            return
+        
+        db_records = self._load_b_db_records()
+        if db_records is None:
+            return
+        
+        processed = set()
+        self._reconcile_b_historical_records(disk_data, db_records, processed)
+        self._insert_new_b_records(disk_data, processed)
+        logging.info("[初始化] B 区扫描自同步完成")
+
+    def _scan_b_disk(self) -> tuple[dict, dict] | None:
+        """扫描 B 区磁盘文件，返回 (fingerprint_to_paths, path_to_data)"""
         b_root = Path(self.config.paths.b_root)
         if not b_root.exists():
             logging.info("[初始化] B 区根目录不存在，跳过扫描")
-            return
+            return None
+        
         disk_fingerprint_to_paths: dict[str, set[str]] = {}
         disk_path_to_data: dict[str, dict] = {}
         scanned_count = 0
+        
         for strm_file in b_root.rglob("*.strm"):
             try:
                 scanned_count += 1
@@ -881,111 +953,122 @@ class AppService:
                         "webdav": webdav_path, "fp": fingerprint}
             except Exception as e:
                 logging.warning("[初始化] 读取 B 区文件失败: %s (%s)", strm_file, e)
+        
         logging.info("[初始化] B 区磁盘扫描完毕，共发现 %d 个 STRM 文件", scanned_count)
+        return disk_fingerprint_to_paths, disk_path_to_data
+
+    def _load_b_db_records(self) -> list | None:
+        """加载 B 区数据库记录，失败返回 None"""
         try:
             all_b_records = self.db.get_all_b_records()
             logging.info("[初始化] 成功读取 B 区历史数据库记录: %d 条", len(all_b_records))
+            return all_b_records
         except Exception as e:
             logging.error("[初始化] 查询历史记录失败 (通常是因为表不存在): %s", e)
-            return
-        processed_disk_paths = set()
-        for row in all_b_records:
+            return None
+
+    def _reconcile_b_historical_records(
+        self, 
+        disk_data: tuple[dict, dict], 
+        db_records: list, 
+        processed: set
+    ) -> None:
+        """对比历史 DB 记录与磁盘数据，处理越界/迁移/删除"""
+        disk_fingerprint_to_paths, disk_path_to_data = disk_data
+        
+        for row in db_records:
             db_local_path = row.local_path
             db_fingerprint = row.fingerprint
+            
             if not db_fingerprint:
                 self.db.delete_b_by_local(db_local_path)
                 continue
-            if db_local_path in disk_path_to_data and disk_path_to_data[
-                    db_local_path]["fp"] == db_fingerprint:
+            
+            # 历史 DB 记录在磁盘上存在且指纹匹配
+            if db_local_path in disk_path_to_data and disk_path_to_data[db_local_path]["fp"] == db_fingerprint:
                 webdav_path = disk_path_to_data[db_local_path]["webdav"]
                 if not self._verify_b_path_lineage(db_local_path, webdav_path):
-                    logging.warning(
-                        "[B区历史越界清理] 物理删除历史遗留越界文件: %s", db_local_path)
+                    logging.warning("[B区历史越界清理] 物理删除历史遗留越界文件: %s", db_local_path)
                     safe_remove_file(db_local_path)
                     self.db.delete_b_by_local(db_local_path)
                     self.refresh_identity_current_b_path(db_fingerprint)
-                    processed_disk_paths.add(db_local_path)
+                    processed.add(db_local_path)
                     continue
-                processed_disk_paths.add(db_local_path)
+                processed.add(db_local_path)
                 continue
-            disk_paths_for_fp = disk_fingerprint_to_paths.get(
-                db_fingerprint, set())
-            available_paths = [
-                p for p in disk_paths_for_fp if p not in processed_disk_paths]
+            
+            # 历史 DB 记录的指纹在磁盘上存在，但路径不同（可能是重命名）
+            disk_paths_for_fp = disk_fingerprint_to_paths.get(db_fingerprint, set())
+            available_paths = [p for p in disk_paths_for_fp if p not in processed]
             valid_new_path = None
+            
             for candidate_path in available_paths:
                 candidate_webdav = disk_path_to_data[candidate_path]["webdav"]
-                if self._verify_b_path_lineage(
-                        candidate_path, candidate_webdav):
+                if self._verify_b_path_lineage(candidate_path, candidate_webdav):
                     valid_new_path = candidate_path
                     break
                 else:
-                    logging.warning(
-                        "[B区越界清理] 发现非法跨目录移动，物理删除: %s", candidate_path)
+                    logging.warning("[B区越界清理] 发现非法跨目录移动，物理删除: %s", candidate_path)
                     safe_remove_file(candidate_path)
-                    processed_disk_paths.add(candidate_path)
+                    processed.add(candidate_path)
+            
             if valid_new_path:
-                self.db.move_b_record(db_local_path, valid_new_path)
-                identity = self.db.get_identity_by_fingerprint(db_fingerprint)
-                if identity and identity.current_b_path == db_local_path:
-                    self.db.update_identity_b_path(
-                        db_fingerprint, valid_new_path)
-                try:
-                    old_path_obj = Path(db_local_path)
-                    if old_path_obj.exists() and str(old_path_obj.resolve()) != str(
-                            Path(valid_new_path).resolve()):
-                        safe_remove_file(old_path_obj)
-                        logging.debug("[B区自同步] 删除旧路径物理文件: %s", db_local_path)
-                except Exception as e:
-                    logging.warning(
-                        "[B区自同步] 删除旧路径物理文件失败: %s (%s)", db_local_path, e)
-                if db_fingerprint:
-                    self.ensure_single_visible_instance(
-                        db_fingerprint, valid_new_path)
-                processed_disk_paths.add(valid_new_path)
-                logging.info(
-                    "[B区自同步] 更新路径(合法重命名): %s -> %s",
-                    db_local_path,
-                    valid_new_path)
+                self._handle_b_record_migration(db_local_path, valid_new_path, db_fingerprint)
+                processed.add(valid_new_path)
             else:
                 self.db.delete_b_by_local(db_local_path)
                 self.refresh_identity_current_b_path(db_fingerprint)
                 logging.debug("[B区自同步] 删除失效数据库记录: %s", db_local_path)
+
+    def _handle_b_record_migration(self, old_path: str, new_path: str, fingerprint: str) -> None:
+        """处理 B 区记录的路径迁移"""
+        self.db.move_b_record(old_path, new_path)
+        identity = self.db.get_identity_by_fingerprint(fingerprint)
+        if identity and identity.current_b_path == old_path:
+            self.db.update_identity_b_path(fingerprint, new_path)
+        
+        try:
+            old_path_obj = Path(old_path)
+            if old_path_obj.exists() and str(old_path_obj.resolve()) != str(Path(new_path).resolve()):
+                safe_remove_file(old_path_obj)
+                logging.debug("[B区自同步] 删除旧路径物理文件: %s", old_path)
+        except Exception as e:
+            logging.warning("[B区自同步] 删除旧路径物理文件失败: %s (%s)", old_path, e)
+        
+        if fingerprint:
+            self.ensure_single_visible_instance(fingerprint, new_path)
+        
+        logging.info("[B区自同步] 更新路径(合法重命名): %s -> %s", old_path, new_path)
+
+    def _insert_new_b_records(self, disk_data: tuple[dict, dict], processed: set) -> None:
+        """插入磁盘上新的 B 区记录"""
+        _, disk_path_to_data = disk_data
         new_insert_count = 0
+        
         for disk_path, data in disk_path_to_data.items():
-            if disk_path not in processed_disk_paths:
+            if disk_path not in processed:
                 webdav_path = data["webdav"]
                 fingerprint = data["fp"]
+                
                 if not self._verify_b_path_lineage(disk_path, webdav_path):
-                    logging.warning(
-                        "[B区越界清理] 发现非法新增跨区复制文件，物理删除: %s", disk_path)
+                    logging.warning("[B区越界清理] 发现非法新增跨区复制文件，物理删除: %s", disk_path)
                     safe_remove_file(disk_path)
                     continue
-                parent_webdav_path = webdav_parent(
-                    webdav_path) if webdav_path else ""
-                identity = self.db.get_identity_by_fingerprint(fingerprint)
-                source_a_path = identity.source_a_path if identity else self.find_a_source_by_webdav(
-                    webdav_path)
-                if source_a_path is None:
-                    logging.warning(
-                        "[B区] webdav_path=%s 无对应 A 区源文件，source_a_path 写入 NULL",
-                        webdav_path)
+                
                 self.db.upsert_b(
-                    local_path=disk_path,
-                    webdav_path=webdav_path,
-                    parent_webdav_path=parent_webdav_path,
-                    source_a_path=source_a_path,
+                    disk_path,
+                    webdav_path,
+                    webdav_parent(webdav_path),
+                    None,  # source_a_path 在初始化扫描阶段未知，后续由 A→B 同步补全
                     fingerprint=fingerprint,
-                    status="valid")
-                self.db.upsert_identity(
-                    fingerprint=fingerprint,
-                    webdav_path=webdav_path,
-                    source_a_path=source_a_path,
-                    current_b_path=disk_path)
-                self.ensure_single_visible_instance(fingerprint, disk_path)
+                    status="valid",
+                )
+                self.refresh_identity_current_b_path(fingerprint)
+                if fingerprint:
+                    self.ensure_single_visible_instance(fingerprint, disk_path)
                 new_insert_count += 1
-                logging.debug("[B区自同步] 新增本地文件入库: %s", disk_path)
-        logging.info("[初始化] B 区扫描自同步完成，本次共新增入库 %d 个文件记录", new_insert_count)
+        
+        logging.info("[初始化] B 区新增 %d 条数据库记录", new_insert_count)
 
     def initial_scan_a(self):
         return self.sync_service.initial_scan_a()
@@ -1990,18 +2073,26 @@ class AppService:
     def trigger_delayed_cleanup(self, parent_webdav_path: str) -> None:
         if not parent_webdav_path:
             return
-        with self.cleanup_lock:
-            old_timer = self.pending_cleanups.pop(parent_webdav_path, None)
+        with self._cleanup_lock:
+            old_timer = self._pending_cleanups.pop(parent_webdav_path, None)
             if old_timer:
                 old_timer.cancel()
             timer = threading.Timer(
                 self.config.behavior.a_to_b_restore_delay_seconds,
-                self.cleanup_b_zombies_under_folder,
+                self._cleanup_b_zombies_under_folder_safe,
                 args=(parent_webdav_path,),
             )
             timer.daemon = True
-            self.pending_cleanups[parent_webdav_path] = timer
+            self._pending_cleanups[parent_webdav_path] = timer
             timer.start()
+
+    def _cleanup_b_zombies_under_folder_safe(self, parent_webdav_path: str) -> None:
+        """安全执行 B 区僵尸清理，完成后自动清理定时器引用"""
+        try:
+            self.cleanup_b_zombies_under_folder(parent_webdav_path)
+        finally:
+            with self._cleanup_lock:
+                self._pending_cleanups.pop(parent_webdav_path, None)
 
     def _build_trash_path(self, cloud_path: str) -> str | None:
         return build_webdav_trash_path(

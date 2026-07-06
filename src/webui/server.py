@@ -60,18 +60,36 @@ logger = logging.getLogger("webui")
 # ============================================================
 from tmdb_client import create_tmdb_client  # noqa: E402
 from database import Database  # noqa: E402
+from app_service_core import AppService  # noqa: E402
 # 路由与处理器统一从 webui.routes 引入
-from webui.routes import (  # noqa: E402
-    _tmdb_routes, _is_lan_ip, _try_bind_port,
-    _handle_tmdb_configure, _handle_tmdb_watchlist_match_refresh,
-    _handle_tmdb_watchlist_match_override, _handle_tmdb_watchlist_bg_sync,
-    _handle_restart_webui, _handle_webui_config_get, _handle_webui_config_post,
-    _handle_openlist_test_connection, _handle_openlist_strm_engines,
-    _handle_openlist_monitored_paths, _handle_openlist_status,
-    _handle_openlist_paths,
-    handle_dashboard, handle_area, handle_area_detail,
-    handle_records_api, handle_logs_api, handle_config_api,
-)
+try:
+    # 作为包导入时（从 src/ 运行）
+    from webui.routes import (  # noqa: E402
+        _tmdb_routes, _is_lan_ip, _try_bind_port,
+        _handle_tmdb_configure, _handle_tmdb_watchlist_match_refresh,
+        _handle_tmdb_watchlist_match_override, _handle_tmdb_watchlist_bg_sync,
+        _handle_restart_webui, _handle_webui_config_get, _handle_webui_config_post,
+        _handle_openlist_test_connection, _handle_openlist_strm_engines,
+        _handle_openlist_monitored_paths, _handle_openlist_status,
+        _handle_openlist_ping, _handle_openlist_paths,
+        _handle_main_status, _handle_main_start, _handle_main_stop,
+        handle_dashboard, handle_area, handle_area_detail,
+        handle_records_api, handle_logs_api, handle_config_api,
+    )
+except ImportError:
+    # 直接运行时（python src/webui/server.py）
+    from routes import (  # noqa: E402
+        _tmdb_routes, _is_lan_ip, _try_bind_port,
+        _handle_tmdb_configure, _handle_tmdb_watchlist_match_refresh,
+        _handle_tmdb_watchlist_match_override, _handle_tmdb_watchlist_bg_sync,
+        _handle_restart_webui, _handle_webui_config_get, _handle_webui_config_post,
+        _handle_openlist_test_connection, _handle_openlist_strm_engines,
+        _handle_openlist_monitored_paths, _handle_openlist_status,
+        _handle_openlist_ping, _handle_openlist_paths,
+        _handle_main_status, _handle_main_start, _handle_main_stop,
+        handle_dashboard, handle_area, handle_area_detail,
+        handle_records_api, handle_logs_api, handle_config_api,
+    )
 
 if TYPE_CHECKING:
     from config import WebUIConfig
@@ -436,6 +454,8 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         # OpenList API 路由
         elif path == "/api/openlist/status":
             _handle_openlist_status(self, self.webui)
+        elif path == "/api/openlist/ping":
+            _handle_openlist_ping(self, self.webui)
         elif path == "/api/openlist/strm-engines":
             _handle_openlist_strm_engines(self, self.webui)
         elif path == "/api/openlist/monitored-paths":
@@ -513,9 +533,11 @@ class WebUIServer:
         self._project_root = PROJECT_ROOT
 
         # AppService 管理（主程序）
-        self._app_service: object | None = None
+        self._app_service: AppService | None = None
         self._app_running = False
         self._app_start_lock = threading.Lock()
+        # 主程序启动时间戳（None 表示未运行）；与 WebUIServer._start_time 区分
+        self._app_start_time: float | None = None
 
         # 顺序很重要：
         # 1) 无条件创建 watchlist DB（用于存储 webui_config）
@@ -618,6 +640,12 @@ class WebUIServer:
     def _init_tmdb_client(self) -> None:
         """初始化 TMDB 客户端（仅当配置了 API key/token 时）"""
         self._tmdb_client = None  # type: ignore[assignment]
+        # 若 watchlist 已禁用，跳过 TMDB 客户端初始化（节省 API 配额）
+        if self._watchlist_db:
+            enabled_raw = self._watchlist_db.get_config("tmdb", "watchlist_enabled")
+            if str(enabled_raw).lower() == "false":
+                logging.info("[WebUI] TMDB 待看列表已禁用，跳过客户端初始化")
+                return
         try:
             from tmdb_client import create_tmdb_client
             tmdb_cfg = getattr(self._config, "tmdb", None)
@@ -661,6 +689,10 @@ class WebUIServer:
     def get_watchlist_cached(self) -> list[dict]:
         """获取待看列表。缓存过期时直接返回旧数据，不自动同步。"""
         if not self._tmdb_client or not self._watchlist_db:
+            return []
+        # 检查 watchlist_enabled 开关（只有明确设为 "false" 才禁用，未设置/空字符串默认启用）
+        enabled_raw = self._watchlist_db.get_config("tmdb", "watchlist_enabled")
+        if str(enabled_raw).lower() == "false":
             return []
         return self._watchlist_db.get_all()
 
@@ -771,24 +803,53 @@ class WebUIServer:
             try:
                 from app_service import AppService
                 from webdav_client import OpenListAdminClient
-                
-                # 创建 OpenListAdminClient
+
+                # 创建 OpenListAdminClient（主程序生命周期内复用）
                 admin_client = OpenListAdminClient(
                     self._config.webdav.host,
                     self._config.webdav.user,
                     self._config.webdav.password,
                     totp_secret=self._config.webdav.totp_secret,
                 )
-                
+
                 # 登录验证
                 if not admin_client.login():
                     error_msg = admin_client.last_error_message or "未知错误"
                     return {"success": False, "message": f"OpenList 登录失败: {error_msg}"}
-                
+
+                # 从 OpenList API 加载 STRM 存储映射（复用 admin_client，避免重复登录）
+                try:
+                    self._config.load_strm_storage_from_api(admin_client=admin_client)
+                except Exception as exc:
+                    logging.warning("[Main] 加载 STRM 存储映射失败: %s", exc)
+
+                # 缓存到 WebUIServer 供热更新/状态查询复用
+                self._admin_client = admin_client
+
+                # 启动主程序前按配置页的日志级别/路径重新初始化日志系统，
+                # 确保 WebUI 启动的主程序不仅输出到控制台，也写入日志文件。
+                # log_file 留空时回退 ./activity.log（始终写文件）。
+                try:
+                    from logger_setup import setup_logging
+                    setup_logging(
+                        level=self._config.log.level,
+                        log_file=self._config.log.file or "./activity.log",
+                        max_size_mb=self._config.log.max_size_mb,
+                        backup_count=self._config.log.backup_count,
+                    )
+                    logging.info(
+                        "[Main] 日志已按配置初始化: level=%s, file=%s",
+                        self._config.log.level,
+                        self._config.log.file or "./activity.log",
+                    )
+                except Exception as log_exc:
+                    logging.warning("[Main] 日志初始化失败（沿用原配置）: %s", log_exc)
+
                 # 创建 AppService
                 self._app_service = AppService(self._config, self._db, admin_client)
                 self._app_service.start()
                 self._app_running = True
+                self._app_start_time = time.time()
                 
                 logging.info("[Main] 主程序已启动")
                 return {"success": True, "message": "主程序已启动"}
@@ -812,6 +873,7 @@ class WebUIServer:
                     self._app_service.stop()
                     self._app_service = None
                 self._app_running = False
+                self._app_start_time = None
                 
                 logging.info("[Main] 主程序已停止")
                 return {"success": True, "message": "主程序已停止"}
@@ -828,7 +890,7 @@ class WebUIServer:
         """
         return {
             "running": self._app_running,
-            "uptime": int(time.time() - self._start_time) if self._app_running else None,
+            "uptime": int(time.time() - self._app_start_time) if self._app_running and self._app_start_time else None,
         }
 
 
@@ -877,13 +939,16 @@ def main():
     except Exception as e:
         logger.debug("[WebUI] 从 DB 加载 TMDB 配置失败: %s", e)
 
-    # 初始化数据库
-    if not os.path.exists(cfg.local.db_file):
-        logger.error("数据库文件不存在: %s", cfg.local.db_file)
-        sys.exit(1)
-
+    # 初始化数据库（Database 会自动创建不存在的数据库文件）
     logger.info("打开数据库: %s", cfg.local.db_file)
     db = Database(cfg.local.db_file)
+
+    # 从 WebUI 配置 DB 加载 OpenList 配置覆盖（WebUI 配置 > config.toml）
+    # 包含 strm_engines、refresh_paths、行为配置等
+    try:
+        cfg.update_from_db(TmdbWatchlistDb(db_path))
+    except Exception as e:
+        logger.warning("[WebUI] 从 DB 加载 OpenList 配置失败: %s", e)
 
     # 初始化 TMDB 客户端
     tmdb_client = None

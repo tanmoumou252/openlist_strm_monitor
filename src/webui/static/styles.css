@@ -219,6 +219,21 @@ thead th{font-size:calc(var(--font-base,13px) - 1px)}
 :root[data-system="material"] .config-form-actions .toolbar-btn{padding:8px 14px}
 :root[data-system="material"] .config-form-actions .toolbar-btn.primary{padding:8px 16px}
 
+/* MD3 style buttons for main control */
+.md3-btn{display:inline-flex;align-items:center;gap:8px;padding:10px 24px;border-radius:20px;font-size:14px;font-weight:600;cursor:pointer;border:none;transition:all .18s ease;text-decoration:none}
+.md3-btn.filled{background:var(--primary);color:var(--on-primary);box-shadow:0 1px 2px rgba(0,0,0,.15)}
+.md3-btn.filled:hover{background:var(--primary-hover);box-shadow:0 2px 4px rgba(0,0,0,.2)}
+.md3-btn.filled:disabled{background:var(--text-muted);opacity:.5;cursor:not-allowed}
+.md3-btn.tonal{background:color-mix(in srgb,var(--primary) 12%,transparent);color:var(--primary);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent)}
+.md3-btn.tonal:hover{background:color-mix(in srgb,var(--primary) 20%,transparent)}
+.md3-btn.tonal:disabled{opacity:.5;cursor:not-allowed}
+:root[data-system="fluent"] .md3-btn{border-radius:var(--radius-control)}
+:root[data-system="fluent"] .md3-btn.filled{box-shadow:none}
+
+/* Small spinner for buttons */
+.spinner-small{display:inline-block;width:14px;height:14px;border:2px solid transparent;border-top-color:currentColor;border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
 /* Fluent 2 button overrides — crisp accent/standard */
 :root[data-system="fluent"] .toolbar-btn,:root[data-system="fluent"] .search-btn,:root[data-system="fluent"] .category-tab,:root[data-system="fluent"] .sort-btn{border-radius:var(--radius-control);padding:6px 14px;font-weight:500}
 :root[data-system="fluent"] .toolbar-btn.primary,:root[data-system="fluent"] .search-btn{background:var(--primary);color:var(--on-primary);border:none;padding:8px 20px;font-weight:600}
@@ -460,24 +475,37 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
  :root[data-system="material"] .config-back-btn{border-radius:28px}
 
   .config-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid color-mix(in srgb,var(--border-color) 10%,transparent)}
-  /* Toggle Switch — shared */
-  .switch-label{display:inline-flex;align-items:center;cursor:pointer;user-select:none}
-  .switch-track{position:relative;display:inline-flex;align-items:center;width:44px;height:24px;border-radius:12px;border:2px solid var(--border-color);background:var(--bg-control);transition:background .2s ease,border-color .2s ease}
-  .switch-thumb{position:absolute;left:2px;width:16px;height:16px;border-radius:50%;background:var(--bg-card);box-shadow:0 1px 2px rgba(0,0,0,.18);transition:transform .25s cubic-bezier(.22,1,.36,1),width .2s ease,height .2s ease,background .2s ease}
-  .switch-label.on .switch-track{background:var(--primary);border-color:var(--primary)}
-  .switch-label.on .switch-thumb{transform:translateX(20px)}
-   /* Material 3 toggle overrides */
-   :root[data-system="material"] .switch-track{width:44px;height:24px;border-radius:12px;border:2px solid var(--border-color);background:var(--bg-control)}
-   :root[data-system="material"] .switch-thumb{left:2px;width:16px;height:16px;background:var(--border-color)}
-   :root[data-system="material"] .switch-label.on .switch-track{background:var(--primary);border-color:var(--primary)}
-   :root[data-system="material"] .switch-label.on .switch-thumb{width:20px;height:20px;background:var(--on-primary);transform:translateX(20px)}
-  /* Fluent 2 toggle overrides */
-  :root[data-system="fluent"] .switch-track{width:44px;height:24px;border-radius:12px;border:2px solid var(--border-color);background:var(--bg-control)}
-  :root[data-system="fluent"] .switch-thumb{left:2px;width:16px;height:16px;background:var(--bg-card)}
-  :root[data-system="fluent"] .switch-label.on .switch-track{background:var(--primary);border-color:var(--primary)}
-  :root[data-system="fluent"] .switch-label.on .switch-thumb{transform:translateX(20px)}
-  .toggle-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid color-mix(in srgb,var(--border-color) 10%,transparent)}
-  .toggle-row:last-child{border-bottom:none}
+
+/* ===== Segmented Switch (分段开关) =====
+/* ⚠️ 开关风格为最终定型方案（2026-07）：
+   基类 .segmented-switch 仅承担布局（inline-flex/gap/padding/border/white-space）与
+   中性颜色；一切视觉细节（border-radius / background / box-shadow / ::after 主色条）
+   均由 :root[data-system="material"] 与 :root[data-system="fluent"] 两个分支完整声明。
+   Fluent 分支完整覆盖 MD3 偏置属性并清除 ::after，保证 Fluent 主题下不出现 MD3 残留
+   （圆角药丸、外阴影、底部主色条）。此后不再调整此开关的 MD3/Fluent 统一性问题。*/
+.segmented-switch{display:inline-flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--border-color);white-space:nowrap}
+.segmented-switch > button{position:relative;height:30px;border:0;background:transparent;color:var(--text-muted);padding:0 14px;font-weight:500;font-size:var(--font-base);cursor:pointer;transition:all .18s ease;user-select:none}
+.segmented-switch > button:hover{color:var(--text-main)}
+.segmented-switch > button.active{color:var(--primary);background:var(--bg-card)}
+
+/* Material 3 风格 - 圆角胶囊，active 按钮有底部主色条 */
+:root[data-system="material"] .segmented-switch{border-radius:999px;background:color-mix(in srgb,var(--primary) 7%,var(--bg-card))}
+:root[data-system="material"] .segmented-switch > button{border-radius:999px}
+:root[data-system="material"] .segmented-switch > button:hover{background:transparent}
+:root[data-system="material"] .segmented-switch > button.active{color:var(--primary);background:var(--bg-card);box-shadow:0 4px 14px rgba(16,24,40,.08)}
+:root[data-system="material"] .segmented-switch > button.active::after{content:"";position:absolute;left:16px;right:16px;bottom:4px;height:2px;border-radius:999px;background:var(--primary)}
+
+/* Fluent 2 风格 - 方角圆角，active 按钮底部主色内阴影
+   完整覆盖基类与 material 的所有视觉属性：border-radius / background / box-shadow /
+   hover 背景 / active 颜色背景 / ::after 清除，确保 Fluent 主题下 100% Fluent 表现。*/
+:root[data-system="fluent"] .segmented-switch{border-radius:6px;background:#fafafa;border-color:#edebe9;box-shadow:none}
+:root[data-system="fluent"] .segmented-switch > button{border-radius:4px;font-weight:600}
+:root[data-system="fluent"] .segmented-switch > button:hover{background:color-mix(in srgb,#edebe9 40%,transparent);color:var(--text-main)}
+:root[data-system="fluent"] .segmented-switch > button.active{color:var(--text-main);background:#ffffff;box-shadow:inset 0 -2px 0 var(--primary);border-radius:4px}
+:root[data-system="fluent"] .segmented-switch > button.active::after{content:none}
+
+.toggle-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid color-mix(in srgb,var(--border-color) 10%,transparent)}
+.toggle-row:last-child{border-bottom:none}
 
 .config-row .key{font-size:var(--font-base);color:var(--text-muted);font-weight:500}
 .config-row .val{font-size:var(--font-base);color:var(--text-main);font-weight:600;word-break:break-all;max-width:60%;text-align:right}
@@ -488,7 +516,7 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 .floating-label.is-shown{opacity:1}
 .floating-label.is-floating{top:0;transform:translateY(0) scale(.82);color:var(--primary)}
 .floating-label.is-filled{top:0;transform:translateY(0) scale(.82);color:var(--text-muted)}
-.floating-field input,.floating-field select{width:100%;border:none;outline:none;background:color-mix(in srgb,var(--bg-control) 60%,transparent);color:var(--text-main);font:inherit;padding:11px 12px;border-radius:var(--radius-card);border:1px solid color-mix(in srgb,var(--border-color) 22%,transparent);box-shadow:none;transition:border-color .18s ease,box-shadow .18s ease,background .18s ease;box-sizing:border-box;line-height:1.4}
+.floating-field input,.floating-field select{width:100%;border:none;outline:none;background:color-mix(in srgb,var(--bg-control) 60%,transparent);color:var(--text-main);font:inherit;padding:11px 12px;border-radius:var(--radius-card);border:1px solid color-mix(in srgb,var(--border-color) 22%,transparent);box-shadow:none;transition:border-color .18s ease,box-shadow .18s ease,background .18s ease;box-sizing:border-box;line-height:1.4;position:relative;z-index:0}
 .floating-field input::placeholder{color:var(--text-muted);opacity:.75;transition:opacity .18s ease}
 .floating-field input:focus::placeholder,.floating-field input.has-value::placeholder{opacity:0}
 .floating-field input:focus,.floating-field select:focus{border-color:var(--primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--primary) 16%,transparent);background:color-mix(in srgb,var(--bg-control) 88%,transparent)}
@@ -510,17 +538,7 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
  .floating-field input.readonly-field{background:color-mix(in srgb,var(--bg-control) 30%,transparent);color:var(--text-muted);cursor:default;border-color:color-mix(in srgb,var(--border-color) 12%,transparent)}
  .floating-field input.readonly-field:focus{box-shadow:none;border-color:color-mix(in srgb,var(--border-color) 12%,transparent);background:color-mix(in srgb,var(--bg-control) 30%,transparent)}
 
- /* TMDB Watchlist Toggle Switch */
- .toggle-switch-container{display:flex;align-items:center;gap:12px;padding:8px 0}
- .toggle-switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;user-select:none}
- .toggle-switch input{position:absolute;opacity:0;width:0;height:0}
- .toggle-slider{position:relative;width:44px;height:24px;background:var(--bg-control);border:2px solid var(--border-color);border-radius:12px;transition:all .2s ease}
- .toggle-slider::before{content:'';position:absolute;left:2px;top:50%;transform:translateY(-50%);width:16px;height:16px;background:var(--border-color);border-radius:50%;transition:all .2s ease}
- .toggle-switch input:checked + .toggle-slider{background:var(--primary);border-color:var(--primary)}
- .toggle-switch input:checked + .toggle-slider::before{left:calc(100% - 18px);background:var(--on-primary)}
- .toggle-label{font-size:var(--font-base);color:var(--text-muted);font-weight:500}
- :root[data-system="fluent"] .toggle-slider{border-radius:100px}
- :root[data-system="fluent"] .toggle-slider::before{border-radius:50%}
+ /* Legacy .switch-label and .toggle-switch classes removed — all toggles now use .segmented-switch */
 
 /* ===== Notes ===== */
  .credit-pill{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;border-radius:999px;font-size:calc(var(--font-base) - 1px);font-weight:500;background:color-mix(in srgb,var(--primary) 10%,var(--bg-card));color:var(--text-muted);border:1px solid color-mix(in srgb,var(--border-color) 18%,transparent);cursor:default;user-select:text}
@@ -573,11 +591,18 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 .openlist-form .field-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 16px}
 .openlist-group-title{font-size:calc(var(--font-base) + 1px);color:var(--primary);font-weight:600;margin:18px 0 8px;display:flex;align-items:center;gap:8px}
 
-/* STRM Engine Table */
-.strm-engine-table{width:100%;border-collapse:separate;border-spacing:0;margin:12px 0;border:1px solid color-mix(in srgb,var(--border-color) 18%,transparent);border-radius:var(--radius-card);overflow:hidden}
+/* STRM Engine Table
+   不使用 overflow:hidden：它会把 monitored_paths 注释图标向下展开的 tooltip
+   裁切掉。圆角改由 thead 首行/末行单元格 + tbody 圆角实现，表格本身允许内容
+   （含 tooltip 气泡）越出边框显示。*/
+.strm-engine-table{width:100%;border-collapse:separate;border-spacing:0;margin:12px 0;border:1px solid color-mix(in srgb,var(--border-color) 18%,transparent);border-radius:var(--radius-card);position:relative}
 .strm-engine-table thead th{background:color-mix(in srgb,var(--primary) 10%,var(--bg-card));padding:10px 14px;font-size:calc(var(--font-base) - 1px);font-weight:600;text-align:left}
+.strm-engine-table thead th:first-child{border-top-left-radius:var(--radius-card)}
+.strm-engine-table thead th:last-child{border-top-right-radius:var(--radius-card)}
 .strm-engine-table tbody td{padding:8px 14px;border-top:1px solid color-mix(in srgb,var(--border-color) 14%,transparent);vertical-align:top}
 .strm-engine-table tbody tr:hover{background:color-mix(in srgb,var(--primary) 5%,var(--bg-card))}
+.strm-engine-table tbody tr:last-child td:first-child{border-bottom-left-radius:var(--radius-card)}
+.strm-engine-table tbody tr:last-child td:last-child{border-bottom-right-radius:var(--radius-card)}
 .engine-select{width:100%;padding:8px;border:1px solid color-mix(in srgb,var(--border-color) 30%,transparent);border-radius:var(--radius-control);background:var(--bg-control);font:inherit;color:var(--text-main)}
 .engine-select:disabled{opacity:.5;cursor:not-allowed}
 .tag-container{display:flex;flex-wrap:wrap;gap:6px;min-height:36px;align-items:center}
@@ -595,13 +620,19 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 
 /* Context Help Area — removed, replaced by tooltip */
 
-/* OpenList field tooltip — info icon */
-.ol-help-icon{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;color:var(--text-muted);cursor:help;position:relative;flex-shrink:0;user-select:none;line-height:1;vertical-align:middle}
+/* OpenList field tooltip — info icon
+   注释图标统一放在 .field-control 内（.field-help-icon 绝对定位右上角），
+   而不放在 .floating-label 内：.floating-label 有 pointer-events:none 且
+   绝对定位浮在 input 之上，图标在 label 内时 hover 会被底层 input 吞掉，
+   tooltip 无法触发。放在 .field-control 顶层并 pointer-events:auto 即可。*/
+.field-help-icon{position:absolute;top:10px;right:10px;z-index:6;display:inline-flex;align-items:center;pointer-events:auto}
+.field-help-icon .ol-help-icon{position:static}
+.ol-help-icon{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;color:var(--text-muted);cursor:help;position:relative;flex-shrink:0;user-select:none;line-height:1;vertical-align:middle;pointer-events:auto;z-index:5}
 .ol-help-icon .material-icon{font-size:15px;color:var(--text-muted);width:15px;height:15px}
 .ol-help-icon:hover{color:var(--primary)}
 .ol-help-icon:hover .material-icon{color:var(--primary)}
-.ol-help-icon::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--bg-card);color:var(--text-main);border:1px solid var(--border-color);border-radius:8px;padding:8px 12px;font-size:calc(var(--font-base) - 1px);font-weight:400;line-height:1.5;white-space:pre-wrap;max-width:320px;min-width:180px;box-shadow:0 4px 16px rgba(0,0,0,.15);opacity:0;pointer-events:none;transition:opacity .15s ease;z-index:1000;text-align:left}
-.ol-help-icon:hover::after{opacity:1}
+.ol-help-icon::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--bg-card);color:var(--text-main);border:1px solid var(--border-color);border-radius:8px;padding:8px 12px;font-size:calc(var(--font-base) - 1px);font-weight:400;line-height:1.5;white-space:pre-wrap;max-width:320px;min-width:180px;box-shadow:0 4px 16px rgba(0,0,0,.15);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .15s ease,visibility .15s ease;z-index:10001;text-align:left}
+.ol-help-icon:hover::after{opacity:1;visibility:visible}
 /* Tooltip appears below when in table header (to avoid overflow:hidden clipping) */
 .ol-help-icon.tooltip-below::after{bottom:auto;top:calc(100% + 8px)}
 
@@ -652,3 +683,26 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 
 /* ===== Responsive ===== */
 @media(max-width:900px){header{padding:12px 14px}.container{padding:14px}.theme-controls{min-width:unset}.media-grid{grid-template-columns:repeat(auto-fill,minmax(max(10vw,100px),1fr))}.tmdb-grid{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:14px 12px}.stat-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}}
+
+/* ===== Dashboard Main Control Card ===== */
+.main-control-card{background:var(--bg-card);border-radius:16px;padding:20px;margin-bottom:24px;border:1px solid var(--border-color);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px}
+.main-control-card .status-info{display:flex;align-items:center;gap:16px}
+.main-control-card .status-actions{display:flex;gap:12px}
+.main-status-dot{width:16px;height:16px;border-radius:50%;background:#9e9e9e;flex-shrink:0;box-shadow:0 0 8px rgba(158,158,158,0.5)}
+.main-status-text{font-size:16px;font-weight:600;color:var(--text-main)}
+.main-uptime-text{font-size:12px;color:var(--text-muted);margin-top:4px}
+
+/* ===== Page Headers ===== */
+.page-header{font-size:20px;margin-bottom:20px;color:var(--text-main)}
+
+/* ===== Sort Buttons ===== */
+.sort-btn{color:var(--primary);text-decoration:none;display:inline-flex;align-items:center;gap:2px;font-weight:600;font-size:calc(var(--font-base) - 1px)}
+
+/* ===== Stat Card Values ===== */
+.stat-value-primary{color:var(--primary)}
+.stat-value-warning{color:#E37400}
+.stat-value-error{color:#C5221F}
+.stat-value-large{font-size:18px}
+
+/* ===== TMDB Unconfigured Notice ===== */
+.tmdb-unconfigured-notice{background:color-mix(in srgb,var(--primary) 10%,var(--bg-card));border:1px solid color-mix(in srgb,var(--primary) 24%,transparent);border-radius:10px;padding:20px;color:var(--text-main);font-size:var(--font-base);display:flex;align-items:center;gap:10px}
