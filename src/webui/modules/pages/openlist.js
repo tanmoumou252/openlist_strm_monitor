@@ -12,9 +12,9 @@ const _openlistHelpTexts = {
   webdav_totp_secret: '两步验证密钥（可选）。\n如果 OpenList 开启了两步验证，需要填写此字段。',
   b_root: '媒体库实际扫描的目录，程序会把 A 区 STRM 同步到这里。',
   c_root: '用于幽灵迁移、异常隔离等场景。',
-  monitored_paths: '该引擎下需要监控的目录（仅用于引擎配置与 A 区派生）。选择引擎入口后会自动填充，可删除不需要的目录。\n注意：这里与下方"刷新配置"中的主动刷新路径是独立维护的，互不影响。',
-  refresh_paths: '主动刷新路径列表（JSON 数组），独立维护。\n程序会定期调用 API 刷新这些路径，让 OpenList 重新扫描目录。\n注意：此列表不会从上方引擎监控目录自动推导，删除这里某条路径也不会影响引擎配置。',
-  strm_engines: 'STRM 引擎配置。\n选择引擎入口后，会自动填充对应的监控目录（仅作引擎配置 / A 区派生用）。\n这里的监控目录与下方"主动刷新路径"是两套独立数据，互不推导、互不影响。\n只有已配置的引擎才会显示在 A 区文件夹中。',
+  monitored_paths: '该引擎下挂载的真实云盘目录（如 /天翼云/番剧）。\n选择引擎入口后自动从 API 获取，不可手动输入。\n引擎配置变更时，刷新路径区域会自动补全缺失的子路径（仅添加，不覆盖用户手动配置的路径）。',
+  refresh_paths: '主动刷新路径列表，格式为"引擎入口/文件夹名"（如 /strm/电影）。\n程序会定期请求这些路径，让 OpenList 重新扫描目录并生成 STRM。\n\n引擎配置变更时，系统会自动补全缺失的子路径（仅添加不覆盖），但你可随时手动增删。\n已保存的刷新路径在引擎配置再变动时不会丢失。',
+  strm_engines: 'STRM 引擎配置。\n选择引擎入口后，自动填充该引擎挂载的真实云盘目录（仅作引擎配置 / A 区派生用）。\n\n刷新路径区域（下方"刷新配置"）会在此变更时自动补全缺失的引擎子路径，不会覆盖你已有的手动配置。\n只有已配置的引擎才会显示在 A 区文件夹中。',
   refresh_enabled: '是否启用主动刷新。\nfalse：只依赖文件系统事件和删除后的延迟清理。\ntrue：程序会周期性扫描 refresh_paths 中的 WebDAV 路径。',
   refresh_interval_minutes: '主动刷新的时间间隔（分钟）。\n建议：5-30 分钟，根据媒体库大小调整。',
   refresh_depth: 'WebDAV 主动刷新递归深度。数值越大，请求越多。\n建议：测试 2~3，正式 3~5。',
@@ -189,7 +189,7 @@ export async function _renderOpenListConfig(el, cfg) {
   </div>`;
 
   html += `<div class="config-section"><h3>${icon('area_a')} STRM 引擎配置</h3>
-    <p style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px);margin:0 0 10px">API 验证通过后，选择引擎入口 → 自动填充监控目录 → 可删除不需要开启主动刷新的特定路径</p>
+    <p style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px);margin:0 0 10px">选择 STRM 引擎入口 → 自动填充该引擎挂载的真实云盘目录（不可手动输入）。引擎配置变更时，下方"刷新路径"会自动补全对应的引擎子路径。</p>
     <div id="strm-engine-table-wrap">${buildEngineTable()}</div>
   </div>`;
 
@@ -283,21 +283,30 @@ export async function _renderOpenListConfig(el, cfg) {
 }
 
 function _syncRefreshPathsFromPreviewEngines() {
-  const derived = new Set();
-  OpenListState.strmEngines.forEach(row => {
-    if (!row || !row.engine || !row.monitored_paths) return;
-    const engineEntry = row.engine;
-    row.monitored_paths.forEach(p => {
-      const lastDir = String(p).replace(/\/$/, '').split('/').pop();
-      if (lastDir) {
-        const refreshPath = `${engineEntry.replace(/\/$/, '')}/${lastDir}`;
-        derived.add(refreshPath);
-      }
-    });
-  });
-  window._openlistRefreshPaths = Array.from(derived);
-  _renderRefreshPathsTags();
-}
+	  // 从引擎配置推导缺失的刷新路径（仅添加新路径，不覆盖已有路径）
+	  const derived = new Set();
+	  OpenListState.strmEngines.forEach(row => {
+	    if (!row || !row.engine || !row.monitored_paths) return;
+	    const engineEntry = row.engine;
+	    row.monitored_paths.forEach(p => {
+	      const lastDir = String(p).replace(/\/$/, '').split('/').pop();
+	      if (lastDir) {
+	        const refreshPath = `${engineEntry.replace(/\/$/, '')}/${lastDir}`;
+	        derived.add(refreshPath);
+	      }
+	    });
+	  });
+	  // 合并：保留用户已有的路径 + 补充引擎配置中新增的推导路径
+	  const existing = window._openlistRefreshPaths || [];
+	  const existingSet = new Set(existing);
+	  for (const d of derived) {
+	    if (!existingSet.has(d)) {
+	      existing.push(d);
+	    }
+	  }
+	  window._openlistRefreshPaths = existing;
+	  _renderRefreshPathsTags();
+	}
 
 function _renderRefreshPathsTags() {
   const container = document.getElementById('refresh-paths-tags');

@@ -118,7 +118,6 @@ class LocalConfig:
 class PathsConfig:
     strm_engine_paths: list[str]
     refresh_paths: list[str]
-    strm_monitored_paths: list[str] = field(default_factory=list)
     b_root: str = ""
     c_root: str = ""
 
@@ -195,8 +194,6 @@ class AppConfig:
             return self.paths.strm_engine_paths
         if name == "refresh_paths":
             return self.paths.refresh_paths
-        if name == "strm_monitored_paths":
-            return self.paths.strm_monitored_paths
         raise AttributeError(
             f"'{self.__class__.__name__}' object has no attribute '{name}'"
         )
@@ -276,22 +273,17 @@ class AppConfig:
             if "engines_initialized" in db_cfg:
                 self.engines_initialized = self._to_bool(db_cfg["engines_initialized"])
 
-            # JSON 数组字段
+# JSON 数组字段
             if "strm_engines" in db_cfg:
                 try:
                     self.openlist_strm_engines = json.loads(db_cfg["strm_engines"])
-                    # 从 openlist_strm_engines 派生 strm_engine_paths 和 strm_monitored_paths
+                    # 从 openlist_strm_engines 派生 strm_engine_paths
                     strm_engine_paths = []
-                    strm_monitored_paths = []
                     for engine in self.openlist_strm_engines:
                         mount_path = engine.get("engine", "")
                         if mount_path and mount_path not in strm_engine_paths:
                             strm_engine_paths.append(mount_path)
-                        for mp in engine.get("monitored_paths", []):
-                            if mp not in strm_monitored_paths:
-                                strm_monitored_paths.append(mp)
                     self.paths.strm_engine_paths = strm_engine_paths
-                    self.paths.strm_monitored_paths = strm_monitored_paths
                 except (json.JSONDecodeError, TypeError) as e:
                     logging.warning("[Config] 解析 strm_engines 失败: %s", e)
                     self.openlist_strm_engines = []
@@ -398,7 +390,6 @@ class AppConfig:
         paths = PathsConfig(
             strm_engine_paths=[],  # 从 API 或 DB 加载
             refresh_paths=[],  # 从 DB 加载（WebUI 配置）；迁移时由 migrate_config_to_db 读取 txt
-            strm_monitored_paths=[],  # 从 API 或 DB 加载
             b_root=b_root,
             c_root=c_root,
         )
@@ -525,7 +516,6 @@ class AppConfig:
             #   - 用户已保存：仅保留用户显式配置的引擎。
             a_folders = []
             strm_engine_paths = []
-            strm_monitored_paths = []
             for entry_path, mapping in strm_storage_map.items():
                 if mapping.mount_path.rstrip("/") not in configured_engines:
                     continue
@@ -533,13 +523,9 @@ class AppConfig:
                     a_folders.append(mapping.local_path)
                 if mapping.mount_path not in strm_engine_paths:
                     strm_engine_paths.append(mapping.mount_path)
-                for p in mapping.paths:
-                    if p not in strm_monitored_paths:
-                        strm_monitored_paths.append(p)
 
             self.a_folders = a_folders
             self.paths.strm_engine_paths = strm_engine_paths
-            self.paths.strm_monitored_paths = strm_monitored_paths
             self.strm_storage_map = strm_storage_map
             logging.info(
                 "[STRM存储API] 成功加载 %d 个 STRM 存储映射，其中 %d 个为用户配置引擎",

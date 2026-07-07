@@ -35,7 +35,6 @@ def _make_app(
     refresh_paths: list[str] | None = None,
     interval_seconds: int = 300,
     strm_engine_paths: list[str] | None = None,
-    strm_monitored_paths: list[str] | None = None,
 ) -> MagicMock:
     """构建最小化 mock AppService，供 RefreshService 使用。
 
@@ -47,7 +46,6 @@ def _make_app(
         refresh_paths=refresh_paths,
         interval_seconds=interval_seconds,
         strm_engine_paths=strm_engine_paths,
-        strm_monitored_paths=strm_monitored_paths,
     )
 
 
@@ -113,7 +111,11 @@ class TestRefreshServiceStartStop:
 # ============================================================
 
 class TestAnalyzePaths:
-    """测试 _analyze_paths 的集合运算逻辑"""
+    """测试 _analyze_paths 的前缀匹配逻辑
+
+    新逻辑：refresh_path 是某个 engine 的子路径时视为匹配。
+    即 refresh_path.startswith(engine + "/") 或 refresh_path == engine。
+    """
 
     def test_empty_engine_set(self):
         """engine_paths 为空 → 所有 refresh_paths 都是 valid，无交集分析"""
@@ -130,8 +132,8 @@ class TestAnalyzePaths:
         assert analysis.only_engine == set()
         assert analysis.engine_set == set()
 
-    def test_full_overlap(self):
-        """refresh_paths 和 engine_paths 完全重叠"""
+    def test_refresh_equals_engine_exact(self):
+        """refresh_path 精确等于 engine 路径 → 匹配"""
         app = _make_app(
             refresh_paths=["/strm", "/data"],
             strm_engine_paths=["/strm", "/data"],
@@ -143,33 +145,63 @@ class TestAnalyzePaths:
         assert analysis.only_refresh == set()
         assert analysis.only_engine == set()
 
-    def test_partial_overlap(self):
-        """部分重叠 → valid 是交集，only_refresh / only_engine 是差集"""
+    def test_refresh_is_subpath_of_engine(self):
+        """refresh_path 是 engine 的子路径 → 前缀匹配"""
         app = _make_app(
-            refresh_paths=["/strm", "/extra_refresh"],
+            refresh_paths=["/strm/电影", "/strm/番剧"],
+            strm_engine_paths=["/strm"],
+        )
+        svc = RefreshService(app)
+        analysis = svc._analyze_paths()
+
+        # 两条 refresh_path 都匹配 /strm 前缀
+        assert set(analysis.valid_refresh_paths) == {"/strm/电影", "/strm/番剧"}
+        assert analysis.only_refresh == set()
+        assert analysis.only_engine == set()
+
+    def test_refresh_subpath_plus_exact_engine(self):
+        """混合用例：子路径 + 精确匹配 + 不匹配路径"""
+        app = _make_app(
+            refresh_paths=["/strm", "/strm/电影", "/extra_refresh"],
             strm_engine_paths=["/strm", "/extra_engine"],
         )
         svc = RefreshService(app)
         analysis = svc._analyze_paths()
 
-        assert analysis.valid_refresh_paths == ["/strm"]
+        # /strm 精确匹配 /strm
+        # /strm/电影 前缀匹配 /strm
+        assert set(analysis.valid_refresh_paths) == {"/strm", "/strm/电影"}
+        # /extra_refresh 不匹配任何 engine
         assert analysis.only_refresh == {"/extra_refresh"}
+        # /extra_engine 没有对应 refresh_path
         assert analysis.only_engine == {"/extra_engine"}
 
-    def test_monitored_paths_merged_into_engine(self):
-        """strm_monitored_paths 被合并到 engine_set 中"""
+    def test_prefix_boundary_no_false_match(self):
+        """边界保护：/strm/电影 不匹配 /str（缺少斜杠分隔）"""
         app = _make_app(
-            refresh_paths=["/strm"],
-            strm_engine_paths=["/strm"],
-            strm_monitored_paths=["/manual_path"],
+            refresh_paths=["/strm/电影"],
+            strm_engine_paths=["/str"],
         )
         svc = RefreshService(app)
         analysis = svc._analyze_paths()
 
-        # /manual_path 通过 monitored 合入 engine_set
-        assert "/manual_path" in analysis.engine_set
-        # /manual_path 不在 refresh_paths → only_engine
-        assert "/manual_path" in analysis.only_engine
+        # /strm/电影.startswith("/str/") == False → 不匹配
+        assert analysis.valid_refresh_paths == []
+        assert analysis.only_refresh == {"/strm/电影"}
+        assert analysis.only_engine == {"/str"}
+
+    def test_trailing_slash_normalization(self):
+        """尾部斜杠不影响匹配"""
+        app = _make_app(
+            refresh_paths=["/strm/电影/", "/strm/a"],
+            strm_engine_paths=["/strm/"],
+        )
+        svc = RefreshService(app)
+        analysis = svc._analyze_paths()
+
+        assert set(analysis.valid_refresh_paths) == {"/strm/电影/", "/strm/a"}
+        assert analysis.only_refresh == set()
+        assert analysis.only_engine == set()
 
     def test_valid_refresh_paths_sorted(self):
         """valid_refresh_paths 应该是排序列表"""
@@ -194,6 +226,71 @@ class TestAnalyzePaths:
         assert analysis.valid_refresh_paths == []
         assert analysis.only_refresh == {"/refresh1"}
         assert analysis.only_engine == {"/engine1"}
+
+
+# ============================================================
+# _calculate_safe_refresh_paths
+# ============================================================
+
+class TestCalculateSafeRefreshPaths:
+    """测试 _calculate_safe_refresh_paths 的前缀匹配逻辑"""
+
+    def test_empty_engine_set_returns_all(self):
+        """engine_set 为空 → 返回所有 valid_refresh_paths"""
+        app = _make_app()
+        svc = RefreshService(app)
+        from refresh_service import PathAnalysis
+        analysis = PathAnalysis(
+            valid_refresh_paths=["/a", "/b"],
+            only_refresh=set(),
+            only_engine=set(),
+            engine_set=set(),
+        )
+        result = svc._calculate_safe_refresh_paths(analysis, set())
+        assert result == ["/a", "/b"]
+
+    def test_subpath_matches_accessible_engine(self):
+        """引擎子路径匹配到可访问引擎 → 安全"""
+        app = _make_app()
+        svc = RefreshService(app)
+        from refresh_service import PathAnalysis
+        analysis = PathAnalysis(
+            valid_refresh_paths=["/strm/电影", "/strm/番剧"],
+            only_refresh=set(),
+            only_engine=set(),
+            engine_set={"/strm"},
+        )
+        result = svc._calculate_safe_refresh_paths(analysis, {"/strm"})
+        assert set(result) == {"/strm/电影", "/strm/番剧"}
+
+    def test_subpath_no_accessible_engine_skipped(self):
+        """引擎子路径匹配到的引擎不在可访问集合中 → 跳过"""
+        app = _make_app()
+        svc = RefreshService(app)
+        from refresh_service import PathAnalysis
+        analysis = PathAnalysis(
+            valid_refresh_paths=["/strm/电影", "/other/data"],
+            only_refresh=set(),
+            only_engine=set(),
+            engine_set={"/strm", "/other"},
+        )
+        # 只有 /strm 可访问，/other 不可访问
+        result = svc._calculate_safe_refresh_paths(analysis, {"/strm"})
+        assert result == ["/strm/电影"]
+
+    def test_exact_engine_path_matches_accessible(self):
+        """精确等于引擎挂载点的路径 → 引擎可访问时安全"""
+        app = _make_app()
+        svc = RefreshService(app)
+        from refresh_service import PathAnalysis
+        analysis = PathAnalysis(
+            valid_refresh_paths=["/strm"],
+            only_refresh=set(),
+            only_engine=set(),
+            engine_set={"/strm"},
+        )
+        result = svc._calculate_safe_refresh_paths(analysis, {"/strm"})
+        assert result == ["/strm"]
 
 
 # ============================================================

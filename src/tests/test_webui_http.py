@@ -80,7 +80,6 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     # strm
     cfg.strm_storage_map = {}
     cfg.strm_engine_paths = []
-    cfg.strm_monitored_paths = []
     # DB 覆盖（no-op）
     cfg.update_from_db = MagicMock()
     return cfg

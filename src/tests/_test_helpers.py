@@ -18,7 +18,6 @@ def build_mock_app(
     refresh_paths: list[str] | None = None,
     interval_seconds: int = 300,
     strm_engine_paths: list[str] | None = None,
-    strm_monitored_paths: list[str] | None = None,
     # SubtitleHandler 配置
     setup_b_root: bool = False,
     # SyncService 配置
@@ -31,7 +30,7 @@ def build_mock_app(
 
     通过 keyword 参数控制不同子系统所需的属性子集：
     - RefreshService: refresh_enabled, refresh_paths, interval_seconds,
-                      strm_engine_paths, strm_monitored_paths
+                      strm_engine_paths
     - SubtitleHandler: tmp_path + setup_b_root=True
     - SyncService: tmp_path + a_dirs, ghost_protect_seconds
     """
@@ -43,7 +42,6 @@ def build_mock_app(
     app.config.refresh.interval_seconds = interval_seconds
     app.config.refresh_paths = refresh_paths or []
     app.config.strm_engine_paths = strm_engine_paths or []
-    app.config.strm_monitored_paths = strm_monitored_paths or []
 
     # SubtitleHandler 配置
     if setup_b_root and tmp_path is not None:

@@ -116,31 +116,16 @@ class RefreshService:
     def _analyze_paths(self) -> PathAnalysis:
         """分析 refresh_paths 和 strm_engine_paths 的关系。
 
-        同时整合 strm_monitored_paths（用户手动声明的 STRM 引擎真实监控路径），
-        与 API 自动获取的 strm_engine_paths 做对比，发现差异时记录警告。
+        refresh_paths 是用户配置的"引擎子路径"（如 /测试a/电影），
+        strm_engine_paths 是 STRM 引擎挂载点（如 /测试a）。
+
+        使用前缀匹配判断 refresh_path 是否属于某个引擎：
+        - 匹配的 → valid_refresh_paths（可执行完整刷新 + B 区清理）
+        - 不匹配的 → only_refresh（仅只读 WebDAV 刷新，不清理 B 区）
+        - 引擎下没有任何 refresh_path 的 → only_engine（提示用户添加）
         """
         refresh_set = set(self.app.config.refresh_paths)
         engine_set = set(self.app.config.strm_engine_paths)
-
-        # 整合用户手动声明的 STRM 引擎监控路径
-        monitored_set = set(self.app.config.strm_monitored_paths)
-        if monitored_set:
-            # 将手动声明的路径合并到 engine_set 中
-            engine_set = engine_set | monitored_set
-            # 对比手动声明与 API 获取的差异
-            api_set = set(self.app.config.strm_engine_paths)
-            manual_only = monitored_set - api_set
-            api_only = api_set - monitored_set
-            if manual_only:
-                logging.info(
-                    "[路径分析] 以下路径仅在 strm_monitored_paths 中声明，API 未返回: %s",
-                    manual_only,
-                )
-            if api_only:
-                logging.info(
-                    "[路径分析] 以下路径在 API 中存在但未在 strm_monitored_paths 中声明: %s",
-                    api_only,
-                )
 
         if not engine_set:
             return PathAnalysis(
@@ -150,10 +135,35 @@ class RefreshService:
                 engine_set=engine_set,
             )
 
+        # 前缀匹配：refresh_path 是某个 engine 的子路径时视为有效
+        valid_refresh_paths = []
+        only_refresh: set[str] = set()
+        for rp in refresh_set:
+            rp_norm = rp.rstrip("/")
+            matched = any(
+                rp_norm.startswith(ep.rstrip("/") + "/") or rp_norm == ep.rstrip("/")
+                for ep in engine_set
+            )
+            if matched:
+                valid_refresh_paths.append(rp)
+            else:
+                only_refresh.add(rp)
+
+        # 找出没有对应 refresh_path 的引擎
+        only_engine: set[str] = set()
+        for ep in engine_set:
+            ep_norm = ep.rstrip("/")
+            has_refresh = any(
+                rp.rstrip("/").startswith(ep_norm + "/") or rp.rstrip("/") == ep_norm
+                for rp in refresh_set
+            )
+            if not has_refresh:
+                only_engine.add(ep)
+
         return PathAnalysis(
-            valid_refresh_paths=sorted(refresh_set & engine_set),
-            only_refresh=refresh_set - engine_set,
-            only_engine=engine_set - refresh_set,
+            valid_refresh_paths=sorted(valid_refresh_paths),
+            only_refresh=only_refresh,
+            only_engine=only_engine,
             engine_set=engine_set,
         )
 
@@ -161,14 +171,15 @@ class RefreshService:
         """记录路径分析结果日志。"""
         if analysis.only_refresh:
             logging.warning(
-                "[主动刷新保护] 以下路径仅程序监控，不在 STRM 引擎监控列表，" "将只执行 WebDAV 刷新，不清理 B 区: %s",
+                "[主动刷新保护] 以下 refresh_paths 不属于任何已配置的 STRM 引擎，"
+                "将只执行 WebDAV 只读刷新（不清理 B 区）: %s",
                 analysis.only_refresh,
             )
 
         if analysis.only_engine:
             logging.info(
-                "[主动刷新提示] 以下 STRM 引擎监控路径未被 refresh_paths 覆盖，"
-                "建议在 WebUI 配置页添加到主动刷新路径以启用主动刷新: %s",
+                "[主动刷新提示] 以下 STRM 引擎下未配置 refresh_paths，"
+                "建议在 WebUI 配置页添加以启用完整刷新 + B 区清理: %s",
                 analysis.only_engine,
             )
 
@@ -258,10 +269,24 @@ class RefreshService:
         analysis: PathAnalysis,
         accessible_engines: set[str],
     ) -> list[str]:
-        """计算可安全执行完整刷新的路径。"""
+        """计算可安全执行完整刷新的路径。
+
+        valid_refresh_paths 是引擎子路径（如 /测试a/电影），
+        accessible_engines 是引擎挂载点（如 /测试a）。
+        使用前缀匹配：子路径所属的引擎在可访问集合中即为安全。
+        """
         if not analysis.engine_set:
             return analysis.valid_refresh_paths
-        return [p for p in analysis.valid_refresh_paths if p in accessible_engines]
+        result = []
+        for rp in analysis.valid_refresh_paths:
+            rp_norm = rp.rstrip("/")
+            matched = any(
+                rp_norm.startswith(ep.rstrip("/") + "/") or rp_norm == ep.rstrip("/")
+                for ep in accessible_engines
+            )
+            if matched:
+                result.append(rp)
+        return result
 
     def _execute_webdav_refreshes(
         self,
@@ -269,7 +294,7 @@ class RefreshService:
         only_refresh: set[str],
     ) -> None:
         for root_path in safe_refresh_paths:
-            # root_path 已经是引擎入口路径（如 /测试a），直接使用
+            # root_path 是引擎子路径（如 /测试a/电影），直接用于 WebDAV 刷新
             self.app.refresh_webdav_root(
                 root_path, self.app.config.refresh.depth)
 
