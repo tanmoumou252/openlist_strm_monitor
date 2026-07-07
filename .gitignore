@@ -11,6 +11,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+!/dist/
 downloads/
 eggs/
 .eggs/
@@ -198,3 +199,4 @@ svg_temp.html
 .tmdb_webui_config.json
 src/.admin_token.json
 review.md
+src/webui/node_modules/

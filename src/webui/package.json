@@ -1,0 +1,14 @@
+{
+  "name": "strm-bridge-webui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "STRM Bridge WebUI",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^8.1.3"
+  }
+}

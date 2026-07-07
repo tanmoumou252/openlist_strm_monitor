@@ -2,23 +2,23 @@
 
 云盘掉线、掉签或网络断开是常态。本程序在设计上放弃了传统的"无脑镜像同步"，而是引入了复杂的**交叉对比与网络探活机制**。
 
-> 📁 **配置文件位置**：`refresh_paths.txt`、`a_folders.txt`、`strm_engine_paths.txt` 位于项目根目录；核心刷新逻辑在 `src/refresh_service.py`。
+> 📁 **配置文件位置**：所有路径配置（A 区目录、STRM 引擎入口、主动刷新路径）均通过 WebUI 配置页维护，存储在数据库 `webui_config` 表中；核心刷新逻辑在 `src/refresh_service.py`。
 
 ---
 
 ## 1. 程序刷新范围与引擎配置的不一致控制
 
-用户经常会在 `refresh_paths.txt` 中填入很多路径，但这些路径很可能游离在引擎监控之外：
+用户经常会在主动刷新路径中填入很多路径，但这些路径很可能游离在引擎监控之外：
 
 ```text
     假设：
-    - 程序主动刷新目标（refresh_paths.txt）：/测试a, /网盘Y/电影, /网盘Z/番剧
+    - 程序主动刷新目标（WebUI 配置的 refresh_paths）：/测试a, /网盘Y/电影, /网盘Z/番剧
     - OpenList 引擎实际配置的路径：/测试a (SaveStrmLocalPath = C:\box\strm)
 ```
 
 ### 交叉校验机制
 - **动态白名单加载**：程序启动时，通过 `/api/admin/storage/list` 抓取所有 `strm` 驱动节点。
-- **精确归属校验**：提取 `SaveStrmLocalPath`，对比本地 `a_folders.txt`。程序此时会知道 `/测试a` 才是"合法的引擎管辖区"。
+- **精确归属校验**：提取 `SaveStrmLocalPath`，对比本地 A 区目录配置（WebUI 维护）。程序此时会知道 `/测试a` 才是"合法的引擎管辖区"。
 - **只读刷新（隔离保护）**：
   对于不在白名单内的 `/网盘Y/电影` 和 `/网盘Z/番剧`：
   - 程序认为其属于"非引擎管理区"。

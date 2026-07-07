@@ -138,12 +138,11 @@ flowchart TD
 
 ## ⚙️ 配置文件
 
-主要配置文件包括：
+主要配置文件：
 
 - `config.toml` (主配置文件)
-- `a_folders.txt` (A区本地监听路径)
-- `refresh_paths.txt` (云端主动刷新与探活路径)
-- `strm_engine_paths.txt` (STRM引擎入口路径)
+
+> 💡 **路径配置**：A 区目录、STRM 引擎入口、主动刷新路径等均已迁移至 WebUI 配置页维护，存储在数据库 `webui_config` 表中，无需 txt 文件。
 
 ### 配置说明
 

@@ -127,7 +127,8 @@ def webui_server(tmp_path):
         # 写入最小 index.html 供 SPA 路由返回
         (tmp_path / "static" / "index.html").write_text(
             "<html><body>test</body></html>", encoding="utf-8")
-        (tmp_path / "static" / "favicon.ico").write_bytes(b"\x00")
+        (tmp_path / "static" / "assets").mkdir(exist_ok=True)
+        (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
 
         server = WebUIServer(cfg.webui, db, app_config=cfg)
         server.start()
@@ -403,6 +404,53 @@ class TestPostRoutes:
             {"host": "", "user": "", "password": ""})
         assert status == 400
         assert isinstance(body, dict)
+
+    def test_openlist_strm_engines_invalid_rejected(self, webui_server):
+        """strm_engines 非法形态应在写入前被拒绝（400），且不部分写入。"""
+        server, base = webui_server
+        bad = {"strm_engines": '[{"monitored_paths":[]}]'}  # 缺 engine
+        status, _, body = _http_post(
+            base, "/api/webui/config/openlist", bad)
+        assert status == 400
+        assert isinstance(body, dict)
+        assert body.get("success") is False
+        assert "strm_engines" in str(body.get("error", "")).lower()
+
+    def test_openlist_strm_engines_valid_accepted(self, webui_server):
+        """strm_engines 合法形态应被接受（200）。"""
+        server, base = webui_server
+        good = {"strm_engines": json.dumps([
+            {"engine": "/测试a", "monitored_paths": ["/m"]}])}
+        status, _, body = _http_post(
+            base, "/api/webui/config/openlist", good)
+        assert status == 200
+        assert body.get("success") is True
+
+    def test_openlist_strm_engines_native_list_accepted(self, webui_server):
+        """其它客户端以原生 JSON 数组（非字符串）发送合法 strm_engines 亦应接受（200）。"""
+        server, base = webui_server
+        good_native = {"strm_engines": [
+            {"engine": "/测试a", "monitored_paths": ["/m"]}]}
+        status, _, body = _http_post(
+            base, "/api/webui/config/openlist", good_native)
+        assert status == 200
+        assert body.get("success") is True
+
+    def test_openlist_strm_engines_none_rejected(self, webui_server):
+        """strm_engines 为 null 应被拒绝（400）。"""
+        server, base = webui_server
+        status, _, body = _http_post(
+            base, "/api/webui/config/openlist", {"strm_engines": None})
+        assert status == 400
+        assert body.get("success") is False
+
+    def test_openlist_strm_engines_empty_string_rejected(self, webui_server):
+        """strm_engines 为空字符串应被拒绝（400）。"""
+        server, base = webui_server
+        status, _, body = _http_post(
+            base, "/api/webui/config/openlist", {"strm_engines": ""})
+        assert status == 400
+        assert body.get("success") is False
 
     def test_tmdb_watchlist_match_override_invalid_media_type(
             self, webui_server):

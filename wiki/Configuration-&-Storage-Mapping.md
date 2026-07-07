@@ -1,8 +1,8 @@
 # 六、 配置系统与存储映射架构
 
-**wiki 原版完全缺失此章节** —— 配置系统是整个程序的骨架，采用 TOML + 多文本文件 + Admin API 动态加载的三层架构，支持多存储分组、引擎入口映射、云端/本地三路路径对应。
+**wiki 原版完全缺失此章节** —— 配置系统是整个程序的骨架，采用 TOML + WebUI 数据库 + Admin API 动态加载的三层架构，支持多存储分组、引擎入口映射、云端/本地三路路径对应。
 
-> 📁 **配置文件位置**：项目根目录 (`config.toml`, `a_folders.txt`, `refresh_paths.txt`, `strm_engine_paths.txt`)；核心实现 `src/config.py`。
+> 📁 **配置文件位置**：项目根目录 (`config.toml`)；所有路径配置（A 区目录、STRM 引擎入口、主动刷新路径）通过 WebUI 配置页维护，存储在数据库 `webui_config` 表中；核心实现 `src/config.py`。
 
 ---
 
@@ -11,9 +11,6 @@
 ```
 项目根目录/
 ├── config.toml              # 主配置 (TOML 格式)
-├── a_folders.txt            # A区监控目录列表
-├── refresh_paths.txt        # 主动刷新路径列表
-├── strm_engine_paths.txt    # STRM引擎入口路径列表
 └── src/
     └── .admin_token.json    # JWT Token 缓存 (运行时生成)
 ```
@@ -23,7 +20,7 @@
 | 层级 | 来源 | 加载时机 | 优先级 |
 |------|------|----------|--------|
 | 1. 静态配置 | `config.toml` | 启动时 | 基础配置 |
-| 2. 列表配置 | `*.txt` 文件 | 启动时 | 路径列表 |
+| 2. 路径配置 | WebUI 数据库 (`webui_config` 表) | 启动时 | 路径列表 |
 | 3. 动态配置 | OpenList Admin API | 启动后/定期刷新 | 存储映射、引擎状态 |
 
 ---
@@ -45,17 +42,11 @@ b_root = "C:/测试b"
 c_root = "C:/测试c"
 
 # ==========================================
-# 路径列表文件 (相对项目根目录)
+# 路径配置
 # ==========================================
 [paths]
-# A区监控的子目录列表文件
-a_folders_file = "a_folders.txt"
-
-# 主动刷新的云端路径列表文件
-refresh_paths_file = "refresh_paths.txt"
-
-# STRM引擎入口路径列表文件
-strm_engine_paths_file = "strm_engine_paths.txt"
+# 注：A 区目录、STRM 引擎入口、主动刷新路径等均已迁移至 WebUI 配置页维护，
+# 存储在数据库 webui_config 表中，无需 txt 文件。
 
 # ==========================================
 # WebDAV / OpenList 连接配置
@@ -124,26 +115,20 @@ console = true
 
 ---
 
-## 3. 列表配置文件详解
+## 3. WebUI 路径配置详解
 
-### a_folders.txt - A区监控目录
+### A 区目录 (a_folders)
 
-```text
-# 每行一个相对 A区根目录 的子目录
-# 支持注释 (# 开头) 和空行
-# 示例:
-测试a
-电影
-番剧
-纪录片
-```
+A 区目录通过 WebUI 配置页维护，存储在数据库 `webui_config` 表中（`scope='openlist'`, `key='strm_engines'`）。
 
 **用途**：
 - `AreaWatcher` 监控范围
 - 血统校验时的首级目录匹配依据
 - 存储映射的键名来源
 
-### refresh_paths.txt - 主动刷新路径
+### 主动刷新路径 (refresh_paths)
+
+主动刷新路径通过 WebUI 配置页维护，存储在数据库 `webui_config` 表中（`scope='openlist'`, `key='refresh_paths'`）。
 
 ```text
 # 每行一个云端路径 (OpenList 路径格式)
@@ -157,8 +142,11 @@ console = true
 **用途**：
 - `RefreshService` 定时刷新目标
 - 与引擎管辖路径交叉校验 (决定 full/readonly 模式)
+- WebUI 选择引擎入口时会自动填充"引擎入口 + 监控目录最后一级"作为默认刷新路径，用户可手动增删
 
-### strm_engine_paths.txt - STRM引擎入口
+### STRM 引擎入口 (strm_engine_paths)
+
+STRM 引擎入口路径通过 WebUI 配置页维护，存储在数据库 `webui_config` 表中（`scope='openlist'`, `key='strm_engines'`）。
 
 ```text
 # 每行一个引擎配置的云端路径
@@ -219,11 +207,10 @@ def from_file(cls, config_path: str) -> "AppConfig":
     with open(config_path, "rb") as f:
         toml_data = tomllib.load(f)
     
-    # 2. 读取列表文件 (相对项目根目录)
+    # 2. 从数据库加载路径配置 (WebUI 维护)
     project_root = Path(config_path).parent
-    a_folders = read_line_list(project_root / toml_data["paths"]["a_folders_file"])
-    refresh_paths = read_line_list(project_root / toml_data["paths"]["refresh_paths_file"])
-    engine_paths = read_line_list(project_root / toml_data["paths"]["strm_engine_paths_file"])
+    # a_folders、engine_paths、refresh_paths 均从 webui_config 表加载
+    # 不再读取 txt 文件
     
     # 3. 创建基础配置对象
     config = cls(...)
@@ -482,8 +469,7 @@ def validate_config(self) -> list[str]:
             errors.append(f"{name}根目录不存在: {path}")
     
     # 2. 列表文件存在性
-    for name, file in [("A区列表", self.paths.a_folders_file), 
-                       ("刷新列表", self.paths.refresh_paths_file),
+    for name, file in [("A区列表", self.paths.a_folders_file),
                        ("引擎列表", self.paths.strm_engine_paths_file)]:
         if not (self.project_root / file).exists():
             errors.append(f"{name}文件不存在: {file}")

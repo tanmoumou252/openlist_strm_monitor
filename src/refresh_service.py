@@ -52,7 +52,7 @@ class RefreshService:
             return
 
         if not self.app.config.refresh_paths:
-            logging.info("[主动刷新] 未配置 refresh_paths.txt 或内容为空，已关闭")
+            logging.info("[主动刷新] 未配置刷新路径或内容为空，已关闭")
             return
 
         self._running = True
@@ -168,7 +168,7 @@ class RefreshService:
         if analysis.only_engine:
             logging.info(
                 "[主动刷新提示] 以下 STRM 引擎监控路径未被 refresh_paths 覆盖，"
-                "建议添加到 refresh_paths.txt 以启用主动刷新: %s",
+                "建议在 WebUI 配置页添加到主动刷新路径以启用主动刷新: %s",
                 analysis.only_engine,
             )
 

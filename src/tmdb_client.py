@@ -238,8 +238,10 @@ class TmdbClient:
         if self.access_token:
             headers["Authorization"] = f"Bearer {self.access_token}"
         # 反代鉴权头（两种认证方式都支持）
-        if self.api_key:
-            headers["X-API-Key"] = self.api_key
+        if self.host:
+            proxy_key = self.api_key
+            if proxy_key:
+                headers["X-API-Key"] = proxy_key
 
         # 构建 opener（含代理）
         if self.proxy:

@@ -756,20 +756,27 @@ def _handler_reinit_tmdb(webui_server, tmdb_cfg) -> None:
     else:
         proxy_cfg = getattr(tmdb_cfg, "proxy", None)
         proxy = proxy_cfg.http if proxy_cfg and proxy_cfg.enabled and proxy_cfg.http else None
+    
+    # 获取项目根目录（用于 config.toml 兜底）
+    project_root = (getattr(webui_server, '_project_root', None)
+                    or Path(__file__).resolve().parent.parent.parent)
+    
+    # 获取 api_key，为空时从 config.toml 兜底
+    api_key = getattr(tmdb_cfg, "api_key", "") or ""
+
+    
     try:
         webui_server._tmdb_client = create_tmdb_client(
             access_token=getattr(tmdb_cfg, "access_token", "") or "",
             language=getattr(tmdb_cfg, "language", "zh-CN"),
             proxy=proxy,
             host=host,
-            api_key=getattr(tmdb_cfg, "api_key", "") or "",
+            api_key=api_key,
         )
     except Exception as e:
         logging.warning("[TMDB] 重新初始化客户端失败: %s", e)
         webui_server._tmdb_client = None
     # 重建 watchlist DB（固定路径，无条件创建）
-    project_root = (getattr(webui_server, '_project_root', None)
-                    or Path(__file__).resolve().parent.parent.parent)
     db_path = str(project_root / "tmdb_watchlist.db")
     ttl = float(getattr(tmdb_cfg, "watchlist_cache_ttl", 604800))
     try:
@@ -812,6 +819,33 @@ def _handle_webui_config_get(handler, webui_server, scope: str) -> None:
         handler._send_json({"success": False, "error": str(e)}, 500)
 
 
+def _validate_strm_engines(value: str) -> bool:
+    """校验 openlist.strm_engines 写入值。
+
+    合法形态：JSON 数组，元素为 {"engine": str(非空),
+    "monitored_paths": [str, ...]}。空数组 [] 合法。
+    用于在写入 DB 前拦截异常载荷（如误把全部引擎/坏结构塞入）。
+    """
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(parsed, list):
+        return False
+    for eng in parsed:
+        if not isinstance(eng, dict):
+            return False
+        engine = eng.get("engine")
+        monitored = eng.get("monitored_paths")
+        if not isinstance(engine, str) or not engine:
+            return False
+        if not isinstance(monitored, list):
+            return False
+        if not all(isinstance(p, str) for p in monitored):
+            return False
+    return True
+
+
 def _handle_webui_config_post(handler, webui_server, scope: str,
                                body: bytes) -> None:
     """处理 POST /api/webui/config/{scope} — 批量写入配置。"""
@@ -829,9 +863,32 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
             handler._send_json(
                 {"success": False, "error": "JSON body 须为对象"}, 400)
             return
+        # openlist.strm_engines 写入前护栏：拒绝非法形态（非用户显式选择的
+        # 引擎子集、坏结构），防止未来再次误注入全部引擎或脏结构。
+        # 若非法，整次拒绝（不部分写入，避免半写脏状态）。
+        if scope == "openlist" and "strm_engines" in data:
+            # 前端正常以 JSON 字符串形式发送 strm_engines；但若其它客户端以
+            # 原生 JSON 对象/数组发送，避免 str() 产生 Python repr 误拒，
+            # 这里统一规整为 JSON 字符串再交校验器（None/空串等交由校验器拒绝）。
+            _raw_se = data["strm_engines"]
+            if isinstance(_raw_se, str):
+                _se_value = _raw_se
+            elif _raw_se is None:
+                _se_value = ""
+            else:
+                _se_value = json.dumps(_raw_se, ensure_ascii=False)
+            if not _validate_strm_engines(_se_value):
+                handler._send_json(
+                    {"success": False,
+                     "error": "strm_engines 格式非法：需为 engine/monitored_paths 对象数组（空数组亦合法）"},
+                    400)
+                return
+            # 校验通过：回写规整后的合法 JSON 字符串，确保后续通用写循环
+            # （str(val)）存入 DB 的是合法 JSON，而非原生对象被 str() 出来的 repr。
+            data["strm_engines"] = _se_value
         for key, val in data.items():
             _wdb.set_config(scope, str(key), str(val) if val is not None else "")
-        
+
         # OpenList 配置保存后：
         # 1. 标记 engines_initialized=True（区分首次运行 vs 用户已保存配置）
         # 2. 触发热更新
@@ -1357,7 +1414,8 @@ def _handle_tmdb_watchlist_bg_sync(handler, webui_server) -> None:
 def _do_bg_sync(webui_server) -> None:
     """后台执行待看列表同步。"""
     try:
-        webui_server._watchlist_db.sync(webui_server._tmdb_client)
+        # force=True 确保同步执行，因为 TTL 检查已移至 sync 方法内部
+        webui_server._watchlist_db.sync(webui_server._tmdb_client, force=True)
         logging.info("[TMDB] 后台同步完成")
         _wdb = getattr(webui_server, '_watchlist_db', None)
         if _wdb:

@@ -2,7 +2,7 @@
 
 为了既能保留用户使用 TMM 等媒体管理工具进行刮削、改名、套娃分类的自由度，又能防止跨库交叉污染与不合法的逃逸，程序设计了**血统校验算法**。
 
-> 📁 **核心实现**：`src/app_service.py` 中的 `_verify_b_path_lineage` 方法；配置文件 `a_folders.txt` 在项目根目录。
+> 📁 **核心实现**：`src/app_service.py` 中的 `_verify_b_path_lineage` 方法；A 区目录配置通过 WebUI 配置页维护（存储在数据库 `webui_config` 表中）。
 
 ---
 

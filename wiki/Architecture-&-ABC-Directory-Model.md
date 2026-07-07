@@ -39,7 +39,7 @@ class StrmStorageMapping:
 ```
 
 **映射构建流程**：
-1. 读取 `strm_engine_paths.txt` 获取引擎入口路径列表
+1. 从 WebUI 数据库 (`webui_config` 表) 加载 STRM 引擎配置
 2. 调用 Admin API `/api/admin/setting/list` 获取所有存储配置
 3. 筛选 `driver` 为 `Local` 且 `enable_sign` 为 true 的存储
 4. 将存储的 `mount_path` (挂载点) 与 `SaveStrmLocalPath` (本地保存路径) 关联

@@ -99,10 +99,18 @@ if TYPE_CHECKING:
 
 
 # ============================================================
-# 静态文件目录（webui/static/）
+# 静态文件目录（PROJECT_ROOT/dist/）
 # ============================================================
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_DIR = PROJECT_ROOT / "dist"
+
+# 检查 dist/ 是否存在
+if not STATIC_DIR.exists():
+    logger.warning(
+        "静态文件目录不存在: %s\n"
+        "请运行 'cd src/webui && npm run build' 构建前端资源",
+        STATIC_DIR
+    )
 
 
 
@@ -339,11 +347,24 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         content_type = ctype_map.get(ext, "application/octet-stream")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        # Font files are stable — cache for 7 days; others no-store
-        if ext in (".woff2", ".woff", ".ttf"):
+        # CORS header for crossorigin attribute in HTML
+        self.send_header("Access-Control-Allow-Origin", "*")
+        
+        # Cache-Control 策略：
+        # - index.html: no-store（始终重新验证）
+        # - assets/ 目录下的哈希文件: 长缓存（1年）
+        # - 字体文件: 7天缓存
+        # - 其他: no-store
+        if filename == "index.html":
+            self.send_header("Cache-Control", "no-store")
+        elif filename.startswith("assets/"):
+            # Vite 构建的哈希文件，文件名包含内容哈希
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        elif ext in (".woff2", ".woff", ".ttf"):
             self.send_header("Cache-Control", "public, max-age=604800")
         else:
             self.send_header("Cache-Control", "no-store")
+        
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:
@@ -394,15 +415,19 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
                             webui_server=self.webui):
                 return
 
-        # SPA 初始页面（从 static/index.html 提供）
+        # SPA 初始页面（从 dist/index.html 提供）
         if path == "/" or path == "/api/page":
             self._send_static_file()
         elif path == "/favicon.ico":
-            self._send_static_file("favicon.ico")
+            # publicDir 提供稳定无哈希路径 assets/favicon.ico
+            self._send_static_file("assets/favicon.ico")
         elif path == "/logo.png":
-            logos = sorted(STATIC_DIR.glob("logo.*.png"))
-            self._send_static_file(
-                random.choice(logos).name if logos else "logo.01.png")
+            logos = sorted(STATIC_DIR.glob("assets/logo.*.png"))
+            if logos:
+                self._send_static_file(str(random.choice(logos).relative_to(STATIC_DIR)))
+            else:
+                logger.error("_send_static_file: Logos not found in assets, returning 404.")
+                self.send_error(404, "Logo not found")
         elif path == "/api/dashboard":
             handle_dashboard(self)
         elif path.startswith("/api/area/"):
@@ -416,7 +441,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             else:
                 self._send_json({"error": "not found"}, 404)
         elif path == "/openlist_strm_bridge.png":
-            self._send_static_file("openlist_strm_bridge.png")
+            self._send_static_file("assets/openlist_strm_bridge.png")
         elif path.startswith("/fonts/css/"):
             # 配置了 tmdb.host：路由到 EdgeOne CDN
             # 未配置 tmdb.host：保留原来的本地 Google Fonts CSS 代理

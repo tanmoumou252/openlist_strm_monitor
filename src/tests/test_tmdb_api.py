@@ -5,7 +5,8 @@ TMDB API 测试脚本 - 测试 TMDB API 功能
   1. CLI 模式 - 直接在终端运行，快速测试各 API 端点
   2. Flask 模式 - 启动 HTTP 服务，通过浏览器/curl 访问测试端点
 
-直接从 config.toml 读取 TMDB 配置，不触发 OpenList 初始化。
+配置来源：优先从 DB (tmdb_watchlist.db webui_config scope=tmdb) 读取，
+DB 无数据时回退到 config.toml。
 """
 from __future__ import annotations
 
@@ -14,11 +15,6 @@ import logging
 import sys
 import time
 from pathlib import Path
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 # 文件位于 src/scripts/，parent.parent 是 src/
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -36,29 +32,58 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 配置加载（直接读 config.toml，不触发 OpenList）
+# 配置加载（DB 优先，回退 config.toml）
 # ============================================================
 
 # 文件位于 src/scripts/，parent.parent.parent 是项目根目录
-config_path = Path(__file__).parent.parent.parent / "config.toml"
-logger.info("[CONFIG] 加载配置文件: %s", config_path)
-logger.info("[CONFIG] 配置文件存在: %s", config_path.exists())
+project_root = Path(__file__).parent.parent.parent
+db_path = project_root / "tmdb_watchlist.db"
+config_path = project_root / "config.toml"
+
+logger.info("[CONFIG] DB 路径: %s (存在: %s)", db_path, db_path.exists())
+logger.info("[CONFIG] config.toml 路径: %s (存在: %s)", config_path, config_path.exists())
 
 cfg = None
 try:
-    with open(config_path, "rb") as f:
-        data = tomllib.load(f)
+    # 优先从 DB 读取
+    db_cfg = {}
+    if db_path.exists():
+        from tmdb_watchlist_db import TmdbWatchlistDb
+        wdb = TmdbWatchlistDb(str(db_path))
+        db_cfg = wdb.get_all_config("tmdb")
+        logger.info("[CONFIG] 从 DB 读取到 %d 个 TMDB 配置项", len(db_cfg))
 
-    tmdb_data = data.get("tmdb", {})
-    proxy_data = tmdb_data.get("proxy", {})
+    # DB 无数据时回退 config.toml
+    toml_cfg = {}
+    if not db_cfg and config_path.exists():
+        if sys.version_info >= (3, 11):
+            import tomllib
+        else:
+            import tomli as tomllib
+        with open(config_path, "rb") as f:
+            data = tomllib.load(f)
+        toml_cfg = data.get("tmdb", {})
+        logger.info("[CONFIG] DB 无数据，从 config.toml 读取配置")
 
-    access_token = tmdb_data.get("access_token", "")
-    language = tmdb_data.get("language", "zh-CN")
-    proxy_enabled = proxy_data.get("enabled", False)
-    proxy_http = proxy_data.get("http", "")
+    # 合并配置（DB 优先）
+    access_token = db_cfg.get("access_token", "") or toml_cfg.get("access_token", "")
+    host = db_cfg.get("host", "") or toml_cfg.get("host", "")
+    api_key = db_cfg.get("api_key", "") or toml_cfg.get("api_key", "")
+    language = db_cfg.get("language", "") or toml_cfg.get("language", "zh-CN")
+    
+    # 代理配置
+    proxy_enabled_raw = db_cfg.get("proxy_enabled", "")
+    if proxy_enabled_raw != "":
+        proxy_enabled = str(proxy_enabled_raw).lower() in ("true", "1", "yes")
+    else:
+        proxy_data = toml_cfg.get("proxy", {})
+        proxy_enabled = proxy_data.get("enabled", False)
+    proxy_http = db_cfg.get("proxy_http", "") or toml_cfg.get("proxy", {}).get("http", "")
 
     logger.info("[CONFIG] ✓ TMDB 配置加载成功")
     logger.info("[CONFIG]   access_token: %s", "已配置" if access_token else "未配置")
+    logger.info("[CONFIG]   host: %s", host or "(官方)")
+    logger.info("[CONFIG]   api_key: %s", "已配置" if api_key else "未配置")
     logger.info("[CONFIG]   language: %s", language)
     logger.info("[CONFIG]   proxy_enabled: %s", proxy_enabled)
     if proxy_enabled:
@@ -66,6 +91,8 @@ try:
 
     cfg = type("TmdbCfg", (), {
         "access_token": access_token,
+        "host": host,
+        "api_key": api_key,
         "language": language,
         "proxy_enabled": proxy_enabled,
         "proxy_http": proxy_http,
@@ -83,13 +110,17 @@ _client = None
 def get_client() -> TmdbClient:
     global _client
     if _client is None:
-        if not cfg or not cfg.access_token:
-            raise RuntimeError("未配置 TMDB access_token，请在 config.toml [tmdb] 中填写 access_token")
+        if not cfg:
+            raise RuntimeError("TMDB 配置加载失败，请检查 DB 或 config.toml")
+        if not cfg.access_token and not cfg.api_key:
+            raise RuntimeError("未配置 TMDB access_token 或 api_key")
         proxy = cfg.proxy_http if cfg.proxy_enabled else None
         _client = create_tmdb_client(
             access_token=cfg.access_token,
             language=cfg.language,
             proxy=proxy,
+            host=cfg.host,
+            api_key=cfg.api_key,
             auto_validate=False,
         )
     return _client

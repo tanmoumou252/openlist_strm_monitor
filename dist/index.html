@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-system="material" data-color="blue">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>STRM Bridge</title>
+<link rel="icon" type="image/x-icon" href="./assets/favicon.ico">
+
+<!-- 字体 fallback 链：本地子集（styles.css @font-face 先命中常用字）→ EdgeOne/Google CDN 反代补全 -->
+<link rel="preconnect" href="/fonts/gstatic/" crossorigin>
+<link rel="stylesheet" href="/fonts/css/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&display=swap">
+  <script type="module" crossorigin src="./assets/index-ckQpWE6j.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/core-BRoB2fU5.js">
+  <link rel="stylesheet" crossorigin href="./assets/index-Vx8SiIGr.css">
+</head>
+<body>
+<div id="wallpaper"></div>
+<canvas id="wallpaper-mask" aria-hidden="true"></canvas>
+<noscript><style>#wallpaper-mask{display:none}</style></noscript>
+
+<div id="toast-container"></div>
+<header>
+  <div>
+    <span class="brand" id="brand-title">
+      <img id="brand-logo" src="/logo.png" alt="STRM Bridge" style="height:5vh;border-radius:12px;object-fit:contain;vertical-align:middle">
+      <span>STRM Bridge</span>
+    </span>
+    
+  </div>
+  <nav class="nav" id="main-nav"></nav>
+  <div class="theme-controls">
+    <div class="api-status-wrap" id="api-status-wrap" title="OpenList API 状态">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" style="width:20px;height:20px;flex-shrink:0;vertical-align:middle"><path fill="#38bdf8" d="M244.57,776.75c-10.1,0-20.31-2.78-29.46-8.59-25.63-16.3-33.2-50.29-16.9-75.92l201.93-317.6c16.3-25.63,50.29-33.2,75.92-16.9,25.63,16.3,33.2,50.29,16.9,75.92l-201.93,317.6c-10.48,16.48-28.28,25.5-46.46,25.5Z"/><path fill="#99f6e4" d="M509.93,907.83c-35.01,0-67.29-4.84-91.84-13.86-15.63-5.74-27.82-18.25-33.15-34.03s-3.23-33.12,5.72-47.16l174.43-273.77c16.32-25.62,50.32-33.15,75.94-16.83,25.62,16.32,33.15,50.32,16.83,75.94l-126.68,198.82c25.39-1.89,54.61-7.42,84.56-19.13,71.29-27.87,127.46-82.26,158.15-153.15,30.53-70.52,31.94-147.78,3.98-217.56-28.43-70.95-82.76-126.78-152.98-157.2-70.23-30.42-147.71-31.59-218.17-3.27-73.46,29.52-126.75,82.48-158.4,157.4-11.82,27.98-44.08,41.08-72.07,29.27-27.98-11.82-41.08-44.08-29.27-72.07,42.86-101.46,118.49-176.38,218.71-216.66,49.54-19.91,101.59-29.4,154.67-28.2,51.11,1.15,100.99,12.12,148.25,32.6,47.14,20.42,89.3,49.27,125.31,85.75,37.27,37.75,66.22,81.98,86.05,131.46,19.64,49.01,28.94,100.74,27.64,153.75-1.26,51.15-12.28,101.08-32.77,148.42-20.54,47.45-49.51,89.78-86.11,125.81-38.15,37.56-82.88,66.53-132.94,86.09-42.5,16.61-89.11,26.08-134.81,27.39-3.71.11-7.4.16-11.05.16Z"/></svg>
+      <span class="api-status-dot checking" id="api-status-dot"></span>
+      <span class="api-status-text" id="api-status-text">OpenList 检查中</span>
+      <button class="gear-quick-btn" id="gear-quick-btn" title="OpenList 配置">
+        <span class="material-icon" style="font-size:18px"><svg viewBox="0 -960 960 960"><path d="m370-80-16-128q-13-5-24.5-12T307-235l-119 50L78-375l103-78q-1-7-1-13.5v-27q0-6.5 1-13.5L78-585l110-190 119 50q11-8 23-15t24-12l16-128h220l16 128q13 5 24.5 12t22.5 15l119-50 110 190-103 78q1 7 1 13.5v27q0 6.5-2 13.5l103 78-110 190-118-50q-11 8-23 15t-24 12L590-80H370Zm70-80h79l14-106q31-8 57.5-23.5T639-327l99 41 39-68-86-65q5-14 7-29.5t2-31.5q0-16-2-31.5t-7-29.5l86-65-39-68-99 42q-22-23-48.5-38.5T533-694l-13-106h-79l-14 106q-31 8-57.5 23.5T321-633l-99-41-39 68 86 64q-5 15-7 30t-2 32q0 16 2 31t7 30l-86 65 39 68 99-42q22 23 48.5 38.5T427-266l13 106Zm42-180q58 0 99-41t41-99q0-58-41-99t-99-41q-59 0-99.5 41T342-480q0 58 40.5 99t99.5 41Zm-2-140Z"/></svg></span>
+      </button>
+    </div>
+    <div class="dropdown-wrap" id="theme-system-dd">
+      <button class="dropdown-btn" id="theme-system-btn" title="切换设计风格">
+        <span id="theme-preset-icon"></span>
+        <span class="dropdown-arrow">▾</span>
+      </button>
+      <div class="dropdown-menu" id="theme-system-menu">
+        <div class="dropdown-item" data-val="material"><span class="material-icon filled" style="font-size:18px;color:var(--primary)"><svg viewBox="0 -960 960 960"><path d="M480-80q-82 0-155-31.5t-127.5-86Q143-252 111.5-325T80-480q0-83 32.5-156t88-127Q256-817 330-848.5T488-880q80 0 151 27.5t124.5 76q53.5 48.5 85 115T880-518q0 115-70 176.5T640-280h-74q-9 0-12.5 5t-3.5 11q0 12 15 34.5t15 51.5q0 50-27.5 74T480-80Zm0-400Zm-177 23q17-17 17-43t-17-43q-17-17-43-17t-43 17q-17 17-17 43t17 43q17 17 43 17t43-17Zm120-160q17-17 17-43t-17-43q-17-17-43-17t-43 17q-17 17-17 43t17 43q17 17 43 17t43-17Zm200 0q17-17 17-43t-17-43q-17-17-43-17t-43 17q-17 17-17 43t17 43q17 17 43 17t43-17Zm120 160q17-17 17-43t-17-43q-17-17-43-17t-43 17q-17 17-17 43t17 43q17 17 43 17t43-17ZM480-160q9 0 14.5-5t5.5-13q0-14-15-33t-15-57q0-42 29-67t71-25h70q66 0 113-38.5T800-518q0-121-92.5-201.5T488-800q-136 0-232 93t-96 227q0 133 93.5 226.5T480-160Z"/></svg></span> Material 3</div>
+        <div class="dropdown-item" data-val="fluent"><span class="material-icon" style="font-size:18px;color:var(--primary)"><svg viewBox="0 -960 960 960"><path d="M120-520v-320h320v320H120Zm0 400v-320h320v320H120Zm400-400v-320h320v320H520Zm0 400v-320h320v320H520ZM200-600h160v-160H200v160Zm400 0h160v-160H600v160Zm0 400h160v-160H600v160Zm-400 0h160v-160H200v160Zm400-400Zm0 240Zm-240 0Zm0-240Z"/></svg></span> Fluent 2</div>
+      </div>
+    </div>
+    <div class="dropdown-wrap" id="theme-fontsize-dd">
+      <button class="dropdown-btn" id="theme-fontsize-btn" title="切换字号">
+        <span id="fontsize-icon" style="font-size:12px;font-weight:600;color:var(--text-main)">Aa</span>
+        <span class="dropdown-arrow">▾</span>
+      </button>
+      <div class="dropdown-menu" id="theme-fontsize-menu">
+        <div class="dropdown-item" data-val="lg"><span style="font-size:15px;font-weight:600">Aa</span> 大 (15px)</div>
+        <div class="dropdown-item" data-val="sm"><span style="font-size:13px;font-weight:600">Aa</span> 正常 (13px)</div>
+        <div class="dropdown-item" data-val="xs"><span style="font-size:11px;font-weight:600">Aa</span> 小 (11px)</div>
+      </div>
+    </div>
+    <div class="dropdown-wrap" id="theme-color-dd">
+      <button class="dropdown-btn" id="theme-color-btn" title="切换主题颜色">
+        <span class="color-dot-icon" id="color-dot-icon"></span>
+        <span class="dropdown-arrow">▾</span>
+      </button>
+      <div class="dropdown-menu" id="theme-color-menu">
+        <div class="dropdown-item" data-val="blue"><span class="color-dot cd-blue"></span> 蓝色</div>
+        <div class="dropdown-item" data-val="purple"><span class="color-dot cd-purple"></span> 紫色</div>
+        <div class="dropdown-item" data-val="green"><span class="color-dot cd-green"></span> 绿色</div>
+        <div class="dropdown-item" data-val="orange"><span class="color-dot cd-orange"></span> 橙色</div>
+      </div>
+    </div>
+  </div>
+</header>
+<main class="container" id="app-main">
+  <div class="loading"><div class="spinner"></div> 加载中...</div>
+</main>
+
+</body>
+</html>

@@ -34,6 +34,8 @@ async function handleRequest(request) {
   }
 
   const API_KEY = request.headers.get("X-API-Key") || url.searchParams.get("api_key") || url.searchParams.get("key");
+  const authHeader = request.headers.get("Authorization") || "";
+  const hasBearer = authHeader.startsWith("Bearer ");
   const userAgent = request.headers.get("User-Agent") || "";
   
   // EdgeOne 获取客户端真实 IP 的标准请求头是 X-Forwarded-For 或通过 request.eo 获取
@@ -54,13 +56,13 @@ async function handleRequest(request) {
     return new Response(getFake404HTML(), { status: 404, headers: { "Content-Type": "text/html", ...corsHeaders } });
   }
 
-  if (pathname === "/admin/status" && API_KEY && API_KEY.length === 32) {
+  if (pathname === "/admin/status" && (API_KEY || hasBearer)) {
     return new Response(JSON.stringify({
       status: "active",
       version: "2.0.0",
       endpoints: { images: "/t/p/{size}/{path}", api: "/3/{endpoint}" },
       client_info: { ip: clientIP, country, ua: userAgent.substring(0, 50) },
-      security: { api_key_provided: true, request_secure: true },
+      security: { api_key_provided: Boolean(API_KEY), bearer_provided: hasBearer, request_secure: true },
       performance: { cache_enabled: true, compression: true },
       timestamp: (new Date()).toISOString()
     }), {
@@ -179,7 +181,7 @@ async function handleRequest(request) {
 
   // 2. API 代理部分
   if (pathname.startsWith("/3/")) {
-    if (!API_KEY) {
+    if (!API_KEY && !hasBearer) {
       return new Response(getFake404HTML(), {
         status: 404,
         headers: { "Content-Type": "text/html; charset=utf-8", ...corsHeaders }
@@ -187,7 +189,9 @@ async function handleRequest(request) {
     }
     try {
       let apiUrl = `https://api.tmdb.org${pathname}${search}`;
-      if (!search.includes("api_key=")) {
+      // 全局 Bearer 优先：有 Bearer 头时绝不注入 api_key（不依赖 TMDB 隐式优先级）；
+      // 仅 api_key 认证（无 Bearer）时注入查询参数。
+      if (!hasBearer && API_KEY && !search.includes("api_key=")) {
         const separator = search ? "&" : "?";
         apiUrl += `${separator}api_key=${API_KEY}`;
       }

@@ -397,11 +397,7 @@ class AppConfig:
 
         paths = PathsConfig(
             strm_engine_paths=[],  # 从 API 或 DB 加载
-            refresh_paths=read_line_list(
-                paths_data.get("refresh_paths_file", "refresh_paths.txt"),
-                base_dir,
-                is_webdav=True,
-            ),
+            refresh_paths=[],  # 从 DB 加载（WebUI 配置）；迁移时由 migrate_config_to_db 读取 txt
             strm_monitored_paths=[],  # 从 API 或 DB 加载
             b_root=b_root,
             c_root=c_root,
@@ -583,8 +579,21 @@ def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
         watchlist_db.set_config("openlist", "c_root", config.paths.c_root)
         
         # 刷新路径（JSON 数组）
-        watchlist_db.set_config("openlist", "refresh_paths", 
-                                json.dumps(config.paths.refresh_paths, ensure_ascii=False))
+        # 运行时 refresh_paths 已不再从 txt 文件加载（改为 WebUI/DB 配置）。
+        # 但为兼容首次升级、尚未迁移的旧用户，迁移阶段仍尝试读取遗留的
+        # refresh_paths.txt 作为一次性数据源写入 DB；文件不存在或为空则写 []。
+        legacy_refresh_paths = config.paths.refresh_paths
+        if not legacy_refresh_paths:
+            legacy_file = os.path.join(
+                config.local.base_dir, "refresh_paths.txt"
+            )
+            legacy_refresh_paths = read_line_list(
+                os.path.basename(legacy_file),
+                os.path.dirname(legacy_file),
+                is_webdav=True,
+            )
+        watchlist_db.set_config("openlist", "refresh_paths",
+                                json.dumps(legacy_refresh_paths, ensure_ascii=False))
         
         # STRM 引擎配置
         # ⚠️ a 区来源仅以 "用户在 WebUI 手动添加并保存的引擎" 为唯一真相来源
