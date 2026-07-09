@@ -43,6 +43,17 @@ export function setUiConfig(v) { _uiConfig = v; }
 export let _flippedCard = null;
 export function setFlippedCard(v) { _flippedCard = v; }
 
+// Auth state (null = uninitialized, false = no password, true = password set)
+export let _hasPassword = null;
+export function setHasPassword(v) { _hasPassword = v; }
+export function setToken(token) {
+  if (token) {
+    localStorage.setItem('session_token', token);
+  } else {
+    localStorage.removeItem('session_token');
+  }
+}
+
 // Cached watchlist helpers
 export function _getCachedWatchlist(type) {
   const c = _tmdbCache[type];
@@ -53,7 +64,8 @@ export function _setCachedWatchlist(type, data) {
   _tmdbCache[type] = { data, ts: Date.now() };
 }
 
-// UI Config helpers
+// UI Config helpers — 使用 AbortController 避免快速连点时回滚覆盖正确值（P1-6）
+let _uiConfigController = null;
 export async function _loadUiConfig() {
   try {
     const resp = await fetch('/api/webui/config/ui');
@@ -65,12 +77,29 @@ export function _getUiConfig(key) {
   return _uiConfig[key] === '1';
 }
 export function _setUiConfig(key, val) {
+  const oldVal = _uiConfig[key];
   _uiConfig[key] = val;
-  fetch('/api/webui/config/ui', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ [key]: val })
-  }).catch(() => { });
+  // 取消前一次未完成的保存请求
+  if (_uiConfigController) _uiConfigController.abort();
+  _uiConfigController = new AbortController();
+fetch('/api/webui/config/ui', {
+	    method: 'POST',
+	    headers: {
+	      'Content-Type': 'application/json',
+	      'X-Session-Token': localStorage.getItem('session_token') || ''
+	    },
+	    body: JSON.stringify({ [key]: val }),
+	    signal: _uiConfigController.signal
+  }).then(resp => {
+    if (!resp.ok) {
+      console.warn('[UI Config] 保存失败:', resp.status, resp.statusText);
+      if (oldVal === undefined) delete _uiConfig[key]; else _uiConfig[key] = oldVal;
+    }
+  }).catch(err => {
+    if (err.name === 'AbortError') return; // 被取消的是上一次请求，忽略
+    console.warn('[UI Config] 保存请求失败:', err);
+    if (oldVal === undefined) delete _uiConfig[key]; else _uiConfig[key] = oldVal;
+  });
 }
 
 // Genre cache with LRU eviction

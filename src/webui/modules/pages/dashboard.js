@@ -1,4 +1,5 @@
 import { api } from '../core/api.js';
+import { isRenderStale } from '../core/router.js';
 import { icon } from '../core/icons.js';
 import { esc } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
@@ -109,6 +110,8 @@ export async function stopMainProgram() {
 
 export async function renderDashboard(el) {
   const d = await api('/api/dashboard');
+  // F-3: await 期间若发生新导航，放弃渲染，避免旧页覆盖 + setInterval 泄漏
+  if (isRenderStale()) return;
   if (d.uptime != null) {
     setServerStartTime(Date.now() - d.uptime * 1000);
   }
@@ -134,12 +137,17 @@ export async function renderDashboard(el) {
   <div class="stat-card"><div class="label">${icon('movie')} A 区 STRM</div><div class="value">${d.a_count}</div></div>
   <div class="stat-card"><div class="label">${icon('tv')} B 区 STRM</div><div class="value">${d.b_count}</div></div>
   <div class="stat-card"><div class="label">${icon('area_c')} C 区幽灵</div><div class="value">${d.c_count}</div></div>
-  <div class="stat-card"><div class="label">B - valid</div><div class="value stat-value-primary">${d.b_valid}</div></div>
-  <div class="stat-card"><div class="label">B - orphan</div><div class="value stat-value-warning">${d.b_orphan}</div></div>
-  <div class="stat-card"><div class="label">B - unknown</div><div class="value stat-value-error">${d.b_unknown}</div></div>
+<div class="stat-card"><div class="label">B - valid</div><div class="value stat-value-primary">${d.b_valid}</div></div>
+	  <div class="stat-card"><div class="label">B - duplicate</div><div class="value stat-value-warning">${d.b_duplicate}</div></div>
+	  <div class="stat-card"><div class="label">B - quarantined</div><div class="value stat-value-error">${d.b_quarantined}</div></div>
   <div class="stat-card"><div class="label">${icon('tmdb')} TMDB</div><div class="value stat-value-large">${d.tmdb_configured ? '已配置' : '未配置'}</div></div>
   <div class="stat-card"><div class="label">WebUI 运行时间</div><div class="value stat-value-large" id="uptime-val">-</div></div>
-</div>`;
+</div>
+	
+	  <!-- 密码提示 -->
+	  <div style="text-align:center;font-size:12px;color:var(--text-muted);margin-top:8px">
+	    管理密码保存在 WebUI 控制台日志中 · 忘记密码可运行 <code style="background:var(--bg-control);padding:1px 4px;border-radius:3px">python reset_admin.py</code> 重置
+	  </div>`;
 
   // Bind start/stop buttons (replaces inline onclick)
   document.getElementById('main-start-btn')?.addEventListener('click', startMainProgram);

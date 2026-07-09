@@ -61,17 +61,17 @@ class BAreaEventHandler(FileSystemEventHandler):
 
     def on_created(self, event) -> None:
         # 移除: if getattr(self.app, '_b_watcher_paused', False): return
-        if not event.is_directory and event.src_path.lower().endswith(".strm"):
-            self.app.handle_b_created_or_modified(event.src_path)
+        if not event.is_directory and Path(event.src_path).suffix.lower() == ".strm":
+            self._run_async(self.app.handle_b_created_or_modified, event.src_path)
 
     def on_modified(self, event) -> None:
         # 移除: if getattr(self.app, '_b_watcher_paused', False): return
-        if not event.is_directory and event.src_path.lower().endswith(".strm"):
-            self.app.handle_b_created_or_modified(event.src_path)
+        if not event.is_directory and Path(event.src_path).suffix.lower() == ".strm":
+            self._run_async(self.app.handle_b_created_or_modified, event.src_path)
 
     def on_deleted(self, event) -> None:
         # 移除: if getattr(self.app, '_b_watcher_paused', False): return
-        if not event.is_directory and event.src_path.lower().endswith(".strm"):
+        if not event.is_directory and Path(event.src_path).suffix.lower() == ".strm":
             self._run_async(self.app.handle_b_deleted, event.src_path)
 
     def on_moved(self, event) -> None:
@@ -79,29 +79,25 @@ class BAreaEventHandler(FileSystemEventHandler):
         if event.is_directory:
             return
 
-        src_is_strm = event.src_path.lower().endswith(".strm")
-        dst_is_strm = event.dest_path.lower().endswith(".strm")
+        src_path = event.src_path
+        dest_path = event.dest_path
+
+        src_is_strm = Path(src_path).suffix.lower() == ".strm"
+        dst_is_strm = Path(dest_path).suffix.lower() == ".strm"
 
         if src_is_strm and dst_is_strm:
-            # .strm 重命名为 .strm：更新数据库路径（不触发云盘删除）
-            moved = self.app.db.move_b_record(event.src_path, event.dest_path)
-            if moved:
-                logging.info(
-                    "[B区重命名] 已更新路径: %s -> %s",
-                    Path(event.src_path).name,
-                    Path(event.dest_path).name,
-                )
-                # 刷新 identity 表的 current_b_path
-                webdav = read_strm_webdav_path(event.dest_path)
-                if webdav:
-                    fp = make_strm_fingerprint(webdav)
-                    self.app.refresh_identity_current_b_path(fp)
+            # B-2: .strm 重命名为 .strm 统一异步化 + 双路径锁。
+            # 原同步调用在 watchdog 事件线程内执行，与同路径的 created/modified/deleted
+            # 异步处理线程竞争，导致 move_b_record 的 SELECT→INSERT/DELETE 序列
+            # 与并发插入/删除产生丢失更新（复活已删行 / 删掉刚插入的新行）。
+            # 现统一走 _run_async，由 AppService.handle_b_moved 取双路径锁后执行。
+            self._run_async(self.app.handle_b_moved, src_path, dest_path)
         elif src_is_strm and not dst_is_strm:
             # .strm 重命名为非 .strm：等同于删除
             self._run_async(self.app.handle_b_deleted, event.src_path)
         elif not src_is_strm and dst_is_strm:
             # 非 .strm 重命名为 .strm：等同于新建
-            self.app.handle_b_created_or_modified(event.dest_path)
+            self._run_async(self.app.handle_b_created_or_modified, event.dest_path)
 
 
 class CAreaEventHandler(FileSystemEventHandler):
@@ -109,21 +105,21 @@ class CAreaEventHandler(FileSystemEventHandler):
         self.app = app
 
     def on_deleted(self, event) -> None:
-        if not event.is_directory and event.src_path.lower().endswith(".strm"):
+        if not event.is_directory and Path(event.src_path).suffix.lower() == ".strm":
             # C 区幽灵文件删除事件：仅记录日志
             # （幽灵文件的管理由其他模块负责，此处不做处理）
             logging.info("[C区] 检测到幽灵文件删除: %s", Path(event.src_path).name)
 
     def on_created(self, event) -> None:
-        if not event.is_directory and event.src_path.lower().endswith(".strm"):
+        if not event.is_directory and Path(event.src_path).suffix.lower() == ".strm":
             logging.info("[C区] 检测到幽灵文件新增: %s", Path(event.src_path).name)
 
     def on_moved(self, event) -> None:
         if event.is_directory:
             return
 
-        src_is_strm = event.src_path.lower().endswith(".strm")
-        dst_is_strm = event.dest_path.lower().endswith(".strm")
+        src_is_strm = Path(event.src_path).suffix.lower() == ".strm"
+        dst_is_strm = Path(event.dest_path).suffix.lower() == ".strm"
 
         if src_is_strm or dst_is_strm:
             logging.info(

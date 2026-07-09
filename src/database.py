@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import sqlite3
@@ -171,157 +171,18 @@ class Database:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
         self.lock = threading.RLock()
+        self._last_ghost_cleanup = 0.0
+        self._ghost_cleanup_lock = threading.Lock()
 
         # ===== 修复：确保数据库文件可写 =====
         self._ensure_db_writable()
         # ====================================
         logging.info("[DB] 开始初始化数据库表结构")
-        with self.lock, self.connection() as conn:
-            cur = conn.cursor()
+        self._create_schema()
+        logging.info("[DB] 数据库核心表与索引核对并创建完成！")
 
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS a_strm_files (
-                    local_path TEXT PRIMARY KEY,
-                    webdav_path TEXT NOT NULL,
-                    parent_webdav_path TEXT NOT NULL,
-                    updated_at REAL NOT NULL
-                )
-                """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS b_strm_files (
-                    local_path TEXT PRIMARY KEY,
-                    webdav_path TEXT NOT NULL,
-                    parent_webdav_path TEXT NOT NULL,
-                    source_a_path TEXT,
-                    updated_at REAL NOT NULL
-                )
-                """)
-            self._ensure_column(cur, "b_strm_files", "fingerprint", "TEXT")
-            self._ensure_column(
-                cur,
-                "b_strm_files",
-                "status",
-                "TEXT DEFAULT 'valid'",
-            )
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS strm_identity (
-                    fingerprint TEXT PRIMARY KEY,
-                    webdav_path TEXT NOT NULL,
-                    source_a_path TEXT,
-                    current_b_path TEXT,
-                    updated_at REAL NOT NULL
-                )
-                """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS c_ghost_files (
-                    local_path TEXT PRIMARY KEY,
-                    webdav_path TEXT NOT NULL,
-                    original_b_path TEXT NOT NULL,
-                    ghost_root TEXT NOT NULL,
-                    moved_at REAL NOT NULL
-                )
-                """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS ghost_protection (
-                    webdav_path TEXT PRIMARY KEY,
-                    expire_time REAL NOT NULL,
-                    reason TEXT
-                )
-                """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS known_folders (
-                    folder_path TEXT PRIMARY KEY,
-                    source TEXT,
-                    updated_at REAL NOT NULL
-                )
-                """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS protected_roots (
-                    root_path TEXT PRIMARY KEY,
-                    trash_path TEXT NOT NULL,
-                    active INTEGER NOT NULL,
-                    updated_at REAL NOT NULL
-                )
-                """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS protected_roots_snapshot (
-                    root_path TEXT PRIMARY KEY,
-                    trash_path TEXT NOT NULL,
-                    updated_at REAL NOT NULL
-                )
-                """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS sync_control (
-                    control_key TEXT PRIMARY KEY,
-                    control_value TEXT NOT NULL,
-                    updated_at REAL NOT NULL
-                )
-                """)
-
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_a_strm_webdav_path
-                ON a_strm_files(webdav_path)
-                """)
-
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_b_strm_webdav_path
-                ON b_strm_files(webdav_path)
-                """)
-
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_b_strm_fingerprint
-                ON b_strm_files(fingerprint)
-                """)
-
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_b_strm_status
-                ON b_strm_files(status)
-                """)
-
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_identity_webdav_path
-                ON strm_identity(webdav_path)
-                """)
-
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_identity_current_b_path
-                ON strm_identity(current_b_path)
-                """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS strm_media_boundary (
-                    fingerprint TEXT PRIMARY KEY,
-                    source_media_name TEXT NOT NULL,
-                    current_media_name TEXT NOT NULL,
-                    engine_entry_path TEXT NOT NULL,
-                    updated_at REAL NOT NULL
-                )
-                """)
-
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_boundary_source_name
-                ON strm_media_boundary(source_media_name)
-                """)
-
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_boundary_current_name
-                ON strm_media_boundary(current_media_name)
-                """)
-
-            conn.commit()
-            logging.info("[DB] 数据库核心表与索引核对并创建完成！")
-
-    def init_db(self) -> None:
-        """初始化数据库表结构（幂等操作，可安全重复调用）。"""
-        logging.debug("[DB] init_db 被调用，确保所有表已创建")
+    def _create_schema(self) -> None:
+        """创建核心数据库表结构和索引（幂等操作，可安全重复调用）。"""
         with self.lock, self.connection() as conn:
             cur = conn.cursor()
 
@@ -428,7 +289,11 @@ class Database:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_boundary_current_name ON strm_media_boundary(current_media_name)")
 
             conn.commit()
-        logging.info("[DB] 数据库表结构初始化完成")
+
+    def init_db(self) -> None:
+        """初始化数据库表结构（幂等操作，可安全重复调用）。"""
+        logging.debug("[DB] init_db 被调用，确保所有表已创建")
+        self._create_schema()
 
     def upsert_a(self, local_path: str, webdav_path: str,
                  parent_webdav_path: str) -> None:
@@ -632,10 +497,11 @@ class Database:
         优化：每 60 秒最多执行一次过期清理，避免热路径中的频繁 DELETE 查询。
         """
         now = time.time()
-        # 每 60 秒执行一次过期清理
-        if not hasattr(self, "_last_ghost_cleanup") or now - self._last_ghost_cleanup > 60:
-            self.cleanup_expired_ghosts()
-            self._last_ghost_cleanup = now
+        # 每 60 秒执行一次过期清理（使用专用锁保护，避免多线程竞态）
+        with self._ghost_cleanup_lock:
+            if now - self._last_ghost_cleanup > 60:
+                self.cleanup_expired_ghosts()
+                self._last_ghost_cleanup = now
         
         with self.lock, self.connection() as conn:
             cur = conn.execute(
@@ -732,9 +598,9 @@ class Database:
                 """
                 SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
                 FROM b_strm_files
-                WHERE webdav_path = ? OR webdav_path LIKE ?
+                WHERE webdav_path LIKE ?
                 """,
-                (webdav_root, pattern),
+                (pattern,),
             )
             return [BRecord(*row) for row in cur.fetchall()]
 
@@ -842,27 +708,43 @@ class Database:
         时中间失败导致的数据丢失。
         """
         with self.lock, self.connection() as conn:
-            cur = conn.execute(
-                """
-                SELECT webdav_path,
-                       parent_webdav_path,
-                       source_a_path,
-                       fingerprint,
-                       status
-                FROM b_strm_files
-                WHERE local_path = ?
-                """,
-                (old_local_path,),
-            )
-            row = cur.fetchone()
-            if not row:
-                return False
-
-            webdav_path, parent_webdav_path, source_a_path, fingerprint, status = row
-            now = time.time()
-            new_status = status or "valid"
-
+            # 显式开启事务（B-8）：确保 conflict 检测与 INSERT/DELETE 在同一原子事务内，
+            # 避免 SELECT 与写入之间被其它写连接插入目标行（TOCTOU）。
+            conn.execute("BEGIN IMMEDIATE")
             try:
+                cur = conn.execute(
+                    """
+                    SELECT webdav_path,
+                           parent_webdav_path,
+                           source_a_path,
+                           fingerprint,
+                           status
+                    FROM b_strm_files
+                    WHERE local_path = ?
+                    """,
+                    (old_local_path,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    conn.rollback()
+                    return False
+
+                webdav_path, parent_webdav_path, source_a_path, fingerprint, status = row
+                now = time.time()
+                new_status = status or "valid"
+
+                # 检查新路径是否已被其他 fingerprint 占用 (P2-6)
+                conflict = conn.execute(
+                    "SELECT fingerprint FROM b_strm_files WHERE local_path = ?",
+                    (new_local_path,),
+                ).fetchone()
+                if conflict and conflict[0] != fingerprint:
+                    conn.rollback()
+                    logging.warning(
+                        "[DB] move_b_record 目标路径已被其他记录占用: %s (旧指纹=%s, 新指纹=%s)",
+                        new_local_path, conflict[0], fingerprint)
+                    return False
+
                 # 使用 INSERT OR REPLACE 实现原子替换
                 conn.execute(
                     """

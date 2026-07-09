@@ -47,7 +47,8 @@ export function createField(id, label, value, options = {}) {
     type = 'text',
     persistLabel = false,
     readOnly = false,
-    helpIcon = ''
+    helpIcon = '',
+    htmlLabel = ''  // 可选：不经过 esc() 转义，直接渲染的 HTML（如配置状态徽章）
   } = options;
   const hasValue = value !== null && value !== undefined && String(value).trim() !== '';
   const inputClass = hasValue ? 'has-value' : '';
@@ -62,7 +63,7 @@ export function createField(id, label, value, options = {}) {
   return `
     <div class="floating-field" data-field="${id}">
       <div class="field-control">
-        <label class="${labelCls}" data-role="label" for="${id}">${esc(label)}${helpIcon || ''}</label>
+        <label class="${labelCls}" data-role="label" for="${id}">${esc(label)}${htmlLabel}${helpIcon || ''}</label>
         <input type="${type}" id="${id}" class="${inputClass}${roClass}"${persistAttr}${disabledAttr} placeholder="${esc(placeholder || label)}" value="${inputValue}">
       </div>
     </div>`;

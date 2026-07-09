@@ -17,15 +17,17 @@ WebUI 服务器模块（合并自 standalone_webui.py + webui.py + webui_font_pr
 # isort: off
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import random
+import secrets
 import sys
 import threading
 import time
 import tomllib
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
@@ -66,7 +68,7 @@ try:
     # 作为包导入时（从 src/ 运行）
     from webui.routes import (  # noqa: E402
         _tmdb_routes, _is_lan_ip, _try_bind_port,
-        _handle_tmdb_configure, _handle_tmdb_watchlist_match_refresh,
+        _handle_login, _handle_tmdb_configure, _handle_tmdb_watchlist_match_refresh,
         _handle_tmdb_watchlist_match_override, _handle_tmdb_watchlist_bg_sync,
         _handle_restart_webui, _handle_webui_config_get, _handle_webui_config_post,
         _handle_openlist_test_connection, _handle_openlist_strm_engines,
@@ -80,7 +82,7 @@ except ImportError:
     # 直接运行时（python src/webui/server.py）
     from routes import (  # noqa: E402
         _tmdb_routes, _is_lan_ip, _try_bind_port,
-        _handle_tmdb_configure, _handle_tmdb_watchlist_match_refresh,
+        _handle_login, _handle_tmdb_configure, _handle_tmdb_watchlist_match_refresh,
         _handle_tmdb_watchlist_match_override, _handle_tmdb_watchlist_bg_sync,
         _handle_restart_webui, _handle_webui_config_get, _handle_webui_config_post,
         _handle_openlist_test_connection, _handle_openlist_strm_engines,
@@ -103,6 +105,9 @@ if TYPE_CHECKING:
 # ============================================================
 
 STATIC_DIR = PROJECT_ROOT / "dist"
+
+# POST 请求体大小上限（10 MB），防止 Content-Length 攻击导致 OOM（B-5）
+_MAX_CONTENT_LENGTH = 10 * 1024 * 1024
 
 # 检查 dist/ 是否存在
 if not STATIC_DIR.exists():
@@ -291,6 +296,48 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             return False
         return True
 
+    def _check_auth(self) -> bool:
+        """检查请求是否已通过密码认证。
+        
+        如果未设置密码 → 放行（向后兼容）
+        如果已设置密码 → 检查 X-Session-Token 头
+        """
+        webui = self.webui
+        if not webui._has_password:
+            return True
+        # 标准化路径，匹配路由分发逻辑
+        from urllib.parse import urlparse
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        # 登录接口放行
+        if path == "/api/login":
+            return True
+        # 密码状态查询放行
+        if path == "/api/admin/status":
+            return True
+        # 静态资源放行（SPA 需要加载 — 登录前必须可用）
+        if path == "/" or path.startswith("/assets/") or path == "/favicon.ico" \
+                or path == "/logo.png" or path == "/openlist_strm_bridge.png" \
+                or path == "/api/page" or path == "/login" \
+                or path.startswith("/fonts/") \
+                or path.endswith(".woff2") or path.endswith(".woff") or path.endswith(".ttf"):
+            return True
+        # API 白名单：登录前初始化和图片代理（非敏感数据）
+        if path in ("/api/config", "/api/webui/config/ui",
+                     "/api/tmdb/avatar", "/api/tmdb/poster",
+                     "/api/openlist/status", "/api/openlist/ping"):
+            return True
+        # 验证 session token
+        token = self.headers.get("X-Session-Token", "")
+        now = time.time()
+        with webui._sessions_lock:
+            if token in webui._sessions and now < webui._sessions[token]:
+                # 滑动过期：刷新 7 天
+                webui._sessions[token] = now + 604800
+                return True
+        self._send_json({"error": "unauthorized", "need_login": True}, 401)
+        return False
+
     # ----------------------------------------------------------
     # 响应工具
     # ----------------------------------------------------------
@@ -408,6 +455,9 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         if not self._guard_request():
             return
 
+        if not self._check_auth():
+            return
+
         # TMDB 路由（复用 webui.routes 的增强版）
         if path.startswith("/api/tmdb/"):
             tmdb_client = getattr(self.webui, '_tmdb_client', None)
@@ -418,6 +468,8 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         # SPA 初始页面（从 dist/index.html 提供）
         if path == "/" or path == "/api/page":
             self._send_static_file()
+        elif path == "/login":
+            self._send_login_page()
         elif path == "/favicon.ico":
             # publicDir 提供稳定无哈希路径 assets/favicon.ico
             self._send_static_file("assets/favicon.ico")
@@ -490,6 +542,8 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         # 主程序控制路由
         elif path == "/api/main/status":
             _handle_main_status(self, self.webui)
+        elif path == "/api/admin/status":
+            self._send_json({"has_password": self.webui._has_password})
         # 通用静态文件处理（.js / .css / .svg / .png / .jpg / .ico / .woff2 等）
         elif self._try_serve_static(path):
             pass
@@ -501,9 +555,20 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/") or "/"
         if not self._guard_request():
             return
+        if not self._check_auth():
+            return
         content_length = int(self.headers.get("Content-Length", 0))
+        # 防止恶意超大请求体耗尽内存（DoS）— 配置类 JSON 载荷不会超过此值
+        if content_length > _MAX_CONTENT_LENGTH:
+            self._send_json(
+                {"error": "payload too large", "max_bytes": _MAX_CONTENT_LENGTH},
+                413,
+            )
+            return
         body = self.rfile.read(content_length) if content_length else b"{}"
-        if path == "/api/tmdb/configure":
+        if path == "/api/login":
+            _handle_login(self, self.webui, body)
+        elif path == "/api/tmdb/configure":
             _handle_tmdb_configure(self, self.webui, body)
         elif path == "/api/tmdb/watchlist/match/refresh":
             _handle_tmdb_watchlist_match_refresh(self, self.webui)
@@ -588,6 +653,11 @@ class WebUIServer:
             if p.exists():
                 self._log_file = str(p)
                 break
+
+        # 认证 & Session
+        self._sessions: dict[str, float] = {}
+        self._sessions_lock = threading.Lock()
+        self._has_password = False
 
         # 1) 无条件创建 DB（存储配置 + 待看列表数据）
         self._reinit_watchlist_db()
@@ -768,7 +838,7 @@ class WebUIServer:
         handler_cls.allow_reuse_address = True
 
         try:
-            self._server = HTTPServer((bind, port), handler_cls)
+            self._server = ThreadingHTTPServer((bind, port), handler_cls)
         except OSError as e:
             err = getattr(
                 e,
@@ -790,12 +860,105 @@ class WebUIServer:
             target=self._server.serve_forever, daemon=True, name="WebUI")
         self._thread.start()
 
+        # 初始化管理员密码
+        self._init_admin_password()
+
+        # 启动 session 过期自动清理（每小时执行一次）
+        self._session_cleanup_event = threading.Event()
+
+        def _cleanup_sessions():
+            while not self._session_cleanup_event.is_set():
+                now = time.time()
+                with self._sessions_lock:
+                    self._sessions = {k: v for k, v in self._sessions.items() if v > now}
+                self._session_cleanup_event.wait(timeout=3600)
+
+        threading.Thread(target=_cleanup_sessions, daemon=True).start()
+
         tmdb_info = "已配置" if self._tmdb_client else "未配置"
+        login_url = f"http://{bind}:{port}"
         logging.info(
-            "[WebUI] 管理面板已启动: http://%s:%d (TMDB: %s)",
-            bind,
-            port,
-            tmdb_info)
+            "[WebUI] ╔══════════════════════════════════════════════╗")
+        logging.info(
+            "[WebUI] ║  管理面板已启动                            ║")
+        logging.info(
+            "[WebUI] ║  访问地址: %s  ║",
+            login_url)
+        if self._has_password:
+            logging.info(
+                "[WebUI] ║  首次访问会自动跳转至登录页面              ║")
+        logging.info(
+            "[WebUI] ╚══════════════════════════════════════════════╝")
+        logging.info("[WebUI] TMDB: %s", tmdb_info)
+
+    @staticmethod
+    def _hash_password(password: str) -> str:
+        """对密码加盐 PBKDF2-HMAC-SHA256 哈希，返回 salt$iterations$hash 格式。"""
+        salt = secrets.token_hex(16)
+        iterations = 600000
+        h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iterations)
+        return f"{salt}${iterations}${h.hex()}"
+
+    @staticmethod
+    def _check_password(password: str, stored: str) -> bool:
+        """验证密码是否与存储的 salt$iterations$hash 匹配。"""
+        try:
+            parts = stored.split("$", 2)
+            if len(parts) != 3:
+                return False
+            salt, iterations_str, stored_hash = parts
+            iterations = int(iterations_str)
+            h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iterations)
+            return h.hex() == stored_hash
+        except (ValueError, AttributeError):
+            return False
+
+    def _init_admin_password(self) -> None:
+        """检查或生成管理员密码。"""
+        if not self._watchlist_db:
+            self._has_password = False
+            return
+        stored = self._watchlist_db.get_config("ui", "admin_password", "")
+        if stored:
+            self._has_password = True
+            logging.info(
+                "[WebUI] ============================================")
+            logging.info(
+                "[WebUI] WebUI 管理面板密码已保存到数据库中")
+            logging.info(
+                "[WebUI] 忘记密码请运行: python reset_admin.py")
+            logging.info(
+                "[WebUI] ============================================")
+        else:
+            # 首次启动，生成随机密码
+            new_password = secrets.token_urlsafe(12)
+            hashed = self._hash_password(new_password)
+            self._watchlist_db.set_config("ui", "admin_password", hashed)
+            self._has_password = True
+            login_url = f"http://{getattr(self, '_bind', '0.0.0.0')}:{self._port}"
+            logging.info(
+                "[WebUI] ╔══════════════════════════════════════════════╗")
+            logging.info(
+                "[WebUI] ║  WebUI 管理密码已生成                       ║")
+            logging.info(
+                "[WebUI] ║                                              ║")
+            logging.info(
+                "[WebUI] ║  访问地址: %s  ║",
+                login_url)
+            # 密码仅输出到控制台（print），不写入日志文件
+            print(f"[WebUI] 管理密码: {new_password}")
+            logging.info(
+                "[WebUI] （请务必在浏览器中登录后立即修改密码）")
+            logging.info(
+                "[WebUI] ║  请在浏览器中打开访问地址                    ║")
+            logging.info(
+                "[WebUI] ║  首次访问会自动跳转至登录页面                ║")
+            logging.info(
+                "[WebUI] ║                                              ║")
+            logging.info(
+                "[WebUI] ║  忘记密码请运行: python reset_admin.py       ║")
+            logging.info(
+                "[WebUI] ╚══════════════════════════════════════════════╝")
 
     def stop(self):
         """停止 WebUI 服务器"""
@@ -853,19 +1016,19 @@ class WebUIServer:
 
                 # 启动主程序前按配置页的日志级别/路径重新初始化日志系统，
                 # 确保 WebUI 启动的主程序不仅输出到控制台，也写入日志文件。
-                # log_file 留空时回退 ./activity.log（始终写文件）。
+                # log_file 留空时回退 logs/strm_bridge.log（始终写文件）。
                 try:
                     from logger_setup import setup_logging
                     setup_logging(
                         level=self._config.log.level,
-                        log_file=self._config.log.file or "./activity.log",
+                        log_file=self._config.log.file or "logs/strm_bridge.log",
                         max_size_mb=self._config.log.max_size_mb,
                         backup_count=self._config.log.backup_count,
                     )
                     logging.info(
                         "[Main] 日志已按配置初始化: level=%s, file=%s",
                         self._config.log.level,
-                        self._config.log.file or "./activity.log",
+                        self._config.log.file or "logs/strm_bridge.log",
                     )
                 except Exception as log_exc:
                     logging.warning("[Main] 日志初始化失败（沿用原配置）: %s", log_exc)

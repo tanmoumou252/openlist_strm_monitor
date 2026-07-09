@@ -2,14 +2,20 @@ import './styles/main.css';
 import { syncTheme, initDropdowns, setRouterFn } from './modules/core/theme.js';
 import { router, navigate } from './modules/core/router.js';
 import { initWallpaperReveal } from './modules/core/wallpaper.js';
-import { _loadUiConfig, setTmdbWebBase, _mainStatusTimer, setMainStatusTimer, stopUptimeTimer, startUptimeTimer, CONFIG } from './modules/core/state.js';
+import { _loadUiConfig, setTmdbWebBase, _mainStatusTimer, setMainStatusTimer, stopUptimeTimer, startUptimeTimer, CONFIG, setHasPassword } from './modules/core/state.js';
 import { _checkApiStatus } from './modules/pages/openlist.js';
 
 // Inject router into theme module to avoid circular dependency
 setRouterFn(router);
 
-// Bind hashchange event
-window.addEventListener('hashchange', router);
+// Bind hashchange event (will be activated after auth init)
+let _hashchangeBound = false;
+function _bindHashchange() {
+  if (!_hashchangeBound) {
+    window.addEventListener('hashchange', router);
+    _hashchangeBound = true;
+  }
+}
 
 // DOMContentLoaded initialization
 document.addEventListener('DOMContentLoaded', () => {
@@ -67,5 +73,14 @@ document.addEventListener('DOMContentLoaded', () => {
     _checkApiStatus();
   }, 0);
 
-  router();
+  // 检查管理员密码状态（必须在 router() 之前完成，确保 auth guard 正确）
+  fetch('/api/admin/status').then(r => r.json()).then(d => {
+    setHasPassword(d.has_password);
+  }).catch(() => {
+    setHasPassword(false);
+  }).finally(() => {
+    // 密码状态就绪后，再激活 hashchange 路由，避免 auth guard 竞争条件
+    _bindHashchange();
+    router();
+  });
 });

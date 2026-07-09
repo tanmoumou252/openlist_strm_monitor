@@ -69,7 +69,7 @@ class LogConfig:
     level: str
     max_size_mb: int
     backup_count: int
-    file: str = "./activity.log"
+    file: str = "logs/strm_bridge.log"
 
 
 @dataclass(slots=True)
@@ -235,7 +235,7 @@ class AppConfig:
                 ("log_level", self.log, "level", str),
                 ("log_max_size_mb", self.log, "max_size_mb", int),
                 ("log_backup_count", self.log, "backup_count", int),
-                # 日志保存路径（DB 往返的关键键，勿删；留空时回退 ./activity.log）
+                # 日志保存路径（DB 往返的关键键，勿删；留空时回退 logs/strm_bridge.log）
                 ("log_file", self.log, "file", str),
             ]
             
@@ -384,7 +384,7 @@ class AppConfig:
             level=log_data.get("level", "INFO"),
             max_size_mb=log_data.get("max_size_mb", 2),
             backup_count=log_data.get("backup_count", 5),
-            file=os.path.join(base_dir, log_data.get("file", "activity.log")),
+            file=os.path.normpath(os.path.join(base_dir, log_data.get("file", "logs/strm_bridge.log"))),
         )
 
         paths = PathsConfig(

@@ -68,8 +68,8 @@ function _renderConfigContent(cfg) {
   function section(titleIcon, title, rowsHtml) {
     return `<div class="config-section"><h3>${icon(titleIcon)} ${esc(title)}</h3>${rowsHtml}</div>`;
   }
-  function field(id, label, value, placeholder, type = 'text', persistLabel = false, readOnly = false) {
-    return createField(id, label, value, { placeholder, type, persistLabel, readOnly });
+  function field(id, label, value, placeholder, type = 'text', persistLabel = false, readOnly = false, htmlLabel = '') {
+    return createField(id, label, value, { placeholder, type, persistLabel, readOnly, htmlLabel });
   }
 
   const presetLangs = ['zh-CN', 'en-US', 'ja-JP'];
@@ -92,10 +92,11 @@ function _renderConfigContent(cfg) {
   html += section('globe', 'WebUI', webuiRows.join(''));
   html += `</div>`;
 
-  const tokenValue = cfg.tmdb_token || '';
-  const apiKeyValue = cfg.tmdb_api_key || '';
+  const tokenIsConfigured = cfg.tmdb_token_configured === true;
+const tokenValue = '';  // 不预填截断预览，避免误保存覆盖真实 token
+  const apiKeyValue = '';  // 不预填明文 API key（B-3：后端仅返回 bool），避免误保存覆盖
   const hostValue = cfg.tmdb_host || '';
-  const proxyValue = cfg.tmdb_proxy || cfg.tmdb_proxy_http || '';
+  const proxyValue = cfg.tmdb_proxy_http || '';
   const watchlistDbValue = cfg.tmdb_watchlist_db || '';
 
   const langLabelCls = 'floating-label is-shown is-floating is-filled';
@@ -128,8 +129,11 @@ function _renderConfigContent(cfg) {
     </div>
   </div>`;
   html += field('cfg-tmdb-account', 'account_id', cfg.tmdb_account_id || '未获取', '', 'text', true, true);
-  html += field('cfg-tmdb-token', 'Access Token', tokenValue, '输入 TMDB Access Token', 'password');
-  html += field('cfg-tmdb-apikey', 'API Key', apiKeyValue, '输入 TMDB API Key', 'password');
+  const tokenBadge = tokenIsConfigured ? '<span class="badge configured-badge" style="color:var(--success);margin-left:6px;font-size:calc(var(--font-base) - 1px)">✓ 已配置</span>' : '';
+html += field('cfg-tmdb-token', 'Access Token', tokenValue, '输入 TMDB Access Token', 'password', false, false, tokenBadge);
+  const apiKeyIsConfigured = cfg.tmdb_api_key_configured === true;
+  const apiKeyBadge = apiKeyIsConfigured ? '<span class="badge configured-badge" style="color:var(--success);margin-left:6px;font-size:calc(var(--font-base) - 1px)">✓ 已配置</span>' : '';
+  html += field('cfg-tmdb-apikey', 'API Key', apiKeyValue, '输入 TMDB API Key', 'password', false, false, apiKeyBadge);
   html += langField;
   html += field('cfg-tmdb-host', '反代 Host', hostValue, '留空则使用官方 API');
   html += field('cfg-tmdb-proxy', 'HTTP 代理', proxyValue, '例: http://127.0.0.1:7890', 'text', true);
@@ -318,8 +322,6 @@ async function _bindConfigFormEvents(cfg) {
       const _wmActiveBtn = document.querySelector('#cfg-tmdb-watchlist-enabled-switch button.active');
       const watchlistEnabled = !(_wmActiveBtn && _wmActiveBtn.dataset.value === 'off');
       const body = {
-        access_token: tokenInput.value,
-        api_key: document.getElementById('cfg-tmdb-apikey').value,
         language: langValue,
         host: document.getElementById('cfg-tmdb-host').value,
         proxy_http: document.getElementById('cfg-tmdb-proxy').value,
@@ -327,18 +329,15 @@ async function _bindConfigFormEvents(cfg) {
         watchlist_db: document.getElementById('cfg-tmdb-wldb').value,
         watchlist_enabled: watchlistEnabled ? 'true' : 'false',
       };
-      const resp = await fetch('/api/tmdb/configure', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const text = await resp.text();
-      if (!resp.ok) throw new Error(text || `HTTP ${resp.status}`);
-      let data;
-      try { data = text ? JSON.parse(text) : {}; }
-      catch (parseError) { throw new Error(text || parseError.message); }
-      if (data.success === false) throw new Error(data.error || data.message || `HTTP ${resp.status}`);
-      showToast(data.message || '已保存', 'success');
+      // token 已配置时若输入框为空则不上传，避免截断预览覆盖真实 token
+      if (tokenInput.value.trim()) body.access_token = tokenInput.value;
+      if (document.getElementById('cfg-tmdb-apikey').value.trim()) body.api_key = document.getElementById('cfg-tmdb-apikey').value;
+const data = await api('/api/tmdb/configure', {
+	        method: 'POST',
+	        body,
+	      });
+	      if (data.success === false) throw new Error(data.error || data.message || '保存失败');
+	      showToast(data.message || '已保存', 'success');
     } catch (e) {
       showToast('保存失败: ' + e.message, 'error');
     } finally {
@@ -352,10 +351,9 @@ async function _bindConfigFormEvents(cfg) {
     btn.disabled = true;
     btn.innerHTML = '启动同步中...';
     try {
-      const resp = await fetch('/api/tmdb/watchlist/sync', { method: 'POST' });
-      const data = await resp.json();
-      if (data.success) showToast('待看列表同步已启动', 'success');
-      else showToast('同步失败: ' + (data.error || '未知错误'), 'error');
+const data = await api('/api/tmdb/watchlist/sync', { method: 'POST' });
+	      if (data.success) showToast('待看列表同步已启动', 'success');
+	      else showToast('同步失败: ' + (data.error || '未知错误'), 'error');
     } catch (e) {
       showToast('同步失败: ' + e.message, 'error');
     } finally {
@@ -369,8 +367,8 @@ async function _bindConfigFormEvents(cfg) {
       const btn = document.getElementById('cfg-tmdb-restart');
       btn.disabled = true;
       btn.innerHTML = '重启中...';
-      try {
-        await fetch('/api/restart-webui', { method: 'POST' });
+try {
+	        await api('/api/restart-webui', { method: 'POST' });
         showToast('WebUI 正在重启...', 'info');
       } catch (e) {
         showToast('重启失败: ' + e.message, 'error');
@@ -386,8 +384,7 @@ async function _bindConfigFormEvents(cfg) {
     btn.disabled = true;
     btn.innerHTML = '启动刷新中...';
     try {
-      const resp = await fetch('/api/tmdb/watchlist/match/refresh', { method: 'POST' });
-      const data = await resp.json();
+const data = await api('/api/tmdb/watchlist/match/refresh', { method: 'POST' });
       if (data.success) {
         showToast(data.message || '后台收录状态刷新已启动', 'info');
         btn.innerHTML = '刷新中...';
@@ -407,7 +404,12 @@ async function _bindConfigFormEvents(cfg) {
               }
               break;
             }
-          } catch (_) { }
+          } catch (e) {
+            console.warn('[Match Refresh] 轮询状态失败:', e);
+            if (i === maxPolls - 1) {
+              showToast('收录状态刷新超时，请稍后重试', 'error');
+            }
+          }
         }
       } else {
         showToast(data.message || '启动刷新失败', 'error');

@@ -28,11 +28,9 @@ async function _lazyLoadSeasonCount(wrapper) {
   if (wrapper.dataset.seasonLoaded) return;
   wrapper.dataset.seasonLoaded = '1';
   if (wrapper.querySelector('.tmdb-season-bars')) return;
-  try {
-    const resp = await fetch('/api/tmdb/season-count/' + type + '/' + id);
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const data = await resp.json();
-    const count = data.season_count || 0;
+try {
+	    const data = await api('/api/tmdb/season-count/' + type + '/' + id);
+	    const count = data.season_count || 0;
     if (count > 1) {
       const bars = document.createElement('div');
       bars.className = 'tmdb-season-bars';
@@ -81,11 +79,9 @@ async function _loadGenres(tmdbId, type) {
   if (!container) return;
   const cachedGenres = _getGenreCache(cacheKey);
   if (cachedGenres) { _renderGenres(container, cachedGenres); return; }
-  try {
-    const resp = await fetch(`/api/tmdb/genres/${type}/${tmdbId}`);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
-    const genres = data.genres || [];
+try {
+	    const data = await api('/api/tmdb/genres/' + type + '/' + tmdbId);
+	    const genres = data.genres || [];
     _setGenreCache(cacheKey, genres);
     _renderGenres(container, genres);
   } catch (e) {
@@ -259,10 +255,10 @@ export async function renderTmdb(el, params) {
   html += `<span style="color:var(--text-muted);margin:0 4px">·</span>`;
   html += `<span class="tmdb-page-info" style="padding:4px 10px">第 ${curPage}/${totalPages} 页 · 共 ${total} 项</span>`;
   html += `<span style="width:1px;height:16px;background:color-mix(in srgb,var(--border-color) 30%,transparent);flex-shrink:0"></span>`;
-  html += `<a class="tmdb-export-btn" href="/api/tmdb/watchlist/export.csv" target="_blank" download="tmdb_watchlist.csv" title="导出 CSV">${icon('csv')}</a>`;
-  html += `<a class="tmdb-export-btn" href="/api/tmdb/watchlist/movies?all=1" target="_blank" title="电影 JSON">${icon('json')}</a>`;
-  html += `<a class="tmdb-export-btn" href="/api/tmdb/watchlist/tv?all=1" target="_blank" title="剧集 JSON">${icon('tv')}</a>`;
-  html += '</div></div>';
+html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${icon('csv')}</button>`;
+	  html += `<button class="tmdb-export-btn" data-export="json-movie" title="电影 JSON">${icon('json')}</button>`;
+	  html += `<button class="tmdb-export-btn" data-export="json-tv" title="剧集 JSON">${icon('tv')}</button>`;
+	  html += '</div></div>';
 
   html += `<div class="toolbar"><div class="search-wrap">${icon('search', 'search-prefix')}<input type="text" id="tmdb-search" placeholder="搜索待看列表..." value="${esc(q)}"></div><button class="search-btn" id="tmdb-search-btn">${icon('search')} 搜索</button></div>`;
 
@@ -355,4 +351,42 @@ export async function renderTmdb(el, params) {
   });
 
   _initFlipCards();
+
+  // 导出按钮 — 使用带 token 的请求下载文件
+  document.querySelectorAll('.tmdb-export-btn[data-export]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const exportType = btn.dataset.export;
+      const token = localStorage.getItem('session_token');
+      try {
+        if (exportType === 'csv') {
+          // CSV 导出：响应是 Blob，用 fetch 手动带 token
+          const resp = await fetch('/api/tmdb/watchlist/export.csv', {
+            headers: token ? { 'X-Session-Token': token } : {}
+          });
+          if (!resp.ok) throw new Error('导出失败');
+          const blob = await resp.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'tmdb_watchlist.csv';
+          a.click();
+          URL.revokeObjectURL(url);
+        } else {
+          // JSON 导出：movies 或 tv
+          const apiType = exportType === 'json-movie' ? 'movies' : 'tv';
+          const data = await api(`/api/tmdb/watchlist/${apiType}?all=1`);
+          const json = JSON.stringify(data, null, 2);
+          const blob = new Blob([json], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `tmdb_watchlist_${apiType}.json`;
+          a.click();
+          URL.revokeObjectURL(url);
+        }
+      } catch (e) {
+        showToast('导出失败: ' + e.message, 'error');
+      }
+    });
+  });
 }

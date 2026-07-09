@@ -2,6 +2,7 @@ import { icon } from '../core/icons.js';
 import { esc, _formatTimeAgo } from '../core/utils.js';
 import { showToast } from './toast.js';
 import { _setUiConfig } from '../core/state.js';
+import { api } from '../core/api.js';
 
 export function showCacheStaleModal(itemCount, lastSync) {
   const existing = document.getElementById('cache-stale-modal');
@@ -36,14 +37,13 @@ export function showCacheStaleModal(itemCount, lastSync) {
     if (cb.checked) _setUiConfig('tmdb_cache_never_remind', '1');
     overlay.remove();
     showToast('后台同步已启动...', 'info');
-    try {
-      const resp = await fetch('/api/tmdb/watchlist/sync', { method: 'POST' });
-      const data = await resp.json();
-      if (data.success) showToast('同步完成后刷新页面即可看到最新数据', 'success');
-      else showToast(data.message || '启动同步失败', 'error');
-    } catch (e) {
-      showToast('启动同步失败: ' + e.message, 'error');
-    }
+try {
+	      const data = await api('/api/tmdb/watchlist/sync', { method: 'POST' });
+	      if (data.success) showToast('同步完成后刷新页面即可看到最新数据', 'success');
+	      else showToast(data.message || '启动同步失败', 'error');
+	    } catch (e) {
+	      showToast('启动同步失败: ' + e.message, 'error');
+	    }
   };
 }
 

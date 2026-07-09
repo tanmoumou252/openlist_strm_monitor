@@ -379,8 +379,8 @@ def process_subtitle_group(
             # 单语种强制加 forced
             forced = True
         else:
-            # 其他多语种情况
-            forced = True
+            # 其他多语种情况（繁体、日语等）不加 forced
+            forced = False
 
         new_name = build_subtitle_name(base_name, _code, _label, forced=forced)
         # 确保扩展名正确

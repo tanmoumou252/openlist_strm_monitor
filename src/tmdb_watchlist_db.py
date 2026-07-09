@@ -381,6 +381,17 @@ class TmdbWatchlistDb:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_season_count(self, tmdb_id: int) -> int:
+        """获取指定 TV 剧集的季数缓存。返回 int，0 表示未找到或无效。"""
+        try:
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT _season_count FROM tv WHERE id=?", (tmdb_id,)
+                ).fetchone()
+                return row[0] if row and row[0] > 0 else 0
+        except Exception:
+            return 0
+
     # ----------------------------------------------------------
     # 全量同步
     # ----------------------------------------------------------
@@ -433,15 +444,17 @@ class TmdbWatchlistDb:
                 page += 1
                 time.sleep(0.3)
 
-            # 删除已移除的电影
+            # 删除已移除的电影（使用临时表避免 SQLite 参数上限 P2-3）
             if movie_ids:
                 with self._conn() as conn:
-                    conn.execute(
-                        "DELETE FROM movies WHERE id NOT IN ({})".format(
-                            ",".join("?" * len(movie_ids))
-                        ),
-                        tuple(movie_ids),
+                    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _keep_movie_ids (id INTEGER)")
+                    conn.execute("DELETE FROM _keep_movie_ids")
+                    conn.executemany(
+                        "INSERT INTO _keep_movie_ids VALUES (?)",
+                        [(i,) for i in movie_ids],
                     )
+                    conn.execute(
+                        "DELETE FROM movies WHERE id NOT IN (SELECT id FROM _keep_movie_ids)")
                     conn.commit()
             else:
                 with self._conn() as conn:
@@ -479,12 +492,14 @@ class TmdbWatchlistDb:
 
             if tv_ids:
                 with self._conn() as conn:
-                    conn.execute(
-                        "DELETE FROM tv WHERE id NOT IN ({})".format(
-                            ",".join("?" * len(tv_ids))
-                        ),
-                        tuple(tv_ids),
+                    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _keep_tv_ids (id INTEGER)")
+                    conn.execute("DELETE FROM _keep_tv_ids")
+                    conn.executemany(
+                        "INSERT INTO _keep_tv_ids VALUES (?)",
+                        [(i,) for i in tv_ids],
                     )
+                    conn.execute(
+                        "DELETE FROM tv WHERE id NOT IN (SELECT id FROM _keep_tv_ids)")
                     conn.commit()
             else:
                 with self._conn() as conn:
@@ -591,8 +606,10 @@ class TmdbWatchlistDb:
             manual_override_at = existing[5] if existing else 0.0
             manual_override_by = existing[6] if existing else ""
 
-            # 如果 item 有 number_of_episodes（watchlist API），用它填充 ep 计数
-            if existing is None and item.get("number_of_episodes"):
+            # 如果 item 有 number_of_seasons/number_of_episodes（watchlist API），始终更新计数（P2-2）
+            if item.get("number_of_seasons") is not None:
+                season_count = int(item["number_of_seasons"])
+            if item.get("number_of_episodes") is not None:
                 episode_count = int(item["number_of_episodes"])
 
             conn.execute(

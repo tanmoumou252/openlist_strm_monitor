@@ -168,20 +168,35 @@ class RefreshService:
         )
 
     def _log_path_analysis(self, analysis: PathAnalysis) -> None:
-        """记录路径分析结果日志。"""
+        """记录路径分析结果日志（问题27：增强上下文信息）。"""
         if analysis.only_refresh:
             logging.warning(
-                "[主动刷新保护] 以下 refresh_paths 不属于任何已配置的 STRM 引擎，"
+                "[主动刷新保护] 以下 refresh_paths（来源: WebUI 配置页用户手动配置）"
+                "不属于任何已配置的 STRM 引擎（来源: Admin API /api/admin/storage/list "
+                "返回的 STRM storage 的 mount_path），"
                 "将只执行 WebDAV 只读刷新（不清理 B 区）: %s",
                 analysis.only_refresh,
             )
 
         if analysis.only_engine:
             logging.info(
-                "[主动刷新提示] 以下 STRM 引擎下未配置 refresh_paths，"
-                "建议在 WebUI 配置页添加以启用完整刷新 + B 区清理: %s",
+                "[主动刷新提示] 以下 STRM 引擎（来源: Admin API 返回的 mount_path）"
+                "下未配置 refresh_paths，建议在 WebUI 配置页添加以启用完整刷新 + B 区清理: %s",
                 analysis.only_engine,
             )
+
+        # 记录有效匹配的详细映射关系，方便排查
+        if analysis.valid_refresh_paths:
+            for rp in analysis.valid_refresh_paths:
+                rp_norm = rp.rstrip("/")
+                matched_engines = [
+                    ep for ep in analysis.engine_set
+                    if rp_norm.startswith(ep.rstrip("/") + "/") or rp_norm == ep.rstrip("/")
+                ]
+                logging.debug(
+                    "[路径分析] refresh_path '%s' 匹配到引擎: %s",
+                    rp, matched_engines,
+                )
 
     def _check_engine_accessibility(self, engine_set: set[str]) -> set[str]:
         """检查引擎路径的可访问性，返回可访问的引擎路径集合。"""
@@ -245,6 +260,19 @@ class RefreshService:
                 if storage.mount_path in engine_set or any(
                     storage.mount_path == ep or ep.startswith(storage.mount_path + "/") for ep in engine_set
                 ):
+                    # 问题27：增强日志，记录每个 storage 的详细信息
+                    logging.debug(
+                        "[STRM存储API验证] 存储详情: mount_path=%s, "
+                        "paths=%s (真实云端监控路径), "
+                        "SaveStrmLocalPath=%s (A区文件夹路径), "
+                        "status=%s, mode=%s",
+                        storage.mount_path,
+                        storage.paths,
+                        storage.save_local_path,
+                        storage.status,
+                        storage.save_local_mode,
+                    )
+
                     if not storage.is_working:
                         logging.warning(
                             "[STRM存储API验证] 存储状态异常: %s (status=%s)",

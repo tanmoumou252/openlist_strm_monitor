@@ -3,6 +3,12 @@ import { icon } from '../core/icons.js';
 import { esc, fmtTime, createSortLink } from '../core/utils.js';
 import { navigate } from '../core/router.js';
 
+/** 根据 B 区状态返回 CSS class 名称 */
+function _statusClass(status) {
+  const map = { valid: 'status-valid', duplicate: 'status-duplicate', quarantined: 'status-quarantined' };
+  return map[status] || '';
+}
+
 export async function renderArea(el, area, params) {
   const media = params.media || '';
   if (media) {
@@ -158,13 +164,13 @@ async function renderAreaDetail(el, area, params) {
     seasonParts.push(`<details class="season-details" open><summary>${esc(season.label)} <span style="font-size:calc(var(--font-base) - 1px);color:var(--text-muted)">(${season.records.length} 个文件)</span></summary>`);
     seasonParts.push('<div class="table-wrap"><table><thead><tr><th>序号</th>');
 
-    if (area === 'a') {
-      seasonParts.push(`<th>${sortLink('本地路径', 'path')}</th><th>WebDAV 路径</th><th>${sortLink('时间', 'time')}</th>`);
-    } else if (area === 'b') {
-      seasonParts.push(`<th>${sortLink('本地路径', 'path')}</th><th>WebDAV 路径</th><th>指纹</th><th>状态</th><th>${sortLink('时间', 'time')}</th>`);
-    } else if (area === 'c') {
-      seasonParts.push(`<th>${sortLink('本地路径', 'path')}</th><th>WebDAV 路径</th><th>原 B 路径</th><th>幽灵根</th><th>${sortLink('时间', 'time')}</th>`);
-    }
+if (area === 'a') {
+	      seasonParts.push(`<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>${sortLink('时间', 'updated_at')}</th>`);
+	    } else if (area === 'b') {
+	      seasonParts.push(`<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>指纹</th><th>状态</th><th>${sortLink('时间', 'updated_at')}</th>`);
+	    } else if (area === 'c') {
+	      seasonParts.push(`<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>原 B 路径</th><th>幽灵根</th><th>${sortLink('时间', 'moved_at')}</th>`);
+	    }
 
     seasonParts.push('</tr></thead><tbody>');
 
@@ -176,7 +182,7 @@ async function renderAreaDetail(el, area, params) {
         row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td>${fmtTime(r.updated_at)}</td>`;
       } else if (area === 'b') {
         const fp = r.fingerprint || '-'; const fpShort = fp.length > 5 ? fp.substring(0, 5) + '...' : fp;
-        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono" style="font-size:calc(var(--font-base) - 2px);cursor:default" title="${esc(fp)}">${esc(fpShort)}</td><td>${esc(r.status || '-')}</td><td>${fmtTime(r.updated_at)}</td>`;
+        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono" style="font-size:calc(var(--font-base) - 2px);cursor:default" title="${esc(fp)}">${esc(fpShort)}</td><td class="${_statusClass(r.status || '-')}">${esc(r.status || '-')}</td><td>${fmtTime(r.updated_at)}</td>`;
       } else if (area === 'c') {
         row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono">${esc(r.original_b_path || '-')}</td><td class="mono">${esc(r.ghost_root || '-')}</td><td>${fmtTime(r.moved_at)}</td>`;
       }

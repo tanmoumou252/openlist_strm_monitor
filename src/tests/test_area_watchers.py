@@ -193,30 +193,29 @@ class TestBAreaEventHandler:
         assert app.handle_b_deleted.called
 
     def test_on_moved_strm_to_strm(self):
-        """测试 B 区 .strm 重命名为 .strm（C2 回归测试）"""
+        """测试 B 区 .strm 重命名为 .strm（B-2 异步化回归测试）"""
         app = MagicMock()
-        app.db = MagicMock()
-        app.db.move_b_record.return_value = True
-        
         handler = BAreaEventHandler(app)
-        
+
         event = MockEvent(
             src_path="/path/to/old.strm",
             dest_path="/path/to/new.strm"
         )
-        
-        with patch('area_watchers.read_strm_webdav_path', return_value="/webdav/new.strm"), \
-             patch('area_watchers.make_strm_fingerprint', return_value="fp123"):
-            handler.on_moved(event)
-        
-        # 验证 move_b_record 被调用
-        app.db.move_b_record.assert_called_once_with(
+
+        handler.on_moved(event)
+
+        # B-2: 现在通过 _run_async 异步调用 handle_b_moved，而非同步调用 db.move_b_record
+        # 等待异步线程执行
+        time.sleep(0.1)
+
+        # 验证 handle_b_moved 被调用（而非直接调用 db.move_b_record）
+        app.handle_b_moved.assert_called_once_with(
             "/path/to/old.strm",
             "/path/to/new.strm"
         )
-        
-        # 验证 refresh_identity_current_b_path 被调用
-        assert app.refresh_identity_current_b_path.called
+
+        # 验证 refresh_identity_current_b_path 不再在 watcher 层调用（由 handle_b_moved 内部处理）
+        assert not app.refresh_identity_current_b_path.called
 
     def test_on_moved_strm_to_non_strm(self):
         """测试 B 区 .strm 重命名为非 .strm（C2 回归测试）"""
@@ -353,28 +352,27 @@ class TestAreaWatcherIntegration:
         assert call_args[0][0] == "/media/show/episode.ass"
 
     def test_b_rename_updates_database(self):
-        """测试 B 区重命名更新数据库（C2 回归场景）"""
+        """测试 B 区重命名更新数据库（B-2 异步化回归场景）"""
         app = MagicMock()
-        app.db = MagicMock()
-        app.db.move_b_record.return_value = True
-        
         handler = BAreaEventHandler(app)
-        
+
         # 模拟 .strm 文件重命名
         event = MockEvent(
             src_path="/b/old_name.strm",
             dest_path="/b/new_name.strm"
         )
-        
-        with patch('area_watchers.read_strm_webdav_path', return_value="/webdav/new.strm"), \
-             patch('area_watchers.make_strm_fingerprint', return_value="fp456"):
-            handler.on_moved(event)
-        
-        # 验证数据库更新
-        app.db.move_b_record.assert_called_once()
-        
-        # 验证 identity 表刷新
-        app.refresh_identity_current_b_path.assert_called_once_with("fp456")
+
+        handler.on_moved(event)
+
+        # B-2: 现在通过 _run_async 异步调用 handle_b_moved
+        # 等待异步线程执行
+        time.sleep(0.1)
+
+        # 验证 handle_b_moved 被调用
+        app.handle_b_moved.assert_called_once_with(
+            "/b/old_name.strm",
+            "/b/new_name.strm"
+        )
 
 
 if __name__ == "__main__":

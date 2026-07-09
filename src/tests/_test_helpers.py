@@ -7,6 +7,7 @@ test_sync_service）复用，消除三处 `_make_app` 的重复实现。
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Lock
 from unittest.mock import MagicMock, Mock
 
 
@@ -69,6 +70,8 @@ def build_mock_app(
     app._verify_b_path_lineage = app_cls(return_value=True)
     app.ensure_single_visible_instance = app_cls()
     app.handle_a_created_or_modified = app_cls()
+    # get_fingerprint_lock 必须返回真正的 Lock 对象，支持上下文管理器协议（P1-4）
+    app.get_fingerprint_lock = lambda _fp: Lock()
     app.get_a_root_for_path = app_cls()
 
     return app

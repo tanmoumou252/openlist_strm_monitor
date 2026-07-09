@@ -10,11 +10,14 @@ WebUI 路由与处理器模块（合并自 webui_routes.py + webui_handlers.py�
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import secrets
 import socket
 import sqlite3
+import sys
 import threading
 import time
 import urllib.request
@@ -34,6 +37,18 @@ if TYPE_CHECKING:
 # ============================================================
 # 工具函数
 # ============================================================
+
+def _hash_password_pbkdf2(password: str) -> str:
+    """对密码加盐 PBKDF2-HMAC-SHA256 哈希，返回 salt$iterations$hash 格式。
+
+    与 server.py:WebUIServer._hash_password / reset_admin.py:hash_password
+    保持完全一致的算法与格式，使登录端 _check_password 可正确验证。
+    """
+    salt = secrets.token_hex(16)
+    iterations = 600000
+    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iterations)
+    return f"{salt}${iterations}${h.hex()}"
+
 
 def _is_lan_ip(ip: str) -> bool:
     """判断 IP 是否为局域网地址（含 localhost）"""
@@ -111,13 +126,17 @@ def _build_img_opener(handler, use_proxy=True):
 def _try_bind_port(host: str, port: int) -> bool:
     """尝试绑定端口，检测端口是否可用。
 
-    设置 SO_REUSEADDR 以支持重启时 TIME_WAIT 状态复用。
-    如果端口被其他进程占用 Windows 下同样绑成功，
-    但后续 HTTPServer 创建失败会被 try-except 兜住。
+    Windows 上使用 SO_EXCLUSIVEADDRUSE 防止多进程绑定同一端口。
+    Unix 上使用 SO_REUSEADDR 支持重启时 TIME_WAIT 状态复用。
     """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if sys.platform == 'win32':
+                # Windows: 独占地址，防止多进程绑定
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                # Unix: 允许 TIME_WAIT 复用
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind((host, port))
         return True
     except OSError:
@@ -357,22 +376,21 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         all_items = (webui_server.get_watchlist_cached()
                      if webui_server and hasattr(webui_server, 'get_watchlist_cached')
                      else [])
-        # CSV 使用的 items 没有经过 _STATUS_MAP 映射（watchlist/movies?all=1 路由才有）
+# CSV 使用的 items 没有经过 _STATUS_MAP 映射（watchlist/movies?all=1 路由才有）
         # 在此补上映射；_status 不存在时通过 match_status 回退
-        for item in all_items:
-            item["_status"] = _STATUS_MAP.get(
-                item.get("match_status", "uncomputed"), "out")
+        # 在 CSV 写入循环中内联计算，避免原地修改共享缓存（P1-5）
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(["状态", "TMDB ID", "类型", "标题", "原标题", "发布日期", "评分"])
         for item in all_items:
+            status = _STATUS_MAP.get(
+                item.get("match_status", "uncomputed"), "out")
             media_type = item.get("_media_type", "movie")
             title = item.get("title") or item.get("name") or ""
             orig = item.get("original_title") or item.get(
                 "original_name") or ""
             date = item.get("release_date") or item.get("first_air_date") or ""
             rating = item.get("vote_average", 0)
-            status = item.get("_status", "out")
             status_label = {
                 "in": "已收录",
                 "out": "待看",
@@ -522,18 +540,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 if webui_server and hasattr(
                     webui_server, '_watchlist_db'
                 ) and webui_server._watchlist_db:
-                    try:
-                        db_path = webui_server._watchlist_db._db_path
-                        with sqlite3.connect(db_path, timeout=5) as conn:
-                            conn.execute("PRAGMA busy_timeout=5000")
-                            row = conn.execute(
-                                "SELECT _season_count FROM tv WHERE id=?",
-                                (tmdb_id,)
-                            ).fetchone()
-                            if row and row[0] > 0:
-                                count = row[0]
-                    except Exception:
-                        pass
+                    count = webui_server._watchlist_db.get_season_count(tmdb_id)
             handler._send_json({"id": tmdb_id, "season_count": count})
             return True
 
@@ -665,6 +672,10 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
                     "watchlist_db", "csv_watchlist_file"):
             if key in data and data[key] is not None:
                 val = data[key]
+                # 安全防护：空 token 且已配置时跳过，避免前端截断预览覆盖
+                if key == "access_token" and not val:
+                    if getattr(tmdb_cfg, "access_token", ""):
+                        continue
                 if key == "watchlist_db" and val:
                     val = str(val).strip()
                     if val:
@@ -813,6 +824,9 @@ def _handle_webui_config_get(handler, webui_server, scope: str) -> None:
         return
     try:
         cfg = _wdb.get_all_config(scope)
+        # 敏感信息过滤：UI scope 的 admin_password 哈希不对 GET 暴露
+        if scope == "ui" and isinstance(cfg, dict):
+            cfg.pop("admin_password", None)
         handler._send_json({"success": True, "scope": scope, "config": cfg})
     except Exception as e:
         logging.warning("[WebUI] 读取配置失败 (scope=%s): %s", scope, e)
@@ -838,7 +852,7 @@ def _validate_strm_engines(value: str) -> bool:
         engine = eng.get("engine")
         monitored = eng.get("monitored_paths")
         if not isinstance(engine, str) or not engine:
-            return False
+            continue  # 跳过空引擎条目，允许前端发 [{engine:"",monitored_paths:[]}]
         if not isinstance(monitored, list):
             return False
         if not all(isinstance(p, str) for p in monitored):
@@ -886,6 +900,21 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
             # 校验通过：回写规整后的合法 JSON 字符串，确保后续通用写循环
             # （str(val)）存入 DB 的是合法 JSON，而非原生对象被 str() 出来的 repr。
             data["strm_engines"] = _se_value
+        # ui scope 白名单过滤：拒绝未声明的 key，避免 LAN 内任意 key 污染配置表
+        if scope == "ui":
+            rejected = [k for k in data if k not in _UI_CONFIG_ALLOWED_KEYS]
+            if rejected:
+                logging.warning("[WebUI] ui scope 配置拒绝未声明 key: %s", rejected)
+                handler._send_json(
+                    {"success": False, "error": f"不允许的配置项: {rejected}"}, 403)
+                return
+        # admin_password 必须以 salt$iterations$hash 格式存储；
+        # 若以明文写入（str(val)），登录端 split("$", 2) 会失败 → 永久锁死。
+        # 在写入循环前统一处理，避免循环内重复哈希。
+        if scope == "ui" and "admin_password" in data:
+            _pw = data["admin_password"]
+            if isinstance(_pw, str) and _pw and "$" not in _pw:
+                data["admin_password"] = _hash_password_pbkdf2(_pw)
         for key, val in data.items():
             _wdb.set_config(scope, str(key), str(val) if val is not None else "")
 
@@ -961,16 +990,17 @@ def _hot_reload_openlist_config(webui_server) -> None:
         if (old_host != new_host or old_user != new_user or 
             old_password != new_password or old_totp != new_totp):
             _reinit_admin_client(webui_server)
-            # 重新从 API 加载 STRM 存储映射（复用刚初始化的 client，避免重复登录）
-            new_client = getattr(webui_server, '_admin_client', None)
-            try:
-                cfg.load_strm_storage_from_api(admin_client=new_client)
-                logging.info("[HotReload] STRM 存储映射已重新加载")
-            except Exception as exc:
-                logging.warning("[HotReload] 重新加载 STRM 存储映射失败: %s", exc)
             logging.info("[HotReload] WebDAV 连接已更新，OpenListAdminClient 已重新初始化")
         else:
             logging.info("[HotReload] OpenList 配置已热更新（WebDAV 连接未变）")
+        
+        # 无论 WebDAV 配置是否变更，只要有 strm_engines 变化就重加载存储映射
+        new_client = getattr(webui_server, '_admin_client', None)
+        try:
+            cfg.load_strm_storage_from_api(admin_client=new_client)
+            logging.info("[HotReload] STRM 存储映射已重新加载")
+        except Exception as exc:
+            logging.warning("[HotReload] 重新加载 STRM 存储映射失败: %s", exc)
     except Exception as e:
         logging.warning("[HotReload] OpenList 配置热更新失败: %s", e)
 
@@ -988,17 +1018,14 @@ def _reinit_admin_client(webui_server) -> None:
         )
         if new_client.login():
             logging.info("[HotReload] 新的 OpenListAdminClient 登录成功")
+            # 仅当登录成功后才替换 client 引用，避免用无效客户端冲掉正常工作实例
+            webui_server._admin_client = new_client
+            app_service = getattr(webui_server, '_app_service', None)
+            if app_service:
+                app_service.admin_api = new_client
+                logging.info("[HotReload] AppService.admin_api 已更新")
         else:
-            logging.warning("[HotReload] 新的 OpenListAdminClient 登录失败: %s", new_client.last_error_message or "未知错误")
-        
-        # 更新 WebUIServer 持有的 admin_client 引用
-        webui_server._admin_client = new_client
-        
-        # 如果 AppService 可访问，更新其 admin_api 引用
-        app_service = getattr(webui_server, '_app_service', None)
-        if app_service:
-            app_service.admin_api = new_client
-            logging.info("[HotReload] AppService.admin_api 已更新")
+            logging.warning("[HotReload] 新的 OpenListAdminClient 登录失败: %s — 保留旧客户端继续运行", new_client.last_error_message or "未知错误")
     except Exception as e:
         logging.warning("[HotReload] 重新初始化 OpenListAdminClient 失败: %s", e)
 
@@ -1236,7 +1263,6 @@ def _handle_openlist_paths(handler, webui_server) -> None:
     try:
         db_openlist_cfg = _wdb.get_all_config("openlist") if _wdb else {}
         strm_engines_json = db_openlist_cfg.get("strm_engines", "[]")
-        import json
         strm_engines = json.loads(strm_engines_json) if strm_engines_json else []
         
         # 从用户配置的引擎中提取 local_path
@@ -1509,14 +1535,13 @@ def _db_get_b_status_counts(db) -> dict[str, int]:
         with db.read_connection() as conn:
             valid = conn.execute(
                 "SELECT COUNT(*) FROM b_strm_files WHERE status='valid'").fetchone()[0]
-            orphan = conn.execute(
-                "SELECT COUNT(*) FROM b_strm_files WHERE status='orphan'").fetchone()[0]
-            unknown = conn.execute(
-                "SELECT COUNT(*) FROM b_strm_files WHERE status NOT IN ('valid','orphan') OR status IS NULL"
-            ).fetchone()[0]
-        return {"valid": valid, "orphan": orphan, "unknown": unknown}
+            duplicate = conn.execute(
+                "SELECT COUNT(*) FROM b_strm_files WHERE status='duplicate'").fetchone()[0]
+            quarantined = conn.execute(
+                "SELECT COUNT(*) FROM b_strm_files WHERE status='quarantined'").fetchone()[0]
+        return {"valid": valid, "duplicate": duplicate, "quarantined": quarantined}
     except Exception:
-        return {"valid": 0, "orphan": 0, "unknown": 0}
+        return {"valid": 0, "duplicate": 0, "quarantined": 0}
 
 
 def _db_get_db_file_size(db) -> int:
@@ -1614,8 +1639,8 @@ def handle_dashboard(handler) -> None:
             "b_count": counts.get("b_strm_files", 0),
             "c_count": counts.get("c_ghost_files", 0),
             "b_valid": b_status.get("valid", 0),
-            "b_orphan": b_status.get("orphan", 0),
-            "b_unknown": b_status.get("unknown", 0),
+            "b_duplicate": b_status.get("duplicate", 0),
+            "b_quarantined": b_status.get("quarantined", 0),
             "tmdb_configured": bool(handler.webui._tmdb_client),
             # 遗留字段（保持向后兼容）
             "table_counts": counts,
@@ -1722,6 +1747,87 @@ _KIND_FILTER_MAP = {
     "other": "其他",
 }
 
+# UI scope 写入白名单：仅允许这些 key 通过 POST /api/webui/config/ui 写入
+_UI_CONFIG_ALLOWED_KEYS = {"tmdb_cache_never_remind", "tmdb_match_toast_disabled", "admin_password"}
+
+
+# 登录速率限制 (P2-13)
+_login_attempts: dict[str, list[float]] = {}
+_login_attempts_lock = threading.Lock()
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_LOCKOUT_SECONDS = 300
+
+
+def _handle_login(handler, webui_server, body: bytes) -> None:
+    """处理 POST /api/login — 密码登录验证。"""
+    # 客户端 IP 速率限制（原子化读写，防止并发绕过）
+    client_ip = handler.client_address[0]
+    now = time.time()
+    with _login_attempts_lock:
+        # 定期清理 _login_attempts（每 1000 个 IP 时清理一次，防止内存泄漏）
+        if len(_login_attempts) > 1000:
+            cutoff = now - _LOGIN_LOCKOUT_SECONDS
+            stale_ips = [ip for ip, times in _login_attempts.items()
+                         if all(t < cutoff for t in times)]
+            for ip in stale_ips:
+                del _login_attempts[ip]
+
+        attempts = _login_attempts.get(client_ip, [])
+        # 清理过期记录
+        attempts = [t for t in attempts if now - t < _LOGIN_LOCKOUT_SECONDS]
+        if len(attempts) >= _LOGIN_MAX_ATTEMPTS:
+            retry_after = int(_LOGIN_LOCKOUT_SECONDS - (now - attempts[0]))
+            handler._send_json(
+                {"error": f"登录尝试过于频繁，请在 {retry_after} 秒后重试"},
+                429)
+            return
+        _login_attempts[client_ip] = attempts  # 保存清理后的列表引用
+    try:
+        data = json.loads(body)
+        password = data.get("password", "")
+        if not password:
+            handler._send_json({"error": "密码不能为空"}, 400)
+            return
+        if not webui_server._watchlist_db:
+            handler._send_json({"error": "DB 未初始化"}, 500)
+            return
+        stored = webui_server._watchlist_db.get_config("ui", "admin_password", "")
+        if not stored:
+            handler._send_json({"error": "未设置管理员密码"}, 400)
+            return
+        # 从 WebUIServer 的静态方法验证密码（内联避免 import 路径问题）
+        try:
+            parts = stored.split("$", 2)
+            if len(parts) != 3:
+                handler._send_json({"error": "密码格式错误"}, 500)
+                return
+            salt, iterations_str, stored_hash = parts
+            iterations = int(iterations_str)
+            pw_hash = hashlib.pbkdf2_hmac(
+                "sha256", password.encode(), salt.encode(), iterations)
+            password_ok = pw_hash.hex() == stored_hash
+        except (ValueError, AttributeError):
+            password_ok = False
+        if not password_ok:
+            with _login_attempts_lock:
+                attempts.append(now)
+                _login_attempts[client_ip] = attempts
+            handler._send_json({"error": "密码错误"}, 401)
+            return
+        # 登录成功，清除失败记录
+        with _login_attempts_lock:
+            _login_attempts.pop(client_ip, None)
+        # 生成 session token
+        token = secrets.token_hex(32)
+        with webui_server._sessions_lock:
+            webui_server._sessions[token] = time.time() + 604800  # 7天
+        handler._send_json({"success": True, "token": token})
+    except json.JSONDecodeError:
+        handler._send_json({"error": "无效的 JSON"}, 400)
+    except Exception as e:
+        logging.warning("[Login] 登录失败: %s", e)
+        handler._send_json({"error": "服务器内部错误"}, 500)
+
 
 def _get_media_groups_paginated(handler, area: str, kind_filter: str, 
                                  q: str, sort_key: str, sort_order: str,
@@ -1746,7 +1852,11 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
         base_where = f" AND (local_path LIKE ? OR webdav_path LIKE ?)"
         params_list.extend([f"%{q}%", f"%{q}%"])
     
-    # 查询 kind_counts（分类统计）
+    # kind_counts 使用独立参数（只含搜索 q，不含 kind 筛选），
+    # 确保统计始终显示所有类型的真实数量不受当前筛选影响
+    kind_params = list(params_list)  # 仅复制搜索参数
+    
+    # 查询 kind_counts（分类统计）— 必须放在 kind 筛选之前，排除 kind_where
     kind_counts_sql = f"""
         SELECT 
             CASE 
@@ -1760,10 +1870,20 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
         GROUP BY kind_category
     """
     
+    # 筛选 kind（仅作用于分页列表，不影响 kind_counts）
+    kind_where = ""
+    if kind_filter != "all" and kind_filter in _KIND_FILTER_MAP:
+        kind_value = _KIND_FILTER_MAP[kind_filter]
+        kind_where = f" AND {_KIND_SQL} = ?"
+        params_list.append(kind_value)
+    
     # 查询媒体分组（分页）
     offset = (page - 1) * page_size
     
-    # 排序
+    # 排序校验
+    if sort_order not in _AREA_SORT_ORDERS:
+        sort_order = "asc"
+
     order_clause = "ORDER BY "
     if sort_key == "count":
         order_clause += "file_count " + ("DESC" if sort_order == "desc" else "ASC")
@@ -1773,12 +1893,6 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
         order_clause += "kind " + ("DESC" if sort_order == "desc" else "ASC")
     else:  # name
         order_clause += "media_name " + ("DESC" if sort_order == "desc" else "ASC")
-    
-    # 筛选 kind（使用白名单映射）
-    kind_where = ""
-    if kind_filter != "all" and kind_filter in _KIND_FILTER_MAP:
-        kind_value = _KIND_FILTER_MAP[kind_filter]
-        kind_where = f" AND {_KIND_SQL} = '{kind_value}'"
     
     media_groups_sql = f"""
         SELECT 
@@ -1804,7 +1918,7 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
         with db.read_connection() as conn:
             conn.row_factory = sqlite3.Row
             # 查询 kind_counts
-            kind_counts_rows = conn.execute(kind_counts_sql, params_list).fetchall()
+            kind_counts_rows = conn.execute(kind_counts_sql, kind_params).fetchall()
             kind_counts = {}
             for row in kind_counts_rows:
                 kind_counts[row[0]] = row[1]
@@ -1906,6 +2020,15 @@ def handle_area(handler, area, params) -> None:
     })
 
 
+# 各区可排序字段白名单
+_AREA_SORT_FIELDS: dict[str, set[str]] = {
+    "a": {"local_path", "webdav_path", "updated_at"},
+    "b": {"local_path", "webdav_path", "updated_at", "status", "fingerprint"},
+    "c": {"local_path", "webdav_path", "moved_at"},
+}
+_AREA_SORT_ORDERS = {"asc", "desc"}
+
+
 def handle_area_detail(handler, area, params) -> None:
     """处理 GET /api/area/{area}/detail — 区域详情，返回指定媒体的所有记录"""
     if area not in ("a", "b", "c"):
@@ -1917,44 +2040,49 @@ def handle_area_detail(handler, area, params) -> None:
     sort_order = params.get("order", ["asc"])[0]
     page = _safe_int(params.get("page", ["1"])[0], 1)
 
-    # 使用 SQL 级过滤，减少返回数据量
+    # 排序白名单校验
+    allowed_fields = _AREA_SORT_FIELDS.get(area, {"local_path"})
+    if sort_field not in allowed_fields:
+        sort_field = "local_path"
+    if sort_order not in _AREA_SORT_ORDERS:
+        sort_order = "asc"
+
     db = handler.webui._db
-    records = []
+    records: list[dict] = []
+    total = 0
     search_params: tuple[str, ...] = ()
     try:
+        # 构建列列表和 COUNT
         if area == "a":
-            query_sql = "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files"
-            if media_name:
-                query_sql += " WHERE local_path LIKE ? OR webdav_path LIKE ?"
-                search_params = (f"%{media_name}%", f"%{media_name}%")
-            else:
-                search_params = ()
-            with db.read_connection() as conn:
-                conn.row_factory = sqlite3.Row
-                rows = conn.execute(query_sql, search_params).fetchall()
-            records = [dict(r) for r in rows]
+            columns = "local_path, webdav_path, parent_webdav_path, updated_at"
+            table = "a_strm_files"
         elif area == "b":
-            query_sql = "SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at FROM b_strm_files"
-            if media_name:
-                query_sql += " WHERE local_path LIKE ? OR webdav_path LIKE ?"
-                search_params = (f"%{media_name}%", f"%{media_name}%")
-            else:
-                search_params = ()
-            with db.read_connection() as conn:
-                conn.row_factory = sqlite3.Row
-                rows = conn.execute(query_sql, search_params).fetchall()
-            records = [dict(r) for r in rows]
-        elif area == "c":
-            query_sql = "SELECT local_path, webdav_path, original_b_path, ghost_root, moved_at FROM c_ghost_files"
-            if media_name:
-                query_sql += " WHERE local_path LIKE ? OR webdav_path LIKE ?"
-                search_params = (f"%{media_name}%", f"%{media_name}%")
-            else:
-                search_params = ()
-            with db.read_connection() as conn:
-                conn.row_factory = sqlite3.Row
-                rows = conn.execute(query_sql, search_params).fetchall()
-            records = [dict(r) for r in rows]
+            columns = "local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at"
+            table = "b_strm_files"
+        else:  # area == "c"
+            columns = "local_path, webdav_path, original_b_path, ghost_root, moved_at"
+            table = "c_ghost_files"
+
+        where_clause = ""
+        if media_name:
+            where_clause = " WHERE local_path LIKE ? OR webdav_path LIKE ?"
+            search_params = (f"%{media_name}%", f"%{media_name}%")
+
+        # 总记录数
+        count_sql = f"SELECT COUNT(*) FROM {table}{where_clause}"
+        with db.read_connection() as conn:
+            total = conn.execute(count_sql, search_params).fetchone()[0]
+
+        # 分页查询（SQL 不做全局排序，改为 Python 季内排序）
+        offset = (page - 1) * PAGE_SIZE
+        query_sql = (
+            f"SELECT {columns} FROM {table}{where_clause}"
+            f" LIMIT ? OFFSET ?"
+        )
+        with db.read_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(query_sql, search_params + (PAGE_SIZE, offset)).fetchall()
+        records = [dict(r) for r in rows]
     except Exception as e:
         logging.error("查询 %s 区详情失败: %s", area, e)
 
@@ -1964,23 +2092,25 @@ def handle_area_detail(handler, area, params) -> None:
         local_root = _compute_media_root(records[0].get("local_path", ""))
         webdav_root = _compute_media_root(records[0].get("webdav_path", ""))
 
-    # 排序（全量排序后再分页）
-    reverse = sort_order == "desc"
-    if records and sort_field in records[0]:
-        records.sort(key=lambda r: r.get(sort_field, ""), reverse=reverse)
-
-    total = len(records)
     total_pages = max(1, ceil(total / PAGE_SIZE)) if total else 1
     page = max(1, min(page, total_pages))
-    start = (page - 1) * PAGE_SIZE
-    page_records = records[start:start + PAGE_SIZE]
 
     # 按季分组
     seasons_map: dict[str, list[dict]] = {}
-    for rec in page_records:
+    for rec in records:
         label = _extract_season_from_local_path(
             rec.get("local_path", "")) or "默认"
         seasons_map.setdefault(label, []).append(rec)
+
+    # 每季内部独立排序（不跨季混合）
+    rev = sort_order.upper() == "DESC"
+    if sort_field == "local_path":
+        for recs in seasons_map.values():
+            recs.sort(key=lambda r: r.get("local_path", "") or "", reverse=rev)
+    elif sort_field == "updated_at" or sort_field == "moved_at":
+        sort_key = "updated_at" if sort_field == "updated_at" else "moved_at"
+        for recs in seasons_map.values():
+            recs.sort(key=lambda r: r.get(sort_key, 0) or 0, reverse=rev)
 
     seasons = [{"label": lbl, "records": recs}
                for lbl, recs in seasons_map.items()]
@@ -2046,6 +2176,7 @@ def handle_config_api(handler) -> None:
     token = db_tmdb_cfg.get("access_token", "") or (
         getattr(tmdb_cfg, "access_token", "") if tmdb_cfg else "")
     token_preview = (token[:16] + "...") if len(token) > 16 else (token or "")
+    token_configured = bool(token)
 
     # 数据库文件路径 — 兼容两种配置结构
     # AppConfig: cfg.local.db_file
@@ -2089,7 +2220,6 @@ def handle_config_api(handler) -> None:
     strm_map = getattr(cfg, "strm_storage_map", {})
     try:
         strm_engines_json = db_openlist_cfg.get("strm_engines", "[]")
-        import json
         strm_engines = json.loads(strm_engines_json) if strm_engines_json else []
         
         # 从用户配置的引擎中提取 local_path
@@ -2170,14 +2300,18 @@ def handle_config_api(handler) -> None:
         "webui_bind": webui_bind,
         # TMDB 认证
         "tmdb_configured": bool(tmdb_client),
-        "tmdb_token_preview": token_preview,
-        "tmdb_token": token,
+        "tmdb_token_configured": token_configured,
         "tmdb_language": tmdb_language,
         "tmdb_host": tmdb_host,
-        "tmdb_api_key": tmdb_api_key,
+        # tmdb_api_key 不返回明文（B-3）：仅返回是否已配置的布尔值，
+        # 防止未认证客户端通过白名单接口窃取完整 API key。
+        "tmdb_api_key": bool(tmdb_api_key),
         "tmdb_api_key_configured": bool(tmdb_api_key),
+        # tmdb_proxy: 最终解析后的代理 URL（None 表示未启用代理或使用反代模式）
         "tmdb_proxy": _resolve_tmdb_proxy(cfg),
+        # tmdb_proxy_http: DB 中存储的原始代理 URL（不论是否启用）
         "tmdb_proxy_http": tmdb_proxy_http,
+        # tmdb_proxy_enabled: DB 中存储的代理启用开关
         "tmdb_proxy_enabled": tmdb_proxy_enabled,
         "tmdb_account_id": tmdb_client.account_id if tmdb_client else None,
         "tmdb_watchlist_db": tmdb_watchlist_db,

@@ -6,12 +6,11 @@
 <title>STRM Bridge</title>
 <link rel="icon" type="image/x-icon" href="./assets/favicon.ico">
 
-<!-- 字体 fallback 链：本地子集（styles.css @font-face 先命中常用字）→ EdgeOne/Google CDN 反代补全 -->
-<link rel="preconnect" href="/fonts/gstatic/" crossorigin>
-<link rel="stylesheet" href="/fonts/css/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&display=swap">
-  <script type="module" crossorigin src="./assets/index-7luqQIsw.js"></script>
-  <link rel="modulepreload" crossorigin href="./assets/core-B6fuJhLL.js">
-  <link rel="stylesheet" crossorigin href="./assets/index-Vx8SiIGr.css">
+<!-- 本地子集字体（NotoSansSC-Subset.woff2）→ 系统字体回退 -->
+<!-- CDN 字体已移除：浏览器会优先使用完整版 CDN 字体覆盖子集，导致子集化失效 -->
+  <script type="module" crossorigin src="./assets/index-Y7K1OcS8.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/core-BOG7mpy_.js">
+  <link rel="stylesheet" crossorigin href="./assets/index-Bz836Hsp.css">
 </head>
 <body>
 <div id="wallpaper"></div>

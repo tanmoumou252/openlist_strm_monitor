@@ -27,7 +27,7 @@ const _openlistHelpTexts = {
   log_level: '日志记录级别。\nDEBUG：最详细，包含所有调试信息。\nINFO：常规信息（推荐）。\nWARNING：只记录警告和错误。\nERROR：只记录错误。',
   log_max_size_mb: '单个日志文件最大大小（MB）。\n超过此大小会自动轮转。\n建议：2-10 MB。',
   log_backup_count: '保留的历史日志文件数量。\n超过此数量的旧日志会被删除。\n建议：5-10 个。',
-  log_file: '日志文件保存路径（相对路径相对项目根目录）。\n留空使用默认 ./activity.log。\n修改并保存后，重启 WebUI / 主程序即按此路径与上面设置的级别写日志。',
+  log_file: '日志文件保存路径（相对路径相对项目根目录）。\n留空使用默认 logs/strm_bridge.log。\n修改并保存后，重启 WebUI / 主程序即按此路径与上面设置的级别写日志。',
 };
 
 function _olHelpIcon(key, tooltipBelow = false) {
@@ -65,7 +65,7 @@ export async function _renderOpenListConfig(el, cfg) {
     if (openlistCfg.refresh_paths) refreshPaths = JSON.parse(openlistCfg.refresh_paths);
   } catch (e) { refreshPaths = []; }
 
-  window._openlistRefreshPaths = refreshPaths.slice();
+  OpenListState.refreshPaths = refreshPaths.slice();
 
   function olField(id, label, value, placeholder, type = 'text', persistLabel = false, readOnly = false) {
     return createField(id, label, value, {
@@ -244,7 +244,7 @@ export async function _renderOpenListConfig(el, cfg) {
       ])}
       ${olField('ol-log-max-size', '日志最大大小 (MB)', openlistCfg.log_max_size_mb || '2', '2', 'number')}
       ${olField('ol-log-backup-count', '历史日志数量', openlistCfg.log_backup_count || '5', '5', 'number')}
-      ${olField('ol-log-path', '日志保存路径', openlistCfg.log_file || '', './activity.log')}
+      ${olField('ol-log-path', '日志保存路径', openlistCfg.log_file || '', 'logs/strm_bridge.log')}
     </div>
   </div>`;
 
@@ -280,6 +280,7 @@ export async function _renderOpenListConfig(el, cfg) {
 
   _bindOpenListFormEvents(cfg, openlistCfg);
   _renderRefreshPathsTags();
+  _bindEngineSelectEvents();
 }
 
 function _syncRefreshPathsFromPreviewEngines() {
@@ -297,21 +298,21 @@ function _syncRefreshPathsFromPreviewEngines() {
 	    });
 	  });
 	  // 合并：保留用户已有的路径 + 补充引擎配置中新增的推导路径
-	  const existing = window._openlistRefreshPaths || [];
+	  const existing = OpenListState.refreshPaths || [];
 	  const existingSet = new Set(existing);
 	  for (const d of derived) {
 	    if (!existingSet.has(d)) {
 	      existing.push(d);
 	    }
 	  }
-	  window._openlistRefreshPaths = existing;
+	  OpenListState.refreshPaths = existing;
 	  _renderRefreshPathsTags();
 	}
 
 function _renderRefreshPathsTags() {
   const container = document.getElementById('refresh-paths-tags');
   if (!container) return;
-  const paths = window._openlistRefreshPaths || [];
+  const paths = OpenListState.refreshPaths || [];
   if (!paths.length) {
     container.innerHTML = '<span class="refresh-paths-empty">暂无刷新路径，可手动添加</span>';
     return;
@@ -324,9 +325,9 @@ function _renderRefreshPathsTags() {
       const btn = e.target.closest('.tag-remove');
       if (!btn || !container.contains(btn)) return;
       const idx = parseInt(btn.dataset.pathIdx);
-      const path = window._openlistRefreshPaths && window._openlistRefreshPaths[idx];
+      const path = OpenListState.refreshPaths && OpenListState.refreshPaths[idx];
       if (path === undefined) return;
-      window._openlistRefreshPaths.splice(idx, 1);
+      OpenListState.refreshPaths.splice(idx, 1);
       _renderRefreshPathsTags();
     };
     container.addEventListener('click', container._delegatedListener);
@@ -380,17 +381,15 @@ function _bindOpenListFormEvents(cfg, openlistCfg) {
     btn.disabled = true;
     btn.innerHTML = '测试中...';
     try {
-      const resp = await fetch('/api/openlist/test-connection', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          host: document.getElementById('ol-webdav-host')?.value || '',
-          user: document.getElementById('ol-webdav-user')?.value || '',
-          password: document.getElementById('ol-webdav-password')?.value || '',
-          totp_secret: document.getElementById('ol-webdav-totp-secret')?.value || '',
-        }),
-      });
-      const data = await resp.json();
+const data = await api('/api/openlist/test-connection', {
+	        method: 'POST',
+	        body: {
+	          host: document.getElementById('ol-webdav-host')?.value || '',
+	          user: document.getElementById('ol-webdav-user')?.value || '',
+	          password: document.getElementById('ol-webdav-password')?.value || '',
+	          totp_secret: document.getElementById('ol-webdav-totp-secret')?.value || '',
+	        },
+	      });
       if (data.success) {
         showToast('连接成功！', 'success');
         OpenListState.apiStatus = 'online';
@@ -434,8 +433,7 @@ function _bindOpenListFormEvents(cfg, openlistCfg) {
         btn.innerHTML = '重启中...';
         showToast('正在重启主程序，请稍候...', 'info');
         try {
-          const resp = await fetch('/api/restart-webui', { method: 'POST' });
-          const data = await resp.json();
+const data = await api('/api/restart-webui', { method: 'POST' });
           if (data.success) {
             showToast('主程序正在重启，请稍候刷新页面...', 'success');
             setTimeout(() => {
@@ -494,12 +492,12 @@ function _bindOpenListFormEvents(cfg, openlistCfg) {
     if (!input) return;
     const path = input.value.trim();
     if (!path) return;
-    if (!window._openlistRefreshPaths) window._openlistRefreshPaths = [];
-    if (window._openlistRefreshPaths.includes(path)) {
+    if (!OpenListState.refreshPaths) OpenListState.refreshPaths = [];
+    if (OpenListState.refreshPaths.includes(path)) {
       showToast('该路径已存在', 'info');
       return;
     }
-    window._openlistRefreshPaths.push(path);
+    OpenListState.refreshPaths.push(path);
     input.value = '';
     _renderRefreshPathsTags();
   });
@@ -519,7 +517,7 @@ function _bindOpenListFormEvents(cfg, openlistCfg) {
         webdav_totp_secret: document.getElementById('ol-webdav-totp-secret')?.value || '',
         b_root: document.getElementById('ol-b-root')?.value || '',
         c_root: document.getElementById('ol-c-root')?.value || '',
-        refresh_paths: JSON.stringify(window._openlistRefreshPaths || []),
+        refresh_paths: JSON.stringify(OpenListState.refreshPaths || []),
         strm_engines: JSON.stringify(OpenListState.strmEngines),
         refresh_enabled: document.querySelector('#ol-refresh-enabled button[data-value="on"].active') ? 'true' : 'false',
         refresh_interval_minutes: document.getElementById('ol-refresh-interval')?.value || '10',
@@ -535,18 +533,17 @@ function _bindOpenListFormEvents(cfg, openlistCfg) {
         log_backup_count: document.getElementById('ol-log-backup-count')?.value || '5',
         log_file: document.getElementById('ol-log-path')?.value || '',
       };
-      const resp = await fetch('/api/webui/config/openlist', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await resp.json();
-      if (data.success) {
-        showToast('OpenList 配置已保存并热更新', 'success');
-        const savedHost = document.getElementById('ol-webdav-host')?.value || '';
-        OpenListState.configured = !!savedHost.trim();
-        _updateApiStatusDot();
-        await _checkApiStatus();
+const data = await api('/api/webui/config/openlist', {
+	        method: 'POST',
+	        body,
+	      });
+if (data.success) {
+	        showToast('OpenList 配置已保存并热更新', 'success');
+	        const savedHost = document.getElementById('ol-webdav-host')?.value || '';
+	        OpenListState.configured = !!savedHost.trim();
+	        _updateApiStatusDot();
+	        await _checkApiStatus();
+	        _refreshAFolders();
       } else {
         showToast('保存失败: ' + (data.error || '未知错误'), 'error');
       }
@@ -559,7 +556,23 @@ function _bindOpenListFormEvents(cfg, openlistCfg) {
   });
 }
 
-function _refreshEngineRow(idx) {
+function _refreshAFolders() {
+	  const container = document.getElementById('a-folders-display');
+	  if (!container) return;
+	  const configuredEngines = OpenListState.strmEngines.filter(e => e.engine);
+	  const aFolders = [];
+	  configuredEngines.forEach(eng => {
+	    const engData = OpenListState.availableEngines.find(e => e.mount_path === eng.engine);
+	    if (engData && engData.local_path && !aFolders.includes(engData.local_path)) {
+	      aFolders.push(engData.local_path);
+	    }
+	  });
+	  container.innerHTML = aFolders.length
+	    ? aFolders.map(f => `<span class="a-folder-chip">${esc(f)}</span>`).join('')
+	    : '<span style="color:var(--text-muted)">暂无数据（请先配置 STRM 引擎）</span>';
+	}
+
+	function _refreshEngineRow(idx) {
   const container = document.getElementById(`tag-container-${idx}`);
   if (!container) return;
   const row = OpenListState.strmEngines[idx];
@@ -570,6 +583,34 @@ function _refreshEngineRow(idx) {
   container.innerHTML = row.monitored_paths.map((p, pi) => 
     `<span class="tag">${esc(p)}<button class="tag-remove" data-row="${idx}" data-pi="${pi}" title="删除">×</button></span>`
   ).join('');
+}
+
+function _bindEngineSelectEvents() {
+  document.querySelectorAll('.engine-select').forEach(sel => {
+    // 避免重复绑定
+    if (sel.dataset.bound) return;
+    sel.dataset.bound = '1';
+    sel.addEventListener('change', async () => {
+      const idx = parseInt(sel.dataset.row);
+      const mountPath = sel.value;
+      if (!mountPath) return;
+      const eng = OpenListState.availableEngines.find(e => e.mount_path === mountPath);
+      if (eng) {
+        OpenListState.strmEngines[idx] = { engine: mountPath, monitored_paths: eng.paths || [] };
+        _refreshEngineRow(idx);
+        _syncRefreshPathsFromPreviewEngines();
+      } else {
+        try {
+          const resp = await api(`/api/openlist/monitored-paths?engine=${encodeURIComponent(mountPath)}`);
+          if (resp.success) {
+            OpenListState.strmEngines[idx] = { engine: mountPath, monitored_paths: resp.paths || [] };
+            _refreshEngineRow(idx);
+            _syncRefreshPathsFromPreviewEngines();
+          }
+        } catch (e) { }
+      }
+    });
+  });
 }
 
 function _refreshEngineTable() {
@@ -603,28 +644,7 @@ function _refreshEngineTable() {
   html += `<div class="table-actions"><button class="table-btn primary" id="add-engine-row"${addDisabled}>+ 添加行</button></div>`;
   wrap.innerHTML = '<div class="strm-engine-wrap"><span class="monitored-paths-help">' + _olHelpIcon('monitored_paths') + '</span>' + html + '</div>';
 
-  wrap.querySelectorAll('.engine-select').forEach(sel => {
-    sel.addEventListener('change', async () => {
-      const idx = parseInt(sel.dataset.row);
-      const mountPath = sel.value;
-      if (!mountPath) return;
-      const eng = OpenListState.availableEngines.find(e => e.mount_path === mountPath);
-      if (eng) {
-        OpenListState.strmEngines[idx] = { engine: mountPath, monitored_paths: eng.paths || [] };
-        _refreshEngineRow(idx);
-        _syncRefreshPathsFromPreviewEngines();
-      } else {
-        try {
-          const resp = await api(`/api/openlist/monitored-paths?engine=${encodeURIComponent(mountPath)}`);
-          if (resp.success) {
-            OpenListState.strmEngines[idx] = { engine: mountPath, monitored_paths: resp.paths || [] };
-            _refreshEngineRow(idx);
-            _syncRefreshPathsFromPreviewEngines();
-          }
-        } catch (e) { }
-      }
-    });
-  });
+  _bindEngineSelectEvents();
   if (!wrap._delegatedTagRemoveListener) {
     wrap._delegatedTagRemoveListener = (e) => {
       const btn = e.target.closest('.tag-remove');

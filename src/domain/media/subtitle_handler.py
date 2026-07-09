@@ -222,14 +222,41 @@ class SubtitleHandler:
         b_target_dir.mkdir(parents=True, exist_ok=True)
 
         base_name = _build_standard_name(season, episode)
-        lang_info = detect_subtitle_language(sub_file.name)
 
-        if lang_info is None:
-            new_name = f"{base_name}.forced.zho.中文{sub_file.suffix.lower()}"
+        # 收集同集数的所有字幕文件进行分组处理
+        episode_subs = []
+        for sub in sub_file.parent.glob(f"*{sub_file.suffix}"):
+            if sub.is_file():
+                s, e = _extract_season_episode(sub.name)
+                if s == season and e == episode:
+                    episode_subs.append(sub)
+
+        # 如果只有当前一个字幕，直接处理
+        if len(episode_subs) <= 1:
+            lang_info = detect_subtitle_language(sub_file.name)
+            if lang_info is None:
+                new_name = f"{base_name}.forced.zho.中文{sub_file.suffix.lower()}"
+            else:
+                _code, _label, _priority = lang_info
+                new_name = f"{base_name}.forced.{_code}.{_label}{sub_file.suffix.lower()}"
         else:
-            _code, _label, _priority = lang_info
-            new_name = f"{base_name}.forced.{_code}.{_label}{
-                sub_file.suffix.lower()}"
+            # 多个字幕，使用分组逻辑
+            from media_renamer import process_subtitle_group
+            grouped = process_subtitle_group(episode_subs, (season, episode), "")
+            # 找到当前字幕的重命名结果
+            new_name = None
+            for src, dst_name in grouped:
+                if src == sub_file:
+                    new_name = dst_name
+                    break
+            if new_name is None:
+                # 回退到单文件处理
+                lang_info = detect_subtitle_language(sub_file.name)
+                if lang_info is None:
+                    new_name = f"{base_name}.forced.zho.中文{sub_file.suffix.lower()}"
+                else:
+                    _code, _label, _priority = lang_info
+                    new_name = f"{base_name}.forced.{_code}.{_label}{sub_file.suffix.lower()}"
 
         target = b_target_dir / new_name
 

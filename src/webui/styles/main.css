@@ -708,3 +708,8 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 
 /* ===== TMDB Unconfigured Notice ===== */
 .tmdb-unconfigured-notice{background:color-mix(in srgb,var(--primary) 10%,var(--bg-card));border:1px solid color-mix(in srgb,var(--primary) 24%,transparent);border-radius:10px;padding:20px;color:var(--text-main);font-size:var(--font-base);display:flex;align-items:center;gap:10px}
+
+/* ===== B 区状态标签颜色 ===== */
+.status-valid{color:var(--primary)}
+.status-duplicate{color:#E37400}
+.status-quarantined{color:#C5221F}

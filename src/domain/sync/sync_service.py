@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from app_service import AppService
     from database import Database
-    from webdav_client import OpenListAdminClient
     from config import AppConfig
 
 from utils import read_strm_webdav_path, safe_remove_file
@@ -24,7 +23,6 @@ class SyncService:
         self.app = app
         self.config: AppConfig = app.config
         self.db: Database = app.db
-        self.admin_api: OpenListAdminClient = app.admin_api
 
     def initial_scan_a(self) -> None:
         """启动时扫描 A 区现有文件"""
@@ -94,10 +92,13 @@ class SyncService:
             return None
         from utils import make_strm_fingerprint
         fingerprint = make_strm_fingerprint(webdav_path)
-        if self.db.b_fingerprint_exists(fingerprint):
-            return None  # 会被统计为 skip_count
-        return self.copy_a_record_to_b(
-            a_local_path, webdav_path, parent_webdav_path)
+        # 按 fingerprint 串行化，与 handle_a_created_or_modified 共用同一锁（P1-4）
+        fp_lock = self.app.get_fingerprint_lock(fingerprint)
+        with fp_lock:
+            if self.db.b_fingerprint_exists(fingerprint):
+                return None  # 会被统计为 skip_count
+            return self.copy_a_record_to_b(
+                a_local_path, webdav_path, parent_webdav_path)
 
     def copy_a_record_to_b(self, a_local_path: str,
                            webdav_path: str, parent: str) -> bool | None:
@@ -137,7 +138,7 @@ class SyncService:
                     logging.error("[A->B跳过失败] %s", e)
                     return False
         # 如果 WebDAV 源文件已不存在，说明 A 区是冗余文件，清理掉
-        if not self.admin_api.check_exists(webdav_path):
+        if not self.app.admin_api.check_exists(webdav_path):
             logging.warning(
                 "[A->B跳过] WebDAV源文件已不存在，跳过复制并清理A区: %s",
                 webdav_path,
