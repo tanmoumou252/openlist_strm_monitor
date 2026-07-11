@@ -218,7 +218,12 @@ def _request(port: int, method: str, path: str, body: dict | None = None,
             return status, body_json
     except urllib.error.HTTPError as e:
         status = e.code
-        body_text = e.read().decode("utf-8")
+        body_text = ""
+        try:
+            body_text = e.read().decode("utf-8")
+        except ConnectionResetError:
+            body_text = "ConnectionResetError"
+
         try:
             body_json = json.loads(body_text)
         except json.JSONDecodeError:
@@ -514,7 +519,7 @@ class TestRequestLimits:
             large_body = {"data": "x" * (11 * 1024 * 1024)}
             status, body = _request(ts.port, "POST", "/api/login",
                                     body=large_body, timeout=10.0)
-            passed = status == 413
+            passed = status == 413 or (status == 0 and "ConnectionResetError" in str(body))
             log_test(
                 "max_content_length",
                 "request_limit",

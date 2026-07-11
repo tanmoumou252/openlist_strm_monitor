@@ -15,6 +15,7 @@ WebUI HTTP 请求级集成测试。
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 import threading
@@ -114,6 +115,10 @@ def _make_mock_db(tmp_path: Path) -> MagicMock:
 @pytest.fixture
 def webui_server(tmp_path):
     """启动一个真实的 WebUIServer 实例，返回 (server, base_url)。"""
+    # 清理全局登录速率限制状态，避免测试间相互污染
+    from webui.routes import _login_attempts
+    _login_attempts.clear()
+
     cfg = _make_mock_config(tmp_path)
     db = _make_mock_db(tmp_path)
     port = _free_port()
@@ -130,6 +135,10 @@ def webui_server(tmp_path):
         (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
 
         server = WebUIServer(cfg.webui, db, app_config=cfg)
+        # 设置测试密码环境变量
+        test_password = "test_password_123"
+        os.environ["WEBUI_TEST_MODE"] = "1"
+        os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
         server.start()
         # 等待服务器线程就绪
         deadline = time.time() + 2.0
@@ -137,31 +146,47 @@ def webui_server(tmp_path):
             time.sleep(0.05)
 
         base_url = f"http://127.0.0.1:{port}"
-        yield server, base_url
+
+        # 登录并获取 session token
+        login_status, login_headers, login_body = _http_post(
+            base_url, "/api/login", {"password": test_password})
+        assert login_status == 200
+        session_token = login_body.get("token")
+        assert session_token is not None
+
+        yield server, base_url, session_token
 
         server.stop()
 
 
-def _http_get(base_url: str, path: str, timeout: float = 3.0):
+def _http_get(base_url: str, path: str, session_token: str | None = None, timeout: float = 3.0):
     """发送 GET 请求并返回 (status, headers, body_dict_or_bytes)。"""
     url = f"{base_url}{path}"
-    req = urllib.request.Request(url, method="GET")
+    req = urllib.request.Request(url, method="GET", headers={"X-Session-Token": session_token}) if session_token else urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()
             ctype = resp.headers.get("Content-Type", "")
             if "application/json" in ctype:
-                return resp.status, resp.headers, json.loads(body)
+                json_body = json.loads(body)
+                # 如果是登录响应，从 body 中提取 token
+                if path == "/api/login" and "token" in json_body:
+                    resp.headers["X-Session-Token"] = json_body["token"]
+                return resp.status, resp.headers, json_body
             return resp.status, resp.headers, body
     except urllib.error.HTTPError as e:
         body = e.read()
         ctype = e.headers.get("Content-Type", "")
         if "application/json" in ctype:
-            return e.code, e.headers, json.loads(body)
+            json_body = json.loads(body)
+            # 如果是登录响应，从 body 中提取 token
+            if path == "/api/login" and "token" in json_body:
+                e.headers["X-Session-Token"] = json_body["token"]
+            return e.code, e.headers, json_body
         return e.code, e.headers, body
 
 
-def _http_post(base_url: str, path: str, data: dict | bytes,
+def _http_post(base_url: str, path: str, data: dict | bytes, session_token: str | None = None,
                timeout: float = 3.0):
     """发送 POST 请求并返回 (status, headers, body_dict_or_bytes)。"""
     url = f"{base_url}{path}"
@@ -171,7 +196,7 @@ def _http_post(base_url: str, path: str, data: dict | bytes,
         body = json.dumps(data).encode("utf-8")
     req = urllib.request.Request(
         url, data=body, method="POST",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "X-Session-Token": session_token} if session_token else {"Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -196,26 +221,26 @@ class TestStaticRoutes:
     """测试 SPA 初始页面和静态资源路由。"""
 
     def test_root_returns_index_html(self, webui_server):
-        server, base = webui_server
-        status, headers, body = _http_get(base, "/")
+        server, base, session_token = webui_server
+        status, headers, body = _http_get(base, "/", session_token)
         assert status == 200
         assert "text/html" in headers.get("Content-Type", "")
         assert b"<html>" in body
 
     def test_api_page_returns_index_html(self, webui_server):
-        server, base = webui_server
-        status, headers, body = _http_get(base, "/api/page")
+        server, base, session_token = webui_server
+        status, headers, body = _http_get(base, "/api/page", session_token)
         assert status == 200
         assert b"<html>" in body
 
     def test_favicon_ico(self, webui_server):
-        server, base = webui_server
-        status, _, _ = _http_get(base, "/favicon.ico")
+        server, base, session_token = webui_server
+        status, _, _ = _http_get(base, "/favicon.ico", session_token)
         assert status == 200
 
     def test_unknown_path_404(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_get(base, "/this/path/does/not/exist")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/this/path/does/not/exist", session_token)
         assert status == 404
         assert isinstance(body, dict)
         assert "error" in body
@@ -229,31 +254,143 @@ class TestCoreRoutes:
     """测试 Dashboard / Logs / Records / Config 路由。"""
 
     def test_dashboard_returns_json(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/dashboard")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/dashboard", session_token)
         # dashboard 调用 _db_get_table_counts / _db_get_b_status_counts / _db_get_db_file_size
         # mock 下可能因 MagicMock 属性访问返回非预期类型而 500
         assert status in (200, 500)
         assert isinstance(body, dict)
 
-    def test_logs_api_returns_list(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/logs")
-        assert status == 200
-        assert isinstance(body, dict)
-        assert "logs" in body or "entries" in body or "lines" in body
-
     def test_records_api_returns_list(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/records")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/area/a", session_token)
         assert status == 200
         assert isinstance(body, dict)
 
     def test_config_api(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/config")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/config", session_token)
         assert status == 200
         assert isinstance(body, dict)
+
+    def test_logs_api_returns_lines(self, webui_server):
+        """主程序日志 API 应返回 {lines, count} 结构。"""
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/logs", session_token)
+        assert status == 200
+        assert isinstance(body, dict)
+        assert "lines" in body
+        assert "count" in body
+        assert isinstance(body["lines"], list)
+        assert isinstance(body["count"], int)
+
+
+# ============================================================
+# 日志下载路由（/api/logs/download）
+# ============================================================
+
+class TestLogsDownloadRoute:
+    """测试 /api/logs/download 路由的鉴权和下载行为。"""
+
+    def test_logs_download_requires_auth(self, webui_server):
+        """未认证访问 /api/logs/download 应返回 401。"""
+        server, base, _ = webui_server
+        # 不传 session_token
+        status, _, body = _http_get(base, "/api/logs/download", session_token=None)
+        assert status == 401
+        assert isinstance(body, dict)
+        assert body.get("error") == "unauthorized"
+
+    def test_logs_download_invalid_token_rejected(self, webui_server):
+        """无效 token 应返回 401。"""
+        server, base, _ = webui_server
+        status, _, body = _http_get(
+            base, "/api/logs/download", session_token="invalid_token_xyz")
+        assert status == 401
+        assert isinstance(body, dict)
+
+    def test_logs_download_authenticated_returns_404_when_no_log_file(
+            self, webui_server):
+        """已认证但日志文件不存在时应返回 404。"""
+        server, base, session_token = webui_server
+        # 确保 _log_file 为 None（fixture 默认就是 None）
+        server._log_file = None
+        # 同时清空 cfg.log.file
+        server._config.log = None
+        status, _, body = _http_get(
+            base, "/api/logs/download", session_token=session_token)
+        assert status == 404
+        assert isinstance(body, dict)
+        assert "error" in body
+
+    def test_logs_download_authenticated_returns_file_content(
+            self, tmp_path, monkeypatch):
+        """已认证且日志文件存在时应返回 200 + 文件内容。"""
+        # 清理全局登录速率限制状态
+        from webui.routes import _login_attempts
+        _login_attempts.clear()
+
+        # 准备一个临时日志文件
+        log_file = tmp_path / "strm_bridge.log"
+        log_file.write_text(
+            "2026-07-10 12:00:00 INFO test log line 1\n"
+            "2026-07-10 12:00:01 INFO test log line 2\n",
+            encoding="utf-8",
+        )
+
+        # 复用 webui_server fixture 但覆盖 _log_file
+        from webui.server import WebUIServer
+        cfg = _make_mock_config(tmp_path)
+        db = _make_mock_db(tmp_path)
+        port = _free_port()
+        cfg.webui.port = port
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"):
+            (tmp_path / "static").mkdir(exist_ok=True)
+            (tmp_path / "static" / "index.html").write_text(
+                "<html><body>test</body></html>", encoding="utf-8")
+            (tmp_path / "static" / "assets").mkdir(exist_ok=True)
+            (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
+
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            test_password = "test_password_123"
+            os.environ["WEBUI_TEST_MODE"] = "1"
+            os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
+            server.start()
+            deadline = time.time() + 2.0
+            while not server._server and time.time() < deadline:
+                time.sleep(0.05)
+
+            try:
+                # 注入日志文件路径
+                server._log_file = str(log_file)
+                # 清空 cfg.log 以确保走 fallback 路径
+                server._config.log = None
+
+                base_url = f"http://127.0.0.1:{port}"
+                # 登录
+                login_status, _, login_body = _http_post(
+                    base_url, "/api/login", {"password": test_password})
+                assert login_status == 200
+                token = login_body.get("token")
+                assert token is not None
+
+                # 下载日志
+                status, headers, body = _http_get(
+                    base_url, "/api/logs/download", session_token=token)
+                assert status == 200
+                # 响应应为二进制内容
+                assert isinstance(body, bytes)
+                content = body.decode("utf-8")
+                assert "test log line 1" in content
+                assert "test log line 2" in content
+                # Content-Disposition 应包含 attachment
+                cdisp = headers.get("Content-Disposition", "")
+                assert "attachment" in cdisp
+                assert "strm_bridge.log" in cdisp
+            finally:
+                server.stop()
 
 
 # ============================================================
@@ -264,24 +401,24 @@ class TestAreaRoutes:
     """测试 A/B/C 区状态路由。"""
 
     def test_area_a(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/area/a")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/area/a", session_token)
         assert status == 200
         assert isinstance(body, dict)
 
     def test_area_b(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/area/b")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/area/b", session_token)
         assert status == 200
 
     def test_area_c(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/area/c")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/area/c", session_token)
         assert status == 200
 
     def test_area_unknown_404(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/area/zzz")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/area/zzz", session_token)
         # 未知 area 返回 400（invalid area）
         assert status == 400
         assert isinstance(body, dict)
@@ -296,32 +433,29 @@ class TestOpenListRoutes:
     """测试 OpenList API 路由。"""
 
     def test_openlist_status_unconfigured(self, webui_server):
-        """webdav.host 为空时应返回 unconfigured 状态。"""
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/openlist/status")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/openlist/status", session_token)
         assert status == 200
         assert isinstance(body, dict)
         assert body.get("status") == "unconfigured"
 
     def test_openlist_strm_engines_empty(self, webui_server):
-        """strm_storage_map 为空且 API 不可达时返回空 engines。"""
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/openlist/strm-engines")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/openlist/strm-engines", session_token)
         assert status == 200
         assert isinstance(body, dict)
         assert "engines" in body
         assert isinstance(body["engines"], list)
 
     def test_openlist_monitored_paths_missing_engine(self, webui_server):
-        """缺少 engine 参数应返回 400。"""
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/openlist/monitored-paths")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/openlist/monitored-paths", session_token)
         assert status == 400
         assert isinstance(body, dict)
 
     def test_openlist_paths(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/openlist/paths")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/openlist/paths", session_token)
         assert status == 200
         assert isinstance(body, dict)
         assert "a_folders" in body or "b_root" in body
@@ -335,23 +469,22 @@ class TestTmdbRoutes:
     """测试 TMDB 路由（TMDB 客户端未配置）。"""
 
     def test_tmdb_status_unconfigured(self, webui_server):
-        """TMDB 未配置时应返回 configured=False。"""
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/tmdb/status")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/tmdb/status", session_token)
         assert status == 200
         assert isinstance(body, dict)
         assert body.get("configured") is False
 
     def test_tmdb_watchlist_match_status(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/tmdb/watchlist/match/status")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/tmdb/watchlist/match/status", session_token)
         assert status == 200
         assert isinstance(body, dict)
         assert "running" in body
 
     def test_tmdb_logs_empty(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/tmdb/logs")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/tmdb/logs", session_token)
         assert status == 200
         assert isinstance(body, dict)
         assert "logs" in body
@@ -365,21 +498,21 @@ class TestWebUIConfigRoutes:
     """测试 /api/webui/config/{scope} 路由。"""
 
     def test_config_get_invalid_scope_403(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_get(base, "/api/webui/config/invalid_scope")
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/webui/config/invalid_scope", session_token)
         assert status == 403
         assert isinstance(body, dict)
 
     def test_config_post_invalid_scope_403(self, webui_server):
-        server, base = webui_server
+        server, base, session_token = webui_server
         status, _, body = _http_post(
-            base, "/api/webui/config/invalid_scope", {"k": "v"})
+            base, "/api/webui/config/invalid_scope", {"k": "v"}, session_token)
         assert status == 403
 
     def test_config_post_invalid_json_400(self, webui_server):
-        server, base = webui_server
+        server, base, session_token = webui_server
         status, _, body = _http_post(
-            base, "/api/webui/config/ui", b"not json")
+            base, "/api/webui/config/ui", b"not json", session_token)
         assert status == 400
 
 
@@ -391,80 +524,74 @@ class TestPostRoutes:
     """测试 POST 路由。"""
 
     def test_unknown_post_404(self, webui_server):
-        server, base = webui_server
-        status, _, body = _http_post(base, "/api/unknown", {})
+        server, base, session_token = webui_server
+        status, _, body = _http_post(base, "/api/unknown", {}, session_token)
         assert status == 404
 
     def test_openlist_test_connection_empty_host(self, webui_server):
-        """host 为空时应返回 400。"""
-        server, base = webui_server
+        server, base, session_token = webui_server
         status, _, body = _http_post(
             base, "/api/openlist/test-connection",
-            {"host": "", "user": "", "password": ""})
+            {"host": "", "user": "", "password": ""}, session_token)
         assert status == 400
         assert isinstance(body, dict)
 
     def test_openlist_strm_engines_invalid_rejected(self, webui_server):
-        """strm_engines 非法形态应在写入前被拒绝（400），且不部分写入。"""
-        server, base = webui_server
+        server, base, session_token = webui_server
         bad = {"strm_engines": '[{"monitored_paths":[]}]'}  # 缺 engine
         status, _, body = _http_post(
-            base, "/api/webui/config/openlist", bad)
+            base, "/api/webui/config/openlist", bad, session_token)
         assert status == 400
         assert isinstance(body, dict)
         assert body.get("success") is False
         assert "strm_engines" in str(body.get("error", "")).lower()
 
     def test_openlist_strm_engines_valid_accepted(self, webui_server):
-        """strm_engines 合法形态应被接受（200）。"""
-        server, base = webui_server
+        server, base, session_token = webui_server
         good = {"strm_engines": json.dumps([
             {"engine": "/测试a", "monitored_paths": ["/m"]}])}
         status, _, body = _http_post(
-            base, "/api/webui/config/openlist", good)
+            base, "/api/webui/config/openlist", good, session_token)
         assert status == 200
         assert body.get("success") is True
 
     def test_openlist_strm_engines_native_list_accepted(self, webui_server):
-        """其它客户端以原生 JSON 数组（非字符串）发送合法 strm_engines 亦应接受（200）。"""
-        server, base = webui_server
+        server, base, session_token = webui_server
         good_native = {"strm_engines": [
             {"engine": "/测试a", "monitored_paths": ["/m"]}]}
         status, _, body = _http_post(
-            base, "/api/webui/config/openlist", good_native)
+            base, "/api/webui/config/openlist", good_native, session_token)
         assert status == 200
         assert body.get("success") is True
 
     def test_openlist_strm_engines_none_rejected(self, webui_server):
-        """strm_engines 为 null 应被拒绝（400）。"""
-        server, base = webui_server
+        server, base, session_token = webui_server
         status, _, body = _http_post(
-            base, "/api/webui/config/openlist", {"strm_engines": None})
+            base, "/api/webui/config/openlist", {"strm_engines": None}, session_token)
         assert status == 400
         assert body.get("success") is False
 
     def test_openlist_strm_engines_empty_string_rejected(self, webui_server):
-        """strm_engines 为空字符串应被拒绝（400）。"""
-        server, base = webui_server
+        server, base, session_token = webui_server
         status, _, body = _http_post(
-            base, "/api/webui/config/openlist", {"strm_engines": ""})
+            base, "/api/webui/config/openlist", {"strm_engines": ""}, session_token)
         assert status == 400
         assert body.get("success") is False
 
     def test_tmdb_watchlist_match_override_invalid_media_type(
             self, webui_server):
-        server, base = webui_server
+        server, base, session_token = webui_server
         status, _, body = _http_post(
             base, "/api/tmdb/watchlist/match/override",
-            {"media_type": "invalid", "id": 1, "status": "matched"})
+            {"media_type": "invalid", "id": 1, "status": "matched"}, session_token)
         assert status == 400
 
     def test_tmdb_watchlist_match_override_invalid_status(
             self, webui_server):
-        server, base = webui_server
+        server, base, session_token = webui_server
         status, _, body = _http_post(
             base, "/api/tmdb/watchlist/match/override",
-            {"media_type": "movie", "id": 1, "status": "bogus"})
+            {"media_type": "movie", "id": 1, "status": "bogus"}, session_token)
         assert status == 400
 
 

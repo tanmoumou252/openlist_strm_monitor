@@ -94,7 +94,7 @@ class BAreaEventHandler(FileSystemEventHandler):
             self._run_async(self.app.handle_b_moved, src_path, dest_path)
         elif src_is_strm and not dst_is_strm:
             # .strm 重命名为非 .strm：等同于删除
-            self._run_async(self.app.handle_b_deleted, event.src_path)
+            self._run_async(self.app.handle_b_renamed_to_non_strm, event.src_path)
         elif not src_is_strm and dst_is_strm:
             # 非 .strm 重命名为 .strm：等同于新建
             self._run_async(self.app.handle_b_created_or_modified, event.dest_path)

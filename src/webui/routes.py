@@ -13,6 +13,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import datetime as _dt
+
 import os
 import secrets
 import socket
@@ -332,12 +334,13 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         img_base = (tmdb_client.image_base() if tmdb_client
                     else "https://image.tmdb.org/t/p")
         poster_url = f"{img_base}/w{width}{poster_path}"
+        logging.debug("[TMDB] Poster Request - path: %s, url: %s", poster_path, poster_url)
         try:
             poster_req = urllib.request.Request(
                 poster_url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
             )
-            opener = _build_img_opener(handler, use_proxy=False)
+            opener = _build_img_opener(handler, use_proxy=True)
             resp = opener.open(poster_req, timeout=15)
             img_data = resp.read()
             content_type = resp.headers.get("Content-Type", "image/jpeg")
@@ -367,6 +370,36 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 handler._send_json({"logs": [], "count": 0})
         else:
             handler._send_json({"logs": [], "count": 0})
+        return True
+
+    # TMDB 操作日志下载
+    if path == "/api/tmdb/logs/download":
+        _wdb = getattr(webui_server, '_watchlist_db', None)
+        if webui_server and _wdb:
+            try:
+                all_logs = _wdb.get_tmdb_logs(limit=100000)
+                lines = []
+                for log in all_logs:
+                    ts = log.get('ts', '')
+                    op = log.get('op', '')
+                    level = log.get('level', '')
+                    msg = log.get('msg', '')
+                    if ts:
+                        ts_str = _dt.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        ts_str = '-'
+                    lines.append(f"[{ts_str}] [{level.upper()}] [{op}] {msg}")
+                content = '\n'.join(lines).encode('utf-8')
+                handler.send_response(200)
+                handler.send_header('Content-Type', 'text/plain; charset=utf-8')
+                handler.send_header('Content-Disposition', 'attachment; filename="tmdb_operations.log"')
+                handler.end_headers()
+                handler.wfile.write(content)
+            except Exception as e:
+                logging.error("[TMDB] 下载操作日志失败: %s", e)
+                handler._send_json({"error": str(e)}, 500)
+        else:
+            handler._send_json({"error": "TMDB 日志不可用"}, 404)
         return True
 
     # CSV 导出 — 即使 TMDB 客户端未初始化，也可从 DB 缓存导出
@@ -669,7 +702,9 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
     try:
         changed = False
         for key in ("access_token", "api_key", "language", "host",
-                    "watchlist_db", "csv_watchlist_file"):
+                    "watchlist_db", "csv_watchlist_file",
+                    "fuzzy_threshold", "anime_min_ep_ratio",
+                    "anime_max_season_diff", "watchlist_cache_ttl", "anime_min_season_ratio"):
             if key in data and data[key] is not None:
                 val = data[key]
                 # 安全防护：空 token 且已配置时跳过，避免前端截断预览覆盖
@@ -852,7 +887,7 @@ def _validate_strm_engines(value: str) -> bool:
         engine = eng.get("engine")
         monitored = eng.get("monitored_paths")
         if not isinstance(engine, str) or not engine:
-            continue  # 跳过空引擎条目，允许前端发 [{engine:"",monitored_paths:[]}]
+            return False  # 拒绝空引擎条目
         if not isinstance(monitored, list):
             return False
         if not all(isinstance(p, str) for p in monitored):
@@ -925,7 +960,10 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
             if "strm_engines" in data:
                 _wdb.set_config("openlist", "engines_initialized", "true")
             _hot_reload_openlist_config(webui_server)
-        
+
+        # 更新 _has_password 缓存（ui scope 管理密码变更时）
+        if scope == "ui" and "admin_password" in data:
+            webui_server._has_password = bool(data.get("admin_password"))
         handler._send_json(
             {"success": True, "scope": scope, "saved": len(data)})
     except json.JSONDecodeError:
@@ -2147,12 +2185,51 @@ def handle_logs_api(handler, params: dict) -> None:
         handler._send_json({"lines": [], "count": 0})
         return
     try:
-        with log_file.open("r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.readlines()
-        tail = all_lines[-lines_req:]
-        handler._send_json({"lines": [line.rstrip() for line in tail],
-                            "count": len(tail)})
+        # 优化：仅读取文件末尾的字节，避免大文件全量读取阻塞 HTTP 线程
+        # 估算每行平均 200 字节，读取 lines_req * 200 字节足够
+        read_size = lines_req * 200
+        file_size = log_file.stat().st_size
+        with log_file.open("rb") as f:
+            if file_size > read_size:
+                f.seek(file_size - read_size)
+                # 跳过可能读取到的不完整行
+                f.readline()
+                tail_bytes = f.read()
+                tail = tail_bytes.decode("utf-8", errors="replace").splitlines()
+            else:
+                tail = f.read().decode("utf-8", errors="replace").splitlines()
+        # 仅返回最后 lines_req 行
+        tail = tail[-lines_req:]
+        handler._send_json({"lines": tail, "count": len(tail)})
     except Exception as e:
+        handler._send_json({"error": str(e)}, 500)
+
+
+def handle_download_log_api(handler, params: dict) -> None:
+    """处理 GET /api/logs/download - 下载完整的日志文件"""
+    log_file_path = None
+    cfg = handler.webui._config
+    cfg_log = getattr(cfg, 'log', None)
+    if cfg_log and hasattr(cfg_log, 'file'):
+        log_file_path = Path(cfg_log.file)
+    if log_file_path is None or not log_file_path.exists():
+        fallback = getattr(handler.webui, '_log_file', None)
+        if fallback:
+            log_file_path = Path(fallback)
+    
+    if not log_file_path or not log_file_path.exists():
+        handler._send_json({"error": "Log file not found"}, 404)
+        return
+
+    try:
+        handler.send_response(200)
+        handler.send_header('Content-Type', 'application/octet-stream')
+        handler.send_header('Content-Disposition', f'attachment; filename="{log_file_path.name}"')
+        handler.end_headers()
+        with open(log_file_path, 'rb') as f:
+            handler.wfile.write(f.read())
+    except Exception as e:
+        logging.error(f"[WebUI] 下载日志文件失败: {e}")
         handler._send_json({"error": str(e)}, 500)
 
 
@@ -2292,6 +2369,16 @@ def handle_config_api(handler) -> None:
     else:
         tmdb_watchlist_enabled = True
 
+    # TMDB 匹配参数 — DB 优先，回退到内存 TmdbConfig
+    tmdb_fuzzy_threshold = db_tmdb_cfg.get("fuzzy_threshold", "") or (
+        str(getattr(tmdb_cfg, "fuzzy_threshold", "0.60")) if tmdb_cfg else "0.60")
+    tmdb_anime_min_ep_ratio = db_tmdb_cfg.get("anime_min_ep_ratio", "") or (
+        str(getattr(tmdb_cfg, "anime_min_ep_ratio", "0.30")) if tmdb_cfg else "0.30")
+    tmdb_anime_max_season_diff = db_tmdb_cfg.get("anime_max_season_diff", "") or (
+        str(getattr(tmdb_cfg, "anime_max_season_diff", "1")) if tmdb_cfg else "1")
+    tmdb_cache_ttl = db_tmdb_cfg.get("watchlist_cache_ttl", "") or (
+        str(getattr(tmdb_cfg, "watchlist_cache_ttl", "43200")) if tmdb_cfg else "43200")
+
     handler._send_json({
         # 数据库 & WebUI
         "db_file": db_file,
@@ -2316,6 +2403,10 @@ def handle_config_api(handler) -> None:
         "tmdb_account_id": tmdb_client.account_id if tmdb_client else None,
         "tmdb_watchlist_db": tmdb_watchlist_db,
         "tmdb_watchlist_enabled": tmdb_watchlist_enabled,
+        "tmdb_fuzzy_threshold": tmdb_fuzzy_threshold,
+        "tmdb_anime_min_ep_ratio": tmdb_anime_min_ep_ratio,
+        "tmdb_anime_max_season_diff": tmdb_anime_max_season_diff,
+        "tmdb_cache_ttl": tmdb_cache_ttl,
         # 路径 & 文件夹
         "b_root": b_root,
         "c_root": c_root,

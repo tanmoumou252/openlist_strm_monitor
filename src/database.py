@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import sqlite3
@@ -9,6 +9,63 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator
+
+class ReadWriteLock:
+    """读写锁：允许多个读者并发访问，写者独占。
+
+    实现要点：
+    - 读者通过 _read_lock 与写者互斥（第一个读者获取，最后一个读者释放）
+    - 写者通过 _write_lock 互斥（所有写者串行化）
+    - 写者优先：当有写者等待时，新读者阻塞，防止写者饥饿
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._readers = 0
+        self._writers_waiting = 0
+        self._writers_active = 0
+        self._read_lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._no_writers = threading.Condition(self._lock)
+
+    @contextmanager
+    def read_locked(self):
+        with self._lock:
+            # 有写者等待或活跃时，读者等待（写者优先，防止饥饿）
+            while self._writers_waiting > 0 or self._writers_active > 0:
+                self._no_writers.wait()
+            self._readers += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._readers -= 1
+                if self._readers == 0:
+                    self._no_writers.notify_all()
+
+    @contextmanager
+    def write_locked(self):
+        with self._lock:
+            self._writers_waiting += 1
+        # 所有写者通过 _write_lock 串行化
+        self._write_lock.acquire()
+        try:
+            with self._lock:
+                self._writers_waiting -= 1
+                self._writers_active += 1
+            # 第一个写者获取 _read_lock，阻止新读者进入
+            self._read_lock.acquire()
+            try:
+                yield
+            finally:
+                self._read_lock.release()
+                with self._lock:
+                    self._writers_active -= 1
+                    if self._writers_active == 0:
+                        self._no_writers.notify_all()
+        finally:
+            self._write_lock.release()
+
 
 
 # ============================================================
@@ -170,7 +227,7 @@ class Database:
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
-        self.lock = threading.RLock()
+        self.rw_lock = ReadWriteLock()
         self._last_ghost_cleanup = 0.0
         self._ghost_cleanup_lock = threading.Lock()
 
@@ -183,7 +240,7 @@ class Database:
 
     def _create_schema(self) -> None:
         """创建核心数据库表结构和索引（幂等操作，可安全重复调用）。"""
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             cur = conn.cursor()
 
             cur.execute("""
@@ -298,7 +355,7 @@ class Database:
     def upsert_a(self, local_path: str, webdav_path: str,
                  parent_webdav_path: str) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
@@ -318,7 +375,7 @@ class Database:
         status: str = "valid",
     ) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO b_strm_files(
@@ -352,7 +409,7 @@ class Database:
         ghost_root: str,
     ) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO c_ghost_files(local_path, webdav_path, original_b_path, ghost_root, moved_at)
@@ -363,25 +420,25 @@ class Database:
             conn.commit()
 
     def delete_a_by_local(self, local_path: str) -> None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 "DELETE FROM a_strm_files WHERE local_path = ?", (local_path,))
             conn.commit()
 
     def delete_b_by_local(self, local_path: str) -> None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 "DELETE FROM b_strm_files WHERE local_path = ?", (local_path,))
             conn.commit()
 
     def delete_c_by_local(self, local_path: str) -> None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 "DELETE FROM c_ghost_files WHERE local_path = ?", (local_path,))
             conn.commit()
 
     def get_a_by_local(self, local_path: str) -> ARecord | None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files WHERE local_path = ?",
                 (local_path,),
@@ -390,7 +447,7 @@ class Database:
             return ARecord(*row) if row else None
 
     def get_b_by_local(self, local_path: str) -> BRecord | None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
@@ -402,7 +459,7 @@ class Database:
             return BRecord(*row) if row else None
 
     def get_a_by_webdav(self, webdav_path: str) -> ARecord | None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files WHERE webdav_path = ?",
                 (webdav_path,),
@@ -411,7 +468,7 @@ class Database:
             return ARecord(*row) if row else None
 
     def get_b_by_webdav(self, webdav_path: str) -> list[BRecord]:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
@@ -422,13 +479,13 @@ class Database:
             return [BRecord(*row) for row in cur.fetchall()]
 
     def get_all_a_records(self) -> list[ARecord]:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files")
             return [ARecord(*row) for row in cur.fetchall()]
 
     def get_all_b(self) -> list[BRecord]:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute("""
                 SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
                 FROM b_strm_files
@@ -436,7 +493,7 @@ class Database:
             return [BRecord(*row) for row in cur.fetchall()]
 
     def get_all_c(self) -> list[CRecord]:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute("""
                 SELECT local_path, webdav_path, original_b_path, ghost_root, moved_at
                 FROM c_ghost_files
@@ -448,7 +505,7 @@ class Database:
         if not folder_path or folder_path == "/":
             return
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO known_folders(folder_path, source, updated_at)
@@ -459,12 +516,12 @@ class Database:
             conn.commit()
 
     def get_known_folders(self) -> list[str]:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute("SELECT folder_path FROM known_folders")
             return [row[0] for row in cur.fetchall()]
 
     def remove_known_folder_prefix(self, folder_path: str) -> None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 "DELETE FROM known_folders WHERE folder_path = ? OR folder_path LIKE ?",
                 (folder_path, folder_path.rstrip("/") + "/%"),
@@ -474,7 +531,7 @@ class Database:
     def set_ghost_protection(self, webdav_path: str,
                              seconds: int, reason: str = "") -> None:
         expire = time.time() + seconds
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO ghost_protection(webdav_path, expire_time, reason)
@@ -486,7 +543,7 @@ class Database:
 
     def cleanup_expired_ghosts(self) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 "DELETE FROM ghost_protection WHERE expire_time <= ?", (now,))
             conn.commit()
@@ -503,7 +560,7 @@ class Database:
                 self.cleanup_expired_ghosts()
                 self._last_ghost_cleanup = now
         
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 "SELECT expire_time FROM ghost_protection WHERE webdav_path = ?",
                 (webdav_path,),
@@ -514,7 +571,7 @@ class Database:
     def set_protected_root(self, root_path: str,
                            trash_path: str, active: bool = True) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO protected_roots(root_path, trash_path, active, updated_at)
@@ -526,7 +583,7 @@ class Database:
 
     def replace_protected_roots(self, roots: list[tuple[str, str]]) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute("DELETE FROM protected_roots")
             conn.executemany(
                 """
@@ -539,20 +596,20 @@ class Database:
             conn.commit()
 
     def get_protected_roots(self) -> list[ProtectedRootRecord]:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 "SELECT root_path, trash_path, active, updated_at FROM protected_roots")
             return [ProtectedRootRecord(r[0], r[1], bool(r[2]), r[3]) for r in cur.fetchall()]
 
     def get_protected_root_paths(self) -> list[str]:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute("SELECT root_path FROM protected_roots")
             return [row[0] for row in cur.fetchall()]
 
     def save_protected_roots_snapshot(
             self, roots: list[tuple[str, str]]) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute("DELETE FROM protected_roots_snapshot")
             conn.executemany(
                 """
@@ -565,14 +622,14 @@ class Database:
             conn.commit()
 
     def get_protected_roots_snapshot_paths(self) -> list[str]:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 "SELECT root_path FROM protected_roots_snapshot")
             return [row[0] for row in cur.fetchall()]
 
     def set_control(self, key: str, value: str) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO sync_control(control_key, control_value, updated_at)
@@ -583,7 +640,7 @@ class Database:
             conn.commit()
 
     def get_control(self, key: str, default: str = "") -> str:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 "SELECT control_value FROM sync_control WHERE control_key = ?",
                 (key,),
@@ -593,7 +650,7 @@ class Database:
 
     def get_b_under_root(self, webdav_root: str) -> list[BRecord]:
         pattern = webdav_root.rstrip("/") + "/%"
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
@@ -606,7 +663,7 @@ class Database:
 
     def delete_b_under_root(self, webdav_root: str) -> None:
         pattern = webdav_root.rstrip("/") + "/%"
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 "DELETE FROM b_strm_files WHERE webdav_path = ? OR webdav_path LIKE ?",
                 (webdav_root, pattern),
@@ -621,7 +678,7 @@ class Database:
         current_b_path: str | None,
     ) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO strm_identity(
@@ -638,7 +695,7 @@ class Database:
             conn.commit()
 
     def get_identity_by_fingerprint(self, fingerprint: str) -> IdentityRecord | None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT fingerprint, webdav_path, source_a_path, current_b_path, updated_at
@@ -651,7 +708,7 @@ class Database:
             return IdentityRecord(*row) if row else None
 
     def get_identity_by_webdav(self, webdav_path: str) -> IdentityRecord | None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT fingerprint, webdav_path, source_a_path, current_b_path, updated_at
@@ -666,7 +723,7 @@ class Database:
     def update_identity_b_path(self, fingerprint: str,
                                current_b_path: str | None) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 UPDATE strm_identity
@@ -680,7 +737,7 @@ class Database:
     def update_identity_a_path(self, fingerprint: str,
                                source_a_path: str | None) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 UPDATE strm_identity
@@ -692,7 +749,7 @@ class Database:
             conn.commit()
 
     def delete_identity_by_fingerprint(self, fingerprint: str) -> None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 "DELETE FROM strm_identity WHERE fingerprint = ?",
                 (fingerprint,),
@@ -707,7 +764,7 @@ class Database:
         使用 INSERT OR REPLACE 实现原子操作，避免先 DELETE 再 INSERT
         时中间失败导致的数据丢失。
         """
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             # 显式开启事务（B-8）：确保 conflict 检测与 INSERT/DELETE 在同一原子事务内，
             # 避免 SELECT 与写入之间被其它写连接插入目标行（TOCTOU）。
             conn.execute("BEGIN IMMEDIATE")
@@ -782,7 +839,7 @@ class Database:
                 return False
 
     def delete_identity_by_b_path(self, current_b_path: str) -> None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 UPDATE strm_identity
@@ -794,7 +851,7 @@ class Database:
             conn.commit()
 
     def get_a_local_path_by_webdav(self, webdav_path: str) -> str | None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path
@@ -809,7 +866,7 @@ class Database:
             return row[0] if row else None
 
     def get_b_instances_by_fingerprint(self, fingerprint: str) -> list[BRecord]:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path,
@@ -828,7 +885,7 @@ class Database:
 
     def mark_b_instance_status(self, local_path: str, status: str) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 UPDATE b_strm_files
@@ -840,7 +897,7 @@ class Database:
             conn.commit()
 
     def delete_b_by_fingerprint(self, fingerprint: str) -> None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 "DELETE FROM b_strm_files WHERE fingerprint = ?",
                 (fingerprint,),
@@ -848,7 +905,7 @@ class Database:
             conn.commit()
 
     def get_b_by_local_full(self, local_path: str) -> BRecord | None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path,
@@ -868,7 +925,7 @@ class Database:
 
     def clear_identity_b_path_by_fingerprint(self, fingerprint: str) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 UPDATE strm_identity
@@ -882,7 +939,7 @@ class Database:
 
     def get_valid_b_instance_by_fingerprint(
             self, fingerprint: str) -> BRecord | None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path,
@@ -913,7 +970,7 @@ class Database:
         返回被标记的 local_path 列表。
         """
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path
@@ -945,7 +1002,7 @@ class Database:
         """
         返回该 fingerprint 下所有 B 实例
         """
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path, webdav_path, parent_webdav_path,
@@ -974,14 +1031,14 @@ class Database:
 
     def b_fingerprint_exists(self, fingerprint: str) -> bool:
         """检查 B 区数据库中是否已存在该指纹"""
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 "SELECT 1 FROM b_strm_files WHERE fingerprint = ? LIMIT 1", (fingerprint,))
             return cur.fetchone() is not None
 
     def update_b_local_path(self, old_path: str, new_path: str) -> bool:
         """更新 B 区文件的本地路径（用于文件名改变的情况）"""
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             cur = conn.execute(
                 "UPDATE b_strm_files SET local_path = ? WHERE local_path = ?",
                 (new_path,
@@ -1000,7 +1057,7 @@ class Database:
         updated_at: float | None = None,
     ) -> bool:
         """插入或更新 B 区 STRM 文件记录"""
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             cur = conn.cursor()
             if updated_at is None:
                 updated_at = time.time()
@@ -1030,7 +1087,7 @@ class Database:
     def get_a_count_under_root(self, cloud_media_root: str) -> int:
         """统计 A 区某个剧集根路径下共有多少集"""
         pattern = cloud_media_root.rstrip('/') + '/%'
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 "SELECT COUNT(*) FROM a_strm_files WHERE webdav_path LIKE ?",
                 (pattern,)
@@ -1041,7 +1098,7 @@ class Database:
     def has_other_b_instance(self, fingerprint: str,
                              exclude_local_path: str) -> bool:
         """检查是否存在同一指纹的其他 B 区实例（排除指定路径）。"""
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 "SELECT 1 FROM b_strm_files WHERE fingerprint = ? AND local_path != ? LIMIT 1",
                 (fingerprint, exclude_local_path),
@@ -1056,7 +1113,7 @@ class Database:
         engine_entry_path: str,
     ) -> None:
         now = time.time()
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO strm_media_boundary(
@@ -1075,7 +1132,7 @@ class Database:
 
     def get_media_boundary_by_fingerprint(
             self, fingerprint: str) -> BoundaryRecord | None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
@@ -1090,7 +1147,7 @@ class Database:
     def get_media_boundaries_by_source_name(
         self, source_media_name: str, engine_entry_path: str
     ) -> list[BoundaryRecord]:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
@@ -1104,7 +1161,7 @@ class Database:
     def get_media_boundary_by_current_name(
         self, current_media_name: str, engine_entry_path: str
     ) -> BoundaryRecord | None:
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
@@ -1122,7 +1179,7 @@ class Database:
         self, source_media_name: str
     ) -> BoundaryRecord | None:
         """根据源媒体名查找边界映射（不限制引擎路径，取最新的）"""
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
@@ -1180,7 +1237,7 @@ class Database:
 
     def init_subtitle_table(self) -> None:
         """初始化字幕表"""
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS subtitles (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1216,7 +1273,7 @@ class Database:
         status: str = "valid",
     ) -> None:
         """插入或更新字幕记录"""
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute("""
                 INSERT INTO subtitles
                 (local_path, target_path, fingerprint, season, episode, lang_code, status)
@@ -1234,7 +1291,7 @@ class Database:
 
     def get_subtitle_by_local(self, local_path: str) -> SubtitleRecord | None:
         """根据本地路径查询字幕记录"""
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 "SELECT id, local_path, target_path, fingerprint, season, episode, lang_code, status, created_at, updated_at FROM subtitles WHERE local_path = ?",
                 (local_path,)
@@ -1244,7 +1301,7 @@ class Database:
 
     def subtitle_exists(self, local_path: str) -> bool:
         """检查字幕是否已存在"""
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 "SELECT 1 FROM subtitles WHERE local_path = ?",
                 (local_path,)
@@ -1253,7 +1310,7 @@ class Database:
 
     def get_subtitles_by_fingerprint(self, fingerprint: str) -> list[SubtitleRecord]:
         """根据指纹获取所有字幕"""
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 "SELECT id, local_path, target_path, fingerprint, season, episode, lang_code, status, created_at, updated_at FROM subtitles WHERE fingerprint = ?",
                 (fingerprint,)
@@ -1262,7 +1319,7 @@ class Database:
 
     def delete_subtitle_by_local(self, local_path: str) -> None:
         """删除字幕记录"""
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 "DELETE FROM subtitles WHERE local_path = ?",
                 (local_path,)
@@ -1271,7 +1328,7 @@ class Database:
 
     def cleanup_invalid_subtitles(self) -> None:
         """清理目标文件已不存在的字幕记录"""
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             cur = conn.execute("SELECT local_path, target_path FROM subtitles")
             for local_path, target_path in cur.fetchall():
                 if not Path(target_path).exists():
@@ -1293,7 +1350,7 @@ class Database:
             return 0
         now = time.time()
         data = [(lp, wp, pwp, now) for lp, wp, pwp in records]
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
@@ -1314,7 +1371,7 @@ class Database:
             return 0
         now = time.time()
         data = [(*r, now) for r in records]
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO b_strm_files(
@@ -1332,7 +1389,7 @@ class Database:
         """批量删除 A 区记录"""
         if not local_paths:
             return 0
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.executemany(
                 "DELETE FROM a_strm_files WHERE local_path = ?",
                 [(p,) for p in local_paths],
@@ -1344,7 +1401,7 @@ class Database:
         """批量删除 B 区记录"""
         if not local_paths:
             return 0
-        with self.lock, self.connection() as conn:
+        with self.rw_lock.write_locked(), self.connection() as conn:
             conn.executemany(
                 "DELETE FROM b_strm_files WHERE local_path = ?",
                 [(p,) for p in local_paths],

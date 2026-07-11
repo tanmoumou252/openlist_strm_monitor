@@ -67,9 +67,14 @@ class RefreshService:
     def _worker(self) -> None:
         self.execute_refresh_cycle()
 
-        interval = self.app.config.refresh.interval_seconds
         while self._running:
-            time.sleep(interval)
+            # 在循环内读取间隔，使热重载后的新间隔即时生效；
+            # 用 1 秒粒度睡眠兼顾快速停止（_running）与间隔变更感知。
+            interval = self.app.config.refresh.interval_seconds
+            waited = 0
+            while self._running and waited < interval:
+                time.sleep(1)
+                waited += 1
             if not self._running:
                 break
             self.execute_refresh_cycle()
@@ -264,11 +269,9 @@ class RefreshService:
                     logging.debug(
                         "[STRM存储API验证] 存储详情: mount_path=%s, "
                         "paths=%s (真实云端监控路径), "
-                        "SaveStrmLocalPath=%s (A区文件夹路径), "
                         "status=%s, mode=%s",
                         storage.mount_path,
                         storage.paths,
-                        storage.save_local_path,
                         storage.status,
                         storage.save_local_mode,
                     )

@@ -60,6 +60,7 @@ class BehaviorConfig:
     sync_on_startup_wait: int
     trash_dir_name: str = "trash"
     action: str = "MOVE"
+    b_delete_triggers_cloud_action: bool = False
     ghost_protect_seconds: int = 300
     a_to_b_restore_delay_seconds: int = 30
 
@@ -99,6 +100,8 @@ class TmdbConfig:
     watchlist_cache_ttl: float = 604800  # 默认 7 天
     fuzzy_threshold: float = 0.60
     anime_min_ep_ratio: float = 0.3
+    anime_max_season_diff: float = 0.3  # 新增：动漫最大季度差异阈值
+    anime_min_season_ratio: float = 0.3  # 新增：动漫最少级数比例阈值
     proxy: TmdbProxyConfig = field(default_factory=TmdbProxyConfig)
     # 扁平化代理字段（供前端/测试 WebUI 直接读写，与嵌套 proxy 双向同步）
     proxy_enabled: bool = False
@@ -340,6 +343,11 @@ class AppConfig:
         paths_data = data.get("paths", {})
         b_root = paths_data.get("b_root", os.path.join(base_dir, "b"))
         c_root = paths_data.get("c_root", os.path.join(base_dir, "c"))
+
+        if not Path(b_root).is_absolute():
+            logging.warning("[Config] b_root 不是绝对路径: %s", b_root)
+        if not Path(c_root).is_absolute():
+            logging.warning("[Config] c_root 不是绝对路径: %s", c_root)
 
         local = LocalConfig(
             base_dir=base_dir,

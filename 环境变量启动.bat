@@ -5,7 +5,7 @@ cd /d "%~dp0"
 
 :: 1. 将 Python 命令指向系统变量中的全局 python
 set "PYTHON=python"
-set "APP=%~dp0src\main.py"
+set "APP=%~dp0src\webui\server.py"
 
 :: 2. 检查系统变量中是否存在 python 
 where %PYTHON% >nul 2>nul
@@ -17,13 +17,13 @@ if %errorlevel% neq 0 (
 )
 
 if not exist "%APP%" (
-    echo [ERROR] 未找到主程序: %APP%
+    echo [ERROR] 未找到 WebUI 服务器: %APP%
     pause
     exit /b 1
 )
 
 echo =======================================================
-echo   OpenList STRM Bridge - Console Run (System Python)
+echo   OpenList STRM Bridge (System Python)
 echo =======================================================
 echo.
 

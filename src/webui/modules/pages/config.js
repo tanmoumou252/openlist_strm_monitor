@@ -61,7 +61,7 @@ export async function renderConfig(el, params) {
     setTimeout(go, 350);
   });
   if (sub === 'config') _bindConfigFormEvents(cfg);
-  if (sub === 'openlist') _renderOpenListConfig(el, cfg);
+  if (sub === 'openlist') _renderOpenListConfig(cfg);
 }
 
 function _renderConfigContent(cfg) {
@@ -137,8 +137,13 @@ html += field('cfg-tmdb-token', 'Access Token', tokenValue, '输入 TMDB Access 
   html += langField;
   html += field('cfg-tmdb-host', '反代 Host', hostValue, '留空则使用官方 API');
   html += field('cfg-tmdb-proxy', 'HTTP 代理', proxyValue, '例: http://127.0.0.1:7890', 'text', true);
-  html += field('cfg-tmdb-wldb', 'Watchlist DB', watchlistDbValue, '留空默认 tmdb_watchlist.db', 'text', true);
-  html += `</div>`;
+html += field('cfg-tmdb-wldb', 'Watchlist DB', watchlistDbValue, '留空默认 tmdb_watchlist.db', 'text', true);
+	  html += field('cfg-tmdb-fuzzy', '模糊匹配阈值', cfg.tmdb_fuzzy_threshold || '0.60', '0.0~1.0', 'text');
+	  html += field('cfg-tmdb-ep-ratio', '番剧最少集数比例', cfg.tmdb_anime_min_ep_ratio || '0.30', '0.0~1.0', 'text');
+	  html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '1', '', 'text');
+	  html += field('cfg-tmdb-min-season-ratio', '番剧最少季数比例', cfg.tmdb_anime_min_season_ratio || '0.30', '0.0~1.0', 'text');
+	  html += field('cfg-tmdb-cache-ttl', '缓存 TTL（秒）', cfg.tmdb_cache_ttl || '43200', '', 'text');
+	  html += `</div>`;
   html += `<div class="config-form-actions"><button class="toolbar-btn primary" id="cfg-tmdb-save">${icon('save')} 保存 TMDB 配置</button><button class="toolbar-btn" id="cfg-tmdb-refresh"> 刷新待看列表</button><button class="toolbar-btn" id="cfg-tmdb-match-refresh" style="background:color-mix(in srgb,var(--primary) 15%,var(--bg-card));border-color:color-mix(in srgb,var(--primary) 30%,var(--border-color))"> 刷新收录状态</button><button class="toolbar-btn secondary" id="cfg-tmdb-restart" style="color:#e37400;border-color:#e37400">${icon('refresh')} 重启 WebUI</button></div>`;
   html += `<div class="toggle-row"><span>关闭全屏 TMDB 缓存过期提醒</span><div class="segmented-switch" data-key="tmdb_cache_never_remind"><button type="button" data-value="off" class="active">否</button><button type="button" data-value="on">是</button></div></div>`;
   html += `<div class="toggle-row"><span>关闭右上角"建议刷新列表"提醒</span><div class="segmented-switch" data-key="tmdb_match_toast_disabled"><button type="button" data-value="off" class="active">否</button><button type="button" data-value="on">是</button></div></div>`;
@@ -177,12 +182,12 @@ function _renderConfigAbout() {
 <div class="credit-group-title">AI 模型</div>
 <p class="credit-group-desc">参与代码生成和方案设计的大语言模型。</p>
 <div class="credit-group">
-  ${creditPill('Claude Opus 4.6')}${creditPill('Qwen 3.7 Plus')}${creditPill('GPT-5.4')}${creditPill('MiMo-V2.5 Pro')}${creditPill('Kimi-K2.6')}${creditPill('GLM-5.1')}${creditPill('DeepSeek-V4-Flash')}${creditPill('MiMo-Auto')}${creditPill('GPT-5.5 via 365 Copilot')}${creditPill('Qwen3-ASR-1.7B')}
+  ${creditPill('Claude Opus 4.6')}${creditPill('Qwen 3.7 Plus')}${creditPill('DeepSeek-V4-Flash')}${creditPill('Glm-5.2')}${creditPill('Minimax-M3')}${creditPill('Gpt-5.4-Mini')}${creditPill('MiMo-V2.5 Pro')}${creditPill('Gpt-5.5 Via 365 Copilot')}${creditPill('Qwen3-Asr-1.7B')}
 </div>
 <div class="credit-group-title">中转站提供商</div>
 <p class="credit-group-desc">免费或低成本的 API 代理中转站，降低开发期间的 API 调用门槛。</p>
 <div class="credit-group">
-  ${creditPillLink('agentrouter', 'https://agentrouter.org/login')}${creditPillLink('vsllm', 'https://vsllm.com')}${creditPillLink('freemodel', 'https://freemodel.dev/dashboard')}${creditPillLink('router.bynara.id', 'https://router.bynara.id/dashboard')}${creditPillLink('openmodel', 'https://www.openmodel.ai/')}${creditPillLink('nvidia nim', 'https://build.nvidia.com/')}
+  ${creditPillLink('agentrouter', 'https://agentrouter.org/login')}${creditPillLink('vsllm', 'https://vsllm.com')}${creditPillLink('商汤', 'https://www.sensenova.cn/')}${creditPillLink('freetheai', 'https://freetheai.xyz/models/')}${creditPillLink('openmodel', 'https://www.openmodel.ai/')}${creditPillLink('nvidia nim', 'https://build.nvidia.com/')}
 </div>
 <div class="credit-group-title">社区与灵感</div>
 <p class="credit-group-desc">感谢论坛里慷慨分享免费 key 与中转站的朋友们，以及带来整个项目结构灵感的开源项目。</p>
@@ -321,14 +326,19 @@ async function _bindConfigFormEvents(cfg) {
       const langValue = langChoice === 'custom' ? (document.getElementById('cfg-tmdb-lang').value || 'zh-CN') : langChoice;
       const _wmActiveBtn = document.querySelector('#cfg-tmdb-watchlist-enabled-switch button.active');
       const watchlistEnabled = !(_wmActiveBtn && _wmActiveBtn.dataset.value === 'off');
-      const body = {
-        language: langValue,
-        host: document.getElementById('cfg-tmdb-host').value,
-        proxy_http: document.getElementById('cfg-tmdb-proxy').value,
-        proxy_enabled: document.getElementById('cfg-tmdb-proxy').value.trim() !== '',
-        watchlist_db: document.getElementById('cfg-tmdb-wldb').value,
-        watchlist_enabled: watchlistEnabled ? 'true' : 'false',
-      };
+const body = {
+	        language: langValue,
+	        host: document.getElementById('cfg-tmdb-host').value,
+	        proxy_http: document.getElementById('cfg-tmdb-proxy').value,
+	        proxy_enabled: document.getElementById('cfg-tmdb-proxy').value.trim() !== '',
+	        watchlist_db: document.getElementById('cfg-tmdb-wldb').value,
+	        watchlist_enabled: watchlistEnabled ? 'true' : 'false',
+	        fuzzy_threshold: document.getElementById('cfg-tmdb-fuzzy').value || '0.60',
+	        anime_min_ep_ratio: document.getElementById('cfg-tmdb-ep-ratio').value || '0.30',
+	        anime_max_season_diff: document.getElementById('cfg-tmdb-season-diff').value || '1',
+	        anime_min_season_ratio: document.getElementById('cfg-tmdb-min-season-ratio').value || '0.30',
+	        watchlist_cache_ttl: document.getElementById('cfg-tmdb-cache-ttl').value || '43200',
+	      };
       // token 已配置时若输入框为空则不上传，避免截断预览覆盖真实 token
       if (tokenInput.value.trim()) body.access_token = tokenInput.value;
       if (document.getElementById('cfg-tmdb-apikey').value.trim()) body.api_key = document.getElementById('cfg-tmdb-apikey').value;

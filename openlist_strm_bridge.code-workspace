@@ -1,10 +1,7 @@
 {
-	"folders": [
-		{
-			"path": "."
-		}
-	],
-	"settings": {
-		"ai-commit.AI_COMMIT_LANGUAGE": "Simplified Chinese"
-	}
+    "folders": [
+        {
+            "path": "."
+        }
+    ]
 }

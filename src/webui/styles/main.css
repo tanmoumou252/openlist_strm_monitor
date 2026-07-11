@@ -1,4 +1,4 @@
-﻿
+
 /* ===== 字体配置 ===== */
 /* 本地子集化字体（优先） */
 @font-face {
@@ -145,10 +145,10 @@ nav a.active{background:color-mix(in srgb,var(--primary) 12%,transparent);color:
 .color-dot{width:16px;height:16px;border-radius:50%;border:2px solid color-mix(in srgb,var(--border-color) 20%,transparent);flex-shrink:0}
 .color-dot.cd-blue{background:#1a73e8}.color-dot.cd-purple{background:#7b1fa2}.color-dot.cd-green{background:#2e7d32}.color-dot.cd-orange{background:#e65100}
 .color-dot-icon{width:18px;height:18px;border-radius:50%;display:block;flex-shrink:0;transition:background .2s}
+/* SVG icon container (inline SVGs from Google Material Symbols, not font-based) */
 .material-icon{font-weight:normal;font-style:normal;font-size:16px;line-height:1;letter-spacing:normal;text-transform:none;white-space:nowrap;word-wrap:normal;direction:ltr;-webkit-font-smoothing:antialiased;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;flex-shrink:0;color:currentColor;user-select:none;width:1em;overflow:hidden}
- .material-icon svg{width:1em;height:1em;fill:currentColor;display:block}
- .material-icon.filled{font-variation-settings:'FILL' 1,'wght' 400,'GRAD' 0,'opsz' 24}
-.material-icon{font-size:16px;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;color:currentColor;flex-shrink:0;overflow:hidden;width:1em}
+.material-icon svg{width:1em;height:1em;fill:currentColor;display:block}
+.material-icon.filled{font-variation-settings:'FILL' 1,'wght' 400,'GRAD' 0,'opsz' 24}
 .material-icon.ui-icon-lg{font-size:22px}
 
 /* Table font size */
@@ -212,6 +212,19 @@ thead th{font-size:calc(var(--font-base,13px) - 1px)}
 .toolbar-btn.secondary{background:color-mix(in srgb,var(--bg-control) 82%,var(--bg-card));color:var(--text-main);border:1px solid color-mix(in srgb,var(--border-color) 40%,transparent)}
 .toolbar-btn.secondary:hover{background:color-mix(in srgb,var(--bg-control) 100%,var(--bg-card))}
 .toolbar-btn:active{transform:translateY(0)}
+
+/* ===== Log Type Toggle (主程序日志 / TMDB 操作日志) ===== */
+.log-type-toggle{display:inline-flex;align-items:center;gap:6px;padding:4px;border-radius:var(--radius-pill);background:color-mix(in srgb,var(--bg-control) 70%,var(--bg-card));border:1px solid color-mix(in srgb,var(--border-color) 40%,transparent);margin:8px 0 12px;flex-wrap:wrap}
+.log-type-toggle button{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:none;border-radius:var(--radius-pill);padding:8px 16px;background:transparent;color:var(--text-muted);font-weight:600;cursor:pointer;transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease;font-family:inherit;font-size:var(--font-base);appearance:none;-webkit-appearance:none;min-width:120px}
+.log-type-toggle button:hover{color:var(--text-main);background:color-mix(in srgb,var(--primary) 8%,transparent)}
+.log-type-toggle button.active{background:var(--primary);color:var(--on-primary);box-shadow:0 1px 2px rgba(0,0,0,.15),0 2px 6px color-mix(in srgb,var(--primary) 30%,transparent)}
+.log-type-toggle button.active:hover{background:var(--primary-hover);color:var(--on-primary)}
+.log-type-toggle button:active{transform:scale(.97)}
+:root[data-system="material"] .log-type-toggle{border-radius:18px;padding:5px}
+:root[data-system="material"] .log-type-toggle button{border-radius:14px;padding:8px 18px}
+:root[data-system="fluent"] .log-type-toggle{border-radius:var(--radius-control);padding:3px}
+:root[data-system="fluent"] .log-type-toggle button{border-radius:var(--radius-control);padding:6px 14px;font-weight:500}
+:root[data-system="fluent"] .log-type-toggle button.active{box-shadow:none}
 
 /* MD3 button overrides — filled/tonal rounded */
 :root[data-system="material"] .toolbar-btn,:root[data-system="material"] .search-btn,:root[data-system="material"] .category-tab{border-radius:20px;padding:8px 20px}

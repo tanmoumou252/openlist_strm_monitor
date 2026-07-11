@@ -76,11 +76,12 @@ try:
         _handle_openlist_ping, _handle_openlist_paths,
         _handle_main_status, _handle_main_start, _handle_main_stop,
         handle_dashboard, handle_area, handle_area_detail,
-        handle_records_api, handle_logs_api, handle_config_api,
+        handle_records_api, handle_logs_api, handle_download_log_api,
+        handle_config_api,
     )
 except ImportError:
     # 直接运行时（python src/webui/server.py）
-    from routes import (  # noqa: E402
+    from webui.routes import (  # noqa: E402
         _tmdb_routes, _is_lan_ip, _try_bind_port,
         _handle_login, _handle_tmdb_configure, _handle_tmdb_watchlist_match_refresh,
         _handle_tmdb_watchlist_match_override, _handle_tmdb_watchlist_bg_sync,
@@ -90,7 +91,8 @@ except ImportError:
         _handle_openlist_ping, _handle_openlist_paths,
         _handle_main_status, _handle_main_start, _handle_main_stop,
         handle_dashboard, handle_area, handle_area_detail,
-        handle_records_api, handle_logs_api, handle_config_api,
+        handle_records_api, handle_logs_api, handle_download_log_api,
+        handle_config_api,
     )
 
 if TYPE_CHECKING:
@@ -517,6 +519,8 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
                 self._send_static_file(fname)
         elif path == "/api/logs":
             handle_logs_api(self, params)
+        elif path == "/api/logs/download":
+            handle_download_log_api(self, params)
         elif path == "/api/records":
             handle_records_api(self, params)
         elif path == "/api/config":
@@ -706,7 +710,8 @@ class WebUIServer:
                     continue
                 # 数值类型字段
                 if key in ("watchlist_cache_ttl", "fuzzy_threshold",
-                           "anime_min_ep_ratio"):
+                           "anime_min_ep_ratio", "anime_max_season_diff",
+                           "anime_min_season_ratio"):
                     try:
                         setattr(cfg_tmdb, key, float(val))
                     except (ValueError, TypeError):
@@ -880,13 +885,13 @@ class WebUIServer:
         logging.info(
             "[WebUI] ╔══════════════════════════════════════════════╗")
         logging.info(
-            "[WebUI] ║  管理面板已启动                            ║")
+            "[WebUI] ║  管理面板已启动                              ║")
         logging.info(
-            "[WebUI] ║  访问地址: %s  ║",
+            "[WebUI] ║  访问地址: %s               ║",
             login_url)
         if self._has_password:
             logging.info(
-                "[WebUI] ║  首次访问会自动跳转至登录页面              ║")
+                "[WebUI] ║  首次访问会自动跳转至登录页面                ║")
         logging.info(
             "[WebUI] ╚══════════════════════════════════════════════╝")
         logging.info("[WebUI] TMDB: %s", tmdb_info)
@@ -931,7 +936,19 @@ class WebUIServer:
                 "[WebUI] ============================================")
         else:
             # 首次启动，生成随机密码
-            new_password = secrets.token_urlsafe(12)
+            # 仅当显式启用测试模式（WEBUI_TEST_MODE=1）时才允许通过环境变量设置密码，
+            # 防止生产环境因误设环境变量而使用弱密码。
+            test_password = None
+            if os.getenv("WEBUI_TEST_MODE") == "1":
+                test_password = os.getenv("WEBUI_ADMIN_PASSWORD_FOR_TEST")
+                if test_password:
+                    logging.warning(
+                        "[WebUI] 测试模式：使用环境变量 WEBUI_ADMIN_PASSWORD_FOR_TEST 设置管理员密码")
+            if test_password:
+                new_password = test_password
+            else:
+                new_password = secrets.token_urlsafe(12)
+            
             hashed = self._hash_password(new_password)
             self._watchlist_db.set_config("ui", "admin_password", hashed)
             self._has_password = True

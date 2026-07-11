@@ -5,7 +5,7 @@ setlocal
 cd /d "%~dp0"
 
 set "PYTHON=%~dp0src\python_embed\python.exe"
-set "APP=%~dp0src\main.py"
+set "APP=%~dp0src\webui\server.py"
 
 if not exist "%PYTHON%" (
     echo [ERROR] 未找到嵌入式 Python: %PYTHON%
@@ -14,13 +14,13 @@ if not exist "%PYTHON%" (
 )
 
 if not exist "%APP%" (
-    echo [ERROR] 未找到主程序: %APP%
+    echo [ERROR] 未找到 WebUI 服务器: %APP%
     pause
     exit /b 1
 )
 
 echo =======================================================
-echo   OpenList STRM Bridge - Console Run
+echo   OpenList STRM Bridge
 echo =======================================================
 echo.
 

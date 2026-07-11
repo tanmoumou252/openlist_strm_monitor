@@ -231,8 +231,8 @@ class TestBAreaEventHandler:
         
         time.sleep(0.1)
         
-        # 应触发删除处理
-        assert app.handle_b_deleted.called
+        # 应触发 renamed_to_non_strm 处理（而非直接删除）
+        assert app.handle_b_renamed_to_non_strm.called
 
     def test_on_moved_non_strm_to_strm(self):
         """测试 B 区非 .strm 重命名为 .strm（C2 回归测试）"""

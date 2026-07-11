@@ -14,6 +14,7 @@ This file provides guidance to AI coding assistants when working with code in th
 8. **Preserve the TMDB integration.** Do not refactor TMDB API code unless specifically requested.
 9. **Prefer small, targeted changes** over large rewrites. This project is close to completion.
 10. **Do NOT fake verification** — use real commands, real server startup, and real API/UI checks when available. Do not claim tests were run unless they were actually executed.
+11. **Reply in Chinese** 
 
 ## Configuration
 

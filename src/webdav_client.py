@@ -79,6 +79,9 @@ class OpenListAdminClient:
         self._fs_list_logged: set[str] = set()
         self._fs_list_logged_time: float = 0.0  # 上次清理时间
 
+        self._check_exists_cache: dict[str, tuple[float, bool]] = {}
+        self._check_exists_cache_ttl: int = 60  # 缓存 60 秒
+
         # 最近一次登录的错误详情（调用方可通过属性访问）
         self.last_error_message: str | None = None
         self.last_error_type: str | None = None
@@ -515,52 +518,69 @@ class OpenListAdminClient:
         
         支持大目录（>1000 项）的分页搜索。
         """
+        now = time.time()
+        # 检查缓存
+        if path in self._check_exists_cache:
+            cached_time, cached_result = self._check_exists_cache[path]
+            if now - cached_time < self._check_exists_cache_ttl:
+                log.debug("[check_exists] 命中缓存: %s -> %s", path, cached_result)
+                return cached_result
+
+        result = False
         if not path or path == "/":
             res = self.list_directory("/", per_page=1)
-            return res is not None and res.get("code") in (0, 200)
+            result = res is not None and res.get("code") in (0, 200)
+        else:
+            path = path.rstrip("/")
+            parts = path.split("/")
+            parent_path = "/".join(parts[:-1]) or "/"
+            target_name = parts[-1]
 
-        path = path.rstrip("/")
-        parts = path.split("/")
-        parent_path = "/".join(parts[:-1]) or "/"
-        target_name = parts[-1]
+            try:
+                page = 1
+                per_page = 1000
+                max_pages = 100  # 安全阀：防止异常响应导致死循环
+                
+                while page <= max_pages:
+                    res = self.list_directory(parent_path, page=page, per_page=per_page)
+                    if not res or res.get("code") not in (0, 200):
+                        result = False
+                        break
 
-        try:
-            page = 1
-            per_page = 1000
-            max_pages = 100  # 安全阀：防止异常响应导致死循环
-            
-            while page <= max_pages:
-                result = self.list_directory(parent_path, page=page, per_page=per_page)
-                if not result or result.get("code") not in (0, 200):
-                    return False
-
-                data = result.get("data", {})
-                content = data.get("content", []) if isinstance(data, dict) else []
-                
-                # 检查当前页是否包含目标
-                for item in content:
-                    if isinstance(item, dict) and item.get("name") == target_name:
-                        return True
-                
-                # 如果当前页不满，说明已无更多数据
-                if len(content) < per_page:
-                    return False
-                
-                # 检查总数，如果已遍历完所有项
-                try:
-                    total = int(data.get("total", 0))
-                    if page * per_page >= total:
-                        return False
-                except (TypeError, ValueError):
-                    pass
-                
-                page += 1
-            
-            log.warning("check_exists: 分页搜索超过 %d 页，强制终止: %s", max_pages, path)
-            return False
-        except Exception as e:
-            log.error("check_exists 异常: %s - %s", path, e)
-            return False
+                    data = res.get("data", {})
+                    content = data.get("content", []) if isinstance(data, dict) else []
+                    
+                    # 检查当前页是否包含目标
+                    for item in content:
+                        if isinstance(item, dict) and item.get("name") == target_name:
+                            result = True
+                            break
+                    if result:
+                        break
+                    
+                    # 如果当前页不满，说明已无更多数据
+                    if len(content) < per_page:
+                        result = False
+                        break
+                    
+                    # 检查总数，如果已遍历完所有项
+                    try:
+                        total = int(data.get("total", 0))
+                        if page * per_page >= total:
+                            result = False
+                            break
+                    except (TypeError, ValueError):
+                        pass
+                    
+                    page += 1
+                else:
+                    log.warning("check_exists: 分页搜索超过 %d 页，强制终止: %s", max_pages, path)
+                    result = False
+            except Exception as e:
+                log.error("check_exists 异常: %s - %s", path, e)
+        
+        self._check_exists_cache[path] = (now, result)
+        return result
 
     # 8. 获取兼容格式的内容列表 (逻辑方法)
     def list_contents(self, path: str) -> dict[str, list[dict[str, Any]]] | None:

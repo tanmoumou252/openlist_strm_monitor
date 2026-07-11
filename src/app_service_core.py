@@ -1952,6 +1952,16 @@ class AppService:
         else:
             logging.warning("[OpenListAdmin] 索引更新触发失败: %s", engine_paths)
 
+    def handle_b_renamed_to_non_strm(self, local_path: str) -> None:
+        local = Path(local_path).resolve()
+        lock = self.get_path_lock(local)
+        with lock:
+            row = self.db.get_b_by_local_full(str(local))
+            if not row:
+                return
+            self.db.delete_b_by_local(str(local))
+            logging.info("[B区重命名] .strm 重命名为非 .strm，已从数据库移除记录: %s", local_path)
+
     def handle_b_deleted(self, local_path: str) -> None:
         local = Path(local_path).resolve()
         lock = self.get_path_lock(local)
@@ -1986,9 +1996,11 @@ class AppService:
                     local_path)
                 self.db.delete_b_by_local(str(local))
                 return
-            if webdav_path:
+            if webdav_path and self.config.behavior.b_delete_triggers_cloud_action:
                 self._execute_webdav_deletion(webdav_path, parent_webdav_path)
                 self._delete_a_file_by_webdav(webdav_path)
+            else:
+                logging.info("[B区删除] 未启用云删除联动，跳过WebDAV删除与A区删除: %s", local_path)
             self.db.delete_b_by_local(str(local))
             if fingerprint:
                 self.refresh_identity_current_b_path(fingerprint)

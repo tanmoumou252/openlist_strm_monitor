@@ -37,3 +37,6 @@ Output requirements:
  
 - 最后给出：已完成 / 有风险 / 需要我决策。
   Finally provide one of the following conclusions: Completed / At risk / Needs my decision.
+
+- 使用中文答复
+  Reply in Chinese.

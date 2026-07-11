@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import tempfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -42,8 +43,26 @@ def setup_logging(
     """
     log_level = getattr(logging, level.upper(), logging.INFO)
 
-    log_path = Path(log_file)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    original_log_path = Path(log_file)
+    final_log_path = original_log_path
+    
+    # Attempt to create parent directory for the original log file
+    try:
+        original_log_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logging.warning(f"[日志] 无法创建日志目录 '{original_log_path.parent}'：{e}。将尝试使用临时日志文件。")
+        final_log_path = Path(tempfile.gettempdir()) / original_log_path.name
+
+    # Check write permissions for the chosen log path
+    if not os.access(final_log_path.parent, os.W_OK):
+        logging.warning(f"[日志] 日志目录 '{final_log_path.parent}' 不可写。将回退到临时日志文件。")
+        final_log_path = Path(tempfile.gettempdir()) / original_log_path.name
+        # Ensure temp directory exists, though tempfile.gettempdir() should be safe
+        final_log_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # If a fallback occurred, log it
+    if final_log_path != original_log_path:
+        logging.info(f"[日志] 实际日志文件路径已设置为：'{final_log_path}'")
 
     root = logging.getLogger()
     # 显式关闭旧 handler（尤其 RotatingFileHandler 持有的未 flush 缓冲区），
@@ -75,7 +94,7 @@ def setup_logging(
 
     # file: 按大小轮转
     file_handler = RotatingFileHandler(
-        filename=str(log_path),
+        filename=str(final_log_path),
         maxBytes=max_size_mb * 1024 * 1024,
         backupCount=backup_count,
         encoding="utf-8",
@@ -95,7 +114,7 @@ def setup_logging(
     logging.info(
         "[日志] 已初始化，level=%s, file=%s, max_size_mb=%s, backup_count=%s",
         level.upper(),
-        log_path,
+        final_log_path,
         max_size_mb,
         backup_count,
     )

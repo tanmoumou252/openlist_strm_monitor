@@ -154,6 +154,7 @@ protected = [
     ("/api/area/c", "GET"),
     ("/api/records", "GET"),
     ("/api/logs", "GET"),
+    ("/api/logs/download", "GET"),
     ("/api/webui/config/openlist", "GET"),
     ("/api/webui/config/tmdb", "GET"),
     ("/api/tmdb/status", "GET"),
@@ -234,6 +235,30 @@ print("\n[8] OpenList 配置端点鉴权")
 s, b = req("GET", "/api/webui/config/openlist")
 log("openlist_config_no_auth", "auth", "/api/webui/config/openlist", "GET",
     s, 401, s == 401, b, "无认证不应返回 OpenList 配置")
+
+# 9. TMDB 配置端点鉴权
+print("\n[9] TMDB 配置端点鉴权")
+s, b = req("POST", "/api/tmdb/configure", body={"anime_max_season_diff": 0.5, "anime_min_season_ratio": 0.5})
+log("tmdb_configure_no_auth", "auth", "/api/tmdb/configure", "POST",
+    s, 401, s == 401, b, "无认证不应允许配置 TMDB")
+
+# 10. TMDB 海报代理端点鉴权
+print("\n[10] TMDB 海报代理端点鉴权")
+s, b = req("GET", "/api/tmdb/poster?path=/test.jpg")
+log("tmdb_poster_no_auth", "auth", "/api/tmdb/poster?path=/test.jpg", "GET",
+    s, "not_401", s != 401, b, "白名单端点不应返回 401")
+
+# 11. 日志下载端点鉴权（/api/logs/download）
+print("\n[11] 日志下载端点鉴权")
+# 无 token 应返回 401
+s, b = req("GET", "/api/logs/download")
+log("logs_download_no_auth", "auth", "/api/logs/download", "GET",
+    s, 401, s == 401, b, "无 token 应返回 401")
+
+# 无效 token 应返回 401
+s, b = req("GET", "/api/logs/download", headers={"X-Session-Token": "fake_token_xyz"})
+log("logs_download_invalid_token", "auth", "/api/logs/download", "GET",
+    s, 401, s == 401, b, "无效 token 应返回 401")
 
 # 保存日志
 save_log()

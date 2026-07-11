@@ -39,7 +39,7 @@ function _olHelpIcon(key, tooltipBelow = false) {
   return `<span class="ol-help-icon${belowClass}" data-tooltip="${safeText}" aria-label="帮助">${icon('info')}</span>`;
 }
 
-export async function _renderOpenListConfig(el, cfg) {
+export async function _renderOpenListConfig(cfg) {
   let openlistCfg = {};
   try {
     const resp = await api('/api/webui/config/openlist');
