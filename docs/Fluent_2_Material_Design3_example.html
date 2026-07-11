@@ -1,0 +1,1484 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-ui="md3" data-theme="blue" data-density="normal">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>后台管理 UI 静态参考</title>
+
+  <!-- 网络 fallback：本地字体不可用时尝试加载 Noto Sans SC -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&display=swap"
+    rel="stylesheet"
+  />
+
+  <!-- 网络图标 fallback：主图标用内联 SVG，这个只作为补充备用 -->
+  <link
+    href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,300..600,0..1,-25..100&display=swap"
+    rel="stylesheet"
+  />
+
+  <style>
+    /*
+      离线字体优先：
+      推荐目录：
+      assets/fonts/SourceHanSansCN-Regular.woff2
+      assets/fonts/SourceHanSansCN-Medium.woff2
+      assets/fonts/SourceHanSansCN-Bold.woff2
+    */
+    @font-face {
+      font-family: "Source Han Sans Local";
+      src:
+        local("Source Han Sans CN"),
+        local("Source Han Sans SC"),
+        url("./assets/fonts/SourceHanSansCN-Regular.woff2") format("woff2");
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "Source Han Sans Local";
+      src:
+        local("Source Han Sans CN Medium"),
+        local("Source Han Sans SC Medium"),
+        url("./assets/fonts/SourceHanSansCN-Medium.woff2") format("woff2");
+      font-weight: 500;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "Source Han Sans Local";
+      src:
+        local("Source Han Sans CN Bold"),
+        local("Source Han Sans SC Bold"),
+        url("./assets/fonts/SourceHanSansCN-Bold.woff2") format("woff2");
+      font-weight: 700;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    :root {
+      --font-scale: 1;
+      --icon-size: 20px;
+
+      --bg: #f6f7fb;
+      --surface: #ffffff;
+      --surface-2: #f9fafb;
+      --surface-3: #f2f4f7;
+
+      --sidebar: #101828;
+      --sidebar-hover: #1d2939;
+
+      --text: #101828;
+      --muted: #667085;
+      --weak: #98a2b3;
+      --line: #e4e7ec;
+
+      --primary: #2563eb;
+      --primary-soft: #eff6ff;
+      --primary-border: #bfdbfe;
+
+      --success: #12b76a;
+      --warning: #f79009;
+      --danger: #f04438;
+
+      --radius: 16px;
+      --radius-sm: 11px;
+      --shadow: 0 16px 38px rgba(16, 24, 40, 0.08);
+      --focus: 0 0 0 4px color-mix(in srgb, var(--primary) 15%, transparent);
+
+      --sidebar-width: 252px;
+    }
+
+    html[data-theme="blue"] {
+      --primary: #2563eb;
+      --primary-soft: #eff6ff;
+      --primary-border: #bfdbfe;
+    }
+
+    html[data-theme="green"] {
+      --primary: #059669;
+      --primary-soft: #ecfdf5;
+      --primary-border: #a7f3d0;
+    }
+
+    html[data-theme="purple"] {
+      --primary: #7c3aed;
+      --primary-soft: #f5f3ff;
+      --primary-border: #ddd6fe;
+    }
+
+    html[data-theme="amber"] {
+      --primary: #d97706;
+      --primary-soft: #fffbeb;
+      --primary-border: #fde68a;
+    }
+
+    html[data-theme="slate"] {
+      --primary: #475569;
+      --primary-soft: #f1f5f9;
+      --primary-border: #cbd5e1;
+    }
+
+    html[data-density="compact"] {
+      --font-scale: 0.94;
+      --icon-size: 18px;
+    }
+
+    html[data-density="normal"] {
+      --font-scale: 1;
+      --icon-size: 20px;
+    }
+
+    html[data-density="large"] {
+      --font-scale: 1.07;
+      --icon-size: 22px;
+    }
+
+    /* MD3：圆角更大，阴影和色块更柔 */
+    html[data-ui="md3"] {
+      --bg: #f6f7fb;
+      --surface: #ffffff;
+      --surface-2: #f9fafb;
+      --surface-3: #f2f4f7;
+      --sidebar: #101828;
+      --sidebar-hover: #1d2939;
+      --line: #e4e7ec;
+      --radius: 18px;
+      --radius-sm: 13px;
+      --shadow: 0 18px 44px rgba(16, 24, 40, 0.09);
+    }
+
+    /* Fluent2：更扁、更克制、更接近 Microsoft Admin */
+    html[data-ui="fluent2"] {
+      --bg: #f5f5f5;
+      --surface: #ffffff;
+      --surface-2: #fafafa;
+      --surface-3: #f3f2f1;
+      --sidebar: #11100f;
+      --sidebar-hover: #252423;
+      --line: #edebe9;
+      --radius: 8px;
+      --radius-sm: 6px;
+      --shadow: 0 6px 20px rgba(0, 0, 0, 0.07);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family:
+        "Source Han Sans Local",
+        "Noto Sans SC",
+        "PingFang SC",
+        "Microsoft YaHei",
+        sans-serif;
+      font-size: calc(14px * var(--font-scale));
+      color: var(--text);
+      background:
+        radial-gradient(
+          circle at top right,
+          color-mix(in srgb, var(--primary) 8%, transparent),
+          transparent 300px
+        ),
+        var(--bg);
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    button,
+    select {
+      cursor: pointer;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .material-fallback-icon {
+      font-family: "Material Symbols Rounded";
+      font-size: var(--icon-size);
+      line-height: 1;
+      font-variation-settings:
+        "FILL" 0,
+        "wght" 420,
+        "GRAD" 0,
+        "opsz" 24;
+    }
+
+    /*
+      核心修复：
+      - .icon 固定尺寸
+      - md3 / fluent 图标默认都隐藏
+      - 只显示当前 data-ui 对应的一套
+    */
+    .icon {
+      width: var(--icon-size);
+      height: var(--icon-size);
+      flex: 0 0 var(--icon-size);
+      color: currentColor;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .icon svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .md3-icon,
+    .fluent-icon {
+      display: none;
+    }
+
+    html[data-ui="md3"] .icon .md3-icon {
+      display: block;
+    }
+
+    html[data-ui="md3"] .icon .fluent-icon {
+      display: none;
+    }
+
+    html[data-ui="fluent2"] .icon .md3-icon {
+      display: none;
+    }
+
+    html[data-ui="fluent2"] .icon .fluent-icon {
+      display: block;
+    }
+
+    .layout {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: var(--sidebar-width) 1fr;
+    }
+
+    .sidebar {
+      background: var(--sidebar);
+      color: #d0d5dd;
+      padding: 22px 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 8px 26px;
+    }
+
+    .brand-mark {
+      width: 36px;
+      height: 36px;
+      border-radius: var(--radius-sm);
+      background: linear-gradient(135deg, var(--primary), #38bdf8);
+      color: #ffffff;
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+    }
+
+    html[data-ui="fluent2"] .brand-mark {
+      background: var(--primary);
+    }
+
+    .brand strong {
+      display: block;
+      color: #ffffff;
+      font-size: 16px;
+      line-height: 1.2;
+    }
+
+    .brand span {
+      display: block;
+      margin-top: 2px;
+      color: #98a2b3;
+      font-size: 12px;
+    }
+
+    .menu-title {
+      margin: 18px 10px 8px;
+      color: #667085;
+      font-size: 12px;
+    }
+
+    .menu-item {
+      position: relative;
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 0 12px;
+      border-radius: var(--radius-sm);
+      color: #d0d5dd;
+      margin-bottom: 4px;
+      transition: 0.18s ease;
+    }
+
+    .menu-item:hover {
+      background: var(--sidebar-hover);
+      color: #ffffff;
+    }
+
+    html[data-ui="md3"] .menu-item.active {
+      background: color-mix(in srgb, var(--primary) 28%, transparent);
+      color: #ffffff;
+    }
+
+    html[data-ui="fluent2"] .menu-item.active {
+      background: var(--sidebar-hover);
+      color: #ffffff;
+    }
+
+    html[data-ui="fluent2"] .menu-item.active::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 9px;
+      bottom: 9px;
+      width: 3px;
+      border-radius: 999px;
+      background: var(--primary);
+    }
+
+    .main {
+      min-width: 0;
+      padding: 0 28px 34px;
+    }
+
+    .topbar {
+      min-height: 76px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      backdrop-filter: blur(18px);
+    }
+
+
+    .search {
+      position: relative;
+      width: min(460px, 100%);
+    }
+
+    .search .icon {
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--weak);
+    }
+
+    .search input {
+      width: 100%;
+      height: 42px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      padding: 0 14px 0 44px;
+      outline: none;
+      color: var(--text);
+    }
+
+    .search input:focus {
+      border-color: var(--primary);
+      box-shadow: var(--focus);
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .select-field {
+      min-height: 40px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+    }
+
+    .select-field > span {
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .select-field select {
+      height: 30px;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .theme-select-field {
+      gap: 10px;
+    }
+
+    .theme-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding-right: 2px;
+    }
+
+    .theme-status svg {
+      width: 14px;
+      height: 14px;
+      flex: 0 0 14px;
+    }
+
+    .theme-status strong {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .icon-button {
+      width: 40px;
+      height: 40px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .page-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 20px;
+      padding: 26px 0 20px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--primary);
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .page-head h1 {
+      margin: 0;
+      font-size: calc(28px * var(--font-scale));
+      letter-spacing: -0.03em;
+      line-height: 1.2;
+    }
+
+    .page-head p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      max-width: 700px;
+      line-height: 1.7;
+    }
+
+    .primary-btn {
+      height: 42px;
+      border: 0;
+      border-radius: var(--radius-sm);
+      background: var(--primary);
+      color: #ffffff;
+      padding: 0 16px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      box-shadow: 0 10px 22px color-mix(in srgb, var(--primary) 24%, transparent);
+    }
+
+    html[data-ui="fluent2"] .primary-btn {
+      box-shadow: none;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .stat-card {
+      padding: 18px;
+    }
+
+    .stat-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+
+    .stat-icon {
+      width: 34px;
+      height: 34px;
+      border-radius: var(--radius-sm);
+      color: var(--primary);
+      background: var(--primary-soft);
+      display: grid;
+      place-items: center;
+    }
+
+    html[data-ui="fluent2"] .stat-icon {
+      background: #f3f2f1;
+    }
+
+    .stat-label {
+      font-size: 13px;
+    }
+
+    .stat-value {
+      font-size: calc(25px * var(--font-scale));
+      font-weight: 700;
+      letter-spacing: -0.03em;
+    }
+
+    .stat-note {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .content {
+      display: grid;
+      grid-template-columns: minmax(0, 1.55fr) 380px;
+      gap: 16px;
+      align-items: start;
+    }
+
+    .panel {
+      padding: 18px;
+    }
+
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .panel-head h2 {
+      margin: 0;
+      font-size: calc(17px * var(--font-scale));
+    }
+
+    .panel-link {
+      color: var(--primary);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      min-width: 700px;
+      border-collapse: collapse;
+    }
+
+    th,
+    td {
+      text-align: left;
+      padding: 13px 10px;
+      border-bottom: 1px solid var(--surface-3);
+      white-space: nowrap;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 500;
+      font-size: 13px;
+      background: var(--surface-2);
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .project {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .project-mark {
+      width: 30px;
+      height: 30px;
+      border-radius: var(--radius-sm);
+      display: grid;
+      place-items: center;
+      background: var(--primary-soft);
+      color: var(--primary);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    html[data-ui="fluent2"] .project-mark {
+      background: #f3f2f1;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .status::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .status.ok {
+      color: #027a48;
+      background: #ecfdf3;
+    }
+
+    .status.warn {
+      color: #b54708;
+      background: #fffaeb;
+    }
+
+    .status.risk {
+      color: #b42318;
+      background: #fef3f2;
+    }
+
+    .side-stack {
+      display: grid;
+      gap: 16px;
+    }
+
+    .action-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .action-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+    }
+
+    .action-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .action-title {
+      font-weight: 600;
+      margin-bottom: 3px;
+    }
+
+    .action-desc {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .progress-row {
+      display: flex;
+      justify-content: space-between;
+      font-weight: 600;
+      margin: 8px 0 10px;
+    }
+
+    .progress {
+      height: 8px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #eaecf0;
+    }
+
+    .progress i {
+      display: block;
+      width: 72%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--primary), #38bdf8);
+    }
+
+    html[data-ui="fluent2"] .progress i {
+      background: var(--primary);
+    }
+
+    .metric-list {
+      display: grid;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .metric-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+    }
+
+    .metric-item span {
+      color: var(--muted);
+    }
+
+    .switch-demo-list {
+      display: grid;
+      gap: 16px;
+    }
+
+    .switch-demo-item {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+    }
+
+    .switch-demo-text strong {
+      display: block;
+      margin-bottom: 4px;
+      font-weight: 600;
+    }
+
+    .switch-demo-text span {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .segmented-switch {
+      width: max-content;
+      max-width: 100%;
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      padding: 3px;
+      border: 1px solid var(--line);
+      white-space: nowrap;
+      overflow-x: auto;
+    }
+
+    .segmented-switch button {
+      position: relative;
+      height: 30px;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      padding: 0 14px;
+      border-radius: 999px;
+      font-weight: 500;
+    }
+
+    .segmented-md3 {
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--primary) 7%, var(--surface));
+    }
+
+    .segmented-md3 button.active {
+      color: var(--primary);
+      background: var(--surface);
+      box-shadow: 0 4px 14px rgba(16, 24, 40, 0.08);
+    }
+
+    .segmented-md3 button.active::after {
+      content: "";
+      position: absolute;
+      left: 16px;
+      right: 16px;
+      bottom: 4px;
+      height: 2px;
+      border-radius: 999px;
+      background: var(--primary);
+    }
+
+    .segmented-fluent {
+      border-radius: 6px;
+      background: #fafafa;
+    }
+
+    .segmented-fluent button {
+      border-radius: 4px;
+    }
+
+    .segmented-fluent button.active {
+      color: var(--text);
+      background: #ffffff;
+      box-shadow: inset 0 -2px 0 var(--primary);
+    }
+
+    html[data-ui="fluent2"] .segmented-fluent {
+      background: #f3f2f1;
+      border-color: #edebe9;
+    }
+
+    @media (max-width: 1200px) {
+      .stats {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .content {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 860px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        display: none;
+      }
+
+      .main {
+        padding: 0 16px 28px;
+      }
+
+      .topbar {
+        padding: 14px 0;
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .search {
+        width: 100%;
+      }
+
+      .toolbar {
+        justify-content: flex-start;
+      }
+
+      .page-head {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .stats {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <!-- 内联 SVG Sprite：单文件静态预览最稳 -->
+  <svg width="0" height="0" style="position:absolute;overflow:hidden" aria-hidden="true">
+    <!-- MD3-like icons -->
+    <symbol id="md-dashboard" viewBox="0 0 24 24">
+      <path d="M4 5.5C4 4.67 4.67 4 5.5 4H10v7H4V5.5ZM14 4h4.5c.83 0 1.5.67 1.5 1.5V10h-6V4ZM4 14h6v6H5.5C4.67 20 4 19.33 4 18.5V14ZM14 13h6v5.5c0 .83-.67 1.5-1.5 1.5H14v-7Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+    </symbol>
+
+    <symbol id="md-folder" viewBox="0 0 24 24">
+      <path d="M3.5 7.5C3.5 6.67 4.17 6 5 6h5l2 2h7c.83 0 1.5.67 1.5 1.5v8c0 .83-.67 1.5-1.5 1.5H5c-.83 0-1.5-.67-1.5-1.5v-10Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+    </symbol>
+
+    <symbol id="md-users" viewBox="0 0 24 24">
+      <path d="M9 11a3.2 3.2 0 1 0 0-6.4A3.2 3.2 0 0 0 9 11Zm7-1.2a2.7 2.7 0 1 0 0-5.4 2.7 2.7 0 0 0 0 5.4ZM3.5 19c0-3 2.6-5 5.5-5s5.5 2 5.5 5v.5h-11V19Zm11.5-4.6c2.6.25 4.5 1.9 4.5 4.1v1h-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+
+    <symbol id="md-search" viewBox="0 0 24 24">
+      <path d="M10.8 17.2a6.4 6.4 0 1 0 0-12.8 6.4 6.4 0 0 0 0 12.8Zm4.6-1.8L20 20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+    </symbol>
+
+    <symbol id="md-add" viewBox="0 0 24 24">
+      <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </symbol>
+
+    <symbol id="md-bell" viewBox="0 0 24 24">
+      <path d="M6.5 10a5.5 5.5 0 0 1 11 0v3.5l1.5 3H5l1.5-3V10Zm3.5 8.5h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+
+    <symbol id="md-more" viewBox="0 0 24 24">
+      <path d="M6 12h.01M12 12h.01M18 12h.01" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+    </symbol>
+
+    <symbol id="md-download" viewBox="0 0 24 24">
+      <path d="M12 4v10m0 0 4-4m-4 4-4-4M5 18.5h14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+
+    <!-- Fluent2-like icons -->
+    <symbol id="fi-dashboard" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M4.75 3A1.75 1.75 0 0 0 3 4.75v5.5C3 11.22 3.78 12 4.75 12h5.5A1.75 1.75 0 0 0 12 10.25v-5.5A1.75 1.75 0 0 0 10.25 3h-5.5Zm0 1.5h5.5c.14 0 .25.11.25.25v5.5c0 .14-.11.25-.25.25h-5.5a.25.25 0 0 1-.25-.25v-5.5c0-.14.11-.25.25-.25Zm9 0h5.5c.14 0 .25.11.25.25v5.5c0 .14-.11.25-.25.25h-5.5a.25.25 0 0 1-.25-.25v-5.5c0-.14.11-.25.25-.25ZM3 13.75C3 12.78 3.78 12 4.75 12h5.5c.97 0 1.75.78 1.75 1.75v5.5c0 .97-.78 1.75-1.75 1.75h-5.5A1.75 1.75 0 0 1 3 19.25v-5.5Zm10.75-.25h5.5c.14 0 .25.11.25.25v5.5c0 .14-.11.25-.25.25h-5.5a.25.25 0 0 1-.25-.25v-5.5c0-.14.11-.25.25-.25Z"/>
+    </symbol>
+
+    <symbol id="fi-folder" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M5.75 4A2.75 2.75 0 0 0 3 6.75v10.5A2.75 2.75 0 0 0 5.75 20h12.5A2.75 2.75 0 0 0 21 17.25v-8.5A2.75 2.75 0 0 0 18.25 6h-5.94l-1.06-1.05A3.25 3.25 0 0 0 8.95 4h-3.2Zm0 1.5h3.2c.46 0 .9.18 1.23.5l1.27 1.28c.14.14.33.22.53.22h6.27c.69 0 1.25.56 1.25 1.25v8.5c0 .69-.56 1.25-1.25 1.25H5.75c-.69 0-1.25-.56-1.25-1.25V6.75c0-.69.56-1.25 1.25-1.25Z"/>
+    </symbol>
+
+    <symbol id="fi-users" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M8.5 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm0-1.5a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM15.5 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm0-1.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3ZM2 17.25C2 14.9 4.9 13 8.5 13S15 14.9 15 17.25V18a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-.75Zm1.5 0V18c0 .28.22.5.5.5h9a.5.5 0 0 0 .5-.5v-.75c0-1.36-2.06-2.75-5-2.75s-5 1.39-5 2.75Zm12.5-2.75c-.27 0-.53.02-.79.06a6.1 6.1 0 0 0-1.2-1.17 8.2 8.2 0 0 1 1.99-.39c2.87 0 5 1.57 5 3.75V18a2 2 0 0 1-2 2h-2.44c.28-.43.44-.94.44-1.5H19c.28 0 .5-.22.5-.5v-1.25c0-1.29-1.54-2.25-3.5-2.25Z"/>
+    </symbol>
+
+    <symbol id="fi-search" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M10.5 4a6.5 6.5 0 0 1 5.16 10.45l4.45 4.44a.75.75 0 1 1-1.06 1.06l-4.44-4.45A6.5 6.5 0 1 1 10.5 4Zm0 1.5a5 5 0 1 0 0 10 5 5 0 0 0 0-10Z"/>
+    </symbol>
+
+    <symbol id="fi-add" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M12 4.75c.41 0 .75.34.75.75v5.75h5.75a.75.75 0 0 1 0 1.5h-5.75v5.75a.75.75 0 0 1-1.5 0v-5.75H5.5a.75.75 0 0 1 0-1.5h5.75V5.5c0-.41.34-.75.75-.75Z"/>
+    </symbol>
+
+    <symbol id="fi-bell" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M12 3a6 6 0 0 0-6 6v3.1l-1.7 3.4A1.75 1.75 0 0 0 5.86 18h12.28a1.75 1.75 0 0 0 1.56-2.5L18 12.1V9a6 6 0 0 0-6-6Zm0 1.5A4.5 4.5 0 0 1 16.5 9v3.28c0 .12.03.23.08.34l1.78 3.56a.25.25 0 0 1-.22.32H5.86a.25.25 0 0 1-.22-.32l1.78-3.56c.05-.11.08-.22.08-.34V9A4.5 4.5 0 0 1 12 4.5Zm-2.25 14.75a2.25 2.25 0 0 0 4.5 0h-4.5Z"/>
+    </symbol>
+
+    <symbol id="fi-more" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M5.75 13.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Zm6.25 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Zm6.25 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Z"/>
+    </symbol>
+
+    <symbol id="fi-download" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M12 3.75c.41 0 .75.34.75.75v8.2l2.72-2.73a.75.75 0 1 1 1.06 1.06l-4 4a.75.75 0 0 1-1.06 0l-4-4a.75.75 0 1 1 1.06-1.06l2.72 2.72V4.5c0-.41.34-.75.75-.75ZM5 17.25c.41 0 .75.34.75.75v.75c0 .41.34.75.75.75h11c.41 0 .75-.34.75-.75V18a.75.75 0 0 1 1.5 0v.75A2.25 2.25 0 0 1 17.5 21h-11A2.25 2.25 0 0 1 4.25 18.75V18c0-.41.34-.75.75-.75Z"/>
+    </symbol>
+  </svg>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">S</div>
+        <div>
+          <strong>Source Admin</strong>
+          <span>运营管理台</span>
+        </div>
+      </div>
+
+      <nav>
+        <div class="menu-title">工作台</div>
+
+        <a href="#" class="menu-item active">
+          <span class="icon">
+            <svg class="md3-icon" aria-hidden="true"><use href="#md-dashboard"></use></svg>
+            <svg class="fluent-icon" aria-hidden="true"><use href="#fi-dashboard"></use></svg>
+          </span>
+          概览
+        </a>
+
+        <a href="#" class="menu-item">
+          <span class="icon">
+            <svg class="md3-icon" aria-hidden="true"><use href="#md-folder"></use></svg>
+            <svg class="fluent-icon" aria-hidden="true"><use href="#fi-folder"></use></svg>
+          </span>
+          项目
+        </a>
+
+        <a href="#" class="menu-item">
+          <span class="icon">
+            <svg class="md3-icon" aria-hidden="true"><use href="#md-users"></use></svg>
+            <svg class="fluent-icon" aria-hidden="true"><use href="#fi-users"></use></svg>
+          </span>
+          用户
+        </a>
+
+        <div class="menu-title">系统</div>
+
+        <a href="#" class="menu-item">
+          <span class="icon">
+            <svg class="md3-icon" aria-hidden="true"><use href="#md-folder"></use></svg>
+            <svg class="fluent-icon" aria-hidden="true"><use href="#fi-folder"></use></svg>
+          </span>
+          权限
+        </a>
+
+        <a href="#" class="menu-item">
+          <span class="icon">
+            <svg class="md3-icon" aria-hidden="true"><use href="#md-dashboard"></use></svg>
+            <svg class="fluent-icon" aria-hidden="true"><use href="#fi-dashboard"></use></svg>
+          </span>
+          日志
+        </a>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="search">
+          <span class="icon">
+            <svg class="md3-icon" aria-hidden="true"><use href="#md-search"></use></svg>
+            <svg class="fluent-icon" aria-hidden="true"><use href="#fi-search"></use></svg>
+          </span>
+          <input type="search" placeholder="搜索项目、成员、工单或日志" />
+        </div>
+
+        <div class="toolbar">
+          <label class="select-field">
+            <span>风格</span>
+            <select id="uiStyleSelect">
+              <option value="md3">MD3</option>
+              <option value="fluent2">Fluent2</option>
+            </select>
+          </label>
+
+          <label class="select-field theme-select-field">
+            <span>主题</span>
+
+            <div class="theme-status" id="themeStatus">
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <circle cx="8" cy="8" r="6" fill="#2563eb"></circle>
+              </svg>
+              <strong>蓝色</strong>
+            </div>
+
+            <select id="themeSelect">
+              <option value="blue">蓝色</option>
+              <option value="green">绿色</option>
+              <option value="purple">紫色</option>
+              <option value="amber">琥珀</option>
+              <option value="slate">石墨</option>
+            </select>
+          </label>
+
+          <label class="select-field">
+            <span>字号</span>
+            <select id="fontSizeSelect">
+              <option value="compact">紧凑</option>
+              <option value="normal" selected>标准</option>
+              <option value="large">大号</option>
+            </select>
+          </label>
+
+          <button class="icon-button" aria-label="通知">
+            <span class="icon">
+              <svg class="md3-icon" aria-hidden="true"><use href="#md-bell"></use></svg>
+              <svg class="fluent-icon" aria-hidden="true"><use href="#fi-bell"></use></svg>
+            </span>
+          </button>
+        </div>
+      </header>
+
+      <section class="page-head">
+        <div>
+          <div class="eyebrow">
+            <span class="icon">
+              <svg class="md3-icon" aria-hidden="true"><use href="#md-dashboard"></use></svg>
+              <svg class="fluent-icon" aria-hidden="true"><use href="#fi-dashboard"></use></svg>
+            </span>
+            运营看板
+          </div>
+
+          <h1>后台管理仪表盘</h1>
+          <p>
+            静态后台页面参考。风格、主题和字号通过下拉切换；状态开关作为组件模板独立展示。
+          </p>
+        </div>
+
+        <button class="primary-btn">
+          <span class="icon">
+            <svg class="md3-icon" aria-hidden="true"><use href="#md-add"></use></svg>
+            <svg class="fluent-icon" aria-hidden="true"><use href="#fi-add"></use></svg>
+          </span>
+          新建项目
+        </button>
+      </section>
+
+      <section class="stats">
+        <article class="card stat-card">
+          <div class="stat-top">
+            <span class="stat-label">今日访问</span>
+            <span class="stat-icon">
+              <span class="icon">
+                <svg class="md3-icon" aria-hidden="true"><use href="#md-dashboard"></use></svg>
+                <svg class="fluent-icon" aria-hidden="true"><use href="#fi-dashboard"></use></svg>
+              </span>
+            </span>
+          </div>
+          <div class="stat-value">128,430</div>
+          <div class="stat-note">较昨日增加 12.8%</div>
+        </article>
+
+        <article class="card stat-card">
+          <div class="stat-top">
+            <span class="stat-label">活跃用户</span>
+            <span class="stat-icon">
+              <span class="icon">
+                <svg class="md3-icon" aria-hidden="true"><use href="#md-users"></use></svg>
+                <svg class="fluent-icon" aria-hidden="true"><use href="#fi-users"></use></svg>
+              </span>
+            </span>
+          </div>
+          <div class="stat-value">24,819</div>
+          <div class="stat-note">本周保持稳定增长</div>
+        </article>
+
+        <article class="card stat-card">
+          <div class="stat-top">
+            <span class="stat-label">待处理事项</span>
+            <span class="stat-icon">
+              <span class="icon">
+                <svg class="md3-icon" aria-hidden="true"><use href="#md-folder"></use></svg>
+                <svg class="fluent-icon" aria-hidden="true"><use href="#fi-folder"></use></svg>
+              </span>
+            </span>
+          </div>
+          <div class="stat-value">326</div>
+          <div class="stat-note">包含 18 条高优先级</div>
+        </article>
+
+        <article class="card stat-card">
+          <div class="stat-top">
+            <span class="stat-label">系统可用性</span>
+            <span class="stat-icon">
+              <span class="icon">
+                <svg class="md3-icon" aria-hidden="true"><use href="#md-dashboard"></use></svg>
+                <svg class="fluent-icon" aria-hidden="true"><use href="#fi-dashboard"></use></svg>
+              </span>
+            </span>
+          </div>
+          <div class="stat-value">99.96%</div>
+          <div class="stat-note">核心服务运行正常</div>
+        </article>
+      </section>
+
+      <section class="content">
+        <div class="card panel">
+          <div class="panel-head">
+            <h2>最近项目</h2>
+            <a href="#" class="panel-link">查看全部</a>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>项目</th>
+                  <th>负责人</th>
+                  <th>进度</th>
+                  <th>状态</th>
+                  <th>更新时间</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    <div class="project">
+                      <span class="project-mark">P1</span>
+                      <div>
+                        <div>企业门户改版</div>
+                        <div class="muted">官网与内容管理</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td>设计组</td>
+                  <td>78%</td>
+                  <td><span class="status ok">进行中</span></td>
+                  <td class="muted">今天 14:20</td>
+                  <td>
+                    <span class="icon muted">
+                      <svg class="md3-icon" aria-hidden="true"><use href="#md-more"></use></svg>
+                      <svg class="fluent-icon" aria-hidden="true"><use href="#fi-more"></use></svg>
+                    </span>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td>
+                    <div class="project">
+                      <span class="project-mark">D2</span>
+                      <div>
+                        <div>订单数据看板</div>
+                        <div class="muted">经营分析与导出</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td>产品组</td>
+                  <td>54%</td>
+                  <td><span class="status warn">待确认</span></td>
+                  <td class="muted">今天 11:35</td>
+                  <td>
+                    <span class="icon muted">
+                      <svg class="md3-icon" aria-hidden="true"><use href="#md-more"></use></svg>
+                      <svg class="fluent-icon" aria-hidden="true"><use href="#fi-more"></use></svg>
+                    </span>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td>
+                    <div class="project">
+                      <span class="project-mark">A3</span>
+                      <div>
+                        <div>权限中心重构</div>
+                        <div class="muted">角色、菜单与审计</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td>研发组</td>
+                  <td>91%</td>
+                  <td><span class="status ok">验收中</span></td>
+                  <td class="muted">昨天 18:10</td>
+                  <td>
+                    <span class="icon muted">
+                      <svg class="md3-icon" aria-hidden="true"><use href="#md-more"></use></svg>
+                      <svg class="fluent-icon" aria-hidden="true"><use href="#fi-more"></use></svg>
+                    </span>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td>
+                    <div class="project">
+                      <span class="project-mark">L4</span>
+                      <div>
+                        <div>日志审计模块</div>
+                        <div class="muted">安全策略与留存</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td>安全组</td>
+                  <td>32%</td>
+                  <td><span class="status risk">有风险</span></td>
+                  <td class="muted">昨天 09:42</td>
+                  <td>
+                    <span class="icon muted">
+                      <svg class="md3-icon" aria-hidden="true"><use href="#md-more"></use></svg>
+                      <svg class="fluent-icon" aria-hidden="true"><use href="#fi-more"></use></svg>
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <aside class="side-stack">
+          <div class="card panel">
+            <div class="panel-head">
+              <h2>状态开关模板</h2>
+              <a href="#" class="panel-link">组件示例</a>
+            </div>
+
+            <div class="switch-demo-list">
+              <div class="switch-demo-item">
+                <div class="switch-demo-text">
+                  <strong>MD3 横划状态</strong>
+                  <span>更圆、更柔和，适合筛选、状态分组、轻量选项。</span>
+                </div>
+
+                <div class="segmented-switch segmented-md3" data-switch>
+                  <button class="active">启用</button>
+                  <button>暂停</button>
+                  <button>关闭</button>
+                </div>
+              </div>
+
+              <div class="switch-demo-item">
+                <div class="switch-demo-text">
+                  <strong>Fluent2 横划状态</strong>
+                  <span>更克制、更扁平，适合权限、审计、配置型场景。</span>
+                </div>
+
+                <div class="segmented-switch segmented-fluent" data-switch>
+                  <button class="active">全部</button>
+                  <button>处理中</button>
+                  <button>异常</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card panel">
+            <div class="panel-head">
+              <h2>快捷操作</h2>
+              <a href="#" class="panel-link">配置</a>
+            </div>
+
+            <div class="action-list">
+              <div class="action-row">
+                <div class="action-left">
+                  <span class="stat-icon">
+                    <span class="icon">
+                      <svg class="md3-icon" aria-hidden="true"><use href="#md-add"></use></svg>
+                      <svg class="fluent-icon" aria-hidden="true"><use href="#fi-add"></use></svg>
+                    </span>
+                  </span>
+                  <div>
+                    <div class="action-title">发布版本</div>
+                    <div class="action-desc">提交生产发布申请</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="action-row">
+                <div class="action-left">
+                  <span class="stat-icon">
+                    <span class="icon">
+                      <svg class="md3-icon" aria-hidden="true"><use href="#md-download"></use></svg>
+                      <svg class="fluent-icon" aria-hidden="true"><use href="#fi-download"></use></svg>
+                    </span>
+                  </span>
+                  <div>
+                    <div class="action-title">导出报表</div>
+                    <div class="action-desc">下载当前筛选结果</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="action-row">
+                <div class="action-left">
+                  <span class="stat-icon">
+                    <span class="icon">
+                      <svg class="md3-icon" aria-hidden="true"><use href="#md-users"></use></svg>
+                      <svg class="fluent-icon" aria-hidden="true"><use href="#fi-users"></use></svg>
+                    </span>
+                  </span>
+                  <div>
+                    <div class="action-title">用户审核</div>
+                    <div class="action-desc">12 条申请待处理</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card panel">
+            <div class="panel-head">
+              <h2>本月目标</h2>
+              <a href="#" class="panel-link">详情</a>
+            </div>
+
+            <div class="progress-row">
+              <span>完成进度</span>
+              <span>72%</span>
+            </div>
+
+            <div class="progress">
+              <i></i>
+            </div>
+
+            <div class="metric-list">
+              <div class="metric-item">
+                <strong>发布准时率</strong>
+                <span>86%</span>
+              </div>
+              <div class="metric-item">
+                <strong>待关闭风险</strong>
+                <span>4 项</span>
+              </div>
+              <div class="metric-item">
+                <strong>平均响应</strong>
+                <span>18 分钟</span>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const root = document.documentElement;
+
+    const themeMap = {
+      blue: {
+        name: "蓝色",
+        color: "#2563eb"
+      },
+      green: {
+        name: "绿色",
+        color: "#059669"
+      },
+      purple: {
+        name: "紫色",
+        color: "#7c3aed"
+      },
+      amber: {
+        name: "琥珀",
+        color: "#d97706"
+      },
+      slate: {
+        name: "石墨",
+        color: "#475569"
+      }
+    };
+
+    const uiStyleSelect = document.getElementById("uiStyleSelect");
+    const themeSelect = document.getElementById("themeSelect");
+    const fontSizeSelect = document.getElementById("fontSizeSelect");
+    const themeStatus = document.getElementById("themeStatus");
+
+    uiStyleSelect.addEventListener("change", () => {
+      root.dataset.ui = uiStyleSelect.value;
+    });
+
+    themeSelect.addEventListener("change", () => {
+      const value = themeSelect.value;
+      const theme = themeMap[value];
+
+      root.dataset.theme = value;
+
+      themeStatus.innerHTML = `
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <circle cx="8" cy="8" r="6" fill="${theme.color}"></circle>
+        </svg>
+        <strong>${theme.name}</strong>
+      `;
+    });
+
+    fontSizeSelect.addEventListener("change", () => {
+      root.dataset.density = fontSizeSelect.value;
+    });
+
+    document.querySelectorAll("[data-switch]").forEach((group) => {
+      group.querySelectorAll("button").forEach((button) => {
+        button.addEventListener("click", () => {
+          group.querySelectorAll("button").forEach((item) => {
+            item.classList.remove("active");
+          });
+
+          button.classList.add("active");
+        });
+      });
+    });
+  </script>
+</body>
+</html>
