@@ -16,7 +16,7 @@ OpenList STRM 引擎能够高效地生成 `.strm` 文件供本地媒体库刮削
 
 ## 🌟 核心特性
 
-1. **API 动态映射**：启动时主动调用 OpenList Admin API 抓取所有 `driver=strm` 的存储节点，自动梳理本地路径与云端真实监控路径的分组映射。（`config.py:62`、`app_service_core.py:129`）
+1. **API 动态映射**：启动时主动调用 OpenList Admin API 抓取所有 `driver=strm` 的存储节点，自动梳理本地路径与云端真实监控路径的分组映射。（`config.py`、`app_service_core.py`）
 
 2. **智能媒体类型识别与字幕同步**：自动识别电影/番剧类型，电影字幕保持同目录结构，番剧字幕按 `Season XX/S01E01.forced.zho.简体.ass` 标准格式归档。（`media_renamer.py`、`subtitle_handler.py`）
 
@@ -60,10 +60,10 @@ python src/webui/server.py
 openlist_strm_bridge/
 ├── src/
 │   ├── main.py                  # 入口 — 配置加载、DB 初始化、AppService 启动
-│   ├── app_service_core.py      # 核心同步引擎 (~2332 行)
+│   ├── app_service_core.py      # 核心同步引擎 (~2160 行)
 │   ├── config.py                # 类型化 dataclass 配置
-│   ├── database.py              # SQLite bridge.db 管理器 (~1400 行)
-│   ├── webdav_client.py         # OpenList Admin API + WebDAV 客户端 (~700 行)
+│   ├── database.py              # SQLite bridge.db 管理器 (~1330 行)
+│   ├── webdav_client.py         # OpenList Admin API + WebDAV 客户端 (~730 行)
 │   ├── area_watchers.py         # Watchdog 文件系统事件处理器
 │   ├── media_renamer.py         # 重命名、季集提取
 │   ├── refresh_service.py       # 周期 WebDAV 刷新

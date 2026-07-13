@@ -138,6 +138,18 @@ class TestAdminTokenCache:
         client._load_token_from_cache()
         assert client.token == "cached-jwt"
 
+    def test_load_encrypted_token_from_cache(self, tmp_path):
+        """加密格式（ENC: 前缀）的缓存应解密还原。"""
+        import secret_manager
+        cache_file = tmp_path / ".admin_token.json"
+        cache_file.write_text(
+            json.dumps({"token": secret_manager.encrypt("enc-jwt")}),
+            encoding="utf-8",
+        )
+        client = _make_admin_client(tmp_path)
+        client._load_token_from_cache()
+        assert client.token == "enc-jwt"
+
     def test_load_token_missing_file(self, tmp_path):
         client = _make_admin_client(tmp_path)
         client._load_token_from_cache()
@@ -148,8 +160,21 @@ class TestAdminTokenCache:
         client._save_token_to_cache("new-jwt")
         assert client.token == "new-jwt"
         data = json.loads((tmp_path / ".admin_token.json").read_text(encoding="utf-8"))
-        assert data["token"] == "new-jwt"
+        # 非空 token 应加密存储（ENC: 前缀），而非明文
+        assert data["token"] != "new-jwt"
         assert "ts" in data
+        # 加密值应能通过 _load_token_from_cache 解密还原
+        client.token = None
+        client._load_token_from_cache()
+        assert client.token == "new-jwt"
+
+    def test_save_empty_token_to_cache(self, tmp_path):
+        """空 token 写入空串（不加密），避免 ENC: 空密文堆积。"""
+        client = _make_admin_client(tmp_path)
+        client._save_token_to_cache("")
+        assert client.token == ""
+        data = json.loads((tmp_path / ".admin_token.json").read_text(encoding="utf-8"))
+        assert data["token"] == ""
 
     def test_save_token_io_error_swallowed(self, tmp_path):
         client = _make_admin_client(tmp_path)
@@ -240,6 +265,94 @@ class TestAdminLogin:
         assert result is False
         assert client.last_error_type == "invalid_totp"
 
+    def test_login_handles_missing_schema_error(self, tmp_path):
+        """login() 区分 MissingSchema/InvalidURL 与一般网络异常。
+
+        覆盖 webdav_client.py:208-214：当 session.post 抛出
+        requests.exceptions.MissingSchema（host 无 scheme）时，
+        应归类为 not_configured 而非 network_error。
+        """
+        import requests as _req
+        client = _make_admin_client(tmp_path, host="no-scheme-host")
+        # host 无 scheme，session.post 会因 URL 无效抛 MissingSchema
+        client.session.post.side_effect = _req.exceptions.MissingSchema(
+            "Invalid URL 'no-scheme-host/api/auth/login': No scheme supplied"
+        )
+
+        result = client.login()
+
+        assert result is False
+        assert client.last_error_type == "not_configured"
+        assert "配置无效" in client.last_error_message
+
+    def test_login_returns_not_configured_when_host_empty(self, tmp_path):
+        """login() 在 host 为空时直接返回 not_configured，不发起请求。
+
+        覆盖 webdav_client.py:162-166：host 为空时前置检查直接返回，
+        避免空 host 拼出无效 URL 误报为网络异常。
+        """
+        client = _make_admin_client(tmp_path)
+        client.host = ""
+
+        result = client.login()
+
+        assert result is False
+
+    def test_login_response_data_field_is_null(self, tmp_path):
+        """login() 处理 API 返回 {data: null, message: "error"} 的情况。
+
+        覆盖 webdav_client.py:190-201：当 OpenList API 返回 data 字段为 null 时，
+        原代码 data.get("data", {}).get("token") 会抛出
+        'NoneType' object has no attribute 'get' 错误。
+        修复后应安全处理并返回明确的错误信息。
+        """
+        client = _make_admin_client(tmp_path)
+        # 模拟 OpenList 返回 data: null 的情况
+        resp = _make_response({"data": None, "message": "authentication failed"})
+        client.session.post.return_value = resp
+
+        result = client.login()
+
+        assert result is False
+        assert client.last_error_type == "unknown"
+        assert client.last_error_message == "authentication failed"
+        assert client.token is None
+
+    def test_login_response_data_field_is_wrong_type(self, tmp_path):
+        """login() 处理 API 返回 data 字段为非字典类型的情况。
+
+        覆盖 webdav_client.py:190-201：当 data 字段为字符串、列表等非字典类型时，
+        应安全处理并返回错误。
+        """
+        client = _make_admin_client(tmp_path)
+        # 模拟 data 字段为字符串
+        resp = _make_response({"data": "unexpected string", "message": "error"})
+        client.session.post.return_value = resp
+
+        result = client.login()
+
+        assert result is False
+        assert client.last_error_type == "unknown"
+        assert client.token is None
+
+    def test_login_response_missing_data_field(self, tmp_path):
+        """login() 处理 API 响应完全缺少 data 字段的情况。
+
+        覆盖 webdav_client.py:190-201：当响应中没有 data 字段时，
+        应安全处理并返回错误。
+        """
+        client = _make_admin_client(tmp_path)
+        # 模拟响应缺少 data 字段
+        resp = _make_response({"message": "some error"})
+        client.session.post.return_value = resp
+
+        result = client.login()
+
+        assert result is False
+        assert client.last_error_type == "unknown"
+        assert client.token is None
+        assert client.last_error_message == "some error"
+
 
 # ===========================================================================
 # OpenListAdminClient — _do_request
@@ -303,6 +416,62 @@ class TestAdminDoRequest:
         # Returns the expired response since re-login failed
         assert res is expired
 
+    def test_do_request_returns_none_when_host_empty(self, tmp_path):
+        """_do_request 在 host 为空时直接返回 None，不发起请求。
+
+        覆盖 webdav_client.py:243-247：host 为空时前置检查直接返回，
+        避免空 host 拼出无效 URL 误报为网络异常。
+        """
+        client = _make_admin_client(tmp_path)
+        client.host = ""
+        # 设置 token 以跳过 login()，确保走 host 空检查路径而非 login 路径
+        client.token = "some-token"
+
+        res = client._do_request("GET", "/api/test")
+
+        assert res is None
+        assert client.last_error_type == "not_configured"
+        # session.request 不应被调用
+        assert client.session.request.call_count == 0
+
+    def test_do_request_handles_missing_schema_exception(self, tmp_path):
+        """_do_request 在 session.request 抛 MissingSchema 时返回 None。
+
+        覆盖 webdav_client.py:330-341：当 session.request 抛出
+        requests.exceptions.MissingSchema（URL 无 scheme）时，
+        应被 except 捕获并返回 None，不向上抛出。
+        注意：与 login() 不同，此处仅记日志，不设置 last_error_type。
+        """
+        import requests as _req
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        # session.request 抛 MissingSchema（模拟 host 无 scheme 但已缓存 token 的场景）
+        client.session.request.side_effect = _req.exceptions.MissingSchema(
+            "Invalid URL '/api/test': No scheme supplied"
+        )
+
+        res = client._do_request("GET", "/api/test")
+
+        # 应返回 None 而非向上抛出
+        assert res is None
+
+    def test_do_request_handles_invalid_url_exception(self, tmp_path):
+        """_do_request 在 session.request 抛 InvalidURL 时返回 None。
+
+        覆盖 webdav_client.py:330-341：InvalidURL 与 MissingSchema 同属
+        "未配置/无效 URL" 分类，应被捕获并返回 None。
+        """
+        import requests as _req
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        client.session.request.side_effect = _req.exceptions.InvalidURL(
+            "failed to parse: /api/test"
+        )
+
+        res = client._do_request("GET", "/api/test")
+
+        assert res is None
+
 
 # ===========================================================================
 # OpenListAdminClient — business methods
@@ -349,6 +518,41 @@ class TestAdminListStorages:
 
         assert client.list_storages() is None
 
+    def test_response_data_field_is_null(self, tmp_path):
+        """list_storages 处理 API 返回 data: null 的情况。
+
+        覆盖 webdav_client.py:382-389：当 OpenList API 返回 data 字段为 null 时，
+        应安全处理并返回空结果，不抛出异常。
+        """
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        # 模拟 OpenList 返回 data: null 的情况
+        client.session.request.return_value = _make_response({"code": 200, "data": None})
+
+        result = client.list_storages()
+
+        # 应返回空结果而非抛出异常或 None
+        assert result is not None
+        assert result["data"]["content"] == []
+        assert result["data"]["total"] == 0
+
+    def test_response_data_content_is_null(self, tmp_path):
+        """list_storages 处理 API 返回 data.content: null 的情况。
+
+        覆盖 webdav_client.py:382-389：当 data.content 为 null 时，
+        应安全处理并返回空列表。
+        """
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        # 模拟 data.content 为 null
+        client.session.request.return_value = _make_response({"code": 200, "data": {"content": None, "total": 0}})
+
+        result = client.list_storages()
+
+        # 应返回结果，content 为空列表
+        assert result is not None
+        assert result["data"]["content"] == []
+
 
 class TestAdminGetStorageInfo:
     def test_success(self, tmp_path):
@@ -365,6 +569,144 @@ class TestAdminGetStorageInfo:
         client.session.request.return_value = _make_response(status=500)
 
         assert client.get_storage_info(5) is None
+
+    def test_response_data_field_is_null(self, tmp_path):
+        """get_storage_info 处理 API 返回 data: null 的情况。
+
+        覆盖 webdav_client.py:458-466：当 OpenList API 返回 data 字段为 null 时，
+        应安全处理并返回原始响应，不抛出异常。
+        """
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        # 模拟 OpenList 返回 data: null 的情况
+        client.session.request.return_value = _make_response({"code": 200, "data": None})
+
+        result = client.get_storage_info(5)
+
+        # 应返回原始响应而非抛出异常
+        assert result is not None
+        assert result["code"] == 200
+        assert result["data"] is None
+
+    def test_response_missing_data_field(self, tmp_path):
+        """get_storage_info 处理 API 响应缺少 data 字段的情况。
+
+        覆盖 webdav_client.py:458-466：当响应中没有 data 字段时，
+        应安全处理并返回原始响应。
+        """
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        # 模拟响应缺少 data 字段
+        client.session.request.return_value = _make_response({"code": 200})
+
+        result = client.get_storage_info(5)
+
+        # 应返回原始响应而非抛出异常
+        assert result is not None
+        assert result["code"] == 200
+        assert "data" not in result
+
+
+class TestAdminGetStrmStoragesFullInfo:
+    """get_strm_storages_full_info 的 null 防御测试。
+
+    覆盖 webdav_client.py:420-455：当 list_storages / get_storage_info 返回
+    data: null 或 None 时，应安全回退，不抛出 'NoneType' object has no
+    attribute 'get' 异常。
+    """
+
+    def test_list_storages_data_null(self, tmp_path):
+        """list_storages 返回 data: null → 返回 [] 不抛异常。"""
+        client = _make_admin_client(tmp_path)
+        with patch.object(client, "list_storages", return_value={"code": 200, "data": None}):
+            result = client.get_strm_storages_full_info()
+            assert result == []
+
+    def test_list_storages_returns_none(self, tmp_path):
+        """list_storages 返回 None → 返回 [] 不抛异常。"""
+        client = _make_admin_client(tmp_path)
+        with patch.object(client, "list_storages", return_value=None):
+            result = client.get_strm_storages_full_info()
+            assert result == []
+
+    def test_get_storage_info_data_null_falls_back(self, tmp_path):
+        """get_storage_info 返回 data: null → fallback 到原始 storage 条目。
+
+        覆盖 webdav_client.py:446-450：full_info.get("data", {}) 在 data 为
+        None 时返回 None，isinstance(data, dict) 守卫为 False，走 else 分支
+        追加原始 storage。
+        """
+        client = _make_admin_client(tmp_path)
+        list_result = {
+            "code": 200,
+            "data": {
+                "content": [{"id": 1, "driver": "Strm", "mount_path": "/s1"}],
+                "total": 1,
+            },
+        }
+        with patch.object(client, "list_storages", return_value=list_result), \
+             patch.object(client, "get_storage_info", return_value={"code": 200, "data": None}):
+            result = client.get_strm_storages_full_info()
+            assert len(result) == 1
+            # data: null → fallback，应返回原始 storage（含 id, driver, mount_path）
+            assert result[0]["id"] == 1
+            assert result[0]["mount_path"] == "/s1"
+
+    def test_get_storage_info_returns_none_falls_back(self, tmp_path):
+        """get_storage_info 返回 None → fallback 到原始 storage 条目。
+
+        覆盖 webdav_client.py:451-453：full_info 为 None 时走 else 分支追加
+        原始 storage。
+        """
+        client = _make_admin_client(tmp_path)
+        list_result = {
+            "code": 200,
+            "data": {
+                "content": [{"id": 2, "driver": "Strm", "mount_path": "/s2"}],
+                "total": 1,
+            },
+        }
+        with patch.object(client, "list_storages", return_value=list_result), \
+             patch.object(client, "get_storage_info", return_value=None):
+            result = client.get_strm_storages_full_info()
+            assert len(result) == 1
+            assert result[0]["id"] == 2
+            assert result[0]["mount_path"] == "/s2"
+
+    def test_empty_strm_list(self, tmp_path):
+        """STRM 列表为空（无 Strm 驱动存储）→ 返回 []。"""
+        client = _make_admin_client(tmp_path)
+        list_result = {
+            "code": 200,
+            "data": {
+                "content": [{"id": 3, "driver": "Local", "mount_path": "/local"}],
+                "total": 1,
+            },
+        }
+        with patch.object(client, "list_storages", return_value=list_result):
+            result = client.get_strm_storages_full_info()
+            assert result == []
+
+    def test_full_info_with_valid_data(self, tmp_path):
+        """get_storage_info 返回有效 data → 返回完整 data（含 addition）。"""
+        client = _make_admin_client(tmp_path)
+        list_result = {
+            "code": 200,
+            "data": {
+                "content": [{"id": 1, "driver": "Strm", "mount_path": "/s1"}],
+                "total": 1,
+            },
+        }
+        full_info = {
+            "code": 200,
+            "data": {"id": 1, "driver": "Strm", "mount_path": "/s1", "addition": "{}"},
+        }
+        with patch.object(client, "list_storages", return_value=list_result), \
+             patch.object(client, "get_storage_info", return_value=full_info):
+            result = client.get_strm_storages_full_info()
+            assert len(result) == 1
+            assert result[0]["id"] == 1
+            assert result[0]["addition"] == "{}"
 
 
 class TestAdminListDirectory:
@@ -511,6 +853,17 @@ class TestAdminCheckExists:
 
         assert client.check_exists("") is True
 
+    def test_data_field_null_returns_false(self, tmp_path):
+        """非根路径 list_directory 返回 data: null → check_exists 返回 False。
+
+        覆盖 webdav_client.py:616-617：data 为 None 时 isinstance(data, dict)
+        守卫使 content 为 []，分页循环判定 len(content) < per_page → result=False。
+        """
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        with patch.object(client, "list_directory", return_value={"code": 200, "data": None}):
+            assert client.check_exists("/dir/target.txt") is False
+
 
 class TestAdminListContents:
     def test_separates_folders_and_files(self, tmp_path):
@@ -548,6 +901,29 @@ class TestAdminListContents:
         client.session.request.return_value = _make_response({"code": 404, "data": {}})
 
         assert client.list_contents("/dir") is None
+
+    def test_data_field_null(self, tmp_path):
+        """list_directory 返回 data: null → list_contents 返回空结构。
+
+        覆盖 webdav_client.py:662-665：data 为 None 时 isinstance 守卫使
+        content 为 []，返回 {"folders": [], "files": []}。
+        """
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        with patch.object(client, "list_directory", return_value={"code": 200, "data": None}):
+            result = client.list_contents("/dir")
+            assert result == {"folders": [], "files": []}
+
+    def test_content_field_null(self, tmp_path):
+        """list_directory 返回 data.content: null → list_contents 返回空结构。
+
+        覆盖 webdav_client.py:664-665：content is None 守卫将其重置为 []。
+        """
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        with patch.object(client, "list_directory", return_value={"code": 200, "data": {"content": None}}):
+            result = client.list_contents("/dir")
+            assert result == {"folders": [], "files": []}
 
 
 class TestAdminTriggerRefresh:

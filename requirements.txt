@@ -3,3 +3,5 @@ requests>=2.31.0
 lxml>=5.0.0
 tomli>=2.0.1; python_version < "3.11"
 pyotp>=2.9.0
+# 可选：凭据加密（未安装时降级为明文存储）
+# cryptography>=42.0.0

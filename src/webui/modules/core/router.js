@@ -160,6 +160,6 @@ export async function router() {
     // F-2：api() 检测到 401 时已导航至 #login 并抛出 ApiAuthError，
     // 此处静默抑制，避免把会话过期渲染成错误页闪现。
     if (e instanceof ApiAuthError) return;
-    mainEl.innerHTML = `<div class="error-msg">${icon('error')} ${e.message}</div>`;
+    mainEl.innerHTML = `<div class="error-msg">${icon('error')} ${esc(e.message)}</div>`;
   }
 }

@@ -68,7 +68,7 @@ a_to_b_restore_delay_seconds = 30 # 损坏文件恢复前等待秒数
 
 [log]
 level = "DEBUG"                   # 日志级别
-file = "./activity.log"           # 日志文件路径
+file = "./strm_bridge.log"        # 日志文件路径
 max_size_mb = 2                   # 日志文件最大 MB
 backup_count = 5                  # 轮转备份数
 
@@ -87,7 +87,7 @@ fuzzy_threshold = 0.60            # 标题匹配阈值
 
 ### 配置从 TOML 到 DB 的迁移
 
-首次启动时（`main.py:48-58`），程序会：
+首次启动时（`main.py` 启动流程），程序会：
 1. 创建 `TmdbWatchlistDb` 实例指向 `tmdb_watchlist.db`
 2. 调用 `migrate_config_to_db(config, wdb)` — 一次性迁移 config.toml 内容
 3. 调用 `config.update_from_db(wdb)` — 加载 DB 覆盖（DB > TOML）
@@ -147,6 +147,6 @@ WebUI 和核心同步引擎同时启动。主程序状态显示在 WebUI 仪表�
 | 文件 | 用途 | 表数量 | 位置 |
 |------|------|--------|------|
 | `bridge.db` | 核心同步状态 | 10 张表 | `[local] db_file` 配置 |
-| `tmdb_watchlist.db` | TMDB 缓存 + WebUI 配置 | 4 张表 | 项目根目录（`main.py:50` 硬编码） |
+| `tmdb_watchlist.db` | TMDB 缓存 + WebUI 配置 | 4 张表 | 项目根目录（`main.py` 硬编码） |
 
 两个数据库均使用 **WAL 模式** 以获得并发读取性能。

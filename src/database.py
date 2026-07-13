@@ -236,6 +236,7 @@ class Database:
         # ====================================
         logging.info("[DB] 开始初始化数据库表结构")
         self._create_schema()
+        self.init_subtitle_table()  # 字幕表单独初始化（避免 _create_schema 重复定义）
         logging.info("[DB] 数据库核心表与索引核对并创建完成！")
 
     def _create_schema(self) -> None:

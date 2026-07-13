@@ -273,6 +273,28 @@ class TestCoreRoutes:
         assert status == 200
         assert isinstance(body, dict)
 
+    def test_config_api_proxy_http_not_leaked(self, webui_server):
+        """测试 /api/config 不泄露完整的代理 URL（白名单端点脱敏）"""
+        server, base, session_token = webui_server
+        # 设置代理配置
+        if server._watchlist_db:
+            server._watchlist_db.set_config("tmdb", "proxy_http", "http://secret-proxy:7890")
+            server._watchlist_db.set_config("tmdb", "proxy_enabled", "true")
+        # 调用 /api/config（无需认证）
+        status, _, body = _http_get(base, "/api/config", session_token=None)
+        assert status == 200
+        # 不应返回完整的代理 URL 字符串
+        assert not (isinstance(body.get("tmdb_proxy_http"), str)
+                    and body.get("tmdb_proxy_http")), \
+            "tmdb_proxy_http 不应返回完整代理 URL"
+        assert not (isinstance(body.get("tmdb_proxy"), str)
+                    and body.get("tmdb_proxy")), \
+            "tmdb_proxy 不应返回完整代理 URL"
+        # 应该返回布尔值表示是否配置
+        assert "tmdb_proxy_configured" in body
+        assert isinstance(body["tmdb_proxy_configured"], bool)
+        assert body["tmdb_proxy_configured"] is True
+
     def test_logs_api_returns_lines(self, webui_server):
         """主程序日志 API 应返回 {lines, count} 结构。"""
         server, base, session_token = webui_server
@@ -460,6 +482,115 @@ class TestOpenListRoutes:
         assert isinstance(body, dict)
         assert "a_folders" in body or "b_root" in body
 
+    def test_openlist_ping_unreachable_host_returns_offline(self, webui_server):
+        """ping 接口在 host 不可达时返回 offline，而非 online。
+
+        回归守卫：修复前 _handle_openlist_ping 调用 client.login()（无 force=True），
+        新实例会加载缓存 token 直接返回 True，导致状态误报为"已连接"。
+        修复后调用 client.login(force=True)，强制真实验证连接。
+        """
+        server, base, session_token = webui_server
+        # 设置一个非空 host，使 ping 接口进入登录逻辑
+        server._config.webdav.host = "http://unreachable:5244"
+
+        mock_class = MagicMock()
+        mock_instance = MagicMock()
+        mock_class.return_value = mock_instance
+        mock_instance.login.return_value = False
+        mock_instance.last_error_type = "network_error"
+        mock_instance.last_error_message = "connection refused"
+
+        with patch("webdav_client.OpenListAdminClient", mock_class):
+            status, _, body = _http_get(base, "/api/openlist/ping", session_token)
+
+        assert status == 200
+        assert body.get("status") == "offline"
+        # 验证 login 被调用时传入了 force=True（关键回归断言）
+        mock_instance.login.assert_called_once_with(force=True)
+
+    def test_openlist_ping_login_succeeds_returns_online(self, webui_server):
+        """ping 接口在登录成功时返回 online。"""
+        server, base, session_token = webui_server
+        server._config.webdav.host = "http://openlist:5244"
+
+        mock_class = MagicMock()
+        mock_instance = MagicMock()
+        mock_class.return_value = mock_instance
+        mock_instance.login.return_value = True
+
+        with patch("webdav_client.OpenListAdminClient", mock_class):
+            status, _, body = _http_get(base, "/api/openlist/ping", session_token)
+
+        assert status == 200
+        assert body.get("status") == "online"
+        mock_instance.login.assert_called_once_with(force=True)
+
+    def test_openlist_ping_not_configured_returns_offline(self, webui_server):
+        """ping 接口在 host 无效（not_configured）时返回 offline。
+
+        覆盖 login() 返回 last_error_type="not_configured" 的场景：
+        host 为空或 URL 无效（MissingSchema/InvalidURL）。
+        """
+        server, base, session_token = webui_server
+        server._config.webdav.host = "http://openlist:5244"
+
+        mock_class = MagicMock()
+        mock_instance = MagicMock()
+        mock_class.return_value = mock_instance
+        mock_instance.login.return_value = False
+        mock_instance.last_error_type = "not_configured"
+        mock_instance.last_error_message = "OpenList host 配置无效"
+
+        with patch("webdav_client.OpenListAdminClient", mock_class):
+            status, _, body = _http_get(base, "/api/openlist/ping", session_token)
+
+        assert status == 200
+        assert body.get("status") == "offline"
+
+    def test_openlist_ping_invalid_totp_returns_auth_failed_2fa(self, webui_server):
+        """ping 接口在 TOTP 密钥无效（invalid_totp）时返回 auth_failed_2fa。
+
+        覆盖 login() 返回 last_error_type="invalid_totp" 的场景：
+        TOTP Secret 格式错误导致无法生成验证码。
+        """
+        server, base, session_token = webui_server
+        server._config.webdav.host = "http://openlist:5244"
+
+        mock_class = MagicMock()
+        mock_instance = MagicMock()
+        mock_class.return_value = mock_instance
+        mock_instance.login.return_value = False
+        mock_instance.last_error_type = "invalid_totp"
+        mock_instance.last_error_message = "TOTP Secret 无效或格式错误"
+
+        with patch("webdav_client.OpenListAdminClient", mock_class):
+            status, _, body = _http_get(base, "/api/openlist/ping", session_token)
+
+        assert status == 200
+        assert body.get("status") == "auth_failed_2fa"
+
+    def test_openlist_ping_account_not_found_returns_auth_failed(self, webui_server):
+        """ping 接口在账号不存在（account_not_found）时返回 auth_failed。
+
+        覆盖 login() 返回 last_error_type="account_not_found" 的场景：
+        OpenList 返回 "user not found" 错误。
+        """
+        server, base, session_token = webui_server
+        server._config.webdav.host = "http://openlist:5244"
+
+        mock_class = MagicMock()
+        mock_instance = MagicMock()
+        mock_class.return_value = mock_instance
+        mock_instance.login.return_value = False
+        mock_instance.last_error_type = "account_not_found"
+        mock_instance.last_error_message = "user not found"
+
+        with patch("webdav_client.OpenListAdminClient", mock_class):
+            status, _, body = _http_get(base, "/api/openlist/ping", session_token)
+
+        assert status == 200
+        assert body.get("status") == "auth_failed"
+
 
 # ============================================================
 # TMDB 路由
@@ -488,6 +619,63 @@ class TestTmdbRoutes:
         assert status == 200
         assert isinstance(body, dict)
         assert "logs" in body
+
+    def test_tmdb_watchlist_movies_includes_is_manual_flag(self, webui_server):
+        """验证 /api/tmdb/watchlist/movies?all=1 返回的 items 包含 _is_manual 字段。
+
+        覆盖 routes.py:460-464：当 all=1 时，应为每个 item 附加 _is_manual 标记，
+        基于 manual_override_at > 0 判断。
+        """
+        server, base, session_token = webui_server
+
+        # 配置 mock 返回包含 manual_override_at 字段的 items
+        mock_items = [
+            {
+                "id": 1,
+                "title": "Movie1",
+                "_media_type": "movie",
+                "match_status": "matched",
+                "manual_override_at": 1234567890.0,  # 手动覆盖
+            },
+            {
+                "id": 2,
+                "title": "Movie2",
+                "_media_type": "movie",
+                "match_status": "out",
+                "manual_override_at": 0,  # 未手动覆盖
+            },
+        ]
+
+        # 配置 server.get_watchlist_cached 返回 mock items
+        server.get_watchlist_cached = lambda: mock_items
+
+        # 配置 mock tmdb_client 以通过 routes.py:447 的检查
+        mock_tmdb_client = MagicMock()
+        mock_tmdb_client.account_id = "test_account"
+        server._tmdb_client = mock_tmdb_client
+
+        # 请求 all=1 以触发 _is_manual 附加逻辑
+        status, _, body = _http_get(base, "/api/tmdb/watchlist/movies?all=1", session_token)
+        assert status == 200
+        assert isinstance(body, dict)
+        assert "results" in body
+
+        results = body["results"]
+        assert len(results) == 2, f"应返回 2 个 items，实际: {len(results)}"
+
+        # 验证 _is_manual 字段存在且正确
+        for item in results:
+            assert "_is_manual" in item, f"item 应包含 _is_manual 字段: {item}"
+
+        # id=1 应标记为手动（manual_override_at > 0）
+        item1 = next(i for i in results if i["id"] == 1)
+        assert item1["_is_manual"] is True, \
+            f"manual_override_at > 0 的 item 应标记 _is_manual=True，实际: {item1['_is_manual']}"
+
+        # id=2 应标记为非手动（manual_override_at == 0）
+        item2 = next(i for i in results if i["id"] == 2)
+        assert item2["_is_manual"] is False, \
+            f"manual_override_at == 0 的 item 应标记 _is_manual=False，实际: {item2['_is_manual']}"
 
 
 # ============================================================
@@ -535,6 +723,105 @@ class TestPostRoutes:
             {"host": "", "user": "", "password": ""}, session_token)
         assert status == 400
         assert isinstance(body, dict)
+
+    def _make_test_connection_mock(self, login_returns, error_type="unknown",
+                                   error_message=""):
+        """构造 mock OpenListAdminClient 类，用于 patch webdav_client.OpenListAdminClient。
+
+        _handle_openlist_test_connection 内部用局部 import
+        `from webdav_client import OpenListAdminClient`，故 patch 目标必须是
+        `webdav_client.OpenListAdminClient`（源模块）。
+        """
+        mock_class = MagicMock()
+        mock_instance = MagicMock()
+        mock_class.return_value = mock_instance
+        mock_instance.login.return_value = login_returns
+        mock_instance.last_error_type = error_type
+        mock_instance.last_error_message = error_message
+        return mock_class
+
+    def test_openlist_test_connection_wrong_password(self, webui_server):
+        """last_error_type=wrong_password → HTTP 200，success=False，error 含"密码错误"。"""
+        server, base, session_token = webui_server
+        mock_class = self._make_test_connection_mock(
+            False, error_type="wrong_password", error_message="密码错误")
+
+        with patch("webdav_client.OpenListAdminClient", mock_class):
+            status, _, body = _http_post(
+                base, "/api/openlist/test-connection",
+                {"host": "http://openlist:5244", "user": "admin", "password": "pw"},
+                session_token)
+
+        assert status == 200
+        assert body.get("success") is False
+        assert "密码错误" in body.get("error", "")
+        assert body.get("error_type") == "wrong_password"
+
+    def test_openlist_test_connection_wrong_2fa(self, webui_server):
+        """last_error_type=wrong_2fa → HTTP 200，error 含"2FA"。"""
+        server, base, session_token = webui_server
+        mock_class = self._make_test_connection_mock(
+            False, error_type="wrong_2fa", error_message="2FA 错误")
+
+        with patch("webdav_client.OpenListAdminClient", mock_class):
+            status, _, body = _http_post(
+                base, "/api/openlist/test-connection",
+                {"host": "http://openlist:5244", "user": "admin", "password": "pw",
+                 "totp_secret": "secret"},
+                session_token)
+
+        assert status == 200
+        assert body.get("success") is False
+        assert "2FA" in body.get("error", "")
+        assert body.get("error_type") == "wrong_2fa"
+
+    def test_openlist_test_connection_network_error(self, webui_server):
+        """last_error_type=network_error → HTTP 200，error 含"无法连接"。"""
+        server, base, session_token = webui_server
+        mock_class = self._make_test_connection_mock(
+            False, error_type="network_error", error_message="connection refused")
+
+        with patch("webdav_client.OpenListAdminClient", mock_class):
+            status, _, body = _http_post(
+                base, "/api/openlist/test-connection",
+                {"host": "http://openlist:5244", "user": "admin", "password": "pw"},
+                session_token)
+
+        assert status == 200
+        assert body.get("success") is False
+        assert "无法连接" in body.get("error", "")
+        assert body.get("error_type") == "network_error"
+
+    def test_openlist_test_connection_unknown_error(self, webui_server):
+        """last_error_type=unknown → HTTP 200，success=False，error_type=unknown。"""
+        server, base, session_token = webui_server
+        mock_class = self._make_test_connection_mock(
+            False, error_type="unknown", error_message="something")
+
+        with patch("webdav_client.OpenListAdminClient", mock_class):
+            status, _, body = _http_post(
+                base, "/api/openlist/test-connection",
+                {"host": "http://openlist:5244", "user": "admin", "password": "pw"},
+                session_token)
+
+        assert status == 200
+        assert body.get("success") is False
+        assert body.get("error_type") == "unknown"
+
+    def test_openlist_test_connection_login_succeeds(self, webui_server):
+        """login() 返回 True → HTTP 200，success=True，message 含"连接成功"。"""
+        server, base, session_token = webui_server
+        mock_class = self._make_test_connection_mock(True)
+
+        with patch("webdav_client.OpenListAdminClient", mock_class):
+            status, _, body = _http_post(
+                base, "/api/openlist/test-connection",
+                {"host": "http://openlist:5244", "user": "admin", "password": "pw"},
+                session_token)
+
+        assert status == 200
+        assert body.get("success") is True
+        assert "连接成功" in body.get("message", "")
 
     def test_openlist_strm_engines_invalid_rejected(self, webui_server):
         server, base, session_token = webui_server
@@ -593,6 +880,49 @@ class TestPostRoutes:
             base, "/api/tmdb/watchlist/match/override",
             {"media_type": "movie", "id": 1, "status": "bogus"}, session_token)
         assert status == 400
+
+    def test_openlist_save_with_empty_optional_fields_accepted(
+            self, webui_server):
+        """2FA/b_root/c_root 为空仍可保存（后端支持空 b/c，前端软警告不阻断）"""
+        server, base, session_token = webui_server
+        body = {
+            "webdav_host": "http://192.168.1.100:5244",
+            "webdav_user": "admin",
+            "webdav_password": "",
+            "webdav_totp_secret": "",
+            "b_root": "",
+            "c_root": "",
+            "strm_engines": "[]",
+            "refresh_paths": "[]",
+            "log_level": "INFO",
+            "log_max_size_mb": "2",
+            "log_backup_count": "5",
+            "log_file": "",
+        }
+        status, _, resp = _http_post(
+            base, "/api/webui/config/openlist", body, session_token)
+        assert status == 200
+        assert resp.get("success") is True
+
+    def test_openlist_save_empty_strm_engines_accepted(self, webui_server):
+        """空 strm_engines 数组合法（前端过滤空引擎条目后的合法路径）"""
+        server, base, session_token = webui_server
+        body = {"strm_engines": "[]"}
+        status, _, resp = _http_post(
+            base, "/api/webui/config/openlist", body, session_token)
+        assert status == 200
+        assert resp.get("success") is True
+
+    def test_openlist_save_missing_engine_entry_still_rejected(
+            self, webui_server):
+        """缺 engine 字段的脏载荷仍被拒 400（护栏不变），且错误文案含 strm_engines"""
+        server, base, session_token = webui_server
+        body = {"strm_engines": '[{"engine":"","monitored_paths":[]}]'}
+        status, _, resp = _http_post(
+            base, "/api/webui/config/openlist", body, session_token)
+        assert status == 400
+        assert resp.get("success") is False
+        assert "strm_engines" in str(resp.get("error", "")).lower()
 
 
 # ============================================================
@@ -685,3 +1015,74 @@ class TestRouteHelpers:
         from webui.routes import _try_bind_port
         # 无效 host 应返回 False
         assert _try_bind_port("invalid.host.xxx", 1) is False
+
+
+# ============================================================
+# 媒体刷新 API
+# ============================================================
+
+class TestAreaRefreshAPI:
+    """测试 POST /api/area/{area}/refresh 刷新 API"""
+
+    def test_area_refresh_invalid_area(self, webui_server):
+        """无效 area 参数应返回 400"""
+        server, base, session_token = webui_server
+        body = {"media": "test_media"}
+        status, _, resp = _http_post(base, "/api/area/x/refresh", body, session_token)
+        assert status == 400
+        assert "invalid area" in resp.get("error", "").lower()
+
+    def test_area_refresh_missing_media(self, webui_server):
+        """缺少 media 参数应返回 400"""
+        server, base, session_token = webui_server
+        body = {}
+        status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
+        assert status == 400
+        assert "media" in resp.get("error", "").lower()
+
+    def test_area_refresh_auth_required(self, tmp_path):
+        """未登录应返回 401"""
+        from webui.routes import _login_attempts
+        _login_attempts.clear()
+
+        cfg = _make_mock_config(tmp_path)
+        db = _make_mock_db(tmp_path)
+        port = _free_port()
+        cfg.webui.port = port
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"):
+            (tmp_path / "static").mkdir(exist_ok=True)
+            (tmp_path / "static" / "index.html").write_text(
+                "<html><body>test</body></html>", encoding="utf-8")
+            (tmp_path / "static" / "assets").mkdir(exist_ok=True)
+            (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
+
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            test_password = "test_password_123"
+            os.environ["WEBUI_TEST_MODE"] = "1"
+            os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
+            server.start()
+            deadline = time.time() + 2.0
+            while not server._server and time.time() < deadline:
+                time.sleep(0.05)
+
+            try:
+                base_url = f"http://127.0.0.1:{port}"
+                # 不传递 session_token
+                body = {"media": "test_media"}
+                status, _, resp = _http_post(base_url, "/api/area/a/refresh", body, session_token=None)
+                assert status == 401
+                assert resp.get("need_login") is True
+            finally:
+                server.stop()
+
+    def test_area_refresh_not_running(self, webui_server):
+        """主程序未运行时应返回 503"""
+        server, base, session_token = webui_server
+        # 确保 _app_service 为 None
+        server._app_service = None
+        body = {"media": "test_media"}
+        status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
+        assert status == 503
+        assert "not running" in resp.get("error", "").lower()

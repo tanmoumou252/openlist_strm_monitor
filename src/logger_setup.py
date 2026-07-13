@@ -29,7 +29,7 @@ class MaxLevelFilter(logging.Filter):
 def setup_logging(
     *,
     level: str = "INFO",
-    log_file: str = "logs/strm_bridge.log",
+    log_file: str = "strm_bridge.log",
     max_size_mb: int = 10,
     backup_count: int = 5,
 ) -> None:

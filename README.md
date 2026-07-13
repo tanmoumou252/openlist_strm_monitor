@@ -150,6 +150,7 @@ flowchart TD
 
 - 字幕语言自动识别：支持 `.sc`、`.chs`、`.tc`、`.cht` 等后缀标识，以及"简中""繁体"等关键词
 - 多语种时简中优先标记 `forced`
+- 无法识别语言时回退为 `.forced.und`（undetermined）
 - 使用数据库 `subtitles` 表追踪处理状态，避免重复处理
 
 ---
@@ -184,6 +185,8 @@ pip install -r requirements.txt
 - `tomli` (Python < 3.11 环境下需要)
 - `pyotp` (TOTP 2FA 支持)
 
+嵌入式版本python应该存放于`/src/python_embed/`
+
 ### 2. 运行程序
 
 ```bash
@@ -199,7 +202,7 @@ python src/webui/server.py
 
 ## 📝 日志分级说明
 
-默认日志文件输出至 `activity.log`，内置按大小截断轮转机制。
+默认日志文件输出至 `strm_bridge.log`（位于项目根目录），内置按大小截断轮转机制。
 
 | 级别 | 用途 |
 | :--- | :--- |
@@ -209,6 +212,28 @@ python src/webui/server.py
 | `ERROR` | API 联动失败、数据库写入失败等严重操作异常。 |
 
 > **建议：** 大媒体库正常服役时使用 `INFO` 级别即可保持日志清爽；排查同步问题时临时切换为 `DEBUG`。
+
+### 错误消息翻译
+
+程序内置**错误消息翻译工具**，将技术性网络错误（如 `ConnectionRefusedError 10061`、`HTTPError 401` 等）转换为普通用户能理解的中文描述。
+
+**示例对比：**
+
+| 原始错误 | 翻译后 |
+| :--- | :--- |
+| `ConnectionRefusedError: [WinError 10061] 由于其目标计算机主动拒绝，无法建立连接` | `登录失败 — 无法连接到服务器，请检查：1. OpenList 是否已启动 2. 地址和端口是否正确 3. 防火墙是否阻止了连接` |
+| `HTTPError: 401 Client Error: Unauthorized` | `登录失败 — 认证失败，用户名或密码错误` |
+| `ConnectTimeout: HTTPSConnectionPool...` | `登录失败 — 连接超时，服务器无响应` |
+
+翻译覆盖的错误类型：
+- 连接拒绝 / 连接重置 / 连接中断
+- 超时（连接超时 / 读取超时）
+- DNS 解析失败
+- HTTP 状态码（400–504）
+- SSL 证书错误
+- 网络不可达 / 路由失败
+
+开发者可在日志中附加 `[技术详情: ...]` 后缀用于调试，通过 `format_error_for_log(error, context, include_technical=True)` 控制。
 
 ---
 

@@ -71,6 +71,12 @@ class SubtitleHandler:
             self._process_movie_subtitle(sub_file, a_root, fingerprint)
             return
 
+        # 2.5 如果是番剧（路径明确为番剧目录），直接走番剧模式
+        # 修复 L0：避免 anime 路径被后续 STRM 辅助判断误降级为 movie
+        if media_type == "anime":
+            self._process_anime_subtitle(sub_file, a_root, fingerprint)
+            return
+
         # 3. 检查同目录STRM文件，辅助判断是电影还是番剧
         parent_dir = sub_file.parent
         strm_files = list(parent_dir.glob("*.strm"))
@@ -119,7 +125,7 @@ class SubtitleHandler:
         # 语言信息
         lang_info = detect_subtitle_language(sub_file.name)
         if lang_info is None:
-            new_name = f"{movie_stem}.forced.zho.中文{sub_file.suffix.lower()}"
+            new_name = f"{movie_stem}.forced.und{sub_file.suffix.lower()}"
         else:
             _code, _label, _priority = lang_info
             new_name = f"{movie_stem}.forced.{_code}.{_label}{sub_file.suffix.lower()}"
@@ -235,7 +241,7 @@ class SubtitleHandler:
         if len(episode_subs) <= 1:
             lang_info = detect_subtitle_language(sub_file.name)
             if lang_info is None:
-                new_name = f"{base_name}.forced.zho.中文{sub_file.suffix.lower()}"
+                new_name = f"{base_name}.forced.und{sub_file.suffix.lower()}"
             else:
                 _code, _label, _priority = lang_info
                 new_name = f"{base_name}.forced.{_code}.{_label}{sub_file.suffix.lower()}"
@@ -253,7 +259,7 @@ class SubtitleHandler:
                 # 回退到单文件处理
                 lang_info = detect_subtitle_language(sub_file.name)
                 if lang_info is None:
-                    new_name = f"{base_name}.forced.zho.中文{sub_file.suffix.lower()}"
+                    new_name = f"{base_name}.forced.und{sub_file.suffix.lower()}"
                 else:
                     _code, _label, _priority = lang_info
                     new_name = f"{base_name}.forced.{_code}.{_label}{sub_file.suffix.lower()}"

@@ -2,14 +2,14 @@
 
 ## AppService — 中央编排器
 
-位于 `src/app_service_core.py`（~2332 行），`AppService` 管理整个同步生命周期。由 `main.py` 在配置加载和 API 验证后实例化。
+位于 `src/app_service_core.py`，`AppService` 管理整个同步生命周期。由 `main.py` 在配置加载和 API 验证后实例化。
 
 ```python
-# main.py:83
+# main.py
 app = AppService(config, db, admin_client)
 ```
 
-### 构造函数（`__init__`，第 199 行）
+### 构造函数（`__init__`）
 
 创建并初始化所有子服务和状态：
 
@@ -34,7 +34,7 @@ AppService.__init__()
 
 ### 生命周期：`start()` → `stop()`
 
-#### 启动序列（`start()`，~第 300 行）
+#### 启动序列（`start()`）
 
 9 步初始化过程：
 

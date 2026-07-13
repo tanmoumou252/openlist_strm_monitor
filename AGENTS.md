@@ -78,7 +78,7 @@ openlist_strm_bridge/
 │   ├── watchlist_match.py       # Watchlist matching logic
 │   ├── webui/
 │   │   ├── server.py            # HTTP server + auth + route dispatch
-│   │   ├── routes.py            # All API route handlers (2335 lines)
+│   │   ├── routes.py            # All API route handlers (2305 lines)
 │   │   ├── index.html           # SPA entry point
 │   │   ├── main.js              # Frontend entry point
 │   │   ├── vite.config.js       # Vite build config
@@ -175,13 +175,13 @@ The Vite config groups modules into chunks:
 
 | File | Lines | What to know |
 |------|-------|-------------|
-| `src/app_service_core.py` | 2100+ | Heart of the engine. Lock ordering is critical. |
-| `src/database.py` | 1400+ | SQLite with WAL, read/write connection managers, reentrant lock. |
-| `src/webui/routes.py` | 2300+ | All API handlers. `_get_media_groups_paginated` (~line 1800) has pagination logic. |
-| `src/webui/server.py` | 1200+ | Auth, routing, SPA serving. `_check_auth()` at ~line 290. |
-| `src/webui/modules/core/api.js` | 30+ | API wrapper — always use this instead of raw fetch. |
-| `src/webui/modules/core/router.js` | 100+ | Hash-based SPA router with auth guard. |
-| `src/webui/modules/core/utils.js` | 90+ | `createField()` for form labels, `esc()` for HTML escaping. |
-| `src/webui/modules/pages/openlist.js` | ~680 | OpenList config page. Engine select change handler at `_bindEngineSelectEvents()`. |
-| `src/config.py` | 600+ | `AppConfig` dataclass. `load_strm_storage_from_api()` for dynamic storage mapping. |
-| `src/webdav_client.py` | 700+ | JWT auth, Admin API, WebDAV protocol. TOTP support. |
+| `src/app_service_core.py` | 2160 | Heart of the engine. Lock ordering is critical. |
+| `src/database.py` | 1330 | SQLite with WAL, read/write connection managers, reentrant lock. |
+| `src/webui/routes.py` | 2305 | All API handlers. `_get_media_groups_paginated` method handles pagination logic. |
+| `src/webui/server.py` | 1134 | Auth, routing, SPA serving. `_check_auth()` method handles authentication. |
+| `src/webui/modules/core/api.js` | 53 | API wrapper — always use this instead of raw fetch. |
+| `src/webui/modules/core/router.js` | 153 | Hash-based SPA router with auth guard. |
+| `src/webui/modules/core/utils.js` | 86 | `createField()` for form labels, `esc()` for HTML escaping. |
+| `src/webui/modules/pages/openlist.js` | 697 | OpenList config page. Engine select change handler at `_bindEngineSelectEvents()`. |
+| `src/config.py` | 594 | `AppConfig` dataclass. `load_strm_storage_from_api()` for dynamic storage mapping. |
+| `src/webdav_client.py` | 730 | JWT auth, Admin API, WebDAV protocol. TOTP support. |

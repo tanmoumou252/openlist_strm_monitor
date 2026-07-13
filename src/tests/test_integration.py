@@ -313,11 +313,11 @@ backup_count = 5
             assert config.behavior.sync_on_startup_wait == 10
             # 验证 base_dir 被正确设置为配置文件所在目录
             assert config.base_dir == tmpdir
-            # 验证路径基于 base_dir 自动生成（from_file 不读取 [local] 表）
+            # 验证路径默认值（from_file 不读取 [local] 表；a/b/c 区路径由 WebUI 配置动态决定，默认为空）
             assert config.local.base_dir == tmpdir
-            assert config.local.a_dir == os.path.join(tmpdir, "a")
-            assert config.local.b_dir == os.path.join(tmpdir, "b")
-            assert config.local.c_dir == os.path.join(tmpdir, "c")
+            assert config.local.a_dir == ""
+            assert config.local.b_dir == ""
+            assert config.local.c_dir == ""
             # strm_storage_map 初始化为空（需显式调用 load_strm_storage_from_api）
             assert config.strm_storage_map == {}
             assert config.a_folders == []

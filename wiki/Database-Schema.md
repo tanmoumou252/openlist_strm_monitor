@@ -4,7 +4,7 @@
 
 ## bridge.db — 核心同步状态
 
-由 `Database` 类管理（`src/database.py`，~1400 行）。通过 `threading.RLock()` 保证线程安全。所有表在 `_create_schema()`（第 184 行）中创建。
+由 `Database` 类管理（`src/database.py`）。通过 `threading.RLock()` 保证线程安全。所有表在 `_create_schema()` 方法中创建。
 
 ### 性能 PRAGMA 设置
 

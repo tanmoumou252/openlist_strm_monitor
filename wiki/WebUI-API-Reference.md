@@ -6,7 +6,7 @@
 
 两层安全：
 
-1. **IP 白名单** — `_is_lan_ip()`（`routes.py:53`）阻止非局域网 IP（10.x、172.16-31.x、192.168.x、169.254.x、localhost）
+1. **IP 白名单** — `_is_lan_ip()` 函数阻止非局域网 IP（10.x、172.16-31.x、192.168.x、169.254.x、localhost）
 2. **会话 Token** — PBKDF2-HMAC-SHA256 认证。通过 `X-Session-Token` 头发送。7 天滑动过期，存储在服务器内存中。
 
 免 Token 路径：`/api/config`、`/api/webui/config/ui`、`/api/tmdb/avatar`、`/api/tmdb/poster`、`/api/openlist/status`、`/api/openlist/ping`、`/api/admin/status`、`/api/login`、静态资源

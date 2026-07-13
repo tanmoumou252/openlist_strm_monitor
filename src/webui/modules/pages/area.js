@@ -2,6 +2,8 @@ import { api } from '../core/api.js';
 import { icon } from '../core/icons.js';
 import { esc, fmtTime, createSortLink } from '../core/utils.js';
 import { navigate } from '../core/router.js';
+import { showToast } from '../components/toast.js';
+import { showConfirmDialog } from '../components/dialog.js';
 
 /** 根据 B 区状态返回 CSS class 名称 */
 function _statusClass(status) {
@@ -130,6 +132,7 @@ async function renderAreaDetail(el, area, params) {
   }
   const localRoot = d.local_root || '';
   const webdavRoot = d.webdav_root || '';
+  const strmEngineRoot = d.strm_engine_root || '';
 
   const kindPart = kind ? '?kind=' + encodeURIComponent(kind) : '';
   const areaLabels = { a: 'A 区', b: 'B 区', c: 'C 区' };
@@ -139,6 +142,7 @@ async function renderAreaDetail(el, area, params) {
   <a href="#area_${area}${kindPart}" class="back-icon-btn" title="返回列表">${icon('back')}</a>
   <span style="color:var(--text-main);font-size:14px;font-weight:600">${esc(media)}</span>
   <span style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px)">· ${d.total} 个文件</span>
+  ${(area === 'a' || area === 'b') ? `<button class="toolbar-btn" id="refresh-media-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button>` : ''}
 </div>`;
 
   const expandBtns = `<div class="detail-actions">
@@ -146,10 +150,11 @@ async function renderAreaDetail(el, area, params) {
   <button class="toolbar-btn" id="collapse-all-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('collapse')} 折叠全部</button>
 </div>`;
 
-  if (localRoot || webdavRoot) {
+  if (localRoot || webdavRoot || strmEngineRoot) {
     html += `<div class="area-detail-head"><div class="area-path-block">`;
     if (localRoot) html += `<div class="path-line"><span class="path-label">${areaLabel} 本地根：</span><span class="path-value mono">${esc(localRoot)}</span></div>`;
     if (webdavRoot) html += `<div class="path-line"><span class="path-label">WebDAV 根：</span><span class="path-value mono">${esc(webdavRoot)}</span></div>`;
+    if (strmEngineRoot) html += `<div class="path-line"><span class="path-label">STRM 入口：</span><span class="path-value mono">${esc(strmEngineRoot)}</span></div>`;
     html += `</div>${expandBtns}</div>`;
   } else {
     html += `<div class="area-detail-head" style="justify-content:flex-end">${expandBtns}</div>`;
@@ -226,4 +231,41 @@ if (area === 'a') {
     setDetailToggleState(false);
   });
   setDetailToggleState(document.querySelectorAll('.season-details').length > 0);
+
+  // 绑定刷新按钮事件
+  const refreshBtn = document.getElementById('refresh-media-btn');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', async () => {
+      const confirmed = await showConfirmDialog(
+        '刷新媒体数据',
+        `将对比 A 区数据库与 OpenList API 返回的文件，自动同步差异。<br><br>媒体：${esc(media)}<br><br>是否继续？`,
+        '确认刷新',
+        '取消'
+      );
+      if (!confirmed) return;
+
+      refreshBtn.disabled = true;
+      refreshBtn.innerHTML = `${icon('loading')} 刷新中...`;
+
+      try {
+        const result = await api(`/api/area/${area}/refresh`, {
+          method: 'POST',
+          body: JSON.stringify({ media })
+        });
+
+        if (result.ok) {
+          showToast(`刷新完成：新增 ${result.added} 个，删除 ${result.removed} 个，未变 ${result.unchanged} 个`, 'success');
+          // 自动刷新页面数据
+          await renderAreaDetail(el, area, params);
+        } else {
+          showToast(`刷新失败：${result.error || '未知错误'}`, 'error');
+        }
+      } catch (err) {
+        showToast(`刷新请求失败：${err.message}`, 'error');
+      } finally {
+        refreshBtn.disabled = false;
+        refreshBtn.innerHTML = `${icon('refresh')} 刷新`;
+      }
+    });
+  }
 }

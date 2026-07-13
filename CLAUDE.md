@@ -51,10 +51,10 @@ This file provides guidance to AI coding assistants when working with the `openl
 
 | File | Purpose |
 |------|---------|
-| `src/app_service_core.py` | Core sync engine (2171 lines) |
-| `src/database.py` | SQLite bridge.db manager (1401 lines) |
-| `src/webui/server.py` | HTTP server + auth + routing (1212 lines) |
-| `src/webui/routes.py` | All API route handlers (2335 lines) |
+| `src/app_service_core.py` | Core sync engine (2160 lines) |
+| `src/database.py` | SQLite bridge.db manager (1329 lines) |
+| `src/webui/server.py` | HTTP server + auth + routing (1134 lines) |
+| `src/webui/routes.py` | All API route handlers (2305 lines) |
 | `src/webui/modules/core/api.js` | API wrapper — always use this for frontend calls |
 | `src/webui/modules/core/utils.js` | `createField()` for form labels, `esc()` for HTML escaping |
 | `src/webui/modules/pages/openlist.js` | OpenList config page |

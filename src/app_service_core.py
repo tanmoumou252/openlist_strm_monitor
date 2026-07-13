@@ -5,31 +5,22 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
-import posixpath
 import re
 import shutil
 import sqlite3
 import sys
 import threading
 import time
-import traceback
-import urllib.parse
-from contextlib import contextmanager, nullcontext as _nullcontext
+from contextlib import nullcontext as _nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-try:
-    import tomllib
-except ImportError:
-    import tomli as tomllib  # type: ignore[no-redef]
 
 from config import AppConfig
-from database import Database, ARecord, BRecord, BoundaryRecord
+from database import Database, ARecord, BRecord
 from domain.media.subtitle_handler import SubtitleHandler
 from domain.sync.sync_service import SyncService
 from area_watchers import AAreaEventHandler, BAreaEventHandler, CAreaEventHandler
@@ -234,7 +225,8 @@ class AppService:
         # 按 fingerprint 串行化 A→B 处理，避免 TOCTOU 竞争（P1-4）
         self._fingerprint_locks_lock = threading.Lock()
         self._fingerprint_locks: dict[str, threading.Lock] = {}
-        self.db.init_subtitle_table()
+        # WebUI 媒体刷新锁：防止同一媒体并发刷新
+        self._refresh_lock = threading.Lock()
         self.sync_service = SyncService(self)
         self.subtitle_handler = SubtitleHandler(self)
 
@@ -338,9 +330,6 @@ class AppService:
             return True
         return self.is_path_under_any_root(
             root_path, self.config.strm_engine_paths)
-
-    def is_strm_engine_monitored(self, root_path: str) -> bool:
-        return self.is_valid_refresh_root(root_path)
 
     def _find_matching_engine_path(self, webdav_path: str) -> str | None:
         if not self.config.strm_engine_paths:
@@ -589,21 +578,6 @@ class AppService:
                         f"Season {season:02d}" / standard_name
                 return self.b_root / new_rel
         return self.b_root / rel
-
-    def _reverse_map_b_to_a(self, b_local_path: str | Path) -> str | None:
-        b_local = Path(b_local_path).resolve()
-        try:
-            rel = b_local.relative_to(self.b_root)
-        except ValueError:
-            return None
-        if not rel.parts:
-            return None
-        sub_path = Path(rel)
-        for a_root in self.a_roots:
-            candidate = a_root / sub_path
-            if candidate.exists():
-                return str(candidate)
-        return None
 
     def update_engine_configs(self):
         logging.info("[引擎配置] 正在向服务器请求 STRM 存储配置...")
@@ -1320,6 +1294,11 @@ class AppService:
             storages = self.admin_api.list_storages()
             data = storages.get("data", {}) if isinstance(storages, dict) else {}
             content = data.get("content", []) if isinstance(data, dict) else []
+            # 防御 content: null —— data.get("content", []) 在 content 为 None 时
+            # 返回 None（key 存在但值为 None，dict.get 不返回 default），len(None) 会
+            # 抛 TypeError。与 list_contents 同模式守卫。
+            if content is None:
+                content = []
             total = len(content)
             working = sum(1 for s in content if s.get("status") == "work")
             logging.info("[STRM存储验证] 总计 %d 个存储，其中 %d 个状态正常", total, working)
@@ -2117,9 +2096,6 @@ class AppService:
         else:
             logging.info("[云盘操作] 删除成功: %s", cloud_path)
         return ok
-
-    def _webdav_to_cloud_path(self, webdav_path: str) -> str:
-        return webdav_path
 
     def migrate_b_under_root_to_c(self, root_path: str) -> None:
         root_path = root_path.rstrip("/") or "/"

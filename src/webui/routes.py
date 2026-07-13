@@ -457,10 +457,11 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                     "_media_type") == "movie"]
             else:
                 items = tmdb_client.fetch_all_watchlist_movies()
-            # 附加 _status 映射字段
+            # 附加 _status 映射字段和 _is_manual 标记
             for item in items:
                 item["_status"] = _STATUS_MAP.get(
                     item.get("match_status", "uncomputed"), "out")
+                item["_is_manual"] = bool(item.get("manual_override_at", 0) > 0)
             handler._send_json({
                 "account_id": tmdb_client.account_id,
                 "media_type": "movie",
@@ -492,10 +493,11 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 items = [i for i in all_items if i.get("_media_type") == "tv"]
             else:
                 items = tmdb_client.fetch_all_watchlist_tv()
-            # 附加 _status 映射字段
+            # 附加 _status 映射字段和 _is_manual 标记
             for item in items:
                 item["_status"] = _STATUS_MAP.get(
                     item.get("match_status", "uncomputed"), "out")
+                item["_is_manual"] = bool(item.get("manual_override_at", 0) > 0)
             handler._send_json({
                 "account_id": tmdb_client.account_id,
                 "media_type": "tv",
@@ -616,7 +618,8 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
             if not data:
                 handler._send_json({"error": "not found"}, 404)
                 return True
-            cast_raw = data.get("credits", {}).get("cast", [])
+            credits = data.get("credits") or {}
+            cast_raw = credits.get("cast", []) if isinstance(credits, dict) else []
             actors = [c for c in cast_raw
                       if c.get("known_for_department", "Acting") == "Acting"]
             cast = [{"name": c.get("name", ""), "character": c.get("character", "")}
@@ -929,7 +932,7 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
             if not _validate_strm_engines(_se_value):
                 handler._send_json(
                     {"success": False,
-                     "error": "strm_engines 格式非法：需为 engine/monitored_paths 对象数组（空数组亦合法）"},
+                     "error": "STRM 引擎配置(strm_engines)格式不正确：请先在「STRM 引擎配置」区选择引擎入口，或清空未使用的引擎行后再保存。"},
                     400)
                 return
             # 校验通过：回写规整后的合法 JSON 字符串，确保后续通用写循环
@@ -960,6 +963,15 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
             if "strm_engines" in data:
                 _wdb.set_config("openlist", "engines_initialized", "true")
             _hot_reload_openlist_config(webui_server)
+            # 记录 OpenList 配置保存日志
+            try:
+                _wdb.log_tmdb_operation(
+                    "openlist_config_save", "success", 
+                    f"OpenList 配置已保存 ({len(data)} 项配置)",
+                    detail=json.dumps({"keys": list(data.keys())})
+                )
+            except Exception:
+                pass
 
         # 更新 _has_password 缓存（ui scope 管理密码变更时）
         if scope == "ui" and "admin_password" in data:
@@ -1054,7 +1066,7 @@ def _reinit_admin_client(webui_server) -> None:
             cfg.webdav.password,
             totp_secret=cfg.webdav.totp_secret,
         )
-        if new_client.login():
+        if new_client.login(force=True):
             logging.info("[HotReload] 新的 OpenListAdminClient 登录成功")
             # 仅当登录成功后才替换 client 引用，避免用无效客户端冲掉正常工作实例
             webui_server._admin_client = new_client
@@ -1105,6 +1117,8 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
                 "wrong_2fa": "2FA 验证码错误，请检查 2FA 密钥或时间同步",
                 "account_not_found": "账号不存在，请检查用户名",
                 "network_error": "无法连接到 OpenList 服务器，请检查地址和网络",
+                "not_configured": "OpenList host 未配置或格式无效，请在配置页面填写正确的 WebDAV 地址",
+                "invalid_totp": "TOTP Secret 无效或格式错误，请检查 2FA 密钥",
                 "unknown": "登录失败，请检查配置",
             }
             display_message = error_messages.get(error_type, error_messages["unknown"])
@@ -1270,7 +1284,7 @@ def _handle_openlist_ping(handler, webui_server) -> None:
     try:
         from webdav_client import OpenListAdminClient
         client = OpenListAdminClient(host, user, password, totp_secret=totp_secret)
-        if client.login():
+        if client.login(force=True):
             handler._send_json({"success": True, "status": "online", "host": host})
         else:
             error_type = client.last_error_type or "unknown"
@@ -1279,6 +1293,8 @@ def _handle_openlist_ping(handler, webui_server) -> None:
                 "wrong_2fa": "auth_failed_2fa",
                 "account_not_found": "auth_failed",
                 "network_error": "offline",
+                "not_configured": "offline",  # host 为空或无效，视为离线
+                "invalid_totp": "auth_failed_2fa",  # TOTP 密钥无效，归类为 2FA 错误
                 "unknown": "auth_failed",
             }
             status = status_map.get(error_type, "auth_failed")
@@ -1843,7 +1859,9 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
             iterations = int(iterations_str)
             pw_hash = hashlib.pbkdf2_hmac(
                 "sha256", password.encode(), salt.encode(), iterations)
-            password_ok = pw_hash.hex() == stored_hash
+            # 使用时序安全比较，防止时序攻击
+            import hmac
+            password_ok = hmac.compare_digest(pw_hash.hex(), stored_hash)
         except (ValueError, AttributeError):
             password_ok = False
         if not password_ok:
@@ -2126,9 +2144,16 @@ def handle_area_detail(handler, area, params) -> None:
 
     local_root = ""
     webdav_root = ""
+    strm_engine_root = ""
     if records:
         local_root = _compute_media_root(records[0].get("local_path", ""))
         webdav_root = _compute_media_root(records[0].get("webdav_path", ""))
+        # 计算 STRM 引擎入口根（引擎挂载点）
+        app_service = getattr(handler.webui, '_app_service', None)
+        if app_service:
+            first_webdav = records[0].get("webdav_path", "")
+            if first_webdav:
+                strm_engine_root = app_service._find_matching_engine_path(first_webdav) or ""
 
     total_pages = max(1, ceil(total / PAGE_SIZE)) if total else 1
     page = max(1, min(page, total_pages))
@@ -2158,11 +2183,244 @@ def handle_area_detail(handler, area, params) -> None:
         "media": media_name,
         "local_root": local_root,
         "webdav_root": webdav_root,
+        "strm_engine_root": strm_engine_root,
         "total": total,
         "page": page,
         "total_pages": total_pages,
         "seasons": seasons,
     })
+
+
+def handle_area_refresh(handler, area, body: bytes) -> None:
+    """处理 POST /api/area/{area}/refresh — 刷新指定媒体的 STRM 入口并同步差异"""
+    if area not in ("a", "b"):
+        handler._send_json({"error": "invalid area, only 'a' or 'b' supported"}, 400)
+        return
+
+    # 解析请求体
+    try:
+        data = json.loads(body) if body else {}
+    except (ValueError, json.JSONDecodeError):
+        data = {}
+
+    media_name = (data.get("media") or "").strip()
+    if not media_name:
+        handler._send_json({"error": "media parameter is required"}, 400)
+        return
+
+    # 获取 AppService
+    app_service = getattr(handler.webui, '_app_service', None)
+    if not app_service:
+        handler._send_json({"error": "main program not running", "status": "not_running"}, 503)
+        return
+
+    # 获取 refresh_lock，防止同一媒体并发刷新
+    refresh_lock = getattr(app_service, '_refresh_lock', None)
+    if refresh_lock is None:
+        # 懒初始化（首次使用时创建）
+        app_service._refresh_lock = threading.Lock()
+        refresh_lock = app_service._refresh_lock
+
+    if not refresh_lock.acquire(blocking=False):
+        handler._send_json({"error": "refresh in progress, please try again later"}, 409)
+        return
+
+    try:
+        result = _do_media_refresh(app_service, area, media_name)
+        handler._send_json(result)
+    except Exception as e:
+        logging.error("[Refresh] 刷新媒体 %s 失败: %s", media_name, e)
+        handler._send_json({"error": str(e), "status": "error"}, 500)
+    finally:
+        refresh_lock.release()
+
+
+def _do_media_refresh(app_service, area: str, media_name: str) -> dict:
+    """执行媒体刷新逻辑：对比 A 区 DB 与 OpenList API 返回的文件差异，并自动同步"""
+    db = app_service.db
+    admin_api = app_service.admin_api
+
+    # 1. 从 A 区 DB 查询该媒体的所有记录
+    a_records = []
+    try:
+        with db.read_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT local_path, webdav_path, parent_webdav_path FROM a_strm_files "
+                "WHERE local_path LIKE ? OR webdav_path LIKE ?",
+                (f"%{media_name}%", f"%{media_name}%")
+            ).fetchall()
+            a_records = [dict(r) for r in rows]
+    except Exception as e:
+        logging.error("[Refresh] 查询 A 区记录失败: %s", e)
+        return {"ok": False, "error": f"query failed: {e}"}
+
+    if not a_records:
+        return {"ok": True, "added": 0, "removed": 0, "unchanged": 0, "message": "no records found"}
+
+    # 2. 计算媒体目录的 STRM 入口路径
+    # 从 parent_webdav_path 提取公共父目录
+    parent_paths = [r.get("parent_webdav_path", "") for r in a_records if r.get("parent_webdav_path")]
+    if not parent_paths:
+        return {"ok": True, "added": 0, "removed": 0, "unchanged": 0, "message": "no parent paths"}
+
+    # 计算最长公共前缀（目录级别）
+    common_parent = _compute_common_parent_path(parent_paths)
+    if not common_parent:
+        return {"ok": True, "added": 0, "removed": 0, "unchanged": 0, "message": "no common parent"}
+
+    # 3. 调用 OpenList /api/fs/list 带 refresh=true 触发 STRM 引擎重新生成
+    logging.info("[Refresh] 触发刷新: %s (媒体: %s)", common_parent, media_name)
+    list_result = admin_api.list_directory(common_parent, refresh=True)
+    if list_result is None or list_result.get("code") not in (0, 200):
+        return {"ok": False, "error": "OpenList API returned error", "detail": list_result}
+
+    # 4. 解析 API 返回的文件列表（只保留 .strm 和字幕文件）
+    api_files = _parse_api_files(list_result, common_parent)
+
+    # 5. 对比 DB 记录 vs API 文件
+    db_webdav_paths = {r.get("webdav_path", "") for r in a_records if r.get("webdav_path")}
+    api_webdav_paths = {f["webdav_path"] for f in api_files}
+
+    added_paths = api_webdav_paths - db_webdav_paths
+    removed_paths = db_webdav_paths - api_webdav_paths
+    unchanged_paths = db_webdav_paths & api_webdav_paths
+
+    added_count = 0
+    removed_count = 0
+
+    # 6. 处理新增文件：调用 handle_a_created_or_modified 同步到 A 区
+    for webdav_path in added_paths:
+        try:
+            # 构造本地路径（从 A 区记录的 local_path 推断根目录）
+            first_local = a_records[0].get("local_path", "")
+            if first_local:
+                # 从 webdav_path 提取文件名，拼接到 A 区根目录
+                filename = Path(webdav_path).name
+                a_root = _compute_media_root(first_local)
+                local_path = str(Path(a_root) / filename)
+                app_service.handle_a_created_or_modified(local_path)
+                added_count += 1
+        except Exception as e:
+            logging.warning("[Refresh] 同步新增文件失败 %s: %s", webdav_path, e)
+
+    # 7. 处理删除文件：清理 A 区记录，同时删除 B 区对应记录
+    for webdav_path in removed_paths:
+        try:
+            # 查找对应的 A 区记录
+            a_record = next((r for r in a_records if r.get("webdav_path") == webdav_path), None)
+            if a_record:
+                local_path = a_record.get("local_path", "")
+                if local_path:
+                    # 删除本地文件
+                    from utils.file_utils import safe_remove_file
+                    safe_remove_file(local_path)
+                    # 删除 A 区记录
+                    db.delete_a_by_local(local_path)
+                    # 删除 B 区对应记录
+                    b_records = db.get_b_by_webdav(webdav_path)
+                    for b_rec in b_records:
+                        db.delete_b_by_local(b_rec.local_path)
+                    removed_count += 1
+        except Exception as e:
+            logging.warning("[Refresh] 清理删除文件失败 %s: %s", webdav_path, e)
+
+    # 8. 调用 scan_a_to_b_full_sync 同步到 B 区
+    try:
+        app_service.scan_a_to_b_full_sync()
+    except Exception as e:
+        logging.warning("[Refresh] A→B 同步失败: %s", e)
+
+    logging.info("[Refresh] 刷新完成: 新增 %d, 删除 %d, 未变 %d", added_count, removed_count, len(unchanged_paths))
+    return {
+        "ok": True,
+        "added": added_count,
+        "removed": removed_count,
+        "unchanged": len(unchanged_paths),
+    }
+
+
+def _compute_common_parent_path(paths: list[str]) -> str:
+    """计算路径列表的最长公共父目录"""
+    if not paths:
+        return ""
+    if len(paths) == 1:
+        return paths[0]
+
+    # 分割路径为组件
+    split_paths = [p.strip("/").split("/") for p in paths if p]
+    if not split_paths:
+        return ""
+
+    # 找出公共前缀
+    common = []
+    for parts in zip(*split_paths):
+        if len(set(parts)) == 1:
+            common.append(parts[0])
+        else:
+            break
+
+    if not common:
+        return "/"
+    return "/" + "/".join(common)
+
+
+def _parse_api_files(list_result: dict, parent_path: str) -> list[dict]:
+    """解析 OpenList API 返回的文件列表，只保留 .strm 和字幕文件"""
+    from media_renamer import is_subtitle_file
+
+    data = list_result.get("data", {})
+    content = data.get("content", []) if isinstance(data, dict) else []
+    if content is None:
+        content = []
+
+    files = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("is_dir", False):
+            continue
+        name = item.get("name", "")
+        if not name:
+            continue
+        # 只保留 .strm 和字幕文件
+        if name.endswith(".strm") or is_subtitle_file(name):
+            webdav_path = f"{parent_path.rstrip('/')}/{name}"
+            files.append({
+                "name": name,
+                "webdav_path": webdav_path,
+            })
+    return files
+
+
+def _read_log_file_tail(log_file: Path | str, lines_req: int) -> list[str]:
+    """读取日志文件的最后 N 行。
+    
+    优化：仅读取文件末尾的字节，避免大文件全量读取。
+    估算每行平均 300 字节（考虑多字节中文字符），读取 lines_req * 300 字节。
+    """
+    log_file = Path(log_file)
+    if not log_file.exists():
+        return []
+    
+    try:
+        # 优化：仅读取文件末尾的字节，避免大文件全量读取阻塞 HTTP 线程
+        # 估算每行平均 300 字节（考虑多字节中文字符），读取 lines_req * 300 字节足够
+        read_size = lines_req * 300
+        file_size = log_file.stat().st_size
+        with log_file.open("rb") as f:
+            if file_size > read_size:
+                f.seek(file_size - read_size)
+                # 跳过可能读取到的不完整行
+                f.readline()
+                tail_bytes = f.read()
+                tail = tail_bytes.decode("utf-8", errors="replace").splitlines()
+            else:
+                tail = f.read().decode("utf-8", errors="replace").splitlines()
+        # 仅返回最后 lines_req 行
+        return tail[-lines_req:]
+    except Exception:
+        return []
 
 
 def handle_logs_api(handler, params: dict) -> None:
@@ -2185,21 +2443,7 @@ def handle_logs_api(handler, params: dict) -> None:
         handler._send_json({"lines": [], "count": 0})
         return
     try:
-        # 优化：仅读取文件末尾的字节，避免大文件全量读取阻塞 HTTP 线程
-        # 估算每行平均 200 字节，读取 lines_req * 200 字节足够
-        read_size = lines_req * 200
-        file_size = log_file.stat().st_size
-        with log_file.open("rb") as f:
-            if file_size > read_size:
-                f.seek(file_size - read_size)
-                # 跳过可能读取到的不完整行
-                f.readline()
-                tail_bytes = f.read()
-                tail = tail_bytes.decode("utf-8", errors="replace").splitlines()
-            else:
-                tail = f.read().decode("utf-8", errors="replace").splitlines()
-        # 仅返回最后 lines_req 行
-        tail = tail[-lines_req:]
+        tail = _read_log_file_tail(log_file, lines_req)
         handler._send_json({"lines": tail, "count": len(tail)})
     except Exception as e:
         handler._send_json({"error": str(e)}, 500)
@@ -2263,6 +2507,15 @@ def handle_config_api(handler) -> None:
         db_file = local_cfg.db_file
     elif hasattr(cfg, "db_file"):
         db_file = cfg.db_file
+
+    # 日志文件路径 — 兼容两种配置结构
+    # AppConfig: cfg.log.file
+    log_file = ""
+    log_cfg = getattr(cfg, "log", None)
+    if log_cfg and hasattr(log_cfg, "file"):
+        log_file = log_cfg.file
+    elif hasattr(cfg, "log_file"):
+        log_file = cfg.log_file
 
     # 路径配置
     paths_cfg = getattr(cfg, "paths", None)
@@ -2394,10 +2647,9 @@ def handle_config_api(handler) -> None:
         # 防止未认证客户端通过白名单接口窃取完整 API key。
         "tmdb_api_key": bool(tmdb_api_key),
         "tmdb_api_key_configured": bool(tmdb_api_key),
-        # tmdb_proxy: 最终解析后的代理 URL（None 表示未启用代理或使用反代模式）
-        "tmdb_proxy": _resolve_tmdb_proxy(cfg),
-        # tmdb_proxy_http: DB 中存储的原始代理 URL（不论是否启用）
-        "tmdb_proxy_http": tmdb_proxy_http,
+        # tmdb_proxy_configured: 是否配置了代理（脱敏，不返回完整 URL）
+        # /api/config 是白名单端点（无需认证），返回完整代理 URL 会泄露内网代理地址
+        "tmdb_proxy_configured": bool(tmdb_proxy_http),
         # tmdb_proxy_enabled: DB 中存储的代理启用开关
         "tmdb_proxy_enabled": tmdb_proxy_enabled,
         "tmdb_account_id": tmdb_client.account_id if tmdb_client else None,

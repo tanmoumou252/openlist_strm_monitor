@@ -14,7 +14,9 @@ from typing import Any
 import requests
 from lxml import etree
 
+import secret_manager
 from openlist_login_shared import parse_login_error
+from utils.error_translator import translate_network_error
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +98,7 @@ class OpenListAdminClient:
     _TOKEN_CACHE_TTL = 24 * 3600
 
     def _load_token_from_cache(self) -> None:
-        """从文件加载缓存的 Token，检查过期时间"""
+        """从文件加载缓存的 Token，检查过期时间。向后兼容旧明文格式。"""
         if os.path.exists(self.token_cache_path):
             try:
                 with open(self.token_cache_path, "r", encoding="utf-8") as f:
@@ -107,17 +109,24 @@ class OpenListAdminClient:
                         log.info("[OpenList] 缓存 Token 已过期，将重新登录")
                         self.token = None
                         return
-                    self.token = data.get("token")
+                    raw_token = data.get("token")
+                    # 向后兼容：旧明文 vs 新加密格式
+                    if raw_token and secret_manager.is_encrypted(raw_token):
+                        self.token = secret_manager.decrypt(raw_token)
+                    else:
+                        self.token = raw_token
                     log.debug("已从本地缓存加载 JWT Token")
             except Exception:
                 self.token = None
 
     def _save_token_to_cache(self, token: str) -> None:
-        """将 Token 保存到本地文件"""
+        """将 Token 加密保存到本地文件"""
         self.token = token
         try:
             with open(self.token_cache_path, "w", encoding="utf-8") as f:
-                json.dump({"token": token, "ts": time.time()}, f)
+                # Token 加密存储（空 token 不加密）
+                encrypted_token = secret_manager.encrypt(token) if token else ""
+                json.dump({"token": encrypted_token, "ts": time.time()}, f)
         except Exception as e:
             log.warning(f"无法保存 Token 缓存: {e}")
 
@@ -138,13 +147,24 @@ class OpenListAdminClient:
         try:
             otp_code = _generate_totp(self.totp_secret) if self.totp_secret else None
         except ValueError as e:
-            log.error("TOTP 生成失败，请检查 TOTP Secret 配置: %s", e)
-            self.last_error_message = f"TOTP Secret 无效: {e}"
+            log.error("TOTP 生成失败，请检查 TOTP Secret 配置（值已隐藏）")
+            self.last_error_message = "TOTP Secret 无效或格式错误"
             self.last_error_type = "invalid_totp"
             return False
 
         url = f"{self.host}/api/auth/login"
         payload = {"username": self.user, "password": self.password, "otp_code": otp_code}
+
+        # 前置检查：host 未配置时直接返回明确错误，避免误报为"网络请求失败"
+        # 注意：login() 是唯一不走 _do_request 的方法（避免死循环），
+        # 故必须在此独立检查 host；_do_request 中的同名检查覆盖 token
+        # 已缓存、不触发 login() 的请求路径。两处检查覆盖不同代码路径，
+        # 非冗余 bug，属防御性设计。
+        if not self.host:
+            log.error("登录失败: OpenList host 未配置，请在 WebUI 配置页面填写连接信息")
+            self.last_error_message = "OpenList host 未配置"
+            self.last_error_type = "not_configured"
+            return False
 
         try:
             # 登录是唯一不走 _do_request 的方法，避免死循环
@@ -169,7 +189,22 @@ class OpenListAdminClient:
             
             # HTTP 200，检查业务响应
             data = res.json()
-            token = data.get("data", {}).get("token")
+            # 诊断日志：记录实际响应内容
+            log.debug("登录响应内容: %r", data)
+            # OpenList API 在某些情况下可能返回 null（None）
+            if not isinstance(data, dict):
+                log.error("登录响应格式异常（非 JSON 对象）: %r", data)
+                self.last_error_message = "登录响应格式异常"
+                self.last_error_type = "unknown"
+                return False
+            # 安全地获取 data 字段，防止 data.get("data") 返回 None
+            data_field = data.get("data") or {}
+            if not isinstance(data_field, dict):
+                log.error("登录响应 data 字段格式异常: %r", data_field)
+                self.last_error_message = "登录响应格式异常"
+                self.last_error_type = "unknown"
+                return False
+            token = data_field.get("token")
             if not token:
                 token = data.get("token")
             if not token:
@@ -187,12 +222,21 @@ class OpenListAdminClient:
             log.info("OpenList 登录成功，Token 已更新")
             return True
         except requests.exceptions.RequestException as e:
-            log.error(f"登录网络请求失败: {e}")
-            self.last_error_message = str(e)
-            self.last_error_type = "network_error"
+            # 使用错误翻译工具转换为易懂描述
+            user_msg = translate_network_error(e, "登录")
+            err_name = type(e).__name__
+            if err_name in ("MissingSchema", "InvalidURL"):
+                log.error(user_msg)
+                self.last_error_message = "OpenList host 配置无效"
+                self.last_error_type = "not_configured"
+            else:
+                log.error(user_msg)
+                self.last_error_message = str(e)
+                self.last_error_type = "network_error"
             return False
         except Exception as e:
-            log.error(f"登录请求失败: {e}")
+            user_msg = translate_network_error(e, "登录")
+            log.error(user_msg)
             self.last_error_message = str(e)
             self.last_error_type = "unknown"
             return False
@@ -209,6 +253,17 @@ class OpenListAdminClient:
 
     def _do_request(self, method: str, url: str, **kwargs) -> requests.Response | None:
         """统一请求包装器：注入 Token、自动处理 401 过期重试"""
+        # 前置检查：host 未配置时直接返回，避免空 host 拼出无效 URL
+        # 误报为"网络请求异常"（MissingSchema）。
+        # 注意：此处与 login() 中的同名检查不冲突——当 token 已缓存时
+        # _do_request 不会调用 login()，故此检查覆盖"已登录但 host 被清空"
+        # 的场景。两处检查覆盖不同代码路径，属防御性设计，非冗余 bug。
+        if not self.host:
+            log.error("请求失败: OpenList host 未配置，请在 WebUI 配置页面填写连接信息")
+            self.last_error_message = "OpenList host 未配置"
+            self.last_error_type = "not_configured"
+            return None
+
         if not self.token:
             if not self.login():
                 return None
@@ -291,7 +346,14 @@ class OpenListAdminClient:
 
             return res
         except Exception as e:
-            log.error(f"网络请求异常 ({url}): {e}")
+            # 使用错误翻译工具转换为易懂描述
+            user_msg = translate_network_error(e, f"请求 {method}")
+            err_name = type(e).__name__
+            if err_name in ("MissingSchema", "InvalidURL"):
+                log.error(
+                    "OpenList host 配置无效或未设置 scheme（应为 http:// 或 https:// 开头）")
+            else:
+                log.error(user_msg)
             return None
 
     # ================= 业务方法 (全量补全) =================
@@ -323,7 +385,9 @@ class OpenListAdminClient:
                 log.error("list_storages: 响应非 JSON 格式")
                 return None
 
-            data = payload.get("data", {}) if isinstance(payload, dict) else {}
+            data = payload.get("data") or {}
+            if not isinstance(data, dict):
+                data = {}
             content = data.get("content", []) if isinstance(data, dict) else []
             if not isinstance(content, list):
                 content = []
@@ -367,7 +431,10 @@ class OpenListAdminClient:
         if not storages or not isinstance(storages, dict):
             return []
         
-        content = storages.get("data", {}).get("content", [])
+        data_field = storages.get("data") or {}
+        if not isinstance(data_field, dict):
+            return []
+        content = data_field.get("content", [])
         strm_storages = [s for s in content if s.get("driver", "").lower() == "strm"]
         
         result = []

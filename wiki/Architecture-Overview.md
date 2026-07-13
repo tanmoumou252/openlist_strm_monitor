@@ -30,15 +30,15 @@
 ├──────────────────────────────────────────────────────────────┤
 │              WebUI 层 (webui/)                                 │
 │  server.py — HTTP 服务器 + 鉴权 + 路由分发                    │
-│  routes.py — 全部 API 处理器 (~2335 行)                       │
+│  routes.py — 全部 API 处理器 (~2300 行)                       │
 │  modules/ — Vanilla JS SPA 前端                               │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 ## 关键类
 
-### `AppService`（`app_service_core.py:185`）
-中央编排器（~2332 行）。管理完整的同步生命周期：
+### `AppService`（`app_service_core.py`）
+中央编排器（~2160 行）。管理完整的同步生命周期：
 - 环境准备与数据库初始化
 - OpenList 引擎配置加载
 - A/B/C 区 watchdog 事件处理器
@@ -53,18 +53,18 @@ class AppService:
                  admin_api: OpenListAdminClient) -> None:
 ```
 
-### `Database`（`database.py:99`）
-SQLite 数据库管理器，WAL 模式（~1400 行）。通过 `threading.RLock()` 保证线程安全。
+### `Database`（`database.py`）
+SQLite 数据库管理器，WAL 模式（~1330 行）。通过 `threading.RLock()` 保证线程安全。
 管理 bridge.db 中 10 张表，提供读写连接的上下文管理器。
 
-### `OpenListAdminClient`（`webdav_client.py:69`）
+### `OpenListAdminClient`（`webdav_client.py`）
 JWT 认证的 OpenList Admin API 客户端：
 - TOTP 2FA 支持（base32/base64 自适应）
 - Token 缓存（24h TTL）
 - 401 自动重试重新登录
 - 大列表分页获取
 
-### `StrmStorageManager`（`app_service_core.py:97`）
+### `StrmStorageManager`（`app_service_core.py`）
 管理 STRM 存储的发现与本地配置的验证。
 
 ### `AppConfig`（`config.py`）
@@ -72,7 +72,7 @@ JWT 认证的 OpenList Admin API 客户端：
 
 ## 锁获取顺序
 
-引擎使用严格的 6 级锁层次防止死锁（`app_service_core.py:186-196`）：
+引擎使用严格的 6 级锁层次防止死锁（定义在 `AppService.__init__` 方法中）：
 
 ```
 获取顺序（必须从小到大获取）：
@@ -89,11 +89,11 @@ JWT 认证的 OpenList Admin API 客户端：
 附加锁：
 - `_fingerprint_locks` — 按指纹串行化 A→B 处理（防止 TOCTOU 竞态）
 - `get_path_lock(path)` — 按文件路径锁定，使用 `Path(path).resolve()` 做 key
-- `get_webdav_lock(webdav_path)` — WebDAV 路径锁，使用 `webdav:` 前缀命名空间隔离（`app_service_core.py:292`）
+- `get_webdav_lock(webdav_path)` — WebDAV 路径锁，使用 `webdav:` 前缀命名空间隔离
 
 ## 配置优先级
 
-配置按以下优先级解析（`main.py:47-64`, `config.py`）：
+配置按以下优先级解析（`main.py` 启动流程、`config.py`）：
 
 1. **数据库**（`tmdb_watchlist.db` → `webui_config` 表）— 最高优先级
 2. **OpenList API** — 动态 STRM 存储映射
@@ -107,8 +107,8 @@ JWT 认证的 OpenList Admin API 客户端：
 | 模式 | 用途 | 位置 |
 |------|------|------|
 | Dataclass 配置 | 所有配置段使用 `@dataclass(slots=True, frozen=True)` | `config.py` |
-| 上下文管理器 DB 连接 | `with self.lock, self.connection() as conn:` | `database.py:117` |
+| 上下文管理器 DB 连接 | `with self.lock, self.connection() as conn:` | `database.py` |
 | 指纹去重 | `make_strm_fingerprint()` 对 WebDAV 路径做 SHA256 哈希 | `utils/strm_utils.py` |
 | 事件驱动文件监控 | watchdog `Observer` + 3 个事件处理器 | `area_watchers.py` |
-| 子服务委托 | AppService 创建 SyncService、SubtitleHandler、RefreshService | `app_service_core.py:238-239` |
+| 子服务委托 | AppService 创建 SyncService、SubtitleHandler、RefreshService | `app_service_core.py` |
 | 渲染过时检测 | 前端 router 根据计数器判定渲染结果是否过时 | `router.js` |

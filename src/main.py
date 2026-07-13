@@ -70,7 +70,8 @@ def main() -> None:
         config.webdav.password,
         totp_secret=config.webdav.totp_secret,
     )
-    if not admin_client.login():
+    # 强制重新登录，不使用缓存 token，确保真实验证连接
+    if not admin_client.login(force=True):
         error_msg = admin_client.last_error_message or "未知错误"
         error_type = admin_client.last_error_type or "unknown"
         logging.error("[AdminAPI] 登录失败: %s (类型: %s)", error_msg, error_type)

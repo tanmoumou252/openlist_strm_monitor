@@ -19,13 +19,13 @@
 
 **用途**：接收 OpenList STRM 引擎生成的 STRM 文件。
 
-**来源**：OpenList 引擎的 `SaveStrmLocalPath` 目录，通过 Admin API 的 `addition` 字段动态确定（`StrmStorageManager._extract_paths_from_addition`，`app_service_core.py:103`）。
+**来源**：OpenList 引擎 `SaveStrmLocalPath` 目录，通过 Admin API 的 `addition` 字段动态确定（`StrmStorageManager._extract_paths_from_addition` 方法）。
 
 **监控内容**：
 - `.strm` 文件 — 计算指纹、血统校验、同步到 B 区
 - 字幕文件（`.ass`、`.srt`、`.ssa`）— 由 `SubtitleHandler` 检测并同步
 
-**Watchdog 处理器**：`AAreaEventHandler`（`area_watchers.py:12`）
+**Watchdog 处理器**：`AAreaEventHandler`（位于 `area_watchers.py`）
 
 ```python
 class AAreaEventHandler(FileSystemEventHandler):
@@ -49,7 +49,7 @@ class AAreaEventHandler(FileSystemEventHandler):
 
 **路径**：通过 `config.toml` → `[paths] b_root` 或 WebUI 配置页设置。
 
-**Watchdog 处理器**：`BAreaEventHandler`（`area_watchers.py:45`）
+**Watchdog 处理器**：`BAreaEventHandler`（位于 `area_watchers.py`）
 
 ```python
 class BAreaEventHandler(FileSystemEventHandler):

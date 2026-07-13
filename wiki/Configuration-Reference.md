@@ -78,7 +78,7 @@ totp_secret = ""
 | 键 | 默认值 | 说明 |
 |-----|------|------|
 | `level` | `"INFO"` | 日志级别：DEBUG/INFO/WARNING/ERROR |
-| `file` | `"logs/strm_bridge.log"` | 日志文件路径 |
+| `file` | `"strm_bridge.log"` | 日志文件路径（默认位于项目根目录） |
 | `max_size_mb` | `10` | 单文件最大 MB，超限轮转 |
 | `backup_count` | `5` | 保留的轮转备份数 |
 
