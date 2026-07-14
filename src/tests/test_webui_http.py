@@ -1086,3 +1086,332 @@ class TestAreaRefreshAPI:
         status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         assert status == 503
         assert "not running" in resp.get("error", "").lower()
+
+    def test_area_refresh_path_traversal_rejected(self, webui_server):
+        """路径穿越攻击应返回 400"""
+        server, base, session_token = webui_server
+        # 模拟主程序运行
+        mock_app_service = MagicMock()
+        mock_app_service._refresh_lock = threading.Lock()
+        server._app_service = mock_app_service
+        
+        # 测试包含 .. 的路径
+        body = {"media": "../etc/passwd"}
+        status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
+        assert status == 400
+        assert "invalid media name" in resp.get("error", "").lower()
+        
+        # 测试以 / 开头的路径
+        body = {"media": "/etc/passwd"}
+        status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
+        assert status == 400
+        assert "invalid media name" in resp.get("error", "").lower()
+        
+        # 测试以 \ 开头的路径
+        body = {"media": "\\etc\\passwd"}
+        status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
+        assert status == 400
+        assert "invalid media name" in resp.get("error", "").lower()
+    
+    def test_area_refresh_dangerous_characters_rejected(self, webui_server):
+        """危险字符应返回 400"""
+        server, base, session_token = webui_server
+        mock_app_service = MagicMock()
+        mock_app_service._refresh_lock = threading.Lock()
+        server._app_service = mock_app_service
+        
+        # 测试各种危险字符
+        dangerous_inputs = [
+            "test\x00name",        # null byte
+            "test:name",           # colon (Windows drive letter)
+            "test*name",           # asterisk
+            "test?name",           # question mark
+            'test"name',           # double quote
+            "test<name",           # less than
+            "test>name",           # greater than
+            "test|name",           # pipe
+            "C:\\Windows\\System", # Windows absolute path with drive letter
+        ]
+        
+        for dangerous_input in dangerous_inputs:
+            body = {"media": dangerous_input}
+            status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
+            assert status == 400, f"Expected 400 for input {repr(dangerous_input)}, got {status}"
+            assert "invalid media name" in resp.get("error", "").lower(), \
+                f"Expected 'invalid media name' error for {repr(dangerous_input)}, got {resp.get('error')}"
+    
+    def test_area_refresh_media_name_length_limit(self, webui_server):
+        """超长媒体名应返回 400"""
+        server, base, session_token = webui_server
+        mock_app_service = MagicMock()
+        mock_app_service._refresh_lock = threading.Lock()
+        server._app_service = mock_app_service
+        
+        # 测试超过 255 字符的媒体名
+        long_name = "a" * 256
+        body = {"media": long_name}
+        status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
+        assert status == 400
+        assert "invalid media name length" in resp.get("error", "").lower()
+
+    def test_refresh_needs_confirmation(self, webui_server):
+        """删除数量超过阈值时应返回 needs_confirmation"""
+        server, base, session_token = webui_server
+        
+        # Mock database 返回 15 条 A 区记录（超过默认阈值 10）
+        mock_db = MagicMock()
+        mock_records = [
+            {"local_path": f"/a/zone/file{i}.strm", "webdav_path": f"/webdav/file{i}.strm", "parent_webdav_path": "/webdav"}
+            for i in range(1, 16)
+        ]
+        
+        # Mock read_connection context manager
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = mock_records
+        mock_conn.execute.return_value = mock_cursor
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=None)
+        mock_conn.row_factory = None
+        mock_db.read_connection.return_value = mock_conn
+        
+        mock_app_service = MagicMock()
+        mock_app_service._refresh_lock = threading.Lock()
+        mock_app_service.db = mock_db
+        mock_app_service.config = None
+        server._app_service = mock_app_service
+        
+        # Mock OpenList Admin API 返回空列表（模拟所有文件都被删除）
+        mock_admin_api = MagicMock()
+        mock_admin_api.list_directory.return_value = {"code": 0, "data": {"content": []}}
+        mock_app_service.admin_api = mock_admin_api
+        
+        # 发起刷新请求（不传 confirmed）
+        body = {"media": "test_movie"}
+        status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
+        
+        # 验证返回 needs_confirmation
+        assert status == 200, f"Expected 200, got {status}. Response: {resp}"
+        assert resp.get("needs_confirmation") is True, f"Expected needs_confirmation=True, got {resp}"
+        assert resp.get("removed") == 15, f"Expected removed=15, got {resp.get('removed')}"
+        assert resp.get("threshold") == 10, f"Expected threshold=10, got {resp.get('threshold')}"
+
+    def test_refresh_with_confirmation(self, webui_server):
+        """传入 confirmed=True 后应执行删除"""
+        server, base, session_token = webui_server
+        
+        # Mock database
+        mock_db = MagicMock()
+        mock_records = [
+            {"local_path": f"/a/zone/file{i}.strm", "webdav_path": f"/webdav/file{i}.strm", "parent_webdav_path": "/webdav"}
+            for i in range(1, 16)
+        ]
+        
+        # Mock read_connection context manager
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = mock_records
+        mock_conn.execute.return_value = mock_cursor
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=None)
+        mock_conn.row_factory = None
+        mock_db.read_connection.return_value = mock_conn
+        mock_db.get_b_by_webdav.return_value = []
+        
+        mock_app_service = MagicMock()
+        mock_app_service._refresh_lock = threading.Lock()
+        mock_app_service.db = mock_db
+        mock_app_service.config = None
+        mock_app_service.handle_a_created_or_modified = MagicMock()
+        mock_app_service.scan_a_to_b_full_sync = MagicMock()
+        server._app_service = mock_app_service
+        
+        # Mock OpenList Admin API 返回空列表
+        mock_admin_api = MagicMock()
+        mock_admin_api.list_directory.return_value = {"code": 0, "data": {"content": []}}
+        mock_app_service.admin_api = mock_admin_api
+        
+        # Mock safe_remove_file（避免真实删除文件）
+        import utils.file_utils
+        original_safe_remove = utils.file_utils.safe_remove_file
+        removed_files = []
+        def mock_safe_remove(path):
+            removed_files.append(path)
+        utils.file_utils.safe_remove_file = mock_safe_remove
+        
+        try:
+            # 发起刷新请求（传 confirmed=True）
+            body = {"media": "test_movie", "confirmed": True}
+            status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
+            
+            # 验证执行了删除
+            assert status == 200, f"Expected 200, got {status}. Response: {resp}"
+            assert resp.get("ok") is True, f"Expected ok=True, got {resp}"
+            assert len(removed_files) == 15, f"Expected 15 files removed, got {len(removed_files)}"
+            assert mock_db.delete_a_by_local.called, "Expected delete_a_by_local to be called"
+        finally:
+            # 恢复原始函数
+            utils.file_utils.safe_remove_file = original_safe_remove
+
+    def test_refresh_timeout(self, webui_server, monkeypatch):
+        """刷新超时应返回超时标记"""
+        import time as _time
+        server, base, session_token = webui_server
+        
+        # Mock database 返回 1 条记录
+        mock_db = MagicMock()
+        mock_records = [
+            {"local_path": "/a/zone/file1.strm", "webdav_path": "/webdav/file1.strm", "parent_webdav_path": "/webdav"}
+        ]
+        
+        # Mock read_connection context manager
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = mock_records
+        mock_conn.execute.return_value = mock_cursor
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=None)
+        mock_conn.row_factory = None
+        mock_db.read_connection.return_value = mock_conn
+        
+        mock_app_service = MagicMock()
+        mock_app_service._refresh_lock = threading.Lock()
+        mock_app_service.db = mock_db
+        mock_app_service.config = None
+        server._app_service = mock_app_service
+        
+        # Mock OpenList Admin API 返回 100 个文件（模拟大量新增）
+        mock_admin_api = MagicMock()
+        mock_files = [{"name": f"file{i}.strm", "path": f"/webdav/file{i}.strm", "is_dir": False} for i in range(100)]
+        mock_admin_api.list_directory.return_value = {"code": 0, "data": {"content": mock_files}}
+        mock_app_service.admin_api = mock_admin_api
+        
+        # monkeypatch time.monotonic：前 3 次返回正常值，之后返回超大值触发超时
+        call_count = [0]
+        def fake_monotonic():
+            call_count[0] += 1
+            if call_count[0] <= 3:
+                return 1000.0       # 正常：查询 + 计算阶段
+            return 999999.0         # 超时：远超任何 deadline
+        monkeypatch.setattr(_time, 'monotonic', fake_monotonic)
+        
+        # 发起刷新请求
+        body = {"media": "test_movie"}
+        status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
+        
+        # 验证返回超时标记
+        assert status == 200, f"Expected 200, got {status}. Response: {resp}"
+        assert resp.get("timeout") is True, f"Expected timeout=True, got {resp}"
+
+
+# ============================================================
+# 新手引导 API 测试
+# ============================================================
+
+
+class TestOnboardingAPI:
+    """测试 /api/config/status 和 /api/config/validate 端点"""
+
+    def test_config_status_unconfigured(self, webui_server):
+        """未配置时返回基础状态"""
+        server, base, session_token = webui_server
+        status, _, resp = _http_get(base, "/api/config/status", session_token)
+        assert status == 200
+        assert resp["password_set"] is True  # 测试模式自动生成密码
+        assert resp["tmdb_configured"] is False
+        assert resp["openlist_configured"] is False
+        assert resp["main_running"] is False
+        assert resp["onboarding_completed"] is False
+
+    def test_config_status_partially_configured(self, webui_server):
+        """部分配置时返回对应字段"""
+        server, base, session_token = webui_server
+        # 模拟 OpenList 已配置
+        server._config.webdav.host = "http://localhost:5244"
+        status, _, resp = _http_get(base, "/api/config/status", session_token)
+        assert status == 200
+        assert resp["openlist_configured"] is True
+        assert resp["tmdb_configured"] is False
+
+    def test_config_status_all_configured(self, webui_server):
+        """全部配置完成时返回对应字段"""
+        server, base, session_token = webui_server
+        # 模拟全部配置
+        server._config.webdav.host = "http://localhost:5244"
+        with patch.object(server._watchlist_db, 'get_all_config', return_value={"access_token": "test_token"}), \
+             patch.object(server._watchlist_db, 'get_config', return_value="1"):
+            status, _, resp = _http_get(base, "/api/config/status", session_token)
+        assert status == 200
+        assert resp["password_set"] is True
+        assert resp["tmdb_configured"] is True
+        assert resp["openlist_configured"] is True
+        assert resp["onboarding_completed"] is True
+
+    def test_config_validate_openlist_unconfigured(self, webui_server):
+        """OpenList 未配置时返回 error"""
+        server, base, session_token = webui_server
+        status, _, resp = _http_post(base, "/api/config/validate", {}, session_token)
+        assert status == 200
+        assert resp["ok"] is False
+        checks = resp["checks"]
+        openlist_config = next(c for c in checks if c["name"] == "openlist_config")
+        assert openlist_config["status"] == "error"
+        assert "未配置" in openlist_config["message"]
+
+    def test_config_validate_tmdb_warning(self, webui_server):
+        """TMDB 未配置时返回 warning（非阻塞）"""
+        server, base, session_token = webui_server
+        # 配置 OpenList 但不配置 TMDB
+        server._config.webdav.host = "http://localhost:5244"
+        with patch.object(server._watchlist_db, 'get_all_config', return_value={}), \
+             patch("webdav_client.OpenListAdminClient") as mock_client:
+            mock_client.return_value.login.return_value = True
+            status, _, resp = _http_post(base, "/api/config/validate", {}, session_token)
+        assert status == 200
+        # TMDB 未配置应为 warning，但 ok 应为 True（仅 openlist_config 阻塞）
+        tmdb_check = next(c for c in resp["checks"] if c["name"] == "tmdb_config")
+        assert tmdb_check["status"] == "warning"
+        assert resp["ok"] is True  # TMDB 未配置不阻塞启动
+
+    def test_config_validate_all_ok(self, webui_server):
+        """全部配置且可达时返回 ok=True"""
+        server, base, session_token = webui_server
+        server._config.webdav.host = "http://localhost:5244"
+        with patch.object(server._watchlist_db, 'get_all_config', return_value={"access_token": "test_token"}), \
+             patch("webdav_client.OpenListAdminClient") as mock_client:
+            mock_client.return_value.login.return_value = True
+            status, _, resp = _http_post(base, "/api/config/validate", {}, session_token)
+        assert status == 200
+        assert resp["ok"] is True
+        assert all(c["status"] == "ok" for c in resp["checks"])
+
+    def test_config_validate_openlist_unreachable(self, webui_server):
+        """OpenList 配置但不可达时返回 warning（降级后不阻塞）"""
+        server, base, session_token = webui_server
+        server._config.webdav.host = "http://localhost:5244"
+        with patch.object(server._watchlist_db, 'get_all_config', return_value={"access_token": "test_token"}), \
+             patch("webdav_client.OpenListAdminClient") as mock_client:
+            mock_client.return_value.login.return_value = False
+            mock_client.return_value.last_error_type = "network_error"
+            status, _, resp = _http_post(base, "/api/config/validate", {}, session_token)
+        assert status == 200
+        # openlist_online 应为 error，但 has_blocker 仅检查 openlist_config
+        openlist_online = next(c for c in resp["checks"] if c["name"] == "openlist_online")
+        assert openlist_online["status"] == "error"
+        # 根据新逻辑，仅 openlist_config 阻塞，openlist_online 不阻塞
+        assert resp["ok"] is True
+
+    def test_config_validate_webui_server_none(self):
+        """webui_server 为 None 时返回 500"""
+        # 直接调用 handler 函数，不通过 HTTP
+        from webui.routes import _handle_config_validate
+        mock_handler = MagicMock()
+        _handle_config_validate(mock_handler, None)
+        mock_handler._send_json.assert_called_once()
+        call_args = mock_handler._send_json.call_args
+        # call_args 是 ((data,), {"status": 500}) 或类似格式
+        assert call_args[0][0]["ok"] is False
+        assert call_args[0][0]["error"] == "WebUI 服务器未初始化"
+        # 检查第二个参数（status code）
+        if len(call_args) > 1 and call_args[1]:
+            assert call_args[1].get("status") == 500

@@ -6,11 +6,11 @@ WebUI 是一个 **Vanilla JavaScript 单页应用（SPA）**，使用 **Vite 8.x
 
 ```
 src/webui/
-├── index.html           # SPA 入口（77 行，zh-CN）
-├── main.js              # 引导（76 行）
+├── index.html           # SPA 入口（zh-CN）
+├── main.js              # 引导
 ├── vite.config.js       # Vite 构建配置
 ├── package.json         # 依赖（vite ^8.1.3）
-├── styles/main.css      # 752 行，双主题 CSS 变量
+├── styles/main.css      # 双主题 CSS 变量
 ├── modules/
 │   ├── core/            # 核心基础设施
 │   │   ├── api.js       # API 封装（含鉴权）
@@ -21,16 +21,16 @@ src/webui/
 │   │   ├── icons.js     # 内联 SVG 图标
 │   │   └── wallpaper.js # 水墨晕染遮罩效果
 │   ├── pages/           # 页面渲染器
-│   │   ├── dashboard.js # 仪表盘（150 行）
-│   │   ├── area.js      # A/B/C 区浏览（203 行）
-│   │   ├── config.js    # 配置页（433 行）
-│   │   ├── login.js     # 登录页（120 行）
-│   │   ├── logs.js      # TMDB 操作日志（207 行）
-│   │   ├── openlist.js  # OpenList 配置（697 行）
-│   │   └── tmdb.js      # TMDB 待看列表（410 行）
+│   │   ├── dashboard.js # 仪表盘
+│   │   ├── area.js      # A/B/C 区浏览
+│   │   ├── config.js    # 配置页
+│   │   ├── login.js     # 登录页
+│   │   ├── logs.js      # TMDB 操作日志
+│   │   ├── openlist.js  # OpenList 配置
+│   │   └── tmdb.js      # TMDB 待看列表
 │   └── components/      # 可复用组件
-│       ├── dialog.js    # 模态对话框（74 行）
-│       └── toast.js     # 提示通知（16 行）
+│       ├── dialog.js    # 模态对话框
+│       └── toast.js     # 提示通知
 └── public/              # 静态资源
 ```
 

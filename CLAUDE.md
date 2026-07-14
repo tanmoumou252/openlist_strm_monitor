@@ -10,14 +10,23 @@ This file provides guidance to AI coding assistants when working with the `openl
 4. **For dangerous operations** (delete, move, cloud linkage), explain safety risk before editing.
 5. **Preserve the A/B/C three-zone model.** Do not merge or flatten zones.
 6. **Prefer small, targeted changes** over large rewrites.
+7. **Documentation must not use exact line numbers**. When referencing code locations in wiki/docs/README markdown files, use method names, function names, class names, or approximate ranges (e.g., "in the authentication section", "near the database initialization") instead of specific line numbers like "line 123" or "lines 45-67". Line numbers change frequently as code evolves, making such references quickly outdated and misleading.
 
 ## Quick Start
 
 - WebUI: `http://127.0.0.1:8579` (port 8579, LAN only)
 - Build frontend: `cd src/webui && npx vite build`
 - Reset admin password: `python reset_admin.py <password>`
-- Start standalone WebUI: `python src/webui/server.py` (select mode 2)
+- Start WebUI: `python src/webui/server.py` (interactive menu: choose whether to also start main program)
+- Start sync engine only: `python src/main.py`
 - Config: `config.toml` + `webui_config` table in `tmdb_watchlist.db`
+
+## Server Entry Points
+
+- **Sync engine only**: `python src/main.py` — starts the A/B/C zone sync engine, no WebUI.
+- **WebUI**: `python src/webui/server.py` — starts the management panel with an interactive menu to optionally launch the sync engine.
+
+> Do NOT use `python src/main.py --webui-only` — that flag does not exist.
 
 ## Project Purpose
 
@@ -51,10 +60,10 @@ This file provides guidance to AI coding assistants when working with the `openl
 
 | File | Purpose |
 |------|---------|
-| `src/app_service_core.py` | Core sync engine (2160 lines) |
-| `src/database.py` | SQLite bridge.db manager (1329 lines) |
-| `src/webui/server.py` | HTTP server + auth + routing (1134 lines) |
-| `src/webui/routes.py` | All API route handlers (2305 lines) |
+| `src/app_service_core.py` | Core sync engine |
+| `src/database.py` | SQLite bridge.db manager |
+| `src/webui/server.py` | HTTP server + auth + routing |
+| `src/webui/routes.py` | All API route handlers |
 | `src/webui/modules/core/api.js` | API wrapper — always use this for frontend calls |
 | `src/webui/modules/core/utils.js` | `createField()` for form labels, `esc()` for HTML escaping |
 | `src/webui/modules/pages/openlist.js` | OpenList config page |

@@ -123,7 +123,10 @@ class OpenListAdminClient:
         """将 Token 加密保存到本地文件"""
         self.token = token
         try:
-            with open(self.token_cache_path, "w", encoding="utf-8") as f:
+            import os
+            # 创建文件时设置权限为 0o600（仅所有者可读写）
+            fd = os.open(self.token_cache_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 # Token 加密存储（空 token 不加密）
                 encrypted_token = secret_manager.encrypt(token) if token else ""
                 json.dump({"token": encrypted_token, "ts": time.time()}, f)

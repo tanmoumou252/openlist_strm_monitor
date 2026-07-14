@@ -11,6 +11,7 @@ WebUI 路由与处理器模块（合并自 webui_routes.py + webui_handlers.py�
 from __future__ import annotations
 
 import hashlib
+import html as html_module
 import json
 import logging
 import datetime as _dt
@@ -450,6 +451,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         return True
 
     if path == "/api/tmdb/watchlist/movies":
+        search_query = params.get("q", [""])[0].strip()
         if params.get("all", ["0"])[0] == "1":
             if webui_server and hasattr(webui_server, 'get_watchlist_cached'):
                 all_items = webui_server.get_watchlist_cached()
@@ -457,6 +459,29 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                     "_media_type") == "movie"]
             else:
                 items = tmdb_client.fetch_all_watchlist_movies()
+            
+            # 如果有搜索查询，使用 FTS5 过滤
+            if search_query:
+                _wdb = getattr(webui_server, '_watchlist_db', None)
+                if _wdb:
+                    try:
+                        escaped_query = _escape_fts5_query(search_query)
+                        with _wdb._conn() as conn:
+                            fts_ids = conn.execute(
+                                "SELECT rowid FROM tmdb_watchlist_fts WHERE tmdb_watchlist_fts MATCH ?",
+                                (escaped_query,)
+                            ).fetchall()
+                            fts_id_set = {row[0] for row in fts_ids}
+                            items = [i for i in items if i.get("id") in fts_id_set]
+                    except Exception as fts_err:
+                        logging.warning("[TMDB] FTS5 搜索失败，回退到内存过滤: %s", fts_err)
+                        # 回退到内存过滤
+                        search_lower = search_query.lower()
+                        items = [i for i in items if 
+                                search_lower in (i.get("title") or "").lower() or
+                                search_lower in (i.get("original_title") or "").lower() or
+                                search_lower in (i.get("overview") or "").lower()]
+            
             # 附加 _status 映射字段和 _is_manual 标记
             for item in items:
                 item["_status"] = _STATUS_MAP.get(
@@ -476,6 +501,28 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 logging.error("[TMDB] 获取电影待看列表失败: %s", e)
                 handler._send_json({"error": "获取待看列表失败", "detail": str(e)}, 500)
                 return True
+            
+            # 如果有搜索查询，使用 FTS5 过滤
+            if search_query:
+                _wdb = getattr(webui_server, '_watchlist_db', None)
+                if _wdb:
+                    try:
+                        escaped_query = _escape_fts5_query(search_query)
+                        with _wdb._conn() as conn:
+                            fts_ids = conn.execute(
+                                "SELECT rowid FROM tmdb_watchlist_fts WHERE tmdb_watchlist_fts MATCH ?",
+                                (escaped_query,)
+                            ).fetchall()
+                            fts_id_set = {row[0] for row in fts_ids}
+                            items = [i for i in items if i.get("id") in fts_id_set]
+                    except Exception as fts_err:
+                        logging.warning("[TMDB] FTS5 搜索失败，回退到内存过滤: %s", fts_err)
+                        search_lower = search_query.lower()
+                        items = [i for i in items if 
+                                search_lower in (i.get("title") or "").lower() or
+                                search_lower in (i.get("original_title") or "").lower() or
+                                search_lower in (i.get("overview") or "").lower()]
+            
             handler._send_json({
                 "account_id": tmdb_client.account_id,
                 "media_type": "movie",
@@ -487,12 +534,35 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         return True
 
     if path == "/api/tmdb/watchlist/tv":
+        search_query = params.get("q", [""])[0].strip()
         if params.get("all", ["0"])[0] == "1":
             if webui_server and hasattr(webui_server, 'get_watchlist_cached'):
                 all_items = webui_server.get_watchlist_cached()
                 items = [i for i in all_items if i.get("_media_type") == "tv"]
             else:
                 items = tmdb_client.fetch_all_watchlist_tv()
+            
+            # 如果有搜索查询，使用 FTS5 过滤
+            if search_query:
+                _wdb = getattr(webui_server, '_watchlist_db', None)
+                if _wdb:
+                    try:
+                        escaped_query = _escape_fts5_query(search_query)
+                        with _wdb._conn() as conn:
+                            fts_ids = conn.execute(
+                                "SELECT rowid FROM tmdb_watchlist_fts WHERE tmdb_watchlist_fts MATCH ?",
+                                (escaped_query,)
+                            ).fetchall()
+                            fts_id_set = {row[0] for row in fts_ids}
+                            items = [i for i in items if i.get("id") in fts_id_set]
+                    except Exception as fts_err:
+                        logging.warning("[TMDB] FTS5 搜索失败，回退到内存过滤: %s", fts_err)
+                        search_lower = search_query.lower()
+                        items = [i for i in items if 
+                                search_lower in (i.get("name") or "").lower() or
+                                search_lower in (i.get("original_name") or "").lower() or
+                                search_lower in (i.get("overview") or "").lower()]
+            
             # 附加 _status 映射字段和 _is_manual 标记
             for item in items:
                 item["_status"] = _STATUS_MAP.get(
@@ -512,6 +582,28 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 logging.error("[TMDB] 获取剧集待看列表失败: %s", e)
                 handler._send_json({"error": "获取待看列表失败", "detail": str(e)}, 500)
                 return True
+            
+            # 如果有搜索查询，使用 FTS5 过滤
+            if search_query:
+                _wdb = getattr(webui_server, '_watchlist_db', None)
+                if _wdb:
+                    try:
+                        escaped_query = _escape_fts5_query(search_query)
+                        with _wdb._conn() as conn:
+                            fts_ids = conn.execute(
+                                "SELECT rowid FROM tmdb_watchlist_fts WHERE tmdb_watchlist_fts MATCH ?",
+                                (escaped_query,)
+                            ).fetchall()
+                            fts_id_set = {row[0] for row in fts_ids}
+                            items = [i for i in items if i.get("id") in fts_id_set]
+                    except Exception as fts_err:
+                        logging.warning("[TMDB] FTS5 搜索失败，回退到内存过滤: %s", fts_err)
+                        search_lower = search_query.lower()
+                        items = [i for i in items if 
+                                search_lower in (i.get("name") or "").lower() or
+                                search_lower in (i.get("original_name") or "").lower() or
+                                search_lower in (i.get("overview") or "").lower()]
+            
             handler._send_json({
                 "account_id": tmdb_client.account_id,
                 "media_type": "tv",
@@ -678,6 +770,28 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
             "page": page,
             "results": tmdb_client.search_tv(query, page=page),
         })
+        return True
+
+    # 综合搜索：同时搜索电影和电视剧
+    if path == "/api/tmdb/search":
+        query = params.get("query", [""])[0].strip()
+        if not query:
+            handler._send_json({"error": "query is required"}, 400)
+            return True
+        
+        try:
+            # 同时搜索电影和电视剧
+            movies = tmdb_client.search_movie(query, page=1)
+            tv_shows = tmdb_client.search_tv(query, page=1)
+            
+            handler._send_json({
+                "query": query,
+                "movies": movies[:10],  # 限制返回数量
+                "tv_shows": tv_shows[:10],
+            })
+        except Exception as e:
+            logging.error("[TMDB] 搜索失败: %s", e)
+            handler._send_json({"error": str(e)}, 500)
         return True
 
     return False
@@ -1802,7 +1916,7 @@ _KIND_FILTER_MAP = {
 }
 
 # UI scope 写入白名单：仅允许这些 key 通过 POST /api/webui/config/ui 写入
-_UI_CONFIG_ALLOWED_KEYS = {"tmdb_cache_never_remind", "tmdb_match_toast_disabled", "admin_password"}
+_UI_CONFIG_ALLOWED_KEYS = {"tmdb_cache_never_remind", "tmdb_match_toast_disabled", "admin_password", "onboarding_completed", "onboarding_skipped"}
 
 
 # 登录速率限制 (P2-13)
@@ -2085,6 +2199,43 @@ _AREA_SORT_FIELDS: dict[str, set[str]] = {
 _AREA_SORT_ORDERS = {"asc", "desc"}
 
 
+def _compute_common_local_root(local_paths: list[str]) -> str:
+    """计算多个本地路径的公共目录前缀。
+    
+    用于路径归属校验，确保删除操作只影响同一媒体目录下的文件。
+    返回带分隔符结尾的目录路径，便于 startswith 检查。
+    """
+    if not local_paths:
+        return ""
+    
+    # 使用 os.path.commonpath 计算公共路径
+    try:
+        import os
+        common = os.path.commonpath(local_paths)
+        # 如果公共路径是文件（不是目录），取其父目录
+        if common and not common.endswith(('/', '\\')):
+            common = os.path.dirname(common)
+        # 确保以分隔符结尾
+        if common and not common.endswith(('/', '\\')):
+            common += os.sep
+        return common
+    except (ValueError, TypeError):
+        # 如果路径无法计算公共路径（如不同驱动器），返回空
+        return ""
+
+
+def _escape_fts5_query(query: str) -> str:
+    """转义 FTS5 特殊字符，防止搜索时抛异常。
+    
+    FTS5 特殊字符包括: * - + " ( ) { } [ ] ^ ~ : \\
+    转义策略：在每个特殊字符前添加反斜杠。
+    """
+    special_chars = ['*', '-', '+', '"', '(', ')', '{', '}', '[', ']', '^', '~', ':', '\\']
+    for char in special_chars:
+        query = query.replace(char, f'\\{char}')
+    return query
+
+
 def handle_area_detail(handler, area, params) -> None:
     """处理 GET /api/area/{area}/detail — 区域详情，返回指定媒体的所有记录"""
     if area not in ("a", "b", "c"):
@@ -2112,22 +2263,43 @@ def handle_area_detail(handler, area, params) -> None:
         if area == "a":
             columns = "local_path, webdav_path, parent_webdav_path, updated_at"
             table = "a_strm_files"
+            fts_table = "a_strm_files_fts"
         elif area == "b":
             columns = "local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at"
             table = "b_strm_files"
+            fts_table = "b_strm_files_fts"
         else:  # area == "c"
             columns = "local_path, webdav_path, original_b_path, ghost_root, moved_at"
             table = "c_ghost_files"
+            fts_table = "c_ghost_files_fts"
 
         where_clause = ""
+        fts_fallback = False
         if media_name:
-            where_clause = " WHERE local_path LIKE ? OR webdav_path LIKE ?"
-            search_params = (f"%{media_name}%", f"%{media_name}%")
+            # 转义 FTS5 特殊字符
+            escaped_query = _escape_fts5_query(media_name)
+            # 使用 FTS5 全文搜索（simple 分词器支持中文）
+            where_clause = f" WHERE rowid IN (SELECT rowid FROM {fts_table} WHERE {fts_table} MATCH ?)"
+            search_params = (escaped_query,)
 
-        # 总记录数
-        count_sql = f"SELECT COUNT(*) FROM {table}{where_clause}"
-        with db.read_connection() as conn:
-            total = conn.execute(count_sql, search_params).fetchone()[0]
+            # 总记录数（FTS 查询，失败则回退 LIKE）
+            count_sql = f"SELECT COUNT(*) FROM {table}{where_clause}"
+            try:
+                with db.read_connection() as conn:
+                    total = conn.execute(count_sql, search_params).fetchone()[0]
+            except Exception as fts_err:
+                logging.warning("[WebUI] FTS5 搜索异常，回退到 LIKE: %s", fts_err)
+                fts_fallback = True
+                where_clause = f" WHERE local_path LIKE ? OR webdav_path LIKE ?"
+                search_params = (f"%{media_name}%", f"%{media_name}%")
+                count_sql = f"SELECT COUNT(*) FROM {table}{where_clause}"
+                with db.read_connection() as conn:
+                    total = conn.execute(count_sql, search_params).fetchone()[0]
+        else:
+            # 无搜索条件
+            count_sql = f"SELECT COUNT(*) FROM {table}{where_clause}"
+            with db.read_connection() as conn:
+                total = conn.execute(count_sql, search_params).fetchone()[0]
 
         # 分页查询（SQL 不做全局排序，改为 Python 季内排序）
         offset = (page - 1) * PAGE_SIZE
@@ -2208,6 +2380,31 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
         handler._send_json({"error": "media parameter is required"}, 400)
         return
 
+    # 路径穿越校验：防止恶意构造路径
+    # 检查长度
+    if len(media_name) > 255:
+        handler._send_json({"error": "invalid media name length"}, 400)
+        return
+    
+    # 检查危险字符和路径分隔符
+    dangerous_chars = ['..', '/', '\\', '\x00', ':', '*', '?', '"', '<', '>', '|']
+    if any(c in media_name for c in dangerous_chars):
+        handler._send_json({"error": "invalid media name characters"}, 400)
+        return
+    
+    # 检查是否为绝对路径
+    from pathlib import Path
+    try:
+        if Path(media_name).is_absolute():
+            handler._send_json({"error": "media name cannot be absolute path"}, 400)
+            return
+    except Exception:
+        handler._send_json({"error": "invalid media name"}, 400)
+        return
+
+    # 是否已确认执行（用于误删保护二次确认）
+    confirmed = bool(data.get("confirmed", False))
+
     # 获取 AppService
     app_service = getattr(handler.webui, '_app_service', None)
     if not app_service:
@@ -2226,7 +2423,22 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
         return
 
     try:
-        result = _do_media_refresh(app_service, area, media_name)
+        # 读取配置
+        app_config = getattr(app_service, 'config', None)
+        timeout_seconds = 300
+        safe_delete_threshold = 10
+        if app_config:
+            if hasattr(app_config, 'refresh'):
+                timeout_seconds = getattr(app_config.refresh, 'timeout_seconds', 300)
+            if hasattr(app_config, 'behavior'):
+                safe_delete_threshold = getattr(app_config.behavior, 'safe_delete_threshold', 10)
+
+        result = _do_media_refresh(
+            app_service, area, media_name,
+            timeout_seconds=timeout_seconds,
+            safe_delete_threshold=safe_delete_threshold,
+            confirmed=confirmed,
+        )
         handler._send_json(result)
     except Exception as e:
         logging.error("[Refresh] 刷新媒体 %s 失败: %s", media_name, e)
@@ -2235,10 +2447,43 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
         refresh_lock.release()
 
 
-def _do_media_refresh(app_service, area: str, media_name: str) -> dict:
-    """执行媒体刷新逻辑：对比 A 区 DB 与 OpenList API 返回的文件差异，并自动同步"""
+def _do_media_refresh(
+    app_service,
+    area: str,
+    media_name: str,
+    *,
+    timeout_seconds: int = 300,
+    safe_delete_threshold: int = 10,
+    confirmed: bool = False,
+) -> dict:
+    """执行媒体刷新逻辑：对比 A 区 DB 与 OpenList API 返回的文件差异，并自动同步。
+
+    新增参数：
+    - timeout_seconds: 超时时间（秒），超时后返回部分结果
+    - safe_delete_threshold: 删除数量超过此阈值时需要二次确认
+    - confirmed: 是否已确认执行（用于误删保护）
+    """
     db = app_service.db
     admin_api = app_service.admin_api
+    deadline = time.monotonic() + timeout_seconds
+
+    # 读取刷新日志级别
+    app_config = getattr(app_service, 'config', None)
+    log_level_name = "INFO"
+    if app_config and hasattr(app_config, 'refresh'):
+        log_level_name = getattr(app_config.refresh, 'log_level', "INFO").upper()
+    _refresh_log = _make_refresh_logger(log_level_name)
+
+    phase_start = time.monotonic()
+    _refresh_log("info", "[Refresh] phase=start media=%s area=%s timeout=%ds",
+                 media_name, area, timeout_seconds)
+
+    def _check_timeout(phase: str) -> bool:
+        """检查是否超时，返回 True 表示已超时"""
+        if time.monotonic() > deadline:
+            _refresh_log("warning", "[Refresh] phase=%s timeout after %.1fs", phase, timeout_seconds)
+            return True
+        return False
 
     # 1. 从 A 区 DB 查询该媒体的所有记录
     a_records = []
@@ -2255,6 +2500,9 @@ def _do_media_refresh(app_service, area: str, media_name: str) -> dict:
         logging.error("[Refresh] 查询 A 区记录失败: %s", e)
         return {"ok": False, "error": f"query failed: {e}"}
 
+    _refresh_log("debug", "[Refresh] phase=query duration=%.2fs records=%d",
+                 time.monotonic() - phase_start, len(a_records))
+
     if not a_records:
         return {"ok": True, "added": 0, "removed": 0, "unchanged": 0, "message": "no records found"}
 
@@ -2270,8 +2518,11 @@ def _do_media_refresh(app_service, area: str, media_name: str) -> dict:
         return {"ok": True, "added": 0, "removed": 0, "unchanged": 0, "message": "no common parent"}
 
     # 3. 调用 OpenList /api/fs/list 带 refresh=true 触发 STRM 引擎重新生成
-    logging.info("[Refresh] 触发刷新: %s (媒体: %s)", common_parent, media_name)
+    _refresh_log("info", "[Refresh] phase=api_call dir=%s", common_parent)
+    phase_start = time.monotonic()
     list_result = admin_api.list_directory(common_parent, refresh=True)
+    _refresh_log("debug", "[Refresh] phase=api_call duration=%.2fs", time.monotonic() - phase_start)
+
     if list_result is None or list_result.get("code") not in (0, 200):
         return {"ok": False, "error": "OpenList API returned error", "detail": list_result}
 
@@ -2286,11 +2537,37 @@ def _do_media_refresh(app_service, area: str, media_name: str) -> dict:
     removed_paths = db_webdav_paths - api_webdav_paths
     unchanged_paths = db_webdav_paths & api_webdav_paths
 
+    _refresh_log("info", "[Refresh] phase=diff added=%d removed=%d unchanged=%d",
+                 len(added_paths), len(removed_paths), len(unchanged_paths))
+
+    # 6. 误删保护：删除数量超过阈值时需要二次确认
+    if len(removed_paths) > safe_delete_threshold and not confirmed:
+        _refresh_log("warning",
+                     "[Refresh] 删除数量 (%d) 超过阈值 (%d)，需要二次确认",
+                     len(removed_paths), safe_delete_threshold)
+        return {
+            "ok": False,
+            "needs_confirmation": True,
+            "removed": len(removed_paths),
+            "threshold": safe_delete_threshold,
+            "message": f"即将删除 {len(removed_paths)} 个文件（超过阈值 {safe_delete_threshold}），是否继续？",
+        }
+
+    # 审计日志：记录用户确认删除操作
+    if confirmed and len(removed_paths) > 0:
+        logging.warning("[Refresh] 用户确认删除操作: media=%s, removed=%d",
+                        media_name, len(removed_paths))
+
     added_count = 0
     removed_count = 0
+    timed_out = False
 
-    # 6. 处理新增文件：调用 handle_a_created_or_modified 同步到 A 区
+    # 7. 处理新增文件：调用 handle_a_created_or_modified 同步到 A 区
+    phase_start = time.monotonic()
     for webdav_path in added_paths:
+        if _check_timeout("add_files"):
+            timed_out = True
+            break
         try:
             # 构造本地路径（从 A 区记录的 local_path 推断根目录）
             first_local = a_records[0].get("local_path", "")
@@ -2301,43 +2578,105 @@ def _do_media_refresh(app_service, area: str, media_name: str) -> dict:
                 local_path = str(Path(a_root) / filename)
                 app_service.handle_a_created_or_modified(local_path)
                 added_count += 1
+                _refresh_log("debug", "[Refresh] phase=add file=%s", webdav_path)
         except Exception as e:
             logging.warning("[Refresh] 同步新增文件失败 %s: %s", webdav_path, e)
 
-    # 7. 处理删除文件：清理 A 区记录，同时删除 B 区对应记录
-    for webdav_path in removed_paths:
+    _refresh_log("debug", "[Refresh] phase=add_files duration=%.2fs added=%d",
+                 time.monotonic() - phase_start, added_count)
+
+    # 8. 处理删除文件：清理 A 区记录，同时删除 B 区对应记录
+    phase_start = time.monotonic()
+    if not timed_out:
+        for webdav_path in removed_paths:
+            if _check_timeout("remove_files"):
+                timed_out = True
+                break
+            try:
+                # 查找对应的 A 区记录
+                a_record = next((r for r in a_records if r.get("webdav_path") == webdav_path), None)
+                if a_record:
+                    local_path = a_record.get("local_path", "")
+                    if local_path:
+                        # 路径归属校验：确保 local_path 在 A 区记录的公共目录下
+                        # 使用第一条记录的目录作为根目录（所有记录应来自同一媒体目录）
+                        first_local = a_records[0].get("local_path", "")
+                        if first_local:
+                            # 检测路径分隔符风格（兼容 POSIX 和 Windows 路径）
+                            sep = "\\" if "\\" in first_local else "/"
+                            a_root = sep.join(first_local.split(sep)[:-1])
+                            if a_root and not a_root.endswith(sep):
+                                a_root += sep
+                            if a_root and not local_path.startswith(a_root):
+                                logging.error("[Refresh] 拒绝删除非 A 区文件: %s (不在 %s 下)", local_path, a_root)
+                                continue
+
+                        # 删除本地文件
+                        from utils.file_utils import safe_remove_file
+                        safe_remove_file(local_path)
+                        # 删除 A 区记录
+                        db.delete_a_by_local(local_path)
+                        # 删除 B 区对应记录
+                        b_records = db.get_b_by_webdav(webdav_path)
+                        for b_rec in b_records:
+                            db.delete_b_by_local(b_rec.local_path)
+                        removed_count += 1
+                        _refresh_log("debug", "[Refresh] phase=remove file=%s", webdav_path)
+            except Exception as e:
+                logging.warning("[Refresh] 清理删除文件失败 %s: %s", webdav_path, e)
+
+    _refresh_log("debug", "[Refresh] phase=remove_files duration=%.2fs removed=%d",
+                 time.monotonic() - phase_start, removed_count)
+
+    # 9. 调用 scan_a_to_b_full_sync 同步到 B 区
+    if not timed_out:
+        phase_start = time.monotonic()
         try:
-            # 查找对应的 A 区记录
-            a_record = next((r for r in a_records if r.get("webdav_path") == webdav_path), None)
-            if a_record:
-                local_path = a_record.get("local_path", "")
-                if local_path:
-                    # 删除本地文件
-                    from utils.file_utils import safe_remove_file
-                    safe_remove_file(local_path)
-                    # 删除 A 区记录
-                    db.delete_a_by_local(local_path)
-                    # 删除 B 区对应记录
-                    b_records = db.get_b_by_webdav(webdav_path)
-                    for b_rec in b_records:
-                        db.delete_b_by_local(b_rec.local_path)
-                    removed_count += 1
+            app_service.scan_a_to_b_full_sync()
+            _refresh_log("debug", "[Refresh] phase=a_to_b_sync duration=%.2fs",
+                         time.monotonic() - phase_start)
         except Exception as e:
-            logging.warning("[Refresh] 清理删除文件失败 %s: %s", webdav_path, e)
+            logging.warning("[Refresh] A→B 同步失败: %s", e)
 
-    # 8. 调用 scan_a_to_b_full_sync 同步到 B 区
-    try:
-        app_service.scan_a_to_b_full_sync()
-    except Exception as e:
-        logging.warning("[Refresh] A→B 同步失败: %s", e)
-
-    logging.info("[Refresh] 刷新完成: 新增 %d, 删除 %d, 未变 %d", added_count, removed_count, len(unchanged_paths))
-    return {
+    result = {
         "ok": True,
         "added": added_count,
         "removed": removed_count,
         "unchanged": len(unchanged_paths),
     }
+
+    if timed_out:
+        result["timeout"] = True
+        result["message"] = f"刷新操作超时（{timeout_seconds}秒），已处理部分文件"
+        _refresh_log("warning", "[Refresh] phase=finish timeout added=%d removed=%d",
+                     added_count, removed_count)
+    else:
+        _refresh_log("info", "[Refresh] phase=finish added=%d removed=%d unchanged=%d",
+                     added_count, removed_count, len(unchanged_paths))
+
+    return result
+
+
+def _make_refresh_logger(level_name: str):
+    """根据日志级别名称创建刷新日志辅助函数。
+
+    返回一个函数 log(level, msg, *args)，其中 level 是单次调用的级别，
+    只有 >= level_name 的日志才会实际输出。
+    """
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+    }
+    threshold = level_map.get(level_name, logging.INFO)
+
+    def _log(level: str, msg: str, *args) -> None:
+        numeric = level_map.get(level.upper(), logging.INFO)
+        if numeric >= threshold:
+            logging.log(numeric, msg, *args)
+
+    return _log
 
 
 def _compute_common_parent_path(paths: list[str]) -> str:
@@ -2716,4 +3055,230 @@ def _handle_main_stop(handler, webui_server) -> bool:
     status_code = 200 if result.get("success") else 500
     handler._send_json(result, status_code)
     return True
+
+
+# ============================================================
+# 配置状态 & 启动预检 API
+# ============================================================
+
+def _handle_config_status(handler, webui_server) -> None:
+    """GET /api/config/status — 返回配置完成状态，供首次引导使用。
+
+    返回各配置步骤的完成状态：
+    - password_set: 管理员密码是否已设置（始终为 True，首次启动自动生成）
+    - tmdb_configured: TMDB 是否已配置
+    - openlist_configured: OpenList WebDAV 是否已配置
+    - main_running: 主程序是否在运行
+    - onboarding_completed: 引导是否已完成或已跳过
+    """
+    if not webui_server:
+        handler._send_json({
+            "password_set": False,
+            "tmdb_configured": False,
+            "openlist_configured": False,
+            "main_running": False,
+            "onboarding_completed": False,
+        })
+        return
+
+    _wdb = getattr(webui_server, '_watchlist_db', None)
+
+    # password_set: 始终为 True（server.py 启动时自动生成）
+    password_set = bool(getattr(webui_server, '_has_password', False))
+
+    # tmdb_configured: 仅查 DB，不查 client（client 为 None 说明未配置）
+    tmdb_configured = False
+    if _wdb:
+        try:
+            db_tmdb = _wdb.get_all_config("tmdb") or {}
+            token = db_tmdb.get("access_token", "")
+            api_key = db_tmdb.get("api_key", "")
+            tmdb_configured = bool(token or api_key)
+        except Exception:
+            pass
+
+    # openlist_configured: 检查 host 是否非空
+    host, _user, _password, _totp = _openlist_merged_webdav_cfg(webui_server)
+    openlist_configured = bool(host)
+
+    # main_running
+    main_running = bool(getattr(webui_server, '_app_running', False))
+
+    # onboarding_completed: 检查 DB 中的标记
+    onboarding_completed = False
+    if _wdb:
+        try:
+            val = _wdb.get_config("ui", "onboarding_completed", "")
+            onboarding_completed = val == "1"
+        except Exception:
+            pass
+
+    # 新增引导步骤完成状态
+    view_ab_completed = False
+    tmdb_refresh_completed = False
+    tmdb_match_completed = False
+    if _wdb:
+        try:
+            view_ab_completed = _wdb.get_config("ui", "onboarding_view_ab_completed", "") == "1"
+            tmdb_refresh_completed = _wdb.get_config("ui", "onboarding_tmdb_refresh_completed", "") == "1"
+            tmdb_match_completed = _wdb.get_config("ui", "onboarding_tmdb_match_completed", "") == "1"
+        except Exception:
+            pass
+
+    handler._send_json({
+        "password_set": password_set,
+        "tmdb_configured": tmdb_configured,
+        "openlist_configured": openlist_configured,
+        "main_running": main_running,
+        "onboarding_completed": onboarding_completed,
+        "view_ab_completed": view_ab_completed,
+        "tmdb_refresh_completed": tmdb_refresh_completed,
+        "tmdb_match_completed": tmdb_match_completed,
+    })
+
+
+def _handle_config_validate(handler, webui_server) -> None:
+    """POST /api/config/validate — 启动主程序前的预检。
+
+    检查项：
+    1. OpenList 配置是否已保存（host 非空）
+    2. OpenList 服务器是否可达（ping）
+    3. TMDB 是否已配置（警告级别，非阻塞）
+
+    返回：
+    - ok: 是否所有必要检查通过
+    - checks: 各项检查结果列表
+    """
+    if not webui_server:
+        handler._send_json({"ok": False, "error": "WebUI 服务器未初始化"}, 500)
+        return
+
+    _wdb = getattr(webui_server, '_watchlist_db', None)
+    checks = []
+
+    # --- 检查项 1: OpenList 配置 ---
+    host, user, password, totp_secret = _openlist_merged_webdav_cfg(webui_server)
+    if not host:
+        checks.append({
+            "name": "openlist_config",
+            "label": "OpenList 配置",
+            "status": "error",
+            "message": "OpenList WebDAV 地址未配置",
+            "suggestion": "请前往「OpenList 配置」页面填写 WebDAV 地址",
+        })
+        # 未配置则跳过 ping 检查
+        checks.append({
+            "name": "openlist_online",
+            "label": "OpenList 连接",
+            "status": "skipped",
+            "message": "配置未完成，跳过连接检测",
+        })
+    else:
+        checks.append({
+            "name": "openlist_config",
+            "label": "OpenList 配置",
+            "status": "ok",
+            "message": f"已配置: {html_module.escape(host)}",
+        })
+        # --- 检查项 2: OpenList 可达性 ---
+        try:
+            from webdav_client import OpenListAdminClient
+            client = OpenListAdminClient(host, user, password, totp_secret=totp_secret)
+            if client.login(force=True):
+                checks.append({
+                    "name": "openlist_online",
+                    "label": "OpenList 连接",
+                    "status": "ok",
+                    "message": "连接成功",
+                })
+            else:
+                error_type = client.last_error_type or "unknown"
+                error_messages = {
+                    "wrong_password": "密码错误，请检查用户名和密码",
+                    "wrong_2fa": "2FA 验证码错误，请检查 2FA 密钥",
+                    "account_not_found": "账号不存在，请检查用户名",
+                    "network_error": "无法连接到 OpenList 服务器，请检查地址和网络",
+                    "not_configured": "OpenList 地址无效",
+                    "invalid_totp": "TOTP 密钥无效",
+                    "unknown": "登录失败，请检查配置",
+                }
+                checks.append({
+                    "name": "openlist_online",
+                    "label": "OpenList 连接",
+                    "status": "error",
+                    "message": error_messages.get(error_type, "连接失败"),
+                    "suggestion": "请检查 OpenList 配置或网络连通性",
+                })
+        except Exception as e:
+            checks.append({
+                "name": "openlist_online",
+                "label": "OpenList 连接",
+                "status": "warning",
+                "message": f"连接异常: {html_module.escape(str(e))}",
+                "suggestion": "请检查网络或 OpenList 服务状态",
+            })
+
+    # --- 检查项 3: TMDB（警告级别，非阻塞） ---
+    tmdb_configured = False
+    if _wdb:
+        try:
+            db_tmdb = _wdb.get_all_config("tmdb") or {}
+            tmdb_configured = bool(db_tmdb.get("access_token", "") or db_tmdb.get("api_key", ""))
+        except Exception:
+            pass
+    if not tmdb_configured:
+        tmdb_client = getattr(webui_server, '_tmdb_client', None)
+        tmdb_configured = bool(tmdb_client)
+
+    if tmdb_configured:
+        checks.append({
+            "name": "tmdb_config",
+            "label": "TMDB 配置",
+            "status": "ok",
+            "message": "已配置",
+        })
+    else:
+        checks.append({
+            "name": "tmdb_config",
+            "label": "TMDB 配置",
+            "status": "warning",
+            "message": "TMDB 未配置（不影响主程序启动）",
+            "suggestion": "可选：前往「TMDB 配置」页面填写 API Token 以启用待看列表功能",
+        })
+
+    # 汇总：仅 openlist_config 为 error 时阻塞（openlist_online 降级为警告）
+    has_blocker = any(
+        c["status"] == "error" and c["name"] == "openlist_config"
+        for c in checks
+    )
+
+    handler._send_json({
+        "ok": not has_blocker,
+        "checks": checks,
+    })
+
+
+def _handle_onboarding_complete_step(handler, webui_server, body: bytes) -> None:
+    """POST /api/onboarding/complete-step — 手动标记引导步骤完成"""
+    try:
+        data = json.loads(body) if body else {}
+    except (ValueError, json.JSONDecodeError):
+        data = {}
+    
+    step = data.get("step", "")
+    
+    if step not in ("view_ab", "tmdb_refresh", "tmdb_match"):
+        handler._send_json({"error": "invalid step"}, 400)
+        return
+    
+    _wdb = getattr(webui_server, '_watchlist_db', None)
+    if _wdb:
+        try:
+            _wdb.set_config("ui", f"onboarding_{step}_completed", "1")
+        except Exception as e:
+            logging.error("[Onboarding] 标记步骤完成失败: %s", e)
+            handler._send_json({"error": str(e)}, 500)
+            return
+    
+    handler._send_json({"ok": True})
 

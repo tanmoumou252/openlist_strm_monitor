@@ -90,3 +90,41 @@ export function copyPathBlock(el) {
     import('../components/toast.js').then(m => m.showToast('已复制路径到剪贴板', 'success'));
   });
 }
+
+/**
+ * 渲染 TMDB 搜索结果（双板块展示）
+ * @param {Object} results - TMDB 搜索结果 {movies: [], tv_shows: []}
+ * @param {string} title - 区块标题
+ */
+export function renderTmdbResults(results, title) {
+  const container = document.getElementById('tmdb-search-results');
+  if (!container) return;
+  
+  const { movies = [], tv_shows = [] } = results;
+  const allResults = [
+    ...movies.map(m => ({ ...m, type: 'movie' })),
+    ...tv_shows.map(t => ({ ...t, type: 'tv' }))
+  ];
+  
+  if (allResults.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+  
+  const html = `
+    <div class="tmdb-results-section" style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius-card);padding:16px">
+      <h3 class="tmdb-results-title" style="font-size:14px;font-weight:600;color:var(--text-main);margin:0 0 12px 0">${esc(title)}</h3>
+      <div class="tmdb-results-list" style="display:flex;flex-direction:column;gap:8px">
+        ${allResults.map(item => `
+          <div class="tmdb-result-item" style="display:flex;align-items:center;gap:12px;padding:8px;background:var(--bg-elevated);border-radius:var(--radius-control);border:1px solid var(--border-color)">
+            <span class="tmdb-result-type" style="font-size:11px;font-weight:600;color:var(--primary);background:color-mix(in srgb,var(--primary) 10%,transparent);padding:2px 8px;border-radius:var(--radius-pill);flex-shrink:0">${item.type === 'movie' ? '电影' : '电视剧'}</span>
+            <span class="tmdb-result-name" style="flex:1;font-size:13px;font-weight:500;color:var(--text-main)">${esc(item.title || item.name)}</span>
+            <span class="tmdb-result-date" style="font-size:12px;color:var(--text-muted);flex-shrink:0">${esc(item.release_date || item.first_air_date || '')}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+  
+  container.innerHTML = html;
+}

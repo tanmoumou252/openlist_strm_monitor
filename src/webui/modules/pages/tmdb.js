@@ -1,6 +1,6 @@
 import { api } from '../core/api.js';
 import { icon } from '../core/icons.js';
-import { esc } from '../core/utils.js';
+import { esc, renderTmdbResults } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
 import { showCacheStaleModal } from '../components/dialog.js';
 import { navigate } from '../core/router.js';
@@ -261,6 +261,11 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
 	  html += '</div></div>';
 
   html += `<div class="toolbar"><div class="search-wrap">${icon('search', 'search-prefix')}<input type="text" id="tmdb-search" placeholder="搜索待看列表..." value="${esc(q)}"></div><button class="search-btn" id="tmdb-search-btn">${icon('search')} 搜索</button></div>`;
+  
+  // TMDB 在线搜索结果容器
+  if (q) {
+    html += `<div id="tmdb-search-results"></div>`;
+  }
 
   const stateMap = { in: '已收录', out: '未收录', que: '有疑问' };
   const stateIconMap = { in: 'badge_in', out: 'badge_out', que: 'badge_que' };
@@ -360,6 +365,13 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
   document.getElementById('tmdb-search').addEventListener('keydown', e => {
     if (e.key === 'Enter') document.getElementById('tmdb-search-btn').click();
   });
+
+  // 有搜索词时，同时查询 TMDB 在线结果
+  if (q) {
+    api(`/api/tmdb/search?query=${encodeURIComponent(q)}`)
+      .then(results => renderTmdbResults(results, "你可能还在找"))
+      .catch(() => {});
+  }
 
   _initFlipCards();
 

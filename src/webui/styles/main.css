@@ -622,6 +622,10 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 .gear-quick-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;border:none;background:transparent;color:var(--text-muted);cursor:pointer;transition:background .15s,color .15s}
 .gear-quick-btn:hover{background:color-mix(in srgb,var(--primary) 12%,transparent);color:var(--primary)}
 
+.onboarding-quick-btn{display:inline-flex;align-items:center;gap:4px;padding:6px 12px;border:1px solid var(--primary);border-radius:var(--radius-control);background:var(--primary-light);color:var(--primary);cursor:pointer;transition:all .18s ease;font-size:13px;font-weight:600;margin-left:8px}
+.onboarding-quick-btn:hover{background:var(--primary);color:var(--on-primary)}
+.onboarding-quick-btn .material-icon{display:inline-flex;align-items:center}
+
 /* ===== OpenList Config ===== */
 .openlist-form{max-width:900px;margin:0 auto}
 .openlist-form .config-section{margin-bottom:18px}
@@ -750,3 +754,43 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 .status-valid{color:var(--primary)}
 .status-duplicate{color:#E37400}
 .status-quarantined{color:#C5221F}
+
+/* ===== 首次配置引导卡片 ===== */
+.onboarding-card{background:var(--bg-card);border-radius:16px;padding:20px;margin-bottom:24px;border:1px solid var(--border-color);box-shadow:var(--shadow-sm)}
+.onboarding-card.onboarding-completed{padding:14px 20px}
+.onboarding-card.onboarding-completed .onboarding-header{margin-bottom:0;padding-bottom:0;border-bottom:none}
+.onboarding-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid color-mix(in srgb,var(--border-color) 30%,transparent)}
+.onboarding-title{font-size:16px;font-weight:600;color:var(--text-main);display:flex;align-items:center;gap:8px}
+.onboarding-progress{font-size:13px;color:var(--text-muted);font-weight:500}
+.onboarding-steps{display:flex;flex-direction:column;gap:12px}
+.onboarding-step{display:flex;align-items:flex-start;gap:12px;padding:12px;border-radius:12px;background:color-mix(in srgb,var(--bg-control) 50%,transparent);border:1px solid color-mix(in srgb,var(--border-color) 20%,transparent);transition:background .18s ease,border-color .18s ease}
+.onboarding-step:hover{background:color-mix(in srgb,var(--bg-control) 70%,transparent);border-color:color-mix(in srgb,var(--primary) 30%,transparent)}
+.onboarding-step.done{opacity:.6}
+.onboarding-step.done:hover{opacity:.8}
+.onboarding-step-indicator{width:32px;height:32px;border-radius:50%;background:color-mix(in srgb,var(--primary) 15%,transparent);color:var(--primary);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;flex-shrink:0;border:2px solid color-mix(in srgb,var(--primary) 40%,transparent)}
+.onboarding-step.done .onboarding-step-indicator{background:var(--primary);color:var(--on-primary);border-color:var(--primary)}
+.onboarding-step-content{flex:1;min-width:0}
+.onboarding-step-label{font-size:14px;font-weight:600;color:var(--text-main);margin-bottom:4px}
+.onboarding-step-message{font-size:12px;color:var(--text-muted);line-height:1.5}
+.onboarding-step-link{display:inline-block;margin-top:6px;font-size:12px;color:var(--primary);text-decoration:none;font-weight:600;transition:color .18s ease}
+.onboarding-step-link:hover{color:var(--primary-hover);text-decoration:underline}
+.onboarding-step-hint{display:inline-block;margin-top:6px;font-size:12px;color:var(--text-muted);font-style:italic}
+.onboarding-step-complete-btn{margin-top:8px;padding:4px 12px;font-size:12px;border:1px solid var(--primary);background:transparent;color:var(--primary);border-radius:4px;cursor:pointer;transition:all 0.2s;font-family:inherit}
+.onboarding-step-complete-btn:hover{background:var(--primary);color:var(--on-primary)}
+.onboarding-footer{margin-top:16px;padding-top:12px;border-top:1px solid color-mix(in srgb,var(--border-color) 30%,transparent);display:flex;justify-content:flex-end}
+
+/* ===== 启动预检对话框 ===== */
+.preflight-dialog{margin:-12px}
+.preflight-header{font-size:15px;font-weight:600;color:var(--text-main);margin-bottom:16px;display:flex;align-items:center;gap:8px;padding:12px;background:color-mix(in srgb,#E37400 10%,var(--bg-card));border-radius:8px;border:1px solid color-mix(in srgb,#E37400 24%,transparent)}
+.preflight-checks{display:flex;flex-direction:column;gap:10px;margin-bottom:16px}
+.preflight-check{display:flex;align-items:flex-start;gap:10px;padding:10px;border-radius:8px;background:color-mix(in srgb,var(--bg-control) 50%,transparent);border:1px solid color-mix(in srgb,var(--border-color) 20%,transparent)}
+.preflight-check-icon{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px}
+.preflight-check.preflight-ok .preflight-check-icon{background:color-mix(in srgb,var(--primary) 15%,transparent);color:var(--primary)}
+.preflight-check.preflight-warning .preflight-check-icon{background:color-mix(in srgb,#E37400 15%,transparent);color:#E37400}
+.preflight-check.preflight-error .preflight-check-icon{background:color-mix(in srgb,#C5221F 15%,transparent);color:#C5221F}
+.preflight-check.preflight-skipped .preflight-check-icon{background:color-mix(in srgb,var(--text-muted) 10%,transparent);color:var(--text-muted)}
+.preflight-check-content{flex:1;min-width:0}
+.preflight-check-label{font-size:13px;font-weight:600;color:var(--text-main);margin-bottom:2px}
+.preflight-check-message{font-size:12px;color:var(--text-muted);line-height:1.4}
+.preflight-check-suggestion{font-size:11px;color:var(--primary);margin-top:4px;font-style:italic}
+.preflight-footer{font-size:12px;color:var(--text-muted);text-align:center;padding:8px;background:color-mix(in srgb,var(--bg-control) 50%,transparent);border-radius:8px}

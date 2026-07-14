@@ -14,7 +14,8 @@ This file provides guidance to AI coding assistants when working with code in th
 8. **Preserve the TMDB integration.** Do not refactor TMDB API code unless specifically requested.
 9. **Prefer small, targeted changes** over large rewrites. This project is close to completion.
 10. **Do NOT fake verification** — use real commands, real server startup, and real API/UI checks when available. Do not claim tests were run unless they were actually executed.
-11. **Reply in Chinese** 
+11. **Reply in Chinese**
+12. **Documentation must not use exact line numbers**. When referencing code locations in wiki/docs/README markdown files, use method names, function names, class names, or approximate ranges (e.g., "in the authentication section", "near the database initialization") instead of specific line numbers like "line 123" or "lines 45-67". Line numbers change frequently as code evolves, making such references quickly outdated and misleading. 
 
 ## Configuration
 
@@ -25,6 +26,13 @@ This file provides guidance to AI coding assistants when working with code in th
 - **Database**: SQLite — `bridge.db` (core), `tmdb_watchlist.db` (TMDB cache + webui_config)
 - **Main config**: `config.toml` (YAML-like TOML)
 - **Runtime config overrides**: `webui_config` table in `tmdb_watchlist.db` (DB > config.toml)
+
+## Server Entry Points
+
+- **Sync engine only**: `python src/main.py` — starts the A/B/C zone sync engine, no WebUI.
+- **WebUI**: `python src/webui/server.py` — starts the management panel with an interactive menu to optionally launch the sync engine.
+
+> Do NOT use `python src/main.py --webui-only` — that flag does not exist.
 
 ## Project Overview
 
@@ -64,9 +72,9 @@ This file provides guidance to AI coding assistants when working with code in th
 openlist_strm_bridge/
 ├── src/
 │   ├── main.py                  # Entry point
-│   ├── app_service_core.py      # Core sync engine (2171 lines)
+│   ├── app_service_core.py      # Core sync engine
 │   ├── config.py                # Configuration classes (AppConfig, etc.)
-│   ├── database.py              # SQLite bridge.db manager (1401 lines)
+│   ├── database.py              # SQLite bridge.db manager
 │   ├── webdav_client.py         # OpenList Admin API + WebDAV client
 │   ├── area_watchers.py         # File system watchers for A/B/C zones
 │   ├── refresh_service.py       # Periodic WebDAV refresh
@@ -78,7 +86,7 @@ openlist_strm_bridge/
 │   ├── watchlist_match.py       # Watchlist matching logic
 │   ├── webui/
 │   │   ├── server.py            # HTTP server + auth + route dispatch
-│   │   ├── routes.py            # All API route handlers (2305 lines)
+│   │   ├── routes.py            # All API route handlers
 │   │   ├── index.html           # SPA entry point
 │   │   ├── main.js              # Frontend entry point
 │   │   ├── vite.config.js       # Vite build config
@@ -173,15 +181,15 @@ The Vite config groups modules into chunks:
 
 ## Key Files Reference
 
-| File | Lines | What to know |
-|------|-------|-------------|
-| `src/app_service_core.py` | 2160 | Heart of the engine. Lock ordering is critical. |
-| `src/database.py` | 1330 | SQLite with WAL, read/write connection managers, reentrant lock. |
-| `src/webui/routes.py` | 2305 | All API handlers. `_get_media_groups_paginated` method handles pagination logic. |
-| `src/webui/server.py` | 1134 | Auth, routing, SPA serving. `_check_auth()` method handles authentication. |
-| `src/webui/modules/core/api.js` | 53 | API wrapper — always use this instead of raw fetch. |
-| `src/webui/modules/core/router.js` | 153 | Hash-based SPA router with auth guard. |
-| `src/webui/modules/core/utils.js` | 86 | `createField()` for form labels, `esc()` for HTML escaping. |
-| `src/webui/modules/pages/openlist.js` | 697 | OpenList config page. Engine select change handler at `_bindEngineSelectEvents()`. |
-| `src/config.py` | 594 | `AppConfig` dataclass. `load_strm_storage_from_api()` for dynamic storage mapping. |
-| `src/webdav_client.py` | 730 | JWT auth, Admin API, WebDAV protocol. TOTP support. |
+| File | What to know |
+|------|-------------|
+| `src/app_service_core.py` | Heart of the engine. Lock ordering is critical. |
+| `src/database.py` | SQLite with WAL, read/write connection managers, reentrant lock. |
+| `src/webui/routes.py` | All API handlers. `_get_media_groups_paginated` method handles pagination logic. |
+| `src/webui/server.py` | Auth, routing, SPA serving. `_check_auth()` method handles authentication. |
+| `src/webui/modules/core/api.js` | API wrapper — always use this instead of raw fetch. |
+| `src/webui/modules/core/router.js` | Hash-based SPA router with auth guard. |
+| `src/webui/modules/core/utils.js` | `createField()` for form labels, `esc()` for HTML escaping. |
+| `src/webui/modules/pages/openlist.js` | OpenList config page. Engine select change handler at `_bindEngineSelectEvents()`. |
+| `src/config.py` | `AppConfig` dataclass. `load_strm_storage_from_api()` for dynamic storage mapping. |
+| `src/webdav_client.py` | JWT auth, Admin API, WebDAV protocol. TOTP support. |

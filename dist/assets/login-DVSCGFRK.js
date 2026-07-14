@@ -1,4 +1,4 @@
-import{F as e,p as t,u as n}from"./core-iN5uWBSS.js";async function r(r){let i=!1,a=!1;try{i=(await t(`/api/admin/status`)).has_password,a=!0}catch{}let o=localStorage.getItem(`session_token`);if(o&&i){n(`#dashboard`);return}if(o&&!i&&a&&localStorage.removeItem(`session_token`),!i){r.innerHTML=`
+import{I as e,d as t,m as n}from"./core-BTjoc0Zv.js";async function r(r){let i=!1,a=!1;try{i=(await n(`/api/admin/status`)).has_password,a=!0}catch{}let o=localStorage.getItem(`session_token`);if(o&&i){t(`#dashboard`);return}if(o&&!i&&a&&localStorage.removeItem(`session_token`),!i){r.innerHTML=`
       <div style="display:flex;align-items:center;justify-content:center;min-height:60vh">
         <div class="page-card" style="max-width:420px;width:100%;text-align:center;padding:40px 32px">
           <div style="font-size:48px;margin-bottom:16px">${e(`lock`)}</div>
@@ -12,7 +12,7 @@ import{F as e,p as t,u as n}from"./core-iN5uWBSS.js";async function r(r){let i=!
             ${e(`arrow_back`)} 进入管理面板
           </button>
         </div>
-      </div>`,document.getElementById(`login-go-dashboard-btn`)?.addEventListener(`click`,()=>n(`#dashboard`));return}r.innerHTML=`
+      </div>`,document.getElementById(`login-go-dashboard-btn`)?.addEventListener(`click`,()=>t(`#dashboard`));return}r.innerHTML=`
     <div style="display:flex;align-items:center;justify-content:center;min-height:70vh">
       <div class="page-card" id="login-card" style="max-width:400px;width:100%;padding:36px 28px 28px">
         <div style="text-align:center;margin-bottom:24px">
@@ -37,4 +37,4 @@ import{F as e,p as t,u as n}from"./core-iN5uWBSS.js";async function r(r){let i=!
           忘记密码可运行 <code style="background:var(--bg-control);padding:1px 4px;border-radius:3px">python reset_admin.py</code> 重置
         </div>
       </div>
-    </div>`;let s=document.getElementById(`login-password-input`),c=document.getElementById(`login-btn`),l=document.getElementById(`login-error`);function u(e){l.textContent=e,l.style.display=`block`}async function d(){let t=s.value.trim();if(!t){u(`请输入管理员密码`);return}c.disabled=!0,c.textContent=`登录中...`,l.style.display=`none`;try{let r=await fetch(`/api/login`,{method:`POST`,headers:{"Content-Type":`application/json`},body:JSON.stringify({password:t})}),i=await r.json();r.ok&&i.token?(localStorage.setItem(`session_token`,i.token),n(`#dashboard`)):(u(i.error||`密码错误`),c.disabled=!1,c.innerHTML=`${e(`login`)} 登录`)}catch{u(`网络错误，请检查服务器是否运行`),c.disabled=!1,c.innerHTML=`${e(`login`)} 登录`}}c.addEventListener(`click`,d),s.addEventListener(`keydown`,e=>{e.key===`Enter`&&d()}),setTimeout(()=>s.focus(),100)}export{r as renderLogin};
+    </div>`;let s=document.getElementById(`login-password-input`),c=document.getElementById(`login-btn`),l=document.getElementById(`login-error`);function u(e){l.textContent=e,l.style.display=`block`}async function d(){let n=s.value.trim();if(!n){u(`请输入管理员密码`);return}c.disabled=!0,c.textContent=`登录中...`,l.style.display=`none`;try{let r=await fetch(`/api/login`,{method:`POST`,headers:{"Content-Type":`application/json`},body:JSON.stringify({password:n})}),i=await r.json();r.ok&&i.token?(localStorage.setItem(`session_token`,i.token),t(`#dashboard`)):(u(i.error||`密码错误`),c.disabled=!1,c.innerHTML=`${e(`login`)} 登录`)}catch{u(`网络错误，请检查服务器是否运行`),c.disabled=!1,c.innerHTML=`${e(`login`)} 登录`}}c.addEventListener(`click`,d),s.addEventListener(`keydown`,e=>{e.key===`Enter`&&d()}),setTimeout(()=>s.focus(),100)}export{r as renderLogin};

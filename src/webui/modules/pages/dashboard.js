@@ -12,6 +12,288 @@ import {
 
 export { startUptimeTimer, stopUptimeTimer, updateUptime };
 
+// ============================================================
+// 首次配置引导（Onboarding Guide）
+// ============================================================
+
+let _onboardingState = null;
+
+async function _fetchConfigStatus() {
+  try {
+    return await api('/api/config/status');
+  } catch (e) {
+    return null;
+  }
+}
+
+async function _markOnboardingCompleted() {
+  try {
+    await api('/api/webui/config/ui', {
+      method: 'POST',
+      body: JSON.stringify({ onboarding_completed: '1' })
+    });
+  } catch (e) {
+    // 静默处理
+  }
+}
+
+async function _resetOnboarding() {
+  try {
+    await api('/api/webui/config/ui', {
+      method: 'POST',
+      body: JSON.stringify({ onboarding_completed: '0' })
+    });
+  } catch (e) {
+    // 静默处理
+  }
+}
+
+function _renderOnboardingCard(status) {
+  if (!status) return '';
+
+  // 引导已完成/跳过 → 显示"重新显示引导"按钮
+  if (status.onboarding_completed) {
+    return `
+      <div class="onboarding-card onboarding-completed" id="onboarding-card">
+        <div class="onboarding-header">
+          <div class="onboarding-title">
+            ${icon('check')} 首次配置引导已完成
+          </div>
+        </div>
+        <div class="onboarding-footer" style="margin-top:8px;padding-top:0;border-top:none">
+          <button class="md3-btn tonal" id="onboarding-restart-btn">${icon('refresh')} 重新显示引导</button>
+        </div>
+      </div>
+    `;
+  }
+
+  const steps = [
+    {
+      key: 'password',
+      label: '设置管理员密码',
+      done: status.password_set,
+      link: '#config',
+      linkText: '前往配置',
+      message: '首次启动时系统已自动生成随机密码并显示在控制台日志中。如需修改，请前往配置页面。'
+    },
+    {
+      key: 'tmdb',
+      label: '配置 TMDB',
+      done: status.tmdb_configured,
+      link: '#config?sub=config',
+      linkText: '前往配置',
+      message: '配置 TMDB API Token 以启用待看列表和影视信息获取功能（可选）。'
+    },
+    {
+      key: 'openlist',
+      label: '配置 OpenList',
+      done: status.openlist_configured,
+      link: '#config?sub=openlist',
+      linkText: '前往配置',
+      message: '填写 OpenList WebDAV 地址、用户名和密码，以连接 STRM 引擎。'
+    },
+    {
+      key: 'main',
+      label: '启动主程序',
+      done: status.main_running,
+      link: null,
+      linkText: '点击下方启动按钮',
+      message: '完成以上配置后，点击「启动主程序」按钮开始同步服务。'
+    },
+    {
+      key: 'view_ab',
+      label: '查看 A/B 分区',
+      done: status.view_ab_completed || false,
+      link: '#area_a',
+      linkText: '前往查看',
+      message: '浏览 A 区和 B 区的文件列表，了解同步状态。'
+    },
+    {
+      key: 'tmdb_refresh',
+      label: '刷新 TMDB 待看列表',
+      done: status.tmdb_refresh_completed || false,
+      link: '#config?sub=config',
+      linkText: '前往刷新',
+      message: '点击「刷新待看列表」按钮，从 TMDB 获取最新数据。'
+    },
+    {
+      key: 'tmdb_match',
+      label: '检测 TMDB 收录状态',
+      done: status.tmdb_match_completed || false,
+      link: '#config?sub=config',
+      linkText: '前往检测',
+      message: '点击「刷新收录状态」按钮，检测本地文件是否已收录到 TMDB。'
+    }
+  ];
+
+  const pendingCount = steps.filter(s => !s.done).length;
+  const allDone = pendingCount === 0;
+
+  const stepsHtml = steps.map((s, i) => `
+    <div class="onboarding-step ${s.done ? 'done' : ''}">
+      <div class="onboarding-step-indicator">
+        ${s.done ? icon('check') : `<span>${i + 1}</span>`}
+      </div>
+      <div class="onboarding-step-content">
+        <div class="onboarding-step-label">${esc(s.label)}</div>
+        <div class="onboarding-step-message">${esc(s.message)}</div>
+        ${!s.done && s.link ? `<a href="${s.link}" class="onboarding-step-link">${esc(s.linkText)} →</a>` : ''}
+        ${!s.done && !s.link ? `<span class="onboarding-step-hint">${esc(s.linkText)}</span>` : ''}
+        ${!s.done && s.key !== 'password' && s.key !== 'tmdb' && s.key !== 'openlist' && s.key !== 'main' ? `<button class="onboarding-step-complete-btn" data-step="${s.key}">标记完成</button>` : ''}
+      </div>
+    </div>
+  `).join('');
+
+  return `
+    <div class="onboarding-card" id="onboarding-card">
+      <div class="onboarding-header">
+        <div class="onboarding-title">
+          ${icon('menu_book', 'ui-icon-lg')} 首次配置引导
+        </div>
+        <div class="onboarding-progress">
+          ${steps.length - pendingCount} / ${steps.length} 已完成
+        </div>
+      </div>
+      <div class="onboarding-steps">
+        ${stepsHtml}
+      </div>
+      <div class="onboarding-footer">
+        ${allDone
+          ? `<button class="md3-btn filled" id="onboarding-complete-btn">${icon('check')} 完成引导</button>`
+          : `<button class="md3-btn tonal" id="onboarding-skip-btn">跳过引导</button>`
+        }
+      </div>
+    </div>
+  `;
+}
+
+function _bindOnboardingEvents() {
+  const skipBtn = document.getElementById('onboarding-skip-btn');
+  const completeBtn = document.getElementById('onboarding-complete-btn');
+  const restartBtn = document.getElementById('onboarding-restart-btn');
+
+  if (skipBtn) {
+    skipBtn.addEventListener('click', async () => {
+      await _markOnboardingCompleted();
+      // 立即更新本地状态并刷新 UI
+      if (_onboardingState) _onboardingState.onboarding_completed = true;
+      const card = document.getElementById('onboarding-card');
+      if (card) card.remove();
+      const quickBtn = document.getElementById('onboarding-quick-btn');
+      if (quickBtn) quickBtn.style.display = 'inline-flex';
+      showToast('已跳过引导，可随时在仪表盘重新显示', 'info');
+    });
+  }
+
+  if (completeBtn) {
+    completeBtn.addEventListener('click', async () => {
+      await _markOnboardingCompleted();
+      // 立即更新本地状态并刷新 UI
+      if (_onboardingState) _onboardingState.onboarding_completed = true;
+      const card = document.getElementById('onboarding-card');
+      if (card) card.remove();
+      const quickBtn = document.getElementById('onboarding-quick-btn');
+      if (quickBtn) quickBtn.style.display = 'inline-flex';
+      showToast('引导已完成', 'success');
+    });
+  }
+
+  if (restartBtn) {
+    restartBtn.addEventListener('click', async () => {
+      await _resetOnboarding();
+      _loadOnboarding();
+      showToast('引导已重新开始', 'success');
+    });
+  }
+
+  // 绑定"标记完成"按钮
+  document.querySelectorAll('.onboarding-step-complete-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const step = btn.dataset.step;
+      try {
+        await api('/api/onboarding/complete-step', {
+          method: 'POST',
+          body: JSON.stringify({ step })
+        });
+        // 重新加载引导状态
+        await _loadOnboarding();
+        showToast('步骤已标记完成', 'success');
+      } catch (e) {
+        showToast('标记失败: ' + e.message, 'error');
+      }
+    });
+  });
+}
+
+async function _loadOnboarding() {
+  const status = await _fetchConfigStatus();
+  _onboardingState = status;
+  const container = document.getElementById('onboarding-container');
+  if (container) {
+    container.innerHTML = _renderOnboardingCard(status);
+    _bindOnboardingEvents();
+  }
+  
+  // Update header quick button visibility
+  const quickBtn = document.getElementById('onboarding-quick-btn');
+  if (quickBtn) {
+    if (status && status.onboarding_completed) {
+      quickBtn.style.display = 'inline-flex';
+    } else {
+      quickBtn.style.display = 'none';
+    }
+  }
+}
+
+// ============================================================
+// 启动预检（Preflight Check）
+// ============================================================
+
+async function _runPreflightCheck() {
+  try {
+    const result = await api('/api/config/validate', { method: 'POST' });
+    return result;
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+function _renderPreflightDialog(result) {
+  if (result.ok) return null;
+
+  const checksHtml = (result.checks || []).map(c => {
+    const statusIcon = c.status === 'ok' ? icon('check')
+      : c.status === 'warning' ? icon('warn')
+      : c.status === 'skipped' ? icon('info')
+      : icon('error');
+    const statusClass = `preflight-${c.status}`;
+    return `
+      <div class="preflight-check ${statusClass}">
+        <div class="preflight-check-icon">${statusIcon}</div>
+        <div class="preflight-check-content">
+          <div class="preflight-check-label">${esc(c.label)}</div>
+          <div class="preflight-check-message">${esc(c.message)}</div>
+          ${c.suggestion ? `<div class="preflight-check-suggestion">${esc(c.suggestion)}</div>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="preflight-dialog">
+      <div class="preflight-header">
+        ${icon('warn')} 启动前检查未通过
+      </div>
+      <div class="preflight-checks">
+        ${checksHtml}
+      </div>
+      <div class="preflight-footer">
+        请修复以上问题后再启动主程序。
+      </div>
+    </div>
+  `;
+}
+
 export async function updateMainStatus() {
   try {
     const status = await api('/api/main/status');
@@ -51,6 +333,23 @@ export async function updateMainStatus() {
 }
 
 export async function startMainProgram() {
+  // 启动前预检
+  const preflight = await _runPreflightCheck();
+  if (!preflight.ok) {
+    // 显示预检失败对话框
+    const preflightHtml = _renderPreflightDialog(preflight);
+    if (preflightHtml) {
+      showConfirmDialog(
+        '启动前检查未通过',
+        preflightHtml,
+        '知道了',
+        '取消',
+        { htmlContent: true }
+      );
+    }
+    return;
+  }
+
   showConfirmDialog('启动主程序', '确定要启动主程序吗？这将开始 STRM 同步服务。', async () => {
     const startBtn = document.getElementById('main-start-btn');
     if (startBtn) {
@@ -62,6 +361,8 @@ export async function startMainProgram() {
       if (result.success) {
         showToast('主程序已启动', 'success');
         updateMainStatus();
+        // 刷新引导状态
+        _loadOnboarding();
       } else {
         showToast('启动失败: ' + (result.message || '未知错误'), 'error');
         if (startBtn) {
@@ -118,6 +419,9 @@ export async function renderDashboard(el) {
   el.innerHTML = `
 <h2 class="page-header">${icon('dashboard', 'ui-icon-lg')} 仪表盘</h2>
 
+<!-- 首次配置引导 -->
+<div id="onboarding-container"></div>
+
 <!-- 主程序控制区 -->
 <div class="main-control-card">
   <div class="status-info">
@@ -152,6 +456,9 @@ export async function renderDashboard(el) {
   // Bind start/stop buttons (replaces inline onclick)
   document.getElementById('main-start-btn')?.addEventListener('click', startMainProgram);
   document.getElementById('main-stop-btn')?.addEventListener('click', stopMainProgram);
+
+  // 加载首次配置引导
+  _loadOnboarding();
 
   // 初始化主程序状态轮询与 uptime 计时器
   updateMainStatus();

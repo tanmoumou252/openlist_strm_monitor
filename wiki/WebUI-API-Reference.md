@@ -1,6 +1,6 @@
 # 十、WebUI API 接口参考
 
-所有 API 端点由 `WebUIServer`（`src/webui/server.py`）提供服务，路由处理器在 `src/webui/routes.py`（~2335 行）中。
+所有 API 端点由 `WebUIServer`（`src/webui/server.py`）提供服务，路由处理器在 `src/webui/routes.py` 中。
 
 ## 鉴权
 

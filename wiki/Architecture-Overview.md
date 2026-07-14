@@ -30,7 +30,7 @@
 ├──────────────────────────────────────────────────────────────┤
 │              WebUI 层 (webui/)                                 │
 │  server.py — HTTP 服务器 + 鉴权 + 路由分发                    │
-│  routes.py — 全部 API 处理器 (~2300 行)                       │
+│  routes.py — 全部 API 处理器                              │
 │  modules/ — Vanilla JS SPA 前端                               │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -38,7 +38,7 @@
 ## 关键类
 
 ### `AppService`（`app_service_core.py`）
-中央编排器（~2160 行）。管理完整的同步生命周期：
+中央编排器。管理完整的同步生命周期：
 - 环境准备与数据库初始化
 - OpenList 引擎配置加载
 - A/B/C 区 watchdog 事件处理器
@@ -54,7 +54,7 @@ class AppService:
 ```
 
 ### `Database`（`database.py`）
-SQLite 数据库管理器，WAL 模式（~1330 行）。通过 `threading.RLock()` 保证线程安全。
+SQLite 数据库管理器，WAL 模式。通过 `threading.RLock()` 保证线程安全。
 管理 bridge.db 中 10 张表，提供读写连接的上下文管理器。
 
 ### `OpenListAdminClient`（`webdav_client.py`）

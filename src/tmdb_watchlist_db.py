@@ -122,6 +122,16 @@ class TmdbWatchlistDb:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
+        
+        # 尝试加载 simple 分词器（与 database.py 保持一致）
+        try:
+            conn.enable_load_extension(True)
+            simple_dll = Path(__file__).parent.parent / "simple.dll"
+            if simple_dll.exists():
+                conn.load_extension(str(simple_dll))
+        except Exception:
+            pass  # 静默失败，使用 unicode61 降级
+        
         return conn
 
     def _init_schema(self) -> None:
@@ -199,6 +209,28 @@ class TmdbWatchlistDb:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_tmdb_log_ts ON tmdb_operation_log(ts DESC)
             """)
+            
+            # FTS5 全文搜索表（用于 TMDB 待看列表搜索）
+            # 尝试使用 simple 分词器，失败则降级到 unicode61
+            tokenizer = 'unicode61'
+            try:
+                conn.enable_load_extension(True)
+                simple_dll = Path(__file__).parent.parent / "simple.dll"
+                if simple_dll.exists():
+                    conn.load_extension(str(simple_dll))
+                    tokenizer = 'simple'
+            except Exception:
+                pass
+            
+            conn.execute(f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS tmdb_watchlist_fts USING fts5(
+                    title,
+                    original_title,
+                    overview,
+                    tokenize='{tokenizer}'
+                )
+            """)
+            
             conn.commit()
         logging.debug("[TMDB-DB] 数据库初始化完成: %s", self._db_path)
 
@@ -481,10 +513,15 @@ class TmdbWatchlistDb:
                     )
                     conn.execute(
                         "DELETE FROM movies WHERE id NOT IN (SELECT id FROM _keep_movie_ids)")
+                    # 同步清理 FTS 表中的孤儿记录
+                    conn.execute(
+                        "DELETE FROM tmdb_watchlist_fts WHERE rowid NOT IN (SELECT rowid FROM movies)")
                     conn.commit()
             else:
                 with self._conn() as conn:
                     conn.execute("DELETE FROM movies")
+                    # 同步清理 FTS 表
+                    conn.execute("DELETE FROM tmdb_watchlist_fts")
                     conn.commit()
 
             logging.info("[TMDB] 电影同步完成 (%d 项)", len(movie_ids))
@@ -528,10 +565,15 @@ class TmdbWatchlistDb:
                     )
                     conn.execute(
                         "DELETE FROM tv WHERE id NOT IN (SELECT id FROM _keep_tv_ids)")
+                    # 同步清理 FTS 表中的孤儿记录
+                    conn.execute(
+                        "DELETE FROM tmdb_watchlist_fts WHERE rowid NOT IN (SELECT rowid FROM tv)")
                     conn.commit()
             else:
                 with self._conn() as conn:
                     conn.execute("DELETE FROM tv")
+                    # 同步清理 FTS 表
+                    conn.execute("DELETE FROM tmdb_watchlist_fts")
                     conn.commit()
 
             logging.info("[TMDB] 剧集同步完成 (%d 项)", len(tv_ids))
@@ -589,6 +631,13 @@ class TmdbWatchlistDb:
             match_updated_at = existing[2] if existing else 0.0
             manual_override_at = existing[3] if existing else 0.0
             manual_override_by = existing[4] if existing else ""
+            
+            # 删除旧的 FTS 记录
+            conn.execute(
+                "DELETE FROM tmdb_watchlist_fts WHERE rowid = (SELECT rowid FROM movies WHERE id=?)",
+                (item["id"],),
+            )
+            
             conn.execute(
                 """INSERT OR REPLACE INTO movies
                 (id, title, original_title, overview, poster_path, backdrop_path,
@@ -625,6 +674,19 @@ class TmdbWatchlistDb:
                     manual_override_by,
                 ),
             )
+            
+            # 插入新的 FTS 记录
+            conn.execute(
+                """INSERT INTO tmdb_watchlist_fts(rowid, title, original_title, overview)
+                VALUES((SELECT rowid FROM movies WHERE id=?), ?, ?, ?)""",
+                (
+                    item["id"],
+                    self._val(item, "title"),
+                    self._val(item, "original_title"),
+                    self._val(item, "overview"),
+                ),
+            )
+            
             conn.commit()
 
     def _upsert_tv(self, item: dict, synced_at: float) -> None:
@@ -647,6 +709,12 @@ class TmdbWatchlistDb:
                 season_count = int(item["number_of_seasons"])
             if item.get("number_of_episodes") is not None:
                 episode_count = int(item["number_of_episodes"])
+
+            # 删除旧的 FTS 记录
+            conn.execute(
+                "DELETE FROM tmdb_watchlist_fts WHERE rowid = (SELECT rowid FROM tv WHERE id=?)",
+                (item["id"],),
+            )
 
             conn.execute(
                 """INSERT OR REPLACE INTO tv
@@ -693,6 +761,19 @@ class TmdbWatchlistDb:
                     manual_override_by,
                 ),
             )
+            
+            # 插入新的 FTS 记录（使用 name 作为 title）
+            conn.execute(
+                """INSERT INTO tmdb_watchlist_fts(rowid, title, original_title, overview)
+                VALUES((SELECT rowid FROM tv WHERE id=?), ?, ?, ?)""",
+                (
+                    item["id"],
+                    self._val(item, "name"),
+                    self._val(item, "original_name"),
+                    self._val(item, "overview"),
+                ),
+            )
+            
             conn.commit()
 
     # ----------------------------------------------------------

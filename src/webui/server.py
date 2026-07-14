@@ -75,6 +75,7 @@ try:
         _handle_openlist_monitored_paths, _handle_openlist_status,
         _handle_openlist_ping, _handle_openlist_paths,
         _handle_main_status, _handle_main_start, _handle_main_stop,
+        _handle_config_status, _handle_config_validate,
         handle_dashboard, handle_area, handle_area_detail, handle_area_refresh,
         handle_records_api, handle_logs_api, handle_download_log_api,
         handle_config_api,
@@ -90,6 +91,7 @@ except ImportError:
         _handle_openlist_monitored_paths, _handle_openlist_status,
         _handle_openlist_ping, _handle_openlist_paths,
         _handle_main_status, _handle_main_start, _handle_main_stop,
+        _handle_config_status, _handle_config_validate,
         handle_dashboard, handle_area, handle_area_detail, handle_area_refresh,
         handle_records_api, handle_logs_api, handle_download_log_api,
         handle_config_api,
@@ -348,9 +350,17 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         token = self.headers.get("X-Session-Token", "")
         now = time.time()
         with webui._sessions_lock:
-            if token in webui._sessions and now < webui._sessions[token]:
+            # 使用常量时间比较防止时序攻击
+            import hmac
+            matched_token = None
+            for stored_token in webui._sessions:
+                if hmac.compare_digest(token.encode('utf-8'), stored_token.encode('utf-8')):
+                    matched_token = stored_token
+                    break
+            
+            if matched_token and now < webui._sessions[matched_token]:
                 # 滑动过期：刷新 7 天
-                webui._sessions[token] = now + 604800
+                webui._sessions[matched_token] = now + 604800
                 return True
         self._send_json({"error": "unauthorized", "need_login": True}, 401)
         return False
@@ -544,6 +554,8 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             handle_records_api(self, params)
         elif path == "/api/config":
             handle_config_api(self)
+        elif path == "/api/config/status":
+            _handle_config_status(self, self.webui)
         elif path.startswith("/api/webui/config/"):
             scope = path.split(
                 "/api/webui/config/")[1].split("/")[0].split("?")[0]
@@ -603,6 +615,11 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             _handle_restart_webui(self, self.webui)
         elif path == "/api/openlist/test-connection":
             _handle_openlist_test_connection(self, self.webui, body)
+        elif path == "/api/config/validate":
+            _handle_config_validate(self, self.webui)
+        elif path == "/api/onboarding/complete-step":
+            from webui.routes import _handle_onboarding_complete_step
+            _handle_onboarding_complete_step(self, self.webui, body)
         elif path == "/api/main/start":
             _handle_main_start(self, self.webui, body)
         elif path == "/api/main/stop":

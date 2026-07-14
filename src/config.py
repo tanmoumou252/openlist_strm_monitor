@@ -52,6 +52,8 @@ class RefreshConfig:
     interval_seconds: int
     enabled: bool = True
     depth: int = 5
+    timeout_seconds: int = 300  # 刷新操作超时时间（秒）
+    log_level: str = "INFO"  # 刷新日志级别：DEBUG/INFO/WARNING
 
 
 @dataclass(slots=True)
@@ -63,6 +65,7 @@ class BehaviorConfig:
     b_delete_triggers_cloud_action: bool = False
     ghost_protect_seconds: int = 300
     a_to_b_restore_delay_seconds: int = 30
+    safe_delete_threshold: int = 10  # 删除数量超过此阈值时需要二次确认
 
 
 @dataclass(slots=True)
@@ -381,6 +384,8 @@ class AppConfig:
             interval_seconds=refresh_data.get("interval_minutes", 10) * 60,
             enabled=refresh_data.get("enabled", True),
             depth=refresh_data.get("depth", 5),
+            timeout_seconds=refresh_data.get("timeout_seconds", 300),
+            log_level=refresh_data.get("log_level", "INFO"),
         )
 
         behavior_data = data.get("behavior", {})
@@ -394,6 +399,7 @@ class AppConfig:
             a_to_b_restore_delay_seconds=behavior_data.get(
                 "a_to_b_restore_delay_seconds", 30
             ),
+            safe_delete_threshold=behavior_data.get("safe_delete_threshold", 10),
         )
 
         log_data = data.get("log", {})

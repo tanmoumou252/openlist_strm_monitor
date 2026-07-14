@@ -18,12 +18,12 @@
 
 ```
 src/
-├── main.py                  # 入口（~99 行）
-├── app_service_core.py      # 核心同步引擎（~2160 行）
-├── app_service.py           # re-export 桶（3 行）
-├── config.py                # 配置类（~594 行）
-├── database.py              # SQLite bridge.db 管理器（~1330 行）
-├── webdav_client.py         # OpenList API + WebDAV 客户端（~730 行）
+├── main.py                  # 入口
+├── app_service_core.py      # 核心同步引擎
+├── app_service.py           # re-export 桶
+├── config.py                # 配置类
+├── database.py              # SQLite bridge.db 管理器
+├── webdav_client.py         # OpenList API + WebDAV 客户端
 ├── area_watchers.py         # Watchdog 事件处理器
 ├── refresh_service.py       # 周期刷新服务
 ├── media_renamer.py         # 媒体重命名 + 字幕检测

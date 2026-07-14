@@ -60,10 +60,10 @@ python src/webui/server.py
 openlist_strm_bridge/
 ├── src/
 │   ├── main.py                  # 入口 — 配置加载、DB 初始化、AppService 启动
-│   ├── app_service_core.py      # 核心同步引擎 (~2160 行)
+│   ├── app_service_core.py      # 核心同步引擎
 │   ├── config.py                # 类型化 dataclass 配置
-│   ├── database.py              # SQLite bridge.db 管理器 (~1330 行)
-│   ├── webdav_client.py         # OpenList Admin API + WebDAV 客户端 (~730 行)
+│   ├── database.py              # SQLite bridge.db 管理器
+│   ├── webdav_client.py         # OpenList Admin API + WebDAV 客户端
 │   ├── area_watchers.py         # Watchdog 文件系统事件处理器
 │   ├── media_renamer.py         # 重命名、季集提取
 │   ├── refresh_service.py       # 周期 WebDAV 刷新
