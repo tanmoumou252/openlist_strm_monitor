@@ -15,6 +15,7 @@ import html as html_module
 import json
 import logging
 import datetime as _dt
+import re
 
 import os
 import secrets
@@ -2019,8 +2020,13 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
     params_list = []
     
     if q:
-        base_where = f" AND (local_path LIKE ? OR webdav_path LIKE ?)"
-        params_list.extend([f"%{q}%", f"%{q}%"])
+        # 使用 FTS5 全文搜索（simple 分词器支持中文），通过 rowid 关联主表。
+        # 与 handle_area_detail 的搜索模式保持一致，避免 LIKE 子串匹配与 CJK 分词语义不一致。
+        fts_table_map = {"a": "a_strm_files_fts", "b": "b_strm_files_fts", "c": "c_ghost_files_fts"}
+        fts_table = fts_table_map.get(area, "a_strm_files_fts")
+        escaped_query = _escape_fts5_query(q)
+        base_where = f" AND rowid IN (SELECT rowid FROM {fts_table} WHERE {fts_table} MATCH ?)"
+        params_list.append(escaped_query)
     
     # kind_counts 使用独立参数（只含搜索 q，不含 kind 筛选），
     # 确保统计始终显示所有类型的真实数量不受当前筛选影响
@@ -2118,6 +2124,77 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
             }
     except Exception as e:
         logging.error("SQL 分页查询媒体分组失败: %s", e)
+        # FTS5 搜索失败时回退到 LIKE 子串匹配，避免返回空结果
+        # 注意：必须重新构建 SQL 语句，因为 f-string 在构建时已求值
+        if q:
+            try:
+                like_base_where = f" AND (local_path LIKE ? OR webdav_path LIKE ?)"
+                like_params = [f"%{q}%", f"%{q}%"]
+                like_kind_params = list(like_params)
+                like_kind_where = ""
+                if kind_filter != "all" and kind_filter in _KIND_FILTER_MAP:
+                    kind_value = _KIND_FILTER_MAP[kind_filter]
+                    like_kind_where = f" AND {_KIND_SQL} = ?"
+                    like_params.append(kind_value)
+                    like_kind_params.append(kind_value)
+                
+                # 重新构建 SQL 语句（使用 LIKE 条件）
+                like_kind_counts_sql = f"""
+                    SELECT 
+                        CASE 
+                            WHEN {_KIND_SQL} = '番剧' THEN 'anime'
+                            WHEN {_KIND_SQL} = '电影' THEN 'movie'
+                            ELSE 'other'
+                        END AS kind_category,
+                        COUNT(DISTINCT ({_MEDIA_NAME_SQL})) AS count
+                    FROM {table}
+                    WHERE 1=1 {like_base_where}
+                    GROUP BY kind_category
+                """
+                like_total_sql = f"""
+                    SELECT COUNT(DISTINCT ({_KIND_SQL} || '|' || {_MEDIA_NAME_SQL})) AS total
+                    FROM {table}
+                    WHERE 1=1 {like_base_where} {like_kind_where}
+                """
+                like_media_groups_sql = f"""
+                    SELECT 
+                        {_KIND_SQL} AS kind,
+                        {_MEDIA_NAME_SQL} AS media_name,
+                        COUNT(*) AS file_count,
+                        MAX({time_field}) AS latest_ts
+                    FROM {table}
+                    WHERE 1=1 {like_base_where} {like_kind_where}
+                    GROUP BY kind, media_name
+                    {order_clause}
+                    LIMIT ? OFFSET ?
+                """
+                
+                with db.read_connection() as conn:
+                    conn.row_factory = sqlite3.Row
+                    kind_counts_rows = conn.execute(like_kind_counts_sql, like_kind_params).fetchall()
+                    kind_counts = {row[0]: row[1] for row in kind_counts_rows}
+                    total = conn.execute(like_total_sql, like_params).fetchone()[0]
+                    media_rows = conn.execute(
+                        like_media_groups_sql, like_params + [page_size, offset]).fetchall()
+                    media_items = [
+                        {
+                            "name": row["media_name"] or "未分类",
+                            "kind": row["kind"],
+                            "count": row["file_count"],
+                            "season": "",
+                            "latest_ts": row["latest_ts"] or 0,
+                        }
+                        for row in media_rows
+                    ]
+                return {
+                    "total": total,
+                    "page": page,
+                    "page_size": page_size,
+                    "media_items": media_items,
+                    "kind_counts": kind_counts,
+                }
+            except Exception as e2:
+                logging.error("SQL 分页查询 LIKE 回退失败: %s", e2)
         return {"total": 0, "page": page, "page_size": page_size, 
                 "media_items": [], "kind_counts": {}}
 
@@ -2133,7 +2210,7 @@ def handle_area(handler, area, params) -> None:
     sort_key = params.get("sort", ["name"])[0]
     sort_order = params.get("order", ["asc"])[0]
     page = _safe_int(params.get("page", ["1"])[0], 1)
-    page_size = _safe_int(params.get("page_size", ["50"])[0], 50)
+    page_size = min(_safe_int(params.get("page_size", ["50"])[0], 50), 500)
 
     kind_label_map = {
         "anime": "番剧",
@@ -2225,14 +2302,21 @@ def _compute_common_local_root(local_paths: list[str]) -> str:
 
 
 def _escape_fts5_query(query: str) -> str:
-    """转义 FTS5 特殊字符，防止搜索时抛异常。
+    """清理 FTS5 查询字符串，移除可能被解释为运算符的字符。
     
-    FTS5 特殊字符包括: * - + " ( ) { } [ ] ^ ~ : \\
-    转义策略：在每个特殊字符前添加反斜杠。
+    策略：移除 FTS5 特殊运算符字符（* - + " ^ ~），保留括号等可能出现在
+    文件名中的字符（替换为空格）。避免逐个反斜杠转义在不同上下文的行为不一致问题。
     """
-    special_chars = ['*', '-', '+', '"', '(', ')', '{', '}', '[', ']', '^', '~', ':', '\\']
-    for char in special_chars:
-        query = query.replace(char, f'\\{char}')
+    # 移除 FTS5 运算符字符（包括冒号，因为冒号在 FTS5 中用于列过滤）
+    query = re.sub(r'[*+"^~:]', '', query)
+    # 将括号替换为空格（避免嵌套查询语法问题）
+    query = re.sub(r'[(){}[\]]', ' ', query)
+    # 保留连字符（文件名中常见，如 test-123），但移除首尾连字符
+    query = query.strip('-')
+    # 移除多余空白
+    query = ' '.join(query.split())
+    # 移除反斜杠（Windows 路径分隔符在 FTS5 中无意义）
+    query = query.replace('\\', ' ')
     return query
 
 
@@ -2537,7 +2621,7 @@ def _do_media_refresh(
     removed_paths = db_webdav_paths - api_webdav_paths
     unchanged_paths = db_webdav_paths & api_webdav_paths
 
-    _refresh_log("info", "[Refresh] phase=diff added=%d removed=%d unchanged=%d",
+    _refresh_log("info", "[Refresh] phase=diff 对方比我们文件多=%d 少=%d 未变=%d",
                  len(added_paths), len(removed_paths), len(unchanged_paths))
 
     # 6. 误删保护：删除数量超过阈值时需要二次确认

@@ -10,7 +10,7 @@ import {
   startUptimeTimer, stopUptimeTimer, updateUptime
 } from '../core/state.js';
 
-export { startUptimeTimer, stopUptimeTimer, updateUptime };
+export { startUptimeTimer, stopUptimeTimer, updateUptime, _loadOnboarding };
 
 // ============================================================
 // 首次配置引导（Onboarding Guide）

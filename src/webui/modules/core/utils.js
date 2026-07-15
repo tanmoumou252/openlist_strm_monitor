@@ -95,8 +95,9 @@ export function copyPathBlock(el) {
  * 渲染 TMDB 搜索结果（双板块展示）
  * @param {Object} results - TMDB 搜索结果 {movies: [], tv_shows: []}
  * @param {string} title - 区块标题
+ * @param {string} query - 搜索关键词（用于构造 TMDB 搜索链接）
  */
-export function renderTmdbResults(results, title) {
+export function renderTmdbResults(results, title, query = '') {
   const container = document.getElementById('tmdb-search-results');
   if (!container) return;
   
@@ -107,7 +108,13 @@ export function renderTmdbResults(results, title) {
   ];
   
   if (allResults.length === 0) {
-    container.innerHTML = '';
+    container.innerHTML = `
+      <div class="tmdb-results-section" style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius-card);padding:16px;text-align:center">
+        <div style="color:var(--text-muted);font-size:13px">
+          未找到相关结果 · <a href="https://www.themoviedb.org/search?query=${encodeURIComponent(query || title)}" target="_blank" rel="noopener" style="color:var(--primary);text-decoration:none">在 TMDB 中搜索</a>
+        </div>
+      </div>
+    `;
     return;
   }
   

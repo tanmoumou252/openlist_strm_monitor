@@ -194,13 +194,16 @@ export async function renderTmdb(el, params) {
   }
   let items = data.results || [];
 
+  // 使用后端 FTS5 搜索（带 LIKE 回退），避免前端内存过滤与后端分词语义不一致。
+  // 注意：FTS5 过滤结果不写入缓存，缓存始终保存完整列表以保证状态统计准确。
   if (q) {
-    const ql = q.toLowerCase();
-    items = items.filter(it => {
-      const t = (it.title || it.name || '').toLowerCase();
-      const ot = (it.original_title || it.original_name || '').toLowerCase();
-      return t.includes(ql) || ot.includes(ql);
-    });
+    try {
+      const filtered = await api(`/api/tmdb/watchlist/${apiType}?all=1&q=${encodeURIComponent(q)}`);
+      items = filtered.results || [];
+    } catch (e) {
+      // 后端搜索失败时回退到完整列表（不再做前端内存过滤）
+      items = data.results || [];
+    }
   }
 
   if (statusFilter && ['in', 'out', 'que'].includes(statusFilter)) {
@@ -369,7 +372,7 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
   // 有搜索词时，同时查询 TMDB 在线结果
   if (q) {
     api(`/api/tmdb/search?query=${encodeURIComponent(q)}`)
-      .then(results => renderTmdbResults(results, "你可能还在找"))
+      .then(results => renderTmdbResults(results, "你可能还在找", q))
       .catch(() => {});
   }
 

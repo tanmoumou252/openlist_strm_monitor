@@ -26,6 +26,7 @@ async function renderAreaList(el, area, params) {
   const sort = params.sort || 'name';
   const order = params.order || 'asc';
   const page = parseInt(params.page) || 1;
+  const pageSize = parseInt(params.page_size) || 50;
   let url = `/api/area/${area}`;
   const qs = [];
   qs.push('kind=' + encodeURIComponent(kind));
@@ -33,6 +34,7 @@ async function renderAreaList(el, area, params) {
   if (sort) qs.push('sort=' + encodeURIComponent(sort));
   if (order) qs.push('order=' + encodeURIComponent(order));
   qs.push('page=' + page);
+  qs.push('page_size=' + pageSize);
   if (qs.length) url += '?' + qs.join('&');
 
   const d = await api(url);
@@ -84,6 +86,11 @@ async function renderAreaList(el, area, params) {
   ${sortLink('名称', 'name')}
   ${sortLink('文件数', 'count')}
   ${sortLink('时间', 'time')}
+  <select id="page-size-select" style="margin-left:auto;padding:4px 8px;border:1px solid var(--border-color);border-radius:var(--radius-control);background:var(--bg-control);color:var(--text-main);font-size:calc(var(--font-base) - 1px)">
+    <option value="50"${d.page_size === 50 ? ' selected' : ''}>50 条/页</option>
+    <option value="100"${d.page_size === 100 ? ' selected' : ''}>100 条/页</option>
+    <option value="200"${d.page_size === 200 ? ' selected' : ''}>200 条/页</option>
+  </select>
 </div>
 <div class="media-grid">${cardsHtml}</div>
 ${pagerHtml}
@@ -92,7 +99,7 @@ ${pagerHtml}
   // 有搜索词时，同时查询 TMDB 在线结果
   if (q) {
     api(`/api/tmdb/search?query=${encodeURIComponent(q)}`)
-      .then(results => renderTmdbResults(results, "你可能还在找"))
+      .then(results => renderTmdbResults(results, "你可能还在找", q))
       .catch(() => {});
   }
 
@@ -116,6 +123,12 @@ ${pagerHtml}
       e.preventDefault();
       navigate(tab.dataset.kindHref);
     });
+  });
+  // Bind page size selector
+  document.getElementById('page-size-select')?.addEventListener('change', (e) => {
+    const newSize = e.target.value;
+    const newHash = `#area_${area}?kind=${encodeURIComponent(kind)}&sort=${sort}&order=${order}&page_size=${newSize}&page=1`;
+    navigate(newHash);
   });
 }
 

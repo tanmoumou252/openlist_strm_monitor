@@ -38,77 +38,96 @@ from webui.routes import _escape_fts5_query  # noqa: E402
 # ============================================================
 
 class TestEscapeFts5Query:
-    """测试 FTS5 特殊字符转义函数。"""
+    """测试 FTS5 查询清理函数。"""
 
     def test_escape_star(self):
-        """星号应被转义（注意：反斜杠本身也是特殊字符，会被二次转义）"""
+        """星号应被移除"""
         result = _escape_fts5_query("test*")
-        # * → \*，然后 \ → \\，最终 test\\*
-        assert "\\*" in result
+        assert "*" not in result
         assert "test" in result
 
     def test_escape_minus(self):
-        """连字符应被转义"""
+        """连字符在词中间应保留，首尾连字符应移除"""
         result = _escape_fts5_query("test-name")
-        assert "\\-" in result
+        assert "test-name" in result  # 词中间保留
+        result2 = _escape_fts5_query("-test")
+        assert not result2.startswith("-")  # 首连字符移除
+        result3 = _escape_fts5_query("test-")
+        assert not result3.endswith("-")  # 尾连字符移除
 
     def test_escape_plus(self):
-        """加号应被转义"""
+        """加号应被移除"""
         result = _escape_fts5_query("test+name")
-        assert "\\+" in result
+        assert "+" not in result
+        assert "test" in result
+        assert "name" in result
 
     def test_escape_double_quote(self):
-        """双引号应被转义"""
+        """双引号应被移除"""
         result = _escape_fts5_query('test"name')
-        assert '\\"' in result
+        assert '"' not in result
+        assert "test" in result
+        assert "name" in result
 
     def test_escape_parentheses(self):
-        """圆括号应被转义"""
+        """圆括号应被替换为空格"""
         result = _escape_fts5_query("test(name)")
-        assert "\\(" in result
-        assert "\\)" in result
+        assert "(" not in result
+        assert ")" not in result
+        assert "test" in result
+        assert "name" in result
 
     def test_escape_braces(self):
-        """花括号应被转义"""
+        """花括号应被替换为空格"""
         result = _escape_fts5_query("test{name}")
-        assert "\\{" in result
-        assert "\\}" in result
+        assert "{" not in result
+        assert "}" not in result
+        assert "test" in result
+        assert "name" in result
 
     def test_escape_brackets(self):
-        """方括号应被转义"""
+        """方括号应被替换为空格"""
         result = _escape_fts5_query("test[name]")
-        assert "\\[" in result
-        assert "\\]" in result
+        assert "[" not in result
+        assert "]" not in result
+        assert "test" in result
+        assert "name" in result
 
     def test_escape_caret(self):
-        """脱字符应被转义"""
+        """脱字符应被移除"""
         result = _escape_fts5_query("test^name")
-        assert "\\^" in result
+        assert "^" not in result
+        assert "test" in result
+        assert "name" in result
 
     def test_escape_tilde(self):
-        """波浪号应被转义"""
+        """波浪号应被移除"""
         result = _escape_fts5_query("test~name")
-        assert "\\~" in result
+        assert "~" not in result
+        assert "test" in result
+        assert "name" in result
 
     def test_escape_colon(self):
-        """冒号应被转义"""
+        """冒号应被移除"""
         result = _escape_fts5_query("test:name")
-        assert "\\:" in result
+        assert ":" not in result
+        assert "test" in result
+        assert "name" in result
 
     def test_escape_backslash(self):
-        """反斜杠应被转义"""
+        """反斜杠应被替换为空格"""
         result = _escape_fts5_query("test\\name")
-        assert "\\\\" in result
+        assert "\\" not in result
+        assert "test" in result
+        assert "name" in result
 
     def test_escape_all_special_chars(self):
-        """所有特殊字符同时出现应全部被转义（每个特殊字符前都有反斜杠）"""
+        """所有特殊字符同时出现应全部被处理"""
         query = '*-+"(){}[]^~:\\'
         escaped = _escape_fts5_query(query)
-        # 验证每个特殊字符在转义结果中都有反斜杠前缀
-        # 注意：由于反斜杠本身也是特殊字符，转义顺序会影响最终结果
-        # 关键断言：所有原始特殊字符都被处理
-        for char in ['*', '-', '+', '"', '(', ')', '{', '}', '[', ']', '^', '~', ':']:
-            assert char in escaped, f"字符 {char} 应在转义结果中"
+        # 验证所有运算符字符都被移除或替换
+        for char in ['*', '+', '"', '(', ')', '{', '}', '[', ']', '^', '~', ':', '\\']:
+            assert char not in escaped, f"字符 {char} 不应在清理结果中"
 
     def test_plain_text_unchanged(self):
         """普通文本（无特殊字符）应保持不变"""
@@ -120,11 +139,11 @@ class TestEscapeFts5Query:
         assert _escape_fts5_query("") == ""
 
     def test_chinese_with_special(self):
-        """中文混合特殊字符应正确转义"""
+        """中文混合特殊字符应正确清理"""
         result = _escape_fts5_query("电影:测试*")
-        # 冒号和星号都应被转义
-        assert "\\:" in result
-        assert "\\*" in result
+        # 冒号和星号都应被移除
+        assert ":" not in result
+        assert "*" not in result
         assert "电影" in result
         assert "测试" in result
 
@@ -132,6 +151,16 @@ class TestEscapeFts5Query:
         """不含特殊字符的输入应原样返回"""
         assert _escape_fts5_query("hello world") == "hello world"
         assert _escape_fts5_query("12345") == "12345"
+
+    def test_hyphen_in_middle_preserved(self):
+        """词中间的连字符应保留（如 test-123）"""
+        result = _escape_fts5_query("test-123")
+        assert "test-123" in result
+
+    def test_multiple_spaces_collapsed(self):
+        """多个连续空白应被合并为单个空格"""
+        result = _escape_fts5_query("test   name")
+        assert result == "test name"
 
 
 # ============================================================

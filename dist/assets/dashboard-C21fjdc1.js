@@ -1,4 +1,4 @@
-import{A as e,C as t,F as n,I as r,N as i,h as a,j as o,m as s,n as c,o as l,r as u,u as d}from"./core-BTjoc0Zv.js";var f=null;async function p(){try{return await s(`/api/config/status`)}catch{return null}}async function m(){try{await s(`/api/webui/config/ui`,{method:`POST`,body:JSON.stringify({onboarding_completed:`1`})})}catch{}}async function h(){try{await s(`/api/webui/config/ui`,{method:`POST`,body:JSON.stringify({onboarding_completed:`0`})})}catch{}}function g(e){if(!e)return``;if(e.onboarding_completed)return`
+import{A as e,C as t,F as n,I as r,N as i,h as a,j as o,m as s,n as c,o as l,r as u,u as d}from"./core-DM_LO3j3.js";var f=null;async function p(){try{return await s(`/api/config/status`)}catch{return null}}async function m(){try{await s(`/api/webui/config/ui`,{method:`POST`,body:JSON.stringify({onboarding_completed:`1`})})}catch{}}async function h(){try{await s(`/api/webui/config/ui`,{method:`POST`,body:JSON.stringify({onboarding_completed:`0`})})}catch{}}function g(e){if(!e)return``;if(e.onboarding_completed)return`
       <div class="onboarding-card onboarding-completed" id="onboarding-card">
         <div class="onboarding-header">
           <div class="onboarding-title">
@@ -95,4 +95,4 @@ import{A as e,C as t,F as n,I as r,N as i,h as a,j as o,m as s,n as c,o as l,r a
 	  <!-- 密码提示 -->
 	  <div style="text-align:center;font-size:12px;color:var(--text-muted);margin-top:8px">
 	    管理密码保存在 WebUI 控制台日志中 · 忘记密码可运行 <code style="background:var(--bg-control);padding:1px 4px;border-radius:3px">python reset_admin.py</code> 重置
-	  </div>`,document.getElementById(`main-start-btn`)?.addEventListener(`click`,S),document.getElementById(`main-stop-btn`)?.addEventListener(`click`,C),v(),x(),i(),t&&clearInterval(t),e(setInterval(x,a.MAIN_STATUS_POLL_INTERVAL)))}export{w as renderDashboard,x as updateMainStatus,n as updateUptime};
+	  </div>`,document.getElementById(`main-start-btn`)?.addEventListener(`click`,S),document.getElementById(`main-stop-btn`)?.addEventListener(`click`,C),v(),x(),i(),t&&clearInterval(t),e(setInterval(x,a.MAIN_STATUS_POLL_INTERVAL)))}export{v as _loadOnboarding,w as renderDashboard,x as updateMainStatus,n as updateUptime};

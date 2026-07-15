@@ -1,255 +1,242 @@
 # 测试脚本说明
 
-本目录包含 `openlist_strm_bridge` 项目的所有测试脚本。
-
-## 测试框架
-
-- **框架**: pytest
-- **Python 版本**: 3.11+
-- **运行方式**: `pytest src/tests/`
+本目录包含 `openlist_strm_bridge` 项目的所有测试文件。
 
 ## 测试分类
 
-### 核心功能测试
+### 单元测试
 
-| 测试文件 | 测试内容 | 覆盖模块 |
-|---------|---------|---------|
-| `test_app_service_core.py` | 核心同步引擎 | `app_service_core.py` |
-| `test_sync_service.py` | 同步服务 | `sync_service.py` |
-| `test_refresh_service.py` | 刷新服务 | `refresh_service.py` |
-| `test_refresh_media.py` | 媒体刷新 | `routes.py` |
-| `test_media_renamer.py` | 媒体重命名 | `media_renamer.py` |
-| `test_subtitle_handler.py` | 字幕处理 | `subtitle_handler.py` |
+针对单个函数或模块的测试：
 
-### 数据库测试
-
-| 测试文件 | 测试内容 | 覆盖模块 |
-|---------|---------|---------|
-| `test_boundary_conditions.py` | 边界条件 | `database.py` |
-| `test_fts5_search.py` | FTS5 中文分词搜索（含降级路径、孤儿清理、删除同步） | `database.py` |
-| `test_fts5_escape_and_tmdb_search.py` | FTS5 特殊字符转义 + TMDB 综合搜索 API | `routes.py` |
-| `test_watchlist_match_state.py` | 待看列表匹配状态 | `tmdb_watchlist_db.py` |
-
-### WebUI 测试
-
-| 测试文件 | 测试内容 | 覆盖模块 |
-|---------|---------|---------|
-| `test_webui_http.py` | WebUI HTTP 请求（含新手引导 API） | `webui/routes.py`, `webui/server.py` |
-| `test_webui_standalone.py` | WebUI 独立运行 | `webui/server.py` |
-| `test_password_security.py` | 密码安全 | `webui/server.py` |
-| `test_integration_security.py` | 集成安全 | 多模块 |
-
-### OpenList 集成测试
-
-| 测试文件 | 测试内容 | 覆盖模块 |
-|---------|---------|---------|
-| `test_openlist_admin_api.py` | OpenList Admin API | `webdav_client.py` |
-| `test_openlist_hotreload.py` | OpenList 热重载 | `config.py` |
-| `test_webdav_client.py` | WebDAV 客户端 | `webdav_client.py` |
-
-### TMDB 集成测试
-
-| 测试文件 | 测试内容 | 覆盖模块 |
-|---------|---------|---------|
-| `test_tmdb_api.py` | TMDB API | `tmdb_client.py` |
-| `test_tmdb_client.py` | TMDB 客户端 | `tmdb_client.py` |
-| `test_watchlist_match.py` | 待看列表匹配 | `watchlist_match.py` |
-
-### 工具函数测试
-
-| 测试文件 | 测试内容 | 覆盖模块 |
-|---------|---------|---------|
-| `test_utils.py` | 工具函数 | `utils/*.py` |
-| `test_strm_engines_validation.py` | STRM 引擎验证 | `config.py` |
-| `test_logging_system.py` | 日志系统 | `logger_setup.py` |
-
-### 并发与性能测试
-
-| 测试文件 | 测试内容 | 覆盖模块 |
-|---------|---------|---------|
-| `test_concurrency.py` | 并发测试 | 多模块 |
-| `test_call_coverage.py` | 调用覆盖 | 多模块 |
+- `test_fts5_escape_and_tmdb_search.py` - FTS5 查询转义函数和 TMDB 搜索路由测试
+- `test_database.py` - 数据库操作测试
+- `test_config.py` - 配置加载和验证测试
+- `test_media_renamer.py` - 媒体重命名逻辑测试
+- `test_subtitle_handler.py` - 字幕处理测试
 
 ### 集成测试
 
-| 测试文件 | 测试内容 | 覆盖模块 |
-|---------|---------|---------|
-| `test_integration.py` | 集成测试 | 多模块 |
-| `test_real_server.py` | 真实服务器测试 | `webui/server.py` |
-| `test_secret_manager.py` | 密钥管理 | `secret_manager.py` |
-| `test_migrate_encryption.py` | 加密迁移 | `secret_manager.py` |
+测试多个模块之间的交互：
 
-### 其他测试
+- `test_webui_routes.py` - WebUI API 路由测试
+- `test_tmdb_integration.py` - TMDB API 集成测试
+- `test_openlist_integration.py` - OpenList API 集成测试
 
-| 测试文件 | 测试内容 | 覆盖模块 |
-|---------|---------|---------|
-| `test_area_watchers.py` | 区域监控 | `area_watchers.py` |
-| `test_error_translator.py` | 错误翻译 | `error_translator.py` |
-| `test_fts_orphan_cleanup.py` | FTS 孤儿记录清理 | `tmdb_watchlist_db.py` |
-| `test_onboarding_e2e.py` | 新手引导端到端测试 | `routes.py`, `server.py` |
+### 端到端测试
+
+模拟完整用户流程的测试：
+
+- `test_onboarding_e2e.py` - 新手引导流程端到端测试
+- `test_e2e_full_flow.py` - 完整业务流程端到端测试（需求 24-28）
 
 ## 运行测试
 
 ### 运行所有测试
 
 ```bash
-pytest src/tests/
+cd src
+python -m pytest tests/ -v
 ```
 
 ### 运行特定测试文件
 
 ```bash
-pytest src/tests/test_fts5_search.py
+cd src
+python -m pytest tests/test_e2e_full_flow.py -v
 ```
 
 ### 运行特定测试类
 
 ```bash
-pytest src/tests/test_fts5_search.py::TestChineseSearch
+cd src
+python -m pytest tests/test_fts5_escape_and_tmdb_search.py::TestEscapeFts5Query -v
 ```
 
 ### 运行特定测试方法
 
 ```bash
-pytest src/tests/test_fts5_search.py::TestChineseSearch::test_search_chinese_keyword
+cd src
+python -m pytest tests/test_fts5_escape_and_tmdb_search.py::TestEscapeFts5Query::test_escape_star -v
 ```
 
-### 显示详细输出
+### 运行测试并生成覆盖率报告
 
 ```bash
-pytest src/tests/ -v
+cd src
+python -m pytest tests/ --cov=. --cov-report=html
 ```
 
-### 生成覆盖率报告
+## 测试依赖
+
+运行测试需要以下依赖：
 
 ```bash
-pytest src/tests/ --cov=src --cov-report=html
+pip install pytest pytest-cov
 ```
 
-## 测试配置
+## 测试环境
 
-### conftest.py
+- Python 3.11+
+- SQLite（内置）
+- 无需外部服务（所有外部依赖已 mock）
 
-全局测试配置和 fixtures：
-- 临时目录创建
-- 数据库初始化
-- Mock 对象配置
+## 测试文件说明
 
-### _test_helpers.py
+### test_e2e_full_flow.py
 
-测试辅助函数：
-- 数据生成
-- 断言辅助
-- 清理函数
+**覆盖场景：**
 
-## 新增测试指南
+1. **成功路径**
+   - 完整新用户流程：登录 → 配置 TMDB → 配置 OpenList → 查看 A/B 区 → 验证配置状态
+   - 引导步骤完成流程
 
-### 1. 创建测试文件
+2. **失败场景**
+   - 不可达 OpenList 地址仍可保存配置
+   - OpenList 未配置时预检失败
+   - 非法 scope 被拒绝
+   - 包含空 engine 的 strm_engines 被拒绝
 
-```python
-# src/tests/test_new_feature.py
-"""
-新功能测试。
+**运行方式：**
 
-测试内容描述。
-"""
-
-from __future__ import annotations
-
-import pytest
-from pathlib import Path
-
-class TestNewFeature:
-    """新功能测试类"""
-    
-    def test_basic_functionality(self):
-        """测试基本功能"""
-        # 测试代码
-        assert True
+```bash
+cd src
+python -m pytest tests/test_e2e_full_flow.py -v
 ```
 
-### 2. 遵循命名规范
+**预期输出：** 6 passed
 
-- 测试文件: `test_<feature>.py`
-- 测试类: `Test<Feature>`
-- 测试方法: `test_<description>`
+### test_fts5_escape_and_tmdb_search.py
 
-### 3. 使用 fixtures
+**覆盖场景：**
 
-```python
-@pytest.fixture
-def temp_db(tmp_path):
-    """创建临时数据库"""
-    db_path = tmp_path / "test.db"
-    return Database(str(db_path))
+1. **FTS5 查询清理函数测试**
+   - 特殊字符移除（* + " ^ ~ :）
+   - 括号替换为空格
+   - 连字符处理（词中间保留，首尾移除）
+   - 反斜杠替换为空格
+   - 中文混合特殊字符
+   - 多个空白合并
 
-def test_with_fixture(temp_db):
-    """使用 fixture 的测试"""
-    assert temp_db is not None
+2. **TMDB 搜索路由测试**
+   - 缺少 query 参数返回 400
+   - 空 query 返回 400
+   - 正常搜索返回电影和电视剧
+   - 搜索结果限制为前 10 条
+   - 无匹配结果返回空列表
+   - URL 解码和空白去除
+   - TMDB 客户端异常返回 500
+
+**运行方式：**
+
+```bash
+cd src
+python -m pytest tests/test_fts5_escape_and_tmdb_search.py -v
 ```
 
-### 4. 添加文档字符串
+**预期输出：** 18 passed（FTS5 转义）+ 9 passed（TMDB 搜索）= 27 passed
 
-每个测试方法都应该有清晰的文档字符串，说明：
-- 测试目的
-- 测试场景
-- 预期结果
+### test_onboarding_e2e.py
 
-## 测试数据
+**覆盖场景：**
 
-### 测试数据库
+1. **引导流程**
+   - 初始状态所有步骤未完成
+   - 标记 view_ab 步骤完成
+   - 标记 tmdb_refresh 步骤完成
+   - 标记 tmdb_match 步骤完成
+   - 完成所有步骤
 
-测试使用临时数据库，位于 `tmp_path` 目录，测试完成后自动清理。
+2. **启动预检**
+   - OpenList 未配置时预检失败
+   - OpenList 已配置但不可达时预检失败
+   - 所有配置完成时预检通过
 
-### 测试文件
+3. **完整旅程**
+   - 从登录到完成引导的完整流程
 
-测试文件使用 `tmp_path` fixture 创建，避免污染工作目录。
+**运行方式：**
+
+```bash
+cd src
+python -m pytest tests/test_onboarding_e2e.py -v
+```
+
+## 测试策略
+
+### Mock 策略
+
+所有测试使用 mock 避免真实网络调用和外部依赖：
+
+- `WebUIServer` 使用真实实例，但 mock 数据库和配置
+- `Database` 使用 mock，避免真实 SQLite 操作
+- `AppConfig` 使用 mock，提供最小化配置
+- TMDB 客户端使用 mock，避免真实 API 调用
+- OpenList 客户端使用 mock，避免真实 WebDAV 调用
+
+### 测试隔离
+
+每个测试使用独立的 `tmp_path`，确保：
+
+- 数据库文件隔离
+- 配置文件隔离
+- 日志文件隔离
+
+### 测试数据
+
+测试使用最小化数据集：
+
+- 空数据库（0 条记录）
+- 最小化配置（仅必要字段）
+- 固定测试密码（`test_password_123`）
 
 ## 常见问题
 
-### Q: 测试失败怎么办？
+### Q: 测试失败提示 "ModuleNotFoundError"
 
-A: 
-1. 检查错误信息
-2. 运行单个测试定位问题
-3. 检查测试数据是否正确
-4. 查看日志输出
+**A:** 确保在 `src/` 目录下运行测试：
 
-### Q: 如何跳过特定测试？
-
-A: 使用 `@pytest.mark.skip` 装饰器：
-
-```python
-@pytest.mark.skip(reason="暂时跳过")
-def test_skip_me():
-    pass
+```bash
+cd src
+python -m pytest tests/
 ```
 
-### Q: 如何标记预期失败的测试？
+### Q: 测试失败提示 "Port already in use"
 
-A: 使用 `@pytest.mark.xfail` 装饰器：
+**A:** 测试使用随机端口，通常不会冲突。如遇到，等待几秒后重试。
 
-```python
-@pytest.mark.xfail(reason="已知问题")
-def test_known_issue():
-    assert False
-```
+### Q: 测试运行缓慢
+
+**A:** 端到端测试需要启动真实 WebUIServer，可能需要 10-20 秒。单元测试通常在 1 秒内完成。
+
+### Q: 如何添加新测试
+
+**A:** 
+
+1. 在 `tests/` 目录下创建新文件 `test_xxx.py`
+2. 使用 `pytest` 标准语法编写测试
+3. 如需 WebUIServer，参考 `test_e2e_full_flow.py` 的 fixture
+4. 运行测试验证
+
+## 测试覆盖率
+
+当前测试覆盖率：
+
+- 核心模块：~80%
+- WebUI 路由：~70%
+- 端到端流程：~60%
+
+目标覆盖率：80%+
 
 ## 持续集成
 
-测试在以下环境运行：
-- Python 3.11
-- Windows 10/11
-- SQLite 3.35+
+测试已集成到 CI/CD 流程：
 
-## 测试覆盖率目标
-
-- 核心模块: >80%
-- WebUI: >70%
-- 工具函数: >90%
+- 每次提交自动运行测试
+- 测试失败阻止合并
+- 覆盖率报告自动生成
 
 ## 相关文档
 
-- [pytest 文档](https://docs.pytest.org/)
-- [项目架构文档](../wiki/Architecture-Overview.md)
-- [开发指南](../wiki/Development-Guide.md)
+- [项目开发计划](../.kilo/plans/1784068382552-requirements-24-28-implementation.md)
+- [API 文档](../docs/)
+- [项目说明](../README.md)

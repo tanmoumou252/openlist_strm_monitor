@@ -367,6 +367,11 @@ class Database:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_boundary_source_name ON strm_media_boundary(source_media_name)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_boundary_current_name ON strm_media_boundary(current_media_name)")
 
+            # 排序字段索引（local_path 是 PRIMARY KEY，SQLite 自动索引，无需重复）
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_a_strm_updated_at ON a_strm_files(updated_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_b_strm_updated_at ON b_strm_files(updated_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_c_ghost_moved_at ON c_ghost_files(moved_at)")
+
             # 创建 FTS5 全文搜索虚拟表（使用 self._fts_tokenizer，simple 或 unicode61 降级）
             tok = self._fts_tokenizer
             cur.execute(f"""
