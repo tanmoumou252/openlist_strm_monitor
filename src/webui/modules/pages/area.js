@@ -56,11 +56,18 @@ async function renderAreaList(el, area, params) {
 
   // Media cards
   const _kindIconMap = { '番剧': 'tv', '动漫': 'tv', '动画': 'tv', '电影': 'movie' };
-  const cardsHtml = d.media_items.map(item => {
-    const href = `#area_${area}?media=${encodeURIComponent(item.name)}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}`;
-    const cardIcon = _kindIconMap[item.kind] || 'tv';
-    return `<a class="media-card" href="${href}">${icon(cardIcon)}<div class="title">${esc(item.name)}</div><div class="meta">${item.count} 个文件</div></a>`;
-  }).join('');
+  const areaLabels = { a: 'A 区', b: 'B 区', c: 'C 区' };
+  const areaLabel = areaLabels[area] || area.toUpperCase() + ' 区';
+  let cardsHtml = '';
+  if (d.media_items.length === 0 && q) {
+    cardsHtml = `<div class="empty-search-state" style="height:200px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:14px">${esc(areaLabel)}暂无搜索结果</div>`;
+  } else {
+    cardsHtml = d.media_items.map(item => {
+      const href = `#area_${area}?media=${encodeURIComponent(item.name)}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}`;
+      const cardIcon = _kindIconMap[item.kind] || 'tv';
+      return `<a class="media-card" href="${href}">${icon(cardIcon)}<div class="title">${esc(item.name)}</div><div class="meta">${item.count} 个文件</div></a>`;
+    }).join('');
+  }
 
   // Pager
   let pagerHtml = '';

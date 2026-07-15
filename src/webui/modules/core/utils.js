@@ -123,11 +123,11 @@ export function renderTmdbResults(results, title, query = '') {
       <h3 class="tmdb-results-title" style="font-size:14px;font-weight:600;color:var(--text-main);margin:0 0 12px 0">${esc(title)}</h3>
       <div class="tmdb-results-list" style="display:flex;flex-direction:column;gap:8px">
         ${allResults.map(item => `
-          <div class="tmdb-result-item" style="display:flex;align-items:center;gap:12px;padding:8px;background:var(--bg-elevated);border-radius:var(--radius-control);border:1px solid var(--border-color)">
+          <a class="tmdb-result-item" href="https://www.themoviedb.org/${item.type}/${item.id}" target="_blank" rel="noopener" style="display:flex;align-items:center;gap:12px;padding:8px;background:var(--bg-elevated);border-radius:var(--radius-control);border:1px solid var(--border-color);text-decoration:none;color:inherit;cursor:pointer;transition:background .18s ease" onmouseover="this.style.background='var(--bg-control)'" onmouseout="this.style.background='var(--bg-elevated)'">
             <span class="tmdb-result-type" style="font-size:11px;font-weight:600;color:var(--primary);background:color-mix(in srgb,var(--primary) 10%,transparent);padding:2px 8px;border-radius:var(--radius-pill);flex-shrink:0">${item.type === 'movie' ? '电影' : '电视剧'}</span>
             <span class="tmdb-result-name" style="flex:1;font-size:13px;font-weight:500;color:var(--text-main)">${esc(item.title || item.name)}</span>
             <span class="tmdb-result-date" style="font-size:12px;color:var(--text-muted);flex-shrink:0">${esc(item.release_date || item.first_air_date || '')}</span>
-          </div>
+          </a>
         `).join('')}
       </div>
     </div>

@@ -51,20 +51,9 @@ async function _resetOnboarding() {
 function _renderOnboardingCard(status) {
   if (!status) return '';
 
-  // 引导已完成/跳过 → 显示"重新显示引导"按钮
+  // 引导已完成/跳过 → 不渲染卡片，由 renderDashboard 中的按钮处理
   if (status.onboarding_completed) {
-    return `
-      <div class="onboarding-card onboarding-completed" id="onboarding-card">
-        <div class="onboarding-header">
-          <div class="onboarding-title">
-            ${icon('check')} 首次配置引导已完成
-          </div>
-        </div>
-        <div class="onboarding-footer" style="margin-top:8px;padding-top:0;border-top:none">
-          <button class="md3-btn tonal" id="onboarding-restart-btn">${icon('refresh')} 重新显示引导</button>
-        </div>
-      </div>
-    `;
+    return '';
   }
 
   const steps = [
@@ -417,7 +406,12 @@ export async function renderDashboard(el) {
     setServerStartTime(Date.now() - d.uptime * 1000);
   }
   el.innerHTML = `
-<h2 class="page-header">${icon('dashboard', 'ui-icon-lg')} 仪表盘</h2>
+<div class="dashboard-header-row" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+  <h2 class="page-header" style="margin:0">${icon('dashboard', 'ui-icon-lg')} 仪表盘</h2>
+  <button class="onboarding-quick-btn" id="onboarding-quick-btn" title="新手入门" style="display:none">
+    ${icon('school')} <span>新手入门</span>
+  </button>
+</div>
 
 <!-- 首次配置引导 -->
 <div id="onboarding-container"></div>
@@ -456,6 +450,22 @@ export async function renderDashboard(el) {
   // Bind start/stop buttons (replaces inline onclick)
   document.getElementById('main-start-btn')?.addEventListener('click', startMainProgram);
   document.getElementById('main-stop-btn')?.addEventListener('click', stopMainProgram);
+
+  // Bind onboarding quick button
+  const onboardingBtn = document.getElementById('onboarding-quick-btn');
+  if (onboardingBtn) {
+    onboardingBtn.addEventListener('click', async () => {
+      try {
+        await api('/api/webui/config/ui', {
+          method: 'POST',
+          body: JSON.stringify({ onboarding_completed: '0' })
+        });
+      } catch (e) {
+        console.error('Failed to reset onboarding:', e);
+      }
+      await _loadOnboarding();
+    });
+  }
 
   // 加载首次配置引导
   _loadOnboarding();

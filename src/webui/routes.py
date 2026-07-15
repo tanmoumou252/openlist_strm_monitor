@@ -2404,12 +2404,19 @@ def handle_area_detail(handler, area, params) -> None:
     if records:
         local_root = _compute_media_root(records[0].get("local_path", ""))
         webdav_root = _compute_media_root(records[0].get("webdav_path", ""))
-        # 计算 STRM 引擎入口根（引擎挂载点）
+        # 计算 STRM 引擎入口根（引擎挂载点 + 媒体路径）
         app_service = getattr(handler.webui, '_app_service', None)
-        if app_service:
-            first_webdav = records[0].get("webdav_path", "")
-            if first_webdav:
-                strm_engine_root = app_service._find_matching_engine_path(first_webdav) or ""
+        if app_service and webdav_root:
+            engine_path = app_service._find_matching_engine_path(webdav_root) or ""
+            if engine_path:
+                # 从 webdav_root 中提取相对于 engine_path 的部分
+                relative_path = webdav_root[len(engine_path):].lstrip('/')
+                if relative_path:
+                    strm_engine_root = f"{engine_path}/{relative_path}"
+                else:
+                    strm_engine_root = engine_path
+            else:
+                strm_engine_root = ""
 
     total_pages = max(1, ceil(total / PAGE_SIZE)) if total else 1
     page = max(1, min(page, total_pages))

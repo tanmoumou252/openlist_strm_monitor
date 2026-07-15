@@ -274,6 +274,9 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
   const stateIconMap = { in: 'badge_in', out: 'badge_out', que: 'badge_que' };
   const statusToMatchStatus = { in: 'matched', out: 'unmatched', que: 'fuzzy' };
   html += '<div class="tmdb-grid">';
+  if (pageItems.length === 0 && q) {
+    html += `<div class="empty-search-state" style="height:200px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:14px;grid-column:1/-1">暂无搜索结果</div>`;
+  } else {
   pageItems.forEach(item => {
     const title = item.title || item.name || 'N/A';
     const originalTitle = item.original_title || item.original_name || '';
@@ -347,6 +350,7 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
   </div>
 </div>`;
   });
+  }
   html += '</div>';
 
   const sp = statusFilter ? '&status=' + statusFilter : '';

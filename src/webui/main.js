@@ -37,31 +37,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Bind onboarding quick button
-  const onboardingBtn = document.getElementById('onboarding-quick-btn');
-  if (onboardingBtn) {
-    onboardingBtn.addEventListener('click', async () => {
-      // Reset onboarding status
-      try {
-        await fetch('/api/webui/config/ui', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ onboarding_completed: '0' })
-        });
-      } catch (e) {
-        console.error('Failed to reset onboarding:', e);
-      }
-      // Navigate to dashboard to show guide
-      navigate('#dashboard');
-      // Reload onboarding after a short delay
-      setTimeout(() => {
-        import('./modules/pages/dashboard.js').then(m => {
-          if (m._loadOnboarding) m._loadOnboarding();
-        });
-      }, 100);
-    });
-  }
-
   // Load UI config from DB
   _loadUiConfig();
 
