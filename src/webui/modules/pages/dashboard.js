@@ -137,7 +137,7 @@ function _renderOnboardingCard(status) {
     <div class="onboarding-card" id="onboarding-card">
       <div class="onboarding-header">
         <div class="onboarding-title">
-          ${icon('menu_book', 'ui-icon-lg')} 首次配置引导
+          ${icon('menu_book', 'ui-icon-lg')} 初次使用
         </div>
         <div class="onboarding-progress">
           ${steps.length - pendingCount} / ${steps.length} 已完成
@@ -408,8 +408,8 @@ export async function renderDashboard(el) {
   el.innerHTML = `
 <div class="dashboard-header-row" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
   <h2 class="page-header" style="margin:0">${icon('dashboard', 'ui-icon-lg')} 仪表盘</h2>
-  <button class="onboarding-quick-btn" id="onboarding-quick-btn" title="新手入门" style="display:none">
-    ${icon('school')} <span>新手入门</span>
+  <button class="onboarding-quick-btn" id="onboarding-quick-btn" title="初次使用" style="display:none">
+    ${icon('menu_book')} <span>初次使用</span>
   </button>
 </div>
 

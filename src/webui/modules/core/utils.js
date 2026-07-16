@@ -96,10 +96,14 @@ export function copyPathBlock(el) {
  * @param {Object} results - TMDB 搜索结果 {movies: [], tv_shows: []}
  * @param {string} title - 区块标题
  * @param {string} query - 搜索关键词（用于构造 TMDB 搜索链接）
+ * @param {HTMLElement} container - 渲染目标容器元素。调用方应在发起异步请求前捕获
+ *   该引用并传入；回调执行时本函数会校验 container.isConnected，若容器已脱离
+ *   DOM（页面已切换）则中止渲染，避免异步结果污染当前页。函数内不负责查找容器，
+ *   未传入或传入 null/已脱离 DOM 时一律不渲染。
  */
-export function renderTmdbResults(results, title, query = '') {
-  const container = document.getElementById('tmdb-search-results');
-  if (!container) return;
+export function renderTmdbResults(results, title, query = '', container) {
+  // 若未传入容器或容器已脱离 DOM（页面已切换），中止渲染，避免异步结果污染当前页
+  if (!container || !container.isConnected) return;
   
   const { movies = [], tv_shows = [] } = results;
   const allResults = [

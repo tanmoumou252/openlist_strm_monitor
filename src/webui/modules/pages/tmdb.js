@@ -3,7 +3,7 @@ import { icon } from '../core/icons.js';
 import { esc, renderTmdbResults } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
 import { showCacheStaleModal } from '../components/dialog.js';
-import { navigate } from '../core/router.js';
+import { navigate, isRenderStale } from '../core/router.js';
 import {
   CONFIG, _getCachedWatchlist, _setCachedWatchlist, _fetchPromises,
   _tmdbWebBase, _getUiConfig, _flippedCard, setFlippedCard,
@@ -264,11 +264,6 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
 	  html += '</div></div>';
 
   html += `<div class="toolbar"><div class="search-wrap">${icon('search', 'search-prefix')}<input type="text" id="tmdb-search" placeholder="搜索待看列表..." value="${esc(q)}"></div><button class="search-btn" id="tmdb-search-btn">${icon('search')} 搜索</button></div>`;
-  
-  // TMDB 在线搜索结果容器
-  if (q) {
-    html += `<div id="tmdb-search-results"></div>`;
-  }
 
   const stateMap = { in: '已收录', out: '未收录', que: '有疑问' };
   const stateIconMap = { in: 'badge_in', out: 'badge_out', que: 'badge_que' };
@@ -361,6 +356,11 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
   if (curPage < totalPages) html += `<a class="pager-btn" href="#tmdb?type=${mediaType}&page=${curPage + 1}${qp}${sp}">下一页 ${icon('chevron_r')}</a>`;
   html += '</div>';
 
+  // TMDB 在线搜索结果容器（位于分页器之后，匹配 area.js 的 DOM 顺序）
+  if (q) {
+    html += `<div id="tmdb-search-results"></div>`;
+  }
+
   el.innerHTML = html;
 
   document.getElementById('tmdb-search-btn').addEventListener('click', () => {
@@ -375,9 +375,16 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
 
   // 有搜索词时，同时查询 TMDB 在线结果
   if (q) {
+    const searchContainer = document.getElementById('tmdb-search-results');
     api(`/api/tmdb/search?query=${encodeURIComponent(q)}`)
-      .then(results => renderTmdbResults(results, "你可能还在找", q))
-      .catch(() => {});
+      .then(results => {
+        if (isRenderStale()) return;  // 双保险 1：页面代际校验
+        renderTmdbResults(results, "你可能还在找", q, searchContainer);  // 双保险 2：container.isConnected 在函数内校验
+      })
+      .catch(() => {
+        if (isRenderStale()) return;
+        showToast('TMDB 在线搜索失败，请稍后重试', 'error');
+      });
   }
 
   _initFlipCards();

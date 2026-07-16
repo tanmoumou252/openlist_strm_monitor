@@ -1,7 +1,7 @@
 import { api } from '../core/api.js';
 import { icon } from '../core/icons.js';
 import { esc, fmtTime, createSortLink, renderTmdbResults } from '../core/utils.js';
-import { navigate } from '../core/router.js';
+import { navigate, isRenderStale } from '../core/router.js';
 import { showToast } from '../components/toast.js';
 import { showConfirmDialog } from '../components/dialog.js';
 
@@ -41,11 +41,23 @@ async function renderAreaList(el, area, params) {
   const kindLabel = d.kind_label;
 
   // Category tabs
-  const kinds = [{ v: 'anime', l: '番剧', i: 'tv' }, { v: 'movie', l: '电影', i: 'movie' }];
+  // 根据是否有搜索词动态生成 tab 列表：搜索时增加"全部"tab（跨分类），非搜索时只有番剧/电影
+  const kinds = q
+    ? [
+        { v: 'all', l: '全部', i: 'grid_view' },
+        { v: 'anime', l: '番剧', i: 'tv' },
+        { v: 'movie', l: '电影', i: 'movie' }
+      ]
+    : [
+        { v: 'anime', l: '番剧', i: 'tv' },
+        { v: 'movie', l: '电影', i: 'movie' }
+      ];
   const tabsHtml = kinds.map(k => {
     const active = (kind || '') === k.v ? ' active' : '';
-    const href = `#area_${area}?kind=${k.v}&sort=${sort}&order=${order}`;
-    const count = d.kind_counts[k.v] || 0;
+    // tab href 保留搜索词，点击 tab 切分类时 q 不丢失
+    const href = `#area_${area}?kind=${k.v}&sort=${sort}&order=${order}${q ? '&q=' + encodeURIComponent(q) : ''}`;
+    // "全部"tab 计数用 d.total（跨分类去重总数）；后端 kind_counts 无 all 键，直接读会恒为 0
+    const count = k.v === 'all' ? (d.total || 0) : (d.kind_counts[k.v] || 0);
     return `<button class="category-tab${active}" data-kind-href="${href}">${icon(k.i)} ${k.l} <span class="count">${count}</span></button>`;
   }).join('');
 
@@ -105,20 +117,33 @@ ${pagerHtml}
 
   // 有搜索词时，同时查询 TMDB 在线结果
   if (q) {
+    const searchContainer = document.getElementById('tmdb-search-results');
     api(`/api/tmdb/search?query=${encodeURIComponent(q)}`)
-      .then(results => renderTmdbResults(results, "你可能还在找", q))
-      .catch(() => {});
+      .then(results => {
+        if (isRenderStale()) return;  // 双保险 1：页面代际校验
+        renderTmdbResults(results, "你可能还在找", q, searchContainer);  // 双保险 2：container.isConnected 在函数内校验
+      })
+      .catch(() => {
+        if (isRenderStale()) return;
+        showToast('TMDB 在线搜索失败，请稍后重试', 'error');
+      });
   }
 
   // Bind search
   document.getElementById('area-search-btn').addEventListener('click', () => {
     const val = document.getElementById('media-search').value.trim();
+    if (val === (q || '')) return;  // 值未变化则不导航（原守卫位于 navigate 之后为死代码，已移到前面）
     let h = `#area_${area}?sort=${sort}&order=${order}`;
     const p = [];
-    if (kind) p.push('kind=' + encodeURIComponent(kind));
-    if (val) p.push('q=' + encodeURIComponent(val));
+    if (val) {
+      // 有搜索词 → 跨分类搜索（全部 tab）
+      p.push('kind=all');
+      p.push('q=' + encodeURIComponent(val));
+    } else {
+      // 清空搜索 → 回到当前分类浏览（非"全部"）
+      p.push('kind=' + encodeURIComponent(kind === 'all' ? 'anime' : kind));
+    }
     if (p.length) h += '&' + p.join('&');
-    if (val === (q || '')) return;
     navigate(h);
   });
   document.getElementById('media-search').addEventListener('keydown', e => {
