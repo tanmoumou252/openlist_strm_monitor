@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -20,7 +21,15 @@ import pytest
 # 确保 src/ 在 sys.path 中
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from webui.routes import _compute_common_parent_path, _parse_api_files, _do_media_refresh
+from database import Database
+from utils import escape_like
+from webui.routes import (
+    _compute_common_parent_path,
+    _parse_api_files,
+    _do_media_refresh,
+    _get_media_groups_paginated,
+    _get_records_paginated,
+)
 
 
 # ============================================================
@@ -155,42 +164,10 @@ class TestApiFileParsing:
 # ============================================================
 
 class TestDiffDetection:
-    """测试差异检测逻辑"""
+    """测试刷新逻辑（简化后：查询 → 映射 → API 调用 → 同步）"""
 
-    def test_diff_detection_no_changes(self):
-        """DB 和 API 完全一致时应返回 0 变化"""
-        app_service = MagicMock()
-        app_service.db = MagicMock()
-        app_service.admin_api = MagicMock()
-
-        # Mock DB 查询返回
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchall.return_value = [
-            {"local_path": "/a/S01E01.strm", "webdav_path": "/strm/S01E01.strm", "parent_webdav_path": "/strm"},
-        ]
-        mock_conn_ctx = MagicMock()
-        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
-        app_service.db.read_connection.return_value = mock_conn_ctx
-
-        # Mock API 返回相同文件
-        app_service.admin_api.list_directory.return_value = {
-            "code": 200,
-            "data": {
-                "content": [
-                    {"name": "S01E01.strm", "is_dir": False},
-                ]
-            }
-        }
-
-        result = _do_media_refresh(app_service, "a", "test_media")
-        assert result["ok"] is True
-        assert result["added"] == 0
-        assert result["removed"] == 0
-        assert result["unchanged"] == 1
-
-    def test_diff_detection_new_files(self):
-        """API 多出文件时应检测到新增"""
+    def test_refresh_no_records(self):
+        """DB 无记录时应返回 未找到相关记录"""
         app_service = MagicMock()
         app_service.db = MagicMock()
         app_service.admin_api = MagicMock()
@@ -205,52 +182,122 @@ class TestDiffDetection:
 
         result = _do_media_refresh(app_service, "a", "test_media")
         assert result["ok"] is True
-        assert result["message"] == "no records found"
+        assert result["message"] == "未找到相关记录"
 
-    def test_diff_detection_removed_files(self):
-        """API 缺少文件时应检测到删除"""
+    def test_refresh_maps_to_engine_path(self):
+        """应将云盘路径映射到 STRM 引擎入口路径后调用 API"""
         app_service = MagicMock()
         app_service.db = MagicMock()
         app_service.admin_api = MagicMock()
 
-        # Mock DB 查询返回 2 个文件
+        # Mock DB 查询返回云盘路径格式的记录
         mock_conn = MagicMock()
         mock_conn.execute.return_value.fetchall.return_value = [
-            {"local_path": "/a/S01E01.strm", "webdav_path": "/strm/S01E01.strm", "parent_webdav_path": "/strm"},
-            {"local_path": "/a/S01E02.strm", "webdav_path": "/strm/S01E02.strm", "parent_webdav_path": "/strm"},
+            {
+                "local_path": "/a/S01E01.strm",
+                "webdav_path": "/天翼云盘家庭云30GB/番剧/test_media/S01E01.mp4",
+                "parent_webdav_path": "/天翼云盘家庭云30GB/番剧/test_media",
+            },
         ]
         mock_conn_ctx = MagicMock()
         mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn_ctx.__exit__ = MagicMock(return_value=False)
         app_service.db.read_connection.return_value = mock_conn_ctx
 
-        # Mock API 只返回 1 个文件（S01E02 缺失）
+        # Mock 引擎路径映射
+        app_service._cloud_path_to_engine_paths.return_value = ["/strm/番剧/test_media"]
+
+        # Mock API 返回成功
         app_service.admin_api.list_directory.return_value = {
             "code": 200,
-            "data": {
-                "content": [
-                    {"name": "S01E01.strm", "is_dir": False},
-                ]
-            }
+            "data": {"content": []}
         }
-
-        # Mock DB 方法
-        app_service.db.get_b_by_webdav.return_value = []
 
         result = _do_media_refresh(app_service, "a", "test_media")
         assert result["ok"] is True
-        assert result["removed"] == 1
-        assert result["unchanged"] == 1
+        assert result["refresh_dir"] == "/strm/番剧/test_media"
 
-        # 验证调用了删除方法
-        app_service.db.delete_a_by_local.assert_called()
+        # 验证 API 用 STRM 引擎路径调用，而非云盘路径
+        app_service.admin_api.list_directory.assert_called_once_with(
+            "/strm/番剧/test_media", refresh=True
+        )
+
+    def test_refresh_fallback_to_cloud_path(self):
+        """无法映射引擎路径时应降级到云盘路径"""
+        app_service = MagicMock()
+        app_service.db = MagicMock()
+        app_service.admin_api = MagicMock()
+
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = [
+            {
+                "local_path": "/a/S01E01.strm",
+                "webdav_path": "/天翼云盘家庭云30GB/番剧/test_media/S01E01.mp4",
+                "parent_webdav_path": "/天翼云盘家庭云30GB/番剧/test_media",
+            },
+        ]
+        mock_conn_ctx = MagicMock()
+        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+        app_service.db.read_connection.return_value = mock_conn_ctx
+
+        # 引擎路径映射返回空（无匹配）
+        app_service._cloud_path_to_engine_paths.return_value = []
+
+        app_service.admin_api.list_directory.return_value = {
+            "code": 200,
+            "data": {"content": []}
+        }
+
+        result = _do_media_refresh(app_service, "a", "test_media")
+        assert result["ok"] is True
+        # 降级到云盘路径
+        assert result["refresh_dir"] == "/天翼云盘家庭云30GB/番剧/test_media"
+        app_service.admin_api.list_directory.assert_called_once_with(
+            "/天翼云盘家庭云30GB/番剧/test_media", refresh=True
+        )
+
+    def test_refresh_refuses_root_when_no_common_parent(self):
+        """公共父目录退化为 '/' 时应拒绝执行，避免全盘刷新"""
+        app_service = MagicMock()
+        app_service.db = MagicMock()
+        app_service.admin_api = MagicMock()
+
+        # 两条记录的父目录分属不同根 → _compute_common_parent_path 返回 '/'
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = [
+            {
+                "local_path": "/a/S01E01.strm",
+                "webdav_path": "/云盘A/番剧/x/S01E01.mp4",
+                "parent_webdav_path": "/云盘A/番剧/x",
+            },
+            {
+                "local_path": "/a/S01E02.strm",
+                "webdav_path": "/云盘B/电影/y/S01E02.mp4",
+                "parent_webdav_path": "/云盘B/电影/y",
+            },
+        ]
+        mock_conn_ctx = MagicMock()
+        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+        app_service.db.read_connection.return_value = mock_conn_ctx
+
+        result = _do_media_refresh(app_service, "a", "test_media")
+        assert result["ok"] is False
+        assert "error" in result
+
+        # 绝不能对根目录发起刷新
+        app_service.admin_api.list_directory.assert_not_called()
+        app_service.scan_a_to_b_full_sync.assert_not_called()
+        # 根目录退化场景下逐条同步也绝不执行（防御性断言）
+        app_service.copy_a_record_to_b_if_needed.assert_not_called()
 
 
 class TestSyncToBZone:
-    """测试 A 区变化同步到 B 区"""
+    """测试 A→B 同步在刷新后被调用"""
 
     def test_sync_to_b_zone_called(self):
-        """刷新完成后应调用 scan_a_to_b_full_sync"""
+        """刷新完成后应仅对该媒体的记录逐条调用 copy_a_record_to_b_if_needed（不全量同步）"""
         app_service = MagicMock()
         app_service.db = MagicMock()
         app_service.admin_api = MagicMock()
@@ -258,59 +305,344 @@ class TestSyncToBZone:
         # Mock DB 查询返回
         mock_conn = MagicMock()
         mock_conn.execute.return_value.fetchall.return_value = [
-            {"local_path": "/a/S01E01.strm", "webdav_path": "/strm/S01E01.strm", "parent_webdav_path": "/strm"},
+            {
+                "local_path": "/a/S01E01.strm",
+                "webdav_path": "/天翼云盘家庭云30GB/番剧/test_media/S01E01.mp4",
+                "parent_webdav_path": "/天翼云盘家庭云30GB/番剧/test_media",
+            },
         ]
         mock_conn_ctx = MagicMock()
         mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn_ctx.__exit__ = MagicMock(return_value=False)
         app_service.db.read_connection.return_value = mock_conn_ctx
+
+        # Mock 引擎路径映射
+        app_service._cloud_path_to_engine_paths.return_value = ["/strm/番剧/test_media"]
 
         # Mock API 返回
         app_service.admin_api.list_directory.return_value = {
             "code": 200,
-            "data": {
-                "content": [
-                    {"name": "S01E01.strm", "is_dir": False},
-                ]
-            }
+            "data": {"content": []}
         }
+        app_service.copy_a_record_to_b_if_needed.return_value = True
 
-        result = _do_media_refresh(app_service, "a", "test_media")
+        # 源文件存在性检查返回 True，使同步逻辑真正执行
+        with patch("webui.routes.Path") as mock_path:
+            mock_path.return_value.exists.return_value = True
+            result = _do_media_refresh(app_service, "a", "test_media")
+
         assert result["ok"] is True
+        # 计数回传：单条记录同步成功
+        assert result["synced"] == 1
+        assert result["skipped"] == 0
+        assert result["failed"] == 0
+        assert result["message"] == "刷新完成：同步 1，跳过 0，失败 0"
 
-        # 验证调用了 scan_a_to_b_full_sync
-        app_service.scan_a_to_b_full_sync.assert_called_once()
+        # 关键：绝不能触发全库全量同步
+        app_service.scan_a_to_b_full_sync.assert_not_called()
+        # 应对该媒体的单条记录调用逐条同步
+        app_service.copy_a_record_to_b_if_needed.assert_called_once_with(
+            "/a/S01E01.strm",
+            "/天翼云盘家庭云30GB/番剧/test_media/S01E01.mp4",
+            "/天翼云盘家庭云30GB/番剧/test_media",
+        )
 
-    def test_sync_handles_new_files(self):
-        """新增文件应调用 handle_a_created_or_modified"""
+    def test_sync_not_called_on_api_error(self):
+        """API 返回错误时不应调用任何 A→B 同步"""
         app_service = MagicMock()
         app_service.db = MagicMock()
         app_service.admin_api = MagicMock()
 
-        # Mock DB 查询返回空（无现有记录）
         mock_conn = MagicMock()
         mock_conn.execute.return_value.fetchall.return_value = [
-            {"local_path": "/a/头文字D/S01E01.strm", "webdav_path": "/strm/头文字D/S01E01.strm", "parent_webdav_path": "/strm/头文字D"},
+            {
+                "local_path": "/a/S01E01.strm",
+                "webdav_path": "/天翼云盘家庭云30GB/番剧/test_media/S01E01.mp4",
+                "parent_webdav_path": "/天翼云盘家庭云30GB/番剧/test_media",
+            },
         ]
         mock_conn_ctx = MagicMock()
         mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn_ctx.__exit__ = MagicMock(return_value=False)
         app_service.db.read_connection.return_value = mock_conn_ctx
 
-        # Mock API 返回 2 个文件（多出 S01E02）
+        app_service._cloud_path_to_engine_paths.return_value = ["/strm/番剧/test_media"]
+
+        # Mock API 返回错误
         app_service.admin_api.list_directory.return_value = {
-            "code": 200,
-            "data": {
-                "content": [
-                    {"name": "S01E01.strm", "is_dir": False},
-                    {"name": "S01E02.strm", "is_dir": False},
-                ]
-            }
+            "code": 500,
+            "message": "server error"
         }
 
-        result = _do_media_refresh(app_service, "a", "头文字D")
-        assert result["ok"] is True
-        assert result["added"] == 1
+        result = _do_media_refresh(app_service, "a", "test_media")
+        assert result["ok"] is False
+        assert "error" in result
 
-        # 验证调用了 handle_a_created_or_modified
-        app_service.handle_a_created_or_modified.assert_called()
+        # 不应调用任何同步
+        app_service.scan_a_to_b_full_sync.assert_not_called()
+        app_service.copy_a_record_to_b_if_needed.assert_not_called()
+
+    def test_sync_counts_mixed_results(self):
+        """多条记录返回 True/None/False 时，计数应正确累加且整体成功"""
+        app_service = MagicMock()
+        app_service.db = MagicMock()
+        app_service.admin_api = MagicMock()
+
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = [
+            {
+                "local_path": "/a/S01E01.strm",
+                "webdav_path": "/云/番剧/test_media/S01E01.mp4",
+                "parent_webdav_path": "/云/番剧/test_media",
+            },
+            {
+                "local_path": "/a/S01E02.strm",
+                "webdav_path": "/云/番剧/test_media/S01E02.mp4",
+                "parent_webdav_path": "/云/番剧/test_media",
+            },
+            {
+                "local_path": "/a/S01E03.strm",
+                "webdav_path": "/云/番剧/test_media/S01E03.mp4",
+                "parent_webdav_path": "/云/番剧/test_media",
+            },
+        ]
+        mock_conn_ctx = MagicMock()
+        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+        app_service.db.read_connection.return_value = mock_conn_ctx
+
+        app_service._cloud_path_to_engine_paths.return_value = ["/strm/番剧/test_media"]
+        app_service.admin_api.list_directory.return_value = {"code": 200, "data": {"content": []}}
+        # 依次返回 True / None / False
+        app_service.copy_a_record_to_b_if_needed.side_effect = [True, None, False]
+
+        with patch("webui.routes.Path") as mock_path:
+            mock_path.return_value.exists.return_value = True
+            result = _do_media_refresh(app_service, "a", "test_media")
+
+        assert result["ok"] is True
+        # 关键：绝不能触发全库全量同步
+        app_service.scan_a_to_b_full_sync.assert_not_called()
+        # 三条记录均被逐条处理
+        assert app_service.copy_a_record_to_b_if_needed.call_count == 3
+        # 计数：成功 1 / 跳过 1 / 失败 1
+        assert result["synced"] == 1
+        assert result["skipped"] == 1
+        assert result["failed"] == 1
+        assert result["message"] == "刷新完成：同步 1，跳过 1，失败 1"
+
+    def test_sync_skips_missing_source_file(self):
+        """源文件不存在的记录应被跳过，仅对存在的记录调用同步"""
+        app_service = MagicMock()
+        app_service.db = MagicMock()
+        app_service.admin_api = MagicMock()
+
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = [
+            {
+                "local_path": "/a/missing.strm",
+                "webdav_path": "/云/番剧/test_media/missing.mp4",
+                "parent_webdav_path": "/云/番剧/test_media",
+            },
+            {
+                "local_path": "/a/exist.strm",
+                "webdav_path": "/云/番剧/test_media/exist.mp4",
+                "parent_webdav_path": "/云/番剧/test_media",
+            },
+        ]
+        mock_conn_ctx = MagicMock()
+        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+        app_service.db.read_connection.return_value = mock_conn_ctx
+
+        app_service._cloud_path_to_engine_paths.return_value = ["/strm/番剧/test_media"]
+        app_service.admin_api.list_directory.return_value = {"code": 200, "data": {"content": []}}
+        app_service.copy_a_record_to_b_if_needed.return_value = True
+
+        # 第一条源文件不存在，第二条存在
+        with patch("webui.routes.Path") as mock_path:
+            mock_path.return_value.exists.side_effect = [False, True]
+            result = _do_media_refresh(app_service, "a", "test_media")
+
+        assert result["ok"] is True
+        # 只对存在的那条调用一次
+        app_service.copy_a_record_to_b_if_needed.assert_called_once_with(
+            "/a/exist.strm",
+            "/云/番剧/test_media/exist.mp4",
+            "/云/番剧/test_media",
+        )
+        assert result["synced"] == 1
+        assert result["skipped"] == 1
+        assert result["failed"] == 0
+
+    def test_sync_per_record_exception_does_not_abort(self):
+        """单条同步抛异常不应中断整体流程，失败计入 failed 且整体仍成功返回"""
+        app_service = MagicMock()
+        app_service.db = MagicMock()
+        app_service.admin_api = MagicMock()
+
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = [
+            {
+                "local_path": "/a/fail.strm",
+                "webdav_path": "/云/番剧/test_media/fail.mp4",
+                "parent_webdav_path": "/云/番剧/test_media",
+            },
+            {
+                "local_path": "/a/ok.strm",
+                "webdav_path": "/云/番剧/test_media/ok.mp4",
+                "parent_webdav_path": "/云/番剧/test_media",
+            },
+        ]
+        mock_conn_ctx = MagicMock()
+        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+        app_service.db.read_connection.return_value = mock_conn_ctx
+
+        app_service._cloud_path_to_engine_paths.return_value = ["/strm/番剧/test_media"]
+        app_service.admin_api.list_directory.return_value = {"code": 200, "data": {"content": []}}
+        # 第一条抛异常，第二条成功
+        app_service.copy_a_record_to_b_if_needed.side_effect = [Exception("boom"), True]
+
+        with patch("webui.routes.Path") as mock_path:
+            mock_path.return_value.exists.return_value = True
+            result = _do_media_refresh(app_service, "a", "test_media")
+
+        # 不抛出、整体成功返回
+        assert result["ok"] is True
+        # 第二条仍被调用
+        assert app_service.copy_a_record_to_b_if_needed.call_count == 2
+        assert result["synced"] == 1
+        assert result["failed"] == 1
+
+
+class TestEscapeLike:
+    """测试 LIKE 通配符转义（配合 ESCAPE '\\'）"""
+
+    def test_escape_like_escapes_wildcards(self):
+        """% _ \\ 应被转义，且反斜杠先于通配符转义"""
+        assert escape_like("a%b") == r"a\%b"
+        assert escape_like("a_b") == r"a\_b"
+        assert escape_like(r"a\b") == r"a\\b"
+        # 反斜杠先于通配符转义：输入含已转义序列 a\_%b 时，
+        # 先转义反斜杠（a\\_），再转义 %（a\\_\%b），最后转义 _（a\\\_%b）
+        assert escape_like(r"a\_%b") == "a\\\\\\_\\%b"
+
+    def test_like_wildcard_in_media_name_escaped_real_db(self):
+        """真实 DB：media_name 含下划线时，LIKE 只精确匹配该媒体，不命中其它"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / "test.db"))
+            # 插入两条 A 区记录：一条含下划线，一条不含但子串相似
+            db.upsert_a("/a/a_b.strm", "/w/a_b.mp4", "/w")
+            db.upsert_a("/a/axb.strm", "/w/axb.mp4", "/w")
+
+            media_name = "a_b"
+            like = f"%{escape_like(media_name)}%"
+            with db.read_connection() as conn:
+                rows = conn.execute(
+                    "SELECT local_path FROM a_strm_files "
+                    "WHERE local_path LIKE ? ESCAPE '\\'",
+                    (like,),
+                ).fetchall()
+
+            matched = {r[0] for r in rows}
+            assert matched == {"/a/a_b.strm"}
+            assert "/a/axb.strm" not in matched
+
+
+class TestRefreshLikeEscape:
+    """刷新查询对 media_name 中的 LIKE 通配符进行转义（真实 DB 端到端）"""
+
+    def test_refresh_escapes_underscore_in_media_name(self):
+        """media_name 含下划线时，刷新只处理该媒体记录，不误命中其它"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / "test.db"))
+            # 目标媒体（含下划线）
+            db.upsert_a("/a/a_b/S01E01.strm", "/w/a_b/S01E01.mp4", "/w/a_b")
+            # 相似但不同的媒体（下划线被当作通配符时会误命中）
+            db.upsert_a("/a/axb/S01E01.strm", "/w/axb/S01E01.mp4", "/w/axb")
+
+            app_service = MagicMock()
+            app_service.db = db
+            app_service.admin_api = MagicMock()
+            app_service._cloud_path_to_engine_paths.return_value = ["/strm/a_b"]
+            app_service.admin_api.list_directory.return_value = {"code": 200, "data": {"content": []}}
+            app_service.copy_a_record_to_b_if_needed.return_value = True
+
+            with patch("webui.routes.Path") as mock_path:
+                mock_path.return_value.exists.return_value = True
+                result = _do_media_refresh(app_service, "a", "a_b")
+
+            assert result["ok"] is True
+            # 只同步了 a_b 这一条，未误命中 axb
+            assert app_service.copy_a_record_to_b_if_needed.call_count == 1
+            args = app_service.copy_a_record_to_b_if_needed.call_args[0]
+            assert args[0] == "/a/a_b/S01E01.strm"
+
+
+class TestMediaGroupsLikeFallbackEscape:
+    """FTS5 失败回退到 LIKE 时，q 中的通配符必须被转义（与已修 3 处一致）"""
+
+    def test_media_groups_like_fallback_escapes_wildcards(self):
+        """回退 LIKE 查询必须使用 ESCAPE 子句并转义 q 中的 %、_、\\ 通配符"""
+        import sqlite3
+        handler = MagicMock()
+        handler.webui._db = MagicMock()
+        conn = MagicMock()
+        conn.row_factory = None
+        err = sqlite3.OperationalError("fts5 error")
+        ok_cursor = MagicMock()
+        ok_cursor.fetchall.return_value = []          # 回退查询返回空结果
+        ok_cursor.fetchone.return_value = [0]         # total 查询返回 0
+        # 第 1 次调用（FTS5 MATCH）抛异常触发回退；之后 3 次回退 LIKE 查询返回 ok_cursor
+        conn.execute.side_effect = [err, ok_cursor, ok_cursor, ok_cursor]
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=conn)
+        ctx.__exit__ = MagicMock(return_value=False)
+        handler.webui._db.read_connection.return_value = ctx
+
+        result = _get_media_groups_paginated(handler, "b", "all", "a_b", "name", "asc", 1, 50)
+
+        # 回退路径应发出 3 条 LIKE 查询（kind_counts / total / media_groups）
+        fallback_calls = [c for c in conn.execute.call_args_list[1:] if "LIKE" in str(c.args[0])]
+        assert fallback_calls, "回退未发出 LIKE 查询"
+        for call in fallback_calls:
+            sql, params = call.args
+            assert "ESCAPE '\\'" in sql, f"回退 LIKE 缺少 ESCAPE 子句: {sql}"
+            assert any(p == "%a\\_b%" for p in params), f"回退 LIKE 参数未转义: {params}"
+        assert result["media_items"] == []
+
+
+class TestRecordsPaginatedLikeEscape:
+    """_get_records_paginated 的 LIKE 查询必须转义搜索通配符"""
+
+    @pytest.mark.parametrize("area", ["a", "b", "c"])
+    def test_records_paginated_escapes_like_wildcards(self, area):
+        """search 参数含下划线时，SQL 应使用 ESCAPE 并转义通配符"""
+        handler = MagicMock()
+        handler.webui._db = MagicMock()
+        conn = MagicMock()
+        conn.row_factory = None
+        ok_cursor = MagicMock()
+        ok_cursor.fetchone.return_value = [0]       # COUNT(*) 返回 0
+        ok_cursor.fetchall.return_value = []         # 记录查询返回空
+        conn.execute.return_value = ok_cursor
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=conn)
+        ctx.__exit__ = MagicMock(return_value=False)
+        handler.webui._db.read_connection.return_value = ctx
+
+        result = _get_records_paginated(handler, area, page=1, page_size=50, search="a_b")
+
+        assert result["records"] == []
+        assert result["total"] == 0
+        # 共 2 次 execute：COUNT + 记录查询
+        assert conn.execute.call_count == 2
+        for call in conn.execute.call_args_list:
+            sql, params = call.args
+            if "LIKE" in sql:
+                assert "ESCAPE '\\'" in sql, f"LIKE 缺少 ESCAPE 子句: {sql}"
+            # 两个参数都是转义后的 LIKE 模式（count 查询2 个参数，记录查询4 个 = 2 LIKE + 2 pagination）
+            like_params = [p for p in params if isinstance(p, str) and "%" in p]
+            for p in like_params:
+                assert p == "%a\\_b%", f"LIKE 参数未转义: {params}"

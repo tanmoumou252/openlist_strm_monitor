@@ -520,5 +520,180 @@ class TestBatchOperations:
         assert len(remaining) == 5
 
 
+class TestFTSIntegrityBStrm:
+    """回归测试：b_strm_files 与其 FTS 表的 rowid 一致性
+
+    覆盖历史 bug：删除 b_strm_files 行时未同步删除 FTS 行，导致
+    FTS 表残留孤儿；随后 upsert_b 复用相同 rowid 插入 FTS 时触发
+    'constraint failed'（IntegrityError）。
+    """
+
+    @pytest.fixture
+    def temp_db(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = Database(str(db_path))
+            yield db
+
+    def _fts_orphan_count(self, db: Database) -> int:
+        with db.read_connection() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM b_strm_files_fts "
+                "WHERE rowid NOT IN (SELECT rowid FROM b_strm_files)"
+            ).fetchone()[0]
+
+    def test_upsert_b_survives_orphan_fts_rowid(self, temp_db: Database):
+        """存在孤儿 FTS 行时，upsert_b 不应因 rowid 冲突而崩溃"""
+        # 制造孤儿：插入后用 delete_b_under_root 删除主表行，
+        # 再手动残留一个 FTS 行来模拟历史损坏状态。
+        temp_db.upsert_b("/b/old.strm", "/w/old.mp4", "/w", "/a/old.strm",
+                         fingerprint="fpold", status="valid")
+        # 直接删主表行但保留 FTS 行，模拟旧版删除路径的 bug
+        with temp_db.rw_lock.write_locked(), temp_db.connection() as conn:
+            conn.execute("DELETE FROM b_strm_files")  # 只删主表，FTS 残留
+            conn.commit()
+        assert self._fts_orphan_count(temp_db) >= 1
+
+        # 新 upsert 会复用 rowid=1，历史版本此处会抛 constraint failed
+        temp_db.upsert_b("/b/new.strm", "/w/new.mp4", "/w", "/a/new.strm",
+                         fingerprint="fpnew", status="valid")
+
+        # 应成功且无孤儿
+        rec = temp_db.get_b_by_local("/b/new.strm")
+        assert rec is not None
+        assert self._fts_orphan_count(temp_db) == 0
+
+    def test_delete_b_under_root_cleans_fts(self, temp_db: Database):
+        temp_db.upsert_b("/b/x1.strm", "/root/a/x1.mp4", "/root/a", None,
+                         fingerprint="fp1", status="valid")
+        temp_db.upsert_b("/b/x2.strm", "/root/a/x2.mp4", "/root/a", None,
+                         fingerprint="fp2", status="valid")
+        temp_db.delete_b_under_root("/root/a")
+        assert self._fts_orphan_count(temp_db) == 0
+
+    def test_delete_b_by_fingerprint_cleans_fts(self, temp_db: Database):
+        temp_db.upsert_b("/b/y.strm", "/w/y.mp4", "/w", None,
+                         fingerprint="fpY", status="valid")
+        temp_db.delete_b_by_fingerprint("fpY")
+        assert self._fts_orphan_count(temp_db) == 0
+
+    def test_delete_b_batch_cleans_fts(self, temp_db: Database):
+        for i in range(3):
+            temp_db.upsert_b(f"/b/z{i}.strm", f"/w/z{i}.mp4", "/w", None,
+                             fingerprint=f"fpZ{i}", status="valid")
+        temp_db.delete_b_batch([f"/b/z{i}.strm" for i in range(3)])
+        assert self._fts_orphan_count(temp_db) == 0
+
+    def test_move_b_record_cleans_fts(self, temp_db: Database):
+        temp_db.upsert_b("/b/old.strm", "/w/m.mp4", "/w", None,
+                         fingerprint="fpM", status="valid")
+        assert temp_db.move_b_record("/b/old.strm", "/b/moved.strm") is True
+        assert self._fts_orphan_count(temp_db) == 0
+        # 移动后新路径可被搜索到、旧路径不残留
+        assert temp_db.get_b_by_local("/b/moved.strm") is not None
+        assert temp_db.get_b_by_local("/b/old.strm") is None
+
+    def test_upsert_b_batch_cleans_fts(self, temp_db: Database):
+        """批量 upsert 后不应残留 FTS 孤儿"""
+        records = [
+            (f"/b/batch{i}.strm", f"/w/batch{i}.mp4", "/w", None, f"fpB{i}", "valid")
+            for i in range(3)
+        ]
+        temp_db.upsert_b_batch(records)
+        assert self._fts_orphan_count(temp_db) == 0
+        # 再次批量 upsert 相同路径（触发 REPLACE），仍不应产生孤儿或崩溃
+        temp_db.upsert_b_batch(records)
+        assert self._fts_orphan_count(temp_db) == 0
+
+
+class TestFTSIntegrityAStrm:
+    """回归测试：a_strm_files 与其 FTS 表的 rowid 一致性
+
+    与 B 区同类，覆盖删除路径未清理 FTS 及 upsert 复用孤儿 rowid 的场景。
+    """
+
+    @pytest.fixture
+    def temp_db(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = Database(str(db_path))
+            yield db
+
+    def _fts_orphan_count(self, db: Database) -> int:
+        with db.read_connection() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM a_strm_files_fts "
+                "WHERE rowid NOT IN (SELECT rowid FROM a_strm_files)"
+            ).fetchone()[0]
+
+    def test_upsert_a_survives_orphan_fts_rowid(self, temp_db: Database):
+        """存在孤儿 FTS 行时，upsert_a 不应因 rowid 冲突而崩溃"""
+        temp_db.upsert_a("/a/old.strm", "/w/old.mp4", "/w")
+        # 只删主表行，保留 FTS 行，模拟历史损坏
+        with temp_db.rw_lock.write_locked(), temp_db.connection() as conn:
+            conn.execute("DELETE FROM a_strm_files")
+            conn.commit()
+        assert self._fts_orphan_count(temp_db) >= 1
+
+        # 新 upsert 会复用 rowid=1，历史版本此处会抛 constraint failed
+        temp_db.upsert_a("/a/new.strm", "/w/new.mp4", "/w")
+        assert temp_db.get_a_by_local("/a/new.strm") is not None
+        assert self._fts_orphan_count(temp_db) == 0
+
+    def test_delete_a_by_local_cleans_fts(self, temp_db: Database):
+        temp_db.upsert_a("/a/x.strm", "/w/x.mp4", "/w")
+        temp_db.delete_a_by_local("/a/x.strm")
+        assert self._fts_orphan_count(temp_db) == 0
+
+    def test_delete_a_batch_cleans_fts(self, temp_db: Database):
+        for i in range(3):
+            temp_db.upsert_a(f"/a/z{i}.strm", f"/w/z{i}.mp4", "/w")
+        temp_db.delete_a_batch([f"/a/z{i}.strm" for i in range(3)])
+        assert self._fts_orphan_count(temp_db) == 0
+
+    def test_upsert_a_batch_cleans_fts(self, temp_db: Database):
+        records = [(f"/a/b{i}.strm", f"/w/b{i}.mp4", "/w") for i in range(3)]
+        temp_db.upsert_a_batch(records)
+        assert self._fts_orphan_count(temp_db) == 0
+        # 再次批量 upsert 相同路径（触发 REPLACE），仍不应产生孤儿或崩溃
+        temp_db.upsert_a_batch(records)
+        assert self._fts_orphan_count(temp_db) == 0
+
+
+class TestFTSIntegrityCGhost:
+    """回归测试：c_ghost_files 与其 FTS 表的 rowid 一致性"""
+
+    @pytest.fixture
+    def temp_db(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = Database(str(db_path))
+            yield db
+
+    def _fts_orphan_count(self, db: Database) -> int:
+        with db.read_connection() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM c_ghost_files_fts "
+                "WHERE rowid NOT IN (SELECT rowid FROM c_ghost_files)"
+            ).fetchone()[0]
+
+    def test_upsert_c_survives_orphan_fts_rowid(self, temp_db: Database):
+        """存在孤儿 FTS 行时，upsert_c 不应因 rowid 冲突而崩溃"""
+        temp_db.upsert_c("/c/old.strm", "/w/old.mp4", "/b/old.strm", "/ghost")
+        with temp_db.rw_lock.write_locked(), temp_db.connection() as conn:
+            conn.execute("DELETE FROM c_ghost_files")
+            conn.commit()
+        assert self._fts_orphan_count(temp_db) >= 1
+
+        # 新 upsert 会复用 rowid=1，历史版本此处会抛 constraint failed
+        temp_db.upsert_c("/c/new.strm", "/w/new.mp4", "/b/new.strm", "/ghost")
+        assert self._fts_orphan_count(temp_db) == 0
+
+    def test_delete_c_by_local_cleans_fts(self, temp_db: Database):
+        temp_db.upsert_c("/c/x.strm", "/w/x.mp4", "/b/x.strm", "/ghost")
+        temp_db.delete_c_by_local("/c/x.strm")
+        assert self._fts_orphan_count(temp_db) == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

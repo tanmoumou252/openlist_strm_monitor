@@ -122,3 +122,13 @@ def read_strm_webdav_path(file_path: str | Path) -> str | None:
     except (FileNotFoundError, OSError, PermissionError):
         # 如果文件不存在或无法读取，返回 None 而不是崩溃
         return None
+
+
+def escape_like(value: str) -> str:
+    """转义 SQL LIKE 通配符（% _ \\），配合 ``ESCAPE '\\'`` 子句使用。
+
+    用于构建 LIKE 模式时，确保路径/媒体名中的下划线、百分号不被当作通配符。
+    顺序很重要：必须先转义反斜杠本身，否则后面对 %/_ 加的反斜杠会被这一步再次转义。
+    转义只作用于传入的 LIKE 模式值，不影响被匹配列的内容（如 Windows 路径中的反斜杠）。
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

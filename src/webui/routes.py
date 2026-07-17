@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING
 from watchlist_match import (
     _compute_media_root, _extract_season_from_local_path,
 )
+from utils import escape_like
 
 if TYPE_CHECKING:
     from tmdb_client import TmdbClient
@@ -1742,9 +1743,10 @@ def _get_records_paginated(handler, area: str, page: int = 1,
             count_sql = "SELECT COUNT(*) FROM a_strm_files"
             query_sql = "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files"
             if search:
-                count_sql += " WHERE local_path LIKE ? OR webdav_path LIKE ?"
-                query_sql += " WHERE local_path LIKE ? OR webdav_path LIKE ?"
-                search_params = (f"%{search}%", f"%{search}%")
+                like = f"%{escape_like(search)}%"
+                count_sql += " WHERE local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\'"
+                query_sql += " WHERE local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\'"
+                search_params = (like, like)
             else:
                 search_params = ()
             query_sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
@@ -1753,9 +1755,10 @@ def _get_records_paginated(handler, area: str, page: int = 1,
             count_sql = "SELECT COUNT(*) FROM b_strm_files"
             query_sql = "SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at FROM b_strm_files"
             if search:
-                count_sql += " WHERE local_path LIKE ? OR webdav_path LIKE ?"
-                query_sql += " WHERE local_path LIKE ? OR webdav_path LIKE ?"
-                search_params = (f"%{search}%", f"%{search}%")
+                like = f"%{escape_like(search)}%"
+                count_sql += " WHERE local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\'"
+                query_sql += " WHERE local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\'"
+                search_params = (like, like)
             else:
                 search_params = ()
             query_sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
@@ -1764,9 +1767,10 @@ def _get_records_paginated(handler, area: str, page: int = 1,
             count_sql = "SELECT COUNT(*) FROM c_ghost_files"
             query_sql = "SELECT local_path, webdav_path, original_b_path, ghost_root, moved_at FROM c_ghost_files"
             if search:
-                count_sql += " WHERE local_path LIKE ? OR webdav_path LIKE ?"
-                query_sql += " WHERE local_path LIKE ? OR webdav_path LIKE ?"
-                search_params = (f"%{search}%", f"%{search}%")
+                like = f"%{escape_like(search)}%"
+                count_sql += " WHERE local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\'"
+                query_sql += " WHERE local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\'"
+                search_params = (like, like)
             else:
                 search_params = ()
             query_sql += " ORDER BY moved_at DESC LIMIT ? OFFSET ?"
@@ -1830,7 +1834,7 @@ def handle_records_api(handler, params) -> None:
     """
     area = params.get("area", ["a"])[0]
     if area not in ("a", "b", "c"):
-        handler._send_json({"error": "invalid area"}, 400)
+        handler._send_json({"error": "无效区域"}, 400)
         return
     page = _safe_int(params.get("page", ["1"])[0], 1)
     page_size = min(_safe_int(params.get("page_size", ["100"])[0], 100), 500)
@@ -2020,8 +2024,10 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
     params_list = []
     
     if q:
-        # 使用 FTS5 全文搜索（simple 分词器支持中文），通过 rowid 关联主表。
-        # 与 handle_area_detail 的搜索模式保持一致，避免 LIKE 子串匹配与 CJK 分词语义不一致。
+        # 列表页搜索：使用 FTS5 全文搜索（simple 分词器支持中文），通过 rowid 关联主表。
+        # 这里是用户主动输入关键词的模糊搜索场景，数据量大，适合 FTS5。
+        # 注意：与 handle_area_detail 不同——详情页用 LIKE 子串精确取「某部媒体的全部剧集」，
+        # 那里 media 是从列表页点进来的过滤条件而非搜索词，且必须避免 FTS5 静默返回 0 行。
         fts_table_map = {"a": "a_strm_files_fts", "b": "b_strm_files_fts", "c": "c_ghost_files_fts"}
         fts_table = fts_table_map.get(area, "a_strm_files_fts")
         escaped_query = _escape_fts5_query(q)
@@ -2128,8 +2134,9 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
         # 注意：必须重新构建 SQL 语句，因为 f-string 在构建时已求值
         if q:
             try:
-                like_base_where = f" AND (local_path LIKE ? OR webdav_path LIKE ?)"
-                like_params = [f"%{q}%", f"%{q}%"]
+                like = f"%{escape_like(q)}%"
+                like_base_where = f" AND (local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\')"
+                like_params = [like, like]
                 like_kind_params = list(like_params)
                 like_kind_where = ""
                 if kind_filter != "all" and kind_filter in _KIND_FILTER_MAP:
@@ -2202,7 +2209,7 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
 def handle_area(handler, area, params) -> None:
     """处理 GET /api/area/{area} — 区域列表，返回按媒体分组的统计摘要"""
     if area not in ("a", "b", "c"):
-        handler._send_json({"error": "invalid area"}, 400)
+        handler._send_json({"error": "无效区域"}, 400)
         return
 
     kind_filter = params.get("kind", ["anime"])[0]
@@ -2243,8 +2250,8 @@ def handle_area(handler, area, params) -> None:
             try:
                 with db.read_connection() as conn:
                     row = conn.execute(
-                        f"SELECT local_path FROM {table} WHERE local_path LIKE ? LIMIT 1",
-                        (f"%{media_name}%",)
+                        f"SELECT local_path FROM {table} WHERE local_path LIKE ? ESCAPE '\\' LIMIT 1",
+                        (f"%{escape_like(media_name)}%",)
                     ).fetchone()
                     if row:
                         season = _extract_season_from_local_path(row[0])
@@ -2323,7 +2330,7 @@ def _escape_fts5_query(query: str) -> str:
 def handle_area_detail(handler, area, params) -> None:
     """处理 GET /api/area/{area}/detail — 区域详情，返回指定媒体的所有记录"""
     if area not in ("a", "b", "c"):
-        handler._send_json({"error": "invalid area"}, 400)
+        handler._send_json({"error": "无效区域"}, 400)
         return
 
     media_name = params.get("media", [""])[0]
@@ -2347,43 +2354,23 @@ def handle_area_detail(handler, area, params) -> None:
         if area == "a":
             columns = "local_path, webdav_path, parent_webdav_path, updated_at"
             table = "a_strm_files"
-            fts_table = "a_strm_files_fts"
         elif area == "b":
             columns = "local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at"
             table = "b_strm_files"
-            fts_table = "b_strm_files_fts"
         else:  # area == "c"
             columns = "local_path, webdav_path, original_b_path, ghost_root, moved_at"
             table = "c_ghost_files"
-            fts_table = "c_ghost_files_fts"
 
         where_clause = ""
-        fts_fallback = False
         if media_name:
-            # 转义 FTS5 特殊字符
-            escaped_query = _escape_fts5_query(media_name)
-            # 使用 FTS5 全文搜索（simple 分词器支持中文）
-            where_clause = f" WHERE rowid IN (SELECT rowid FROM {fts_table} WHERE {fts_table} MATCH ?)"
-            search_params = (escaped_query,)
-
-            # 总记录数（FTS 查询，失败则回退 LIKE）
-            count_sql = f"SELECT COUNT(*) FROM {table}{where_clause}"
-            try:
-                with db.read_connection() as conn:
-                    total = conn.execute(count_sql, search_params).fetchone()[0]
-            except Exception as fts_err:
-                logging.warning("[WebUI] FTS5 搜索异常，回退到 LIKE: %s", fts_err)
-                fts_fallback = True
-                where_clause = f" WHERE local_path LIKE ? OR webdav_path LIKE ?"
-                search_params = (f"%{media_name}%", f"%{media_name}%")
-                count_sql = f"SELECT COUNT(*) FROM {table}{where_clause}"
-                with db.read_connection() as conn:
-                    total = conn.execute(count_sql, search_params).fetchone()[0]
-        else:
-            # 无搜索条件
-            count_sql = f"SELECT COUNT(*) FROM {table}{where_clause}"
-            with db.read_connection() as conn:
-                total = conn.execute(count_sql, search_params).fetchone()[0]
+            # 使用 LIKE 而非 FTS5：详情页数据量小，LIKE 更可靠（FTS5 对中文媒体名可能静默返回空结果）
+            # 转义 media_name 中的 LIKE 通配符（% _ \），避免下划线等合法字符被当作通配符过度匹配
+            like = f"%{escape_like(media_name)}%"
+            where_clause = " WHERE local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\'"
+            search_params = (like, like)
+        count_sql = f"SELECT COUNT(*) FROM {table}{where_clause}"
+        with db.read_connection() as conn:
+            total = conn.execute(count_sql, search_params).fetchone()[0]
 
         # 分页查询（SQL 不做全局排序，改为 Python 季内排序）
         offset = (page - 1) * PAGE_SIZE
@@ -2407,16 +2394,9 @@ def handle_area_detail(handler, area, params) -> None:
         # 计算 STRM 引擎入口根（引擎挂载点 + 媒体路径）
         app_service = getattr(handler.webui, '_app_service', None)
         if app_service and webdav_root:
-            engine_path = app_service._find_matching_engine_path(webdav_root) or ""
-            if engine_path:
-                # 从 webdav_root 中提取相对于 engine_path 的部分
-                relative_path = webdav_root[len(engine_path):].lstrip('/')
-                if relative_path:
-                    strm_engine_root = f"{engine_path}/{relative_path}"
-                else:
-                    strm_engine_root = engine_path
-            else:
-                strm_engine_root = ""
+            engine_paths = app_service._cloud_path_to_engine_paths(webdav_root)
+            if engine_paths:
+                strm_engine_root = engine_paths[0]
 
     total_pages = max(1, ceil(total / PAGE_SIZE)) if total else 1
     page = max(1, min(page, total_pages))
@@ -2455,9 +2435,9 @@ def handle_area_detail(handler, area, params) -> None:
 
 
 def handle_area_refresh(handler, area, body: bytes) -> None:
-    """处理 POST /api/area/{area}/refresh — 刷新指定媒体的 STRM 入口并同步差异"""
+    """处理 POST /api/area/{area}/refresh — 通过 STRM 入口路径触发引擎刷新并同步到 B 区"""
     if area not in ("a", "b"):
-        handler._send_json({"error": "invalid area, only 'a' or 'b' supported"}, 400)
+        handler._send_json({"error": "无效区域，仅支持 'a' 或 'b'"}, 400)
         return
 
     # 解析请求体
@@ -2468,38 +2448,34 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
 
     media_name = (data.get("media") or "").strip()
     if not media_name:
-        handler._send_json({"error": "media parameter is required"}, 400)
+        handler._send_json({"error": "缺少 media 参数"}, 400)
         return
 
     # 路径穿越校验：防止恶意构造路径
     # 检查长度
     if len(media_name) > 255:
-        handler._send_json({"error": "invalid media name length"}, 400)
+        handler._send_json({"error": "媒体名长度超限"}, 400)
         return
-    
+
     # 检查危险字符和路径分隔符
     dangerous_chars = ['..', '/', '\\', '\x00', ':', '*', '?', '"', '<', '>', '|']
     if any(c in media_name for c in dangerous_chars):
-        handler._send_json({"error": "invalid media name characters"}, 400)
-        return
-    
-    # 检查是否为绝对路径
-    from pathlib import Path
-    try:
-        if Path(media_name).is_absolute():
-            handler._send_json({"error": "media name cannot be absolute path"}, 400)
-            return
-    except Exception:
-        handler._send_json({"error": "invalid media name"}, 400)
+        handler._send_json({"error": "媒体名包含非法字符"}, 400)
         return
 
-    # 是否已确认执行（用于误删保护二次确认）
-    confirmed = bool(data.get("confirmed", False))
+    # 检查是否为绝对路径
+    try:
+        if Path(media_name).is_absolute():
+            handler._send_json({"error": "媒体名不能是绝对路径"}, 400)
+            return
+    except Exception:
+        handler._send_json({"error": "无效的媒体名"}, 400)
+        return
 
     # 获取 AppService
     app_service = getattr(handler.webui, '_app_service', None)
     if not app_service:
-        handler._send_json({"error": "main program not running", "status": "not_running"}, 503)
+        handler._send_json({"error": "主程序未运行", "status": "not_running"}, 503)
         return
 
     # 获取 refresh_lock，防止同一媒体并发刷新
@@ -2510,26 +2486,11 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
         refresh_lock = app_service._refresh_lock
 
     if not refresh_lock.acquire(blocking=False):
-        handler._send_json({"error": "refresh in progress, please try again later"}, 409)
+        handler._send_json({"error": "刷新进行中，请稍后再试"}, 409)
         return
 
     try:
-        # 读取配置
-        app_config = getattr(app_service, 'config', None)
-        timeout_seconds = 300
-        safe_delete_threshold = 10
-        if app_config:
-            if hasattr(app_config, 'refresh'):
-                timeout_seconds = getattr(app_config.refresh, 'timeout_seconds', 300)
-            if hasattr(app_config, 'behavior'):
-                safe_delete_threshold = getattr(app_config.behavior, 'safe_delete_threshold', 10)
-
-        result = _do_media_refresh(
-            app_service, area, media_name,
-            timeout_seconds=timeout_seconds,
-            safe_delete_threshold=safe_delete_threshold,
-            confirmed=confirmed,
-        )
+        result = _do_media_refresh(app_service, area, media_name)
         handler._send_json(result)
     except Exception as e:
         logging.error("[Refresh] 刷新媒体 %s 失败: %s", media_name, e)
@@ -2538,25 +2499,10 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
         refresh_lock.release()
 
 
-def _do_media_refresh(
-    app_service,
-    area: str,
-    media_name: str,
-    *,
-    timeout_seconds: int = 300,
-    safe_delete_threshold: int = 10,
-    confirmed: bool = False,
-) -> dict:
-    """执行媒体刷新逻辑：对比 A 区 DB 与 OpenList API 返回的文件差异，并自动同步。
-
-    新增参数：
-    - timeout_seconds: 超时时间（秒），超时后返回部分结果
-    - safe_delete_threshold: 删除数量超过此阈值时需要二次确认
-    - confirmed: 是否已确认执行（用于误删保护）
-    """
+def _do_media_refresh(app_service, area: str, media_name: str) -> dict:
+    """执行媒体刷新逻辑：通过 STRM 入口路径触发引擎重新生成，然后同步到 B 区。"""
     db = app_service.db
     admin_api = app_service.admin_api
-    deadline = time.monotonic() + timeout_seconds
 
     # 读取刷新日志级别
     app_config = getattr(app_service, 'config', None)
@@ -2565,187 +2511,121 @@ def _do_media_refresh(
         log_level_name = getattr(app_config.refresh, 'log_level', "INFO").upper()
     _refresh_log = _make_refresh_logger(log_level_name)
 
-    phase_start = time.monotonic()
-    _refresh_log("info", "[Refresh] phase=start media=%s area=%s timeout=%ds",
-                 media_name, area, timeout_seconds)
-
-    def _check_timeout(phase: str) -> bool:
-        """检查是否超时，返回 True 表示已超时"""
-        if time.monotonic() > deadline:
-            _refresh_log("warning", "[Refresh] phase=%s timeout after %.1fs", phase, timeout_seconds)
-            return True
-        return False
+    _refresh_log("info", "[Refresh] 开始刷新 媒体=%s 区=%s", media_name, area)
 
     # 1. 从 A 区 DB 查询该媒体的所有记录
+    # 注意：LIKE '%media_name%' 是子串匹配，理论上当两部媒体名互为子串时会误匹配
+    # （如 '巨人' 会命中 '进击的巨人'）。此处依赖后续 _compute_common_parent_path
+    # 计算公共父目录 + '/' 根目录保护来收敛范围；若误匹配导致跨目录，公共父目录会退化为
+    # '/' 并被上面的边界保护拒绝，因此不会触发全盘刷新。media_name 已在调用方做过
+    # 路径分隔符/危险字符校验。
+    phase_start = time.monotonic()
     a_records = []
     try:
         with db.read_connection() as conn:
             conn.row_factory = sqlite3.Row
+            # 转义 media_name 中的 LIKE 通配符（% _ \），配合 ESCAPE '\' 子句。
+            # 下划线在媒体名中极常见（如 S01_E01、The_Movie），不转义会被当作单字符通配符过度匹配。
+            like = f"%{escape_like(media_name)}%"
             rows = conn.execute(
                 "SELECT local_path, webdav_path, parent_webdav_path FROM a_strm_files "
-                "WHERE local_path LIKE ? OR webdav_path LIKE ?",
-                (f"%{media_name}%", f"%{media_name}%")
+                "WHERE local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\'",
+                (like, like)
             ).fetchall()
             a_records = [dict(r) for r in rows]
     except Exception as e:
         logging.error("[Refresh] 查询 A 区记录失败: %s", e)
         return {"ok": False, "error": f"query failed: {e}"}
 
-    _refresh_log("debug", "[Refresh] phase=query duration=%.2fs records=%d",
+    _refresh_log("debug", "[Refresh] 查询完成 耗时=%.2fs 记录数=%d",
                  time.monotonic() - phase_start, len(a_records))
 
     if not a_records:
-        return {"ok": True, "added": 0, "removed": 0, "unchanged": 0, "message": "no records found"}
+        return {"ok": True, "message": "未找到相关记录"}
 
-    # 2. 计算媒体目录的 STRM 入口路径
-    # 从 parent_webdav_path 提取公共父目录
+    # 2. 计算媒体目录的公共父目录（云盘路径）
     parent_paths = [r.get("parent_webdav_path", "") for r in a_records if r.get("parent_webdav_path")]
     if not parent_paths:
-        return {"ok": True, "added": 0, "removed": 0, "unchanged": 0, "message": "no parent paths"}
+        return {"ok": True, "message": "无父目录信息"}
 
-    # 计算最长公共前缀（目录级别）
     common_parent = _compute_common_parent_path(parent_paths)
     if not common_parent:
-        return {"ok": True, "added": 0, "removed": 0, "unchanged": 0, "message": "no common parent"}
+        return {"ok": True, "message": "无法确定公共父目录"}
+    # 边界保护：不同根目录时 _compute_common_parent_path 返回 "/"，
+    # 若用 "/" 触发刷新会波及整个云盘根，代价高且不安全，拒绝执行。
+    if common_parent == "/":
+        _refresh_log("warning",
+                     "[Refresh] 公共父目录退化为根目录 '/'，拒绝全盘刷新: media=%s", media_name)
+        return {"ok": False, "error": "拒绝全盘刷新", "message": "公共父目录退化为根目录，已拒绝全盘刷新"}
 
-    # 3. 调用 OpenList /api/fs/list 带 refresh=true 触发 STRM 引擎重新生成
-    _refresh_log("info", "[Refresh] phase=api_call dir=%s", common_parent)
+    # 3. 映射到 STRM 引擎入口路径
+    engine_parent = ""
+    if app_service:
+        engine_paths = app_service._cloud_path_to_engine_paths(common_parent)
+        if engine_paths:
+            engine_parent = engine_paths[0]
+    refresh_dir = engine_parent or common_parent  # 降级到云盘路径
+
+    # 4. 调用 OpenList /api/fs/list 带 refresh=true 触发 STRM 引擎重新生成
+    _refresh_log("info", "[Refresh] 调用引擎 API 云盘目录=%s (引擎入口=%s)",
+                 common_parent, refresh_dir)
     phase_start = time.monotonic()
-    list_result = admin_api.list_directory(common_parent, refresh=True)
-    _refresh_log("debug", "[Refresh] phase=api_call duration=%.2fs", time.monotonic() - phase_start)
+    list_result = admin_api.list_directory(refresh_dir, refresh=True)
+    _refresh_log("debug", "[Refresh] 引擎 API 完成 耗时=%.2fs", time.monotonic() - phase_start)
 
     if list_result is None or list_result.get("code") not in (0, 200):
-        return {"ok": False, "error": "OpenList API returned error", "detail": list_result}
+        return {"ok": False, "error": "OpenList API 返回错误", "detail": list_result}
 
-    # 4. 解析 API 返回的文件列表（只保留 .strm 和字幕文件）
-    api_files = _parse_api_files(list_result, common_parent)
+    # 检查 API 返回内容是否为空（可能是云盘临时不可达或目录不存在）
+    _data = list_result.get("data", {})
+    _content = _data.get("content", []) if isinstance(_data, dict) else []
+    if not _content:
+        _refresh_log("warning", "[Refresh] API 返回目录为空: dir=%s (可能是云盘不可达或目录不存在)", refresh_dir)
 
-    # 5. 对比 DB 记录 vs API 文件
-    db_webdav_paths = {r.get("webdav_path", "") for r in a_records if r.get("webdav_path")}
-    api_webdav_paths = {f["webdav_path"] for f in api_files}
-
-    added_paths = api_webdav_paths - db_webdav_paths
-    removed_paths = db_webdav_paths - api_webdav_paths
-    unchanged_paths = db_webdav_paths & api_webdav_paths
-
-    _refresh_log("info", "[Refresh] phase=diff 对方比我们文件多=%d 少=%d 未变=%d",
-                 len(added_paths), len(removed_paths), len(unchanged_paths))
-
-    # 6. 误删保护：删除数量超过阈值时需要二次确认
-    if len(removed_paths) > safe_delete_threshold and not confirmed:
-        _refresh_log("warning",
-                     "[Refresh] 删除数量 (%d) 超过阈值 (%d)，需要二次确认",
-                     len(removed_paths), safe_delete_threshold)
-        return {
-            "ok": False,
-            "needs_confirmation": True,
-            "removed": len(removed_paths),
-            "threshold": safe_delete_threshold,
-            "message": f"即将删除 {len(removed_paths)} 个文件（超过阈值 {safe_delete_threshold}），是否继续？",
-        }
-
-    # 审计日志：记录用户确认删除操作
-    if confirmed and len(removed_paths) > 0:
-        logging.warning("[Refresh] 用户确认删除操作: media=%s, removed=%d",
-                        media_name, len(removed_paths))
-
-    added_count = 0
-    removed_count = 0
-    timed_out = False
-
-    # 7. 处理新增文件：调用 handle_a_created_or_modified 同步到 A 区
+    # 5. 仅同步当前媒体的 A→B（只处理步骤 1 已查出的记录，避免全库全量同步）
+    #    直接复用步骤 1 内存中的 a_records，逐条调用 copy_a_record_to_b_if_needed，
+    #    不读全库、不触发 [初始化] 全量扫描。数据库规模无论多大，此处只处理该媒体的记录。
     phase_start = time.monotonic()
-    for webdav_path in added_paths:
-        if _check_timeout("add_files"):
-            timed_out = True
-            break
+    synced = 0
+    skipped = 0
+    failed = 0
+    for rec in a_records:
+        a_local = rec.get("local_path", "")
+        a_webdav = rec.get("webdav_path", "")
+        a_parent = rec.get("parent_webdav_path", "")
+        if not a_local or not a_webdav:
+            continue
+        if not Path(a_local).exists():
+            _refresh_log("debug", "[Refresh] A→B跳过 源文件不存在: %s", a_local)
+            skipped += 1
+            continue
         try:
-            # 构造本地路径（从 A 区记录的 local_path 推断根目录）
-            first_local = a_records[0].get("local_path", "")
-            if first_local:
-                # 从 webdav_path 提取文件名，拼接到 A 区根目录
-                filename = Path(webdav_path).name
-                a_root = _compute_media_root(first_local)
-                local_path = str(Path(a_root) / filename)
-                app_service.handle_a_created_or_modified(local_path)
-                added_count += 1
-                _refresh_log("debug", "[Refresh] phase=add file=%s", webdav_path)
+            # ghost 保护 / 指纹去重由 copy_a_record_to_b_if_needed 内部处理
+            copy_result = app_service.copy_a_record_to_b_if_needed(a_local, a_webdav, a_parent)
+            if copy_result is True:
+                synced += 1
+            elif copy_result is None:
+                skipped += 1
+            else:
+                failed += 1
         except Exception as e:
-            logging.warning("[Refresh] 同步新增文件失败 %s: %s", webdav_path, e)
+            logging.warning("[Refresh] A→B 单条同步失败 %s: %s", a_local, e)
+            failed += 1
 
-    _refresh_log("debug", "[Refresh] phase=add_files duration=%.2fs added=%d",
-                 time.monotonic() - phase_start, added_count)
+    _refresh_log("info",
+                 "[Refresh] 同步到 B 区完成 耗时=%.2fs 成功=%d 跳过=%d 失败=%d",
+                 time.monotonic() - phase_start, synced, skipped, failed)
 
-    # 8. 处理删除文件：清理 A 区记录，同时删除 B 区对应记录
-    phase_start = time.monotonic()
-    if not timed_out:
-        for webdav_path in removed_paths:
-            if _check_timeout("remove_files"):
-                timed_out = True
-                break
-            try:
-                # 查找对应的 A 区记录
-                a_record = next((r for r in a_records if r.get("webdav_path") == webdav_path), None)
-                if a_record:
-                    local_path = a_record.get("local_path", "")
-                    if local_path:
-                        # 路径归属校验：确保 local_path 在 A 区记录的公共目录下
-                        # 使用第一条记录的目录作为根目录（所有记录应来自同一媒体目录）
-                        first_local = a_records[0].get("local_path", "")
-                        if first_local:
-                            # 检测路径分隔符风格（兼容 POSIX 和 Windows 路径）
-                            sep = "\\" if "\\" in first_local else "/"
-                            a_root = sep.join(first_local.split(sep)[:-1])
-                            if a_root and not a_root.endswith(sep):
-                                a_root += sep
-                            if a_root and not local_path.startswith(a_root):
-                                logging.error("[Refresh] 拒绝删除非 A 区文件: %s (不在 %s 下)", local_path, a_root)
-                                continue
+    _refresh_log("info", "[Refresh] 刷新完成 目录=%s", refresh_dir)
 
-                        # 删除本地文件
-                        from utils.file_utils import safe_remove_file
-                        safe_remove_file(local_path)
-                        # 删除 A 区记录
-                        db.delete_a_by_local(local_path)
-                        # 删除 B 区对应记录
-                        b_records = db.get_b_by_webdav(webdav_path)
-                        for b_rec in b_records:
-                            db.delete_b_by_local(b_rec.local_path)
-                        removed_count += 1
-                        _refresh_log("debug", "[Refresh] phase=remove file=%s", webdav_path)
-            except Exception as e:
-                logging.warning("[Refresh] 清理删除文件失败 %s: %s", webdav_path, e)
-
-    _refresh_log("debug", "[Refresh] phase=remove_files duration=%.2fs removed=%d",
-                 time.monotonic() - phase_start, removed_count)
-
-    # 9. 调用 scan_a_to_b_full_sync 同步到 B 区
-    if not timed_out:
-        phase_start = time.monotonic()
-        try:
-            app_service.scan_a_to_b_full_sync()
-            _refresh_log("debug", "[Refresh] phase=a_to_b_sync duration=%.2fs",
-                         time.monotonic() - phase_start)
-        except Exception as e:
-            logging.warning("[Refresh] A→B 同步失败: %s", e)
-
-    result = {
+    return {
         "ok": True,
-        "added": added_count,
-        "removed": removed_count,
-        "unchanged": len(unchanged_paths),
+        "message": f"刷新完成：同步 {synced}，跳过 {skipped}，失败 {failed}",
+        "refresh_dir": refresh_dir,
+        "synced": synced,
+        "skipped": skipped,
+        "failed": failed,
     }
-
-    if timed_out:
-        result["timeout"] = True
-        result["message"] = f"刷新操作超时（{timeout_seconds}秒），已处理部分文件"
-        _refresh_log("warning", "[Refresh] phase=finish timeout added=%d removed=%d",
-                     added_count, removed_count)
-    else:
-        _refresh_log("info", "[Refresh] phase=finish added=%d removed=%d unchanged=%d",
-                     added_count, removed_count, len(unchanged_paths))
-
-    return result
 
 
 def _make_refresh_logger(level_name: str):

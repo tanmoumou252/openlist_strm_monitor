@@ -441,7 +441,7 @@ class TestAreaRoutes:
     def test_area_unknown_404(self, webui_server):
         server, base, session_token = webui_server
         status, _, body = _http_get(base, "/api/area/zzz", session_token)
-        # 未知 area 返回 400（invalid area）
+        # 未知 area 返回 400（无效区域）
         assert status == 400
         assert isinstance(body, dict)
         assert "error" in body
@@ -1030,7 +1030,7 @@ class TestAreaRefreshAPI:
         body = {"media": "test_media"}
         status, _, resp = _http_post(base, "/api/area/x/refresh", body, session_token)
         assert status == 400
-        assert "invalid area" in resp.get("error", "").lower()
+        assert "无效区域" in resp.get("error", "")
 
     def test_area_refresh_missing_media(self, webui_server):
         """缺少 media 参数应返回 400"""
@@ -1038,7 +1038,7 @@ class TestAreaRefreshAPI:
         body = {}
         status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         assert status == 400
-        assert "media" in resp.get("error", "").lower()
+        assert "缺少 media 参数" in resp.get("error", "")
 
     def test_area_refresh_auth_required(self, tmp_path):
         """未登录应返回 401"""
@@ -1085,7 +1085,7 @@ class TestAreaRefreshAPI:
         body = {"media": "test_media"}
         status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         assert status == 503
-        assert "not running" in resp.get("error", "").lower()
+        assert resp.get("status") == "not_running"
 
     def test_area_refresh_path_traversal_rejected(self, webui_server):
         """路径穿越攻击应返回 400"""
@@ -1099,19 +1099,19 @@ class TestAreaRefreshAPI:
         body = {"media": "../etc/passwd"}
         status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         assert status == 400
-        assert "invalid media name" in resp.get("error", "").lower()
+        assert "媒体名包含非法字符" in resp.get("error", "")
         
         # 测试以 / 开头的路径
         body = {"media": "/etc/passwd"}
         status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         assert status == 400
-        assert "invalid media name" in resp.get("error", "").lower()
+        assert "媒体名包含非法字符" in resp.get("error", "")
         
         # 测试以 \ 开头的路径
         body = {"media": "\\etc\\passwd"}
         status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         assert status == 400
-        assert "invalid media name" in resp.get("error", "").lower()
+        assert "媒体名包含非法字符" in resp.get("error", "")
     
     def test_area_refresh_dangerous_characters_rejected(self, webui_server):
         """危险字符应返回 400"""
@@ -1137,8 +1137,8 @@ class TestAreaRefreshAPI:
             body = {"media": dangerous_input}
             status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
             assert status == 400, f"Expected 400 for input {repr(dangerous_input)}, got {status}"
-            assert "invalid media name" in resp.get("error", "").lower(), \
-                f"Expected 'invalid media name' error for {repr(dangerous_input)}, got {resp.get('error')}"
+            assert "媒体名包含非法字符" in resp.get("error", ""), \
+                f"Expected '媒体名包含非法字符' error for {repr(dangerous_input)}, got {resp.get('error')}"
     
     def test_area_refresh_media_name_length_limit(self, webui_server):
         """超长媒体名应返回 400"""
@@ -1152,13 +1152,13 @@ class TestAreaRefreshAPI:
         body = {"media": long_name}
         status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         assert status == 400
-        assert "invalid media name length" in resp.get("error", "").lower()
+        assert "媒体名长度超限" in resp.get("error", "")
 
-    def test_refresh_needs_confirmation(self, webui_server):
-        """删除数量超过阈值时应返回 needs_confirmation"""
+    def test_refresh_is_non_destructive(self, webui_server):
+        """刷新不再因删除数超阈值要求确认，而是直接完成非破坏性 A→B 同步"""
         server, base, session_token = webui_server
         
-        # Mock database 返回 15 条 A 区记录（超过默认阈值 10）
+        # Mock database 返回 15 条 A 区记录（旧逻辑下会超过阈值要求确认）
         mock_db = MagicMock()
         mock_records = [
             {"local_path": f"/a/zone/file{i}.strm", "webdav_path": f"/webdav/file{i}.strm", "parent_webdav_path": "/webdav"}
@@ -1179,25 +1179,33 @@ class TestAreaRefreshAPI:
         mock_app_service._refresh_lock = threading.Lock()
         mock_app_service.db = mock_db
         mock_app_service.config = None
+        # 新契约：映射到引擎入口路径 + 逐条 A→B 同步
+        mock_app_service._cloud_path_to_engine_paths.return_value = ["/strm/webdav"]
+        mock_app_service.copy_a_record_to_b_if_needed.return_value = True
         server._app_service = mock_app_service
         
-        # Mock OpenList Admin API 返回空列表（模拟所有文件都被删除）
+        # Mock OpenList Admin API 返回空列表
         mock_admin_api = MagicMock()
         mock_admin_api.list_directory.return_value = {"code": 0, "data": {"content": []}}
         mock_app_service.admin_api = mock_admin_api
         
-        # 发起刷新请求（不传 confirmed）
-        body = {"media": "test_movie"}
-        status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
+        # patch Path.exists 返回 True，使记录计入 synced 而非 skipped
+        with patch("webui.routes.Path") as mock_path:
+            mock_path.return_value.exists.return_value = True
+            mock_path.return_value.is_absolute.return_value = False
+            body = {"media": "test_movie"}
+            status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         
-        # 验证返回 needs_confirmation
+        # 验证非破坏性同步：不再要求确认，直接完成
         assert status == 200, f"Expected 200, got {status}. Response: {resp}"
-        assert resp.get("needs_confirmation") is True, f"Expected needs_confirmation=True, got {resp}"
-        assert resp.get("removed") == 15, f"Expected removed=15, got {resp.get('removed')}"
-        assert resp.get("threshold") == 10, f"Expected threshold=10, got {resp.get('threshold')}"
+        assert resp.get("ok") is True, f"Expected ok=True, got {resp}"
+        assert "needs_confirmation" not in resp, f"不应再返回 needs_confirmation: {resp}"
+        assert resp.get("synced") == 15, f"Expected synced=15, got {resp.get('synced')}"
+        assert resp.get("skipped") == 0, f"Expected skipped=0, got {resp.get('skipped')}"
+        assert resp.get("failed") == 0, f"Expected failed=0, got {resp.get('failed')}"
 
-    def test_refresh_with_confirmation(self, webui_server):
-        """传入 confirmed=True 后应执行删除"""
+    def test_refresh_calls_copy_per_record(self, webui_server):
+        """刷新逐条调用 copy_a_record_to_b_if_needed，不删除文件、不调用 delete_a_by_local"""
         server, base, session_token = webui_server
         
         # Mock database
@@ -1216,14 +1224,14 @@ class TestAreaRefreshAPI:
         mock_conn.__exit__ = MagicMock(return_value=None)
         mock_conn.row_factory = None
         mock_db.read_connection.return_value = mock_conn
-        mock_db.get_b_by_webdav.return_value = []
         
         mock_app_service = MagicMock()
         mock_app_service._refresh_lock = threading.Lock()
         mock_app_service.db = mock_db
         mock_app_service.config = None
-        mock_app_service.handle_a_created_or_modified = MagicMock()
-        mock_app_service.scan_a_to_b_full_sync = MagicMock()
+        # 新契约：映射到引擎入口路径 + 逐条 A→B 同步
+        mock_app_service._cloud_path_to_engine_paths.return_value = ["/strm/webdav"]
+        mock_app_service.copy_a_record_to_b_if_needed.return_value = True
         server._app_service = mock_app_service
         
         # Mock OpenList Admin API 返回空列表
@@ -1231,31 +1239,24 @@ class TestAreaRefreshAPI:
         mock_admin_api.list_directory.return_value = {"code": 0, "data": {"content": []}}
         mock_app_service.admin_api = mock_admin_api
         
-        # Mock safe_remove_file（避免真实删除文件）
-        import utils.file_utils
-        original_safe_remove = utils.file_utils.safe_remove_file
-        removed_files = []
-        def mock_safe_remove(path):
-            removed_files.append(path)
-        utils.file_utils.safe_remove_file = mock_safe_remove
-        
-        try:
-            # 发起刷新请求（传 confirmed=True）
-            body = {"media": "test_movie", "confirmed": True}
+        # patch Path.exists 返回 True，使记录计入 synced
+        with patch("webui.routes.Path") as mock_path:
+            mock_path.return_value.exists.return_value = True
+            mock_path.return_value.is_absolute.return_value = False
+            body = {"media": "test_movie"}
             status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
-            
-            # 验证执行了删除
-            assert status == 200, f"Expected 200, got {status}. Response: {resp}"
-            assert resp.get("ok") is True, f"Expected ok=True, got {resp}"
-            assert len(removed_files) == 15, f"Expected 15 files removed, got {len(removed_files)}"
-            assert mock_db.delete_a_by_local.called, "Expected delete_a_by_local to be called"
-        finally:
-            # 恢复原始函数
-            utils.file_utils.safe_remove_file = original_safe_remove
+        
+        # 验证逐条同步、非破坏性
+        assert status == 200, f"Expected 200, got {status}. Response: {resp}"
+        assert resp.get("ok") is True, f"Expected ok=True, got {resp}"
+        assert mock_app_service.copy_a_record_to_b_if_needed.call_count == 15, \
+            f"Expected 15 copy calls, got {mock_app_service.copy_a_record_to_b_if_needed.call_count}"
+        assert resp.get("synced") == 15, f"Expected synced=15, got {resp.get('synced')}"
+        # 非破坏性守卫：刷新不应删除任何 A 区记录
+        assert mock_db.delete_a_by_local.called is False, "刷新不应调用 delete_a_by_local"
 
-    def test_refresh_timeout(self, webui_server, monkeypatch):
-        """刷新超时应返回超时标记"""
-        import time as _time
+    def test_refresh_timeout(self, webui_server):
+        """刷新不再有超时逻辑，响应中不应出现 timeout 字段"""
         server, base, session_token = webui_server
         
         # Mock database 返回 1 条记录
@@ -1278,30 +1279,26 @@ class TestAreaRefreshAPI:
         mock_app_service._refresh_lock = threading.Lock()
         mock_app_service.db = mock_db
         mock_app_service.config = None
+        mock_app_service._cloud_path_to_engine_paths.return_value = ["/strm/webdav"]
+        mock_app_service.copy_a_record_to_b_if_needed.return_value = True
         server._app_service = mock_app_service
         
-        # Mock OpenList Admin API 返回 100 个文件（模拟大量新增）
+        # Mock OpenList Admin API 返回空列表
         mock_admin_api = MagicMock()
-        mock_files = [{"name": f"file{i}.strm", "path": f"/webdav/file{i}.strm", "is_dir": False} for i in range(100)]
-        mock_admin_api.list_directory.return_value = {"code": 0, "data": {"content": mock_files}}
+        mock_admin_api.list_directory.return_value = {"code": 0, "data": {"content": []}}
         mock_app_service.admin_api = mock_admin_api
         
-        # monkeypatch time.monotonic：前 3 次返回正常值，之后返回超大值触发超时
-        call_count = [0]
-        def fake_monotonic():
-            call_count[0] += 1
-            if call_count[0] <= 3:
-                return 1000.0       # 正常：查询 + 计算阶段
-            return 999999.0         # 超时：远超任何 deadline
-        monkeypatch.setattr(_time, 'monotonic', fake_monotonic)
+        # patch Path.exists 返回 True
+        with patch("webui.routes.Path") as mock_path:
+            mock_path.return_value.exists.return_value = True
+            mock_path.return_value.is_absolute.return_value = False
+            body = {"media": "test_movie"}
+            status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         
-        # 发起刷新请求
-        body = {"media": "test_movie"}
-        status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
-        
-        # 验证返回超时标记
+        # 验证无超时字段（超时逻辑已移除，防止被误加回）
         assert status == 200, f"Expected 200, got {status}. Response: {resp}"
-        assert resp.get("timeout") is True, f"Expected timeout=True, got {resp}"
+        assert resp.get("ok") is True, f"Expected ok=True, got {resp}"
+        assert "timeout" not in resp, f"不应再返回 timeout 字段: {resp}"
 
 
 # ============================================================

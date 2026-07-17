@@ -183,24 +183,6 @@ class TestAppServicePathValidation:
         self.app.config.strm_engine_paths = []
         assert self.app.is_valid_refresh_root("/any/path") is True
 
-    def test_find_matching_engine_path_exact(self):
-        self.app.config.strm_engine_paths = ["/e1", "/e2"]
-        assert self.app._find_matching_engine_path("/e1") == "/e1"
-
-    def test_find_matching_engine_path_subpath(self):
-        self.app.config.strm_engine_paths = ["/e1"]
-        assert self.app._find_matching_engine_path("/e1/show/ep") == "/e1"
-
-    def test_find_matching_engine_path_returns_longest(self):
-        self.app.config.strm_engine_paths = ["/e1", "/e1/sub"]
-        # /e1/sub/file matches both; should return longest
-        result = self.app._find_matching_engine_path("/e1/sub/file.mp4")
-        assert result == "/e1/sub"
-
-    def test_find_matching_engine_path_no_match(self):
-        self.app.config.strm_engine_paths = ["/e1"]
-        assert self.app._find_matching_engine_path("/other") is None
-
 
 # ===========================================================================
 # TestGhostProtection  (migrated)

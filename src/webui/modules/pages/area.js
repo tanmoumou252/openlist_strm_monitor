@@ -288,33 +288,20 @@ if (area === 'a') {
   // 绑定刷新按钮事件
   const refreshBtn = document.getElementById('refresh-media-btn');
   if (refreshBtn) {
-    const doRefresh = async (confirmed) => {
+    const doRefresh = async () => {
       refreshBtn.disabled = true;
       refreshBtn.innerHTML = `${icon('loading')} 刷新中...`;
       try {
         const result = await api(`/api/area/${area}/refresh`, {
           method: 'POST',
-          body: JSON.stringify({ media, confirmed })
+          body: JSON.stringify({ media })
         });
 
         if (result.ok) {
-          let msg = `刷新完成：新增 ${result.added} 个，删除 ${result.removed} 个，未变 ${result.unchanged} 个`;
-          if (result.timeout) {
-            msg += '（部分超时）';
-            showToast(msg, 'warning');
-          } else {
-            showToast(msg, 'success');
-          }
+          const msg = result.message || '刷新完成';
+          showToast(msg, 'success');
           // 自动刷新页面数据
           await renderAreaDetail(el, area, params);
-        } else if (result.needs_confirmation) {
-          // 误删保护：需要二次确认（使用回调模式）
-          showConfirmDialog(
-            '删除确认',
-            `${result.message}<br><br>此操作将删除 ${result.removed} 个文件，是否继续？`,
-            async () => { await doRefresh(true); },
-            null
-          );
         } else {
           showToast(`刷新失败：${result.error || '未知错误'}`, 'error');
         }
@@ -329,8 +316,8 @@ if (area === 'a') {
     refreshBtn.addEventListener('click', () => {
       showConfirmDialog(
         '刷新媒体数据',
-        `将对比 A 区数据库与 OpenList API 返回的文件，自动同步差异。<br><br>媒体：${esc(media)}<br><br>是否继续？`,
-        async () => { await doRefresh(false); },
+        `将触发 STRM 引擎重新生成并同步。<br><br>媒体：${esc(media)}<br><br>是否继续？`,
+        async () => { await doRefresh(); },
         null
       );
     });

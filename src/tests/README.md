@@ -1,74 +1,122 @@
 # 测试脚本说明
 
-本目录包含 `openlist_strm_bridge` 项目的所有测试文件。
+本目录包含 `openlist_strm_bridge` 项目的全部测试文件，当前共 **34** 个 `test_*.py`。
 
-## 测试分类
+所有测试均从**项目根目录**运行（根目录含 `conftest.py` 与 `src/` 路径注入），推荐命令：
 
-### 单元测试
+```bash
+python -m pytest src/tests/ -v
+```
 
-针对单个函数或模块的测试：
+## 测试文件清单（按功能分组）
 
-- `test_fts5_escape_and_tmdb_search.py` - FTS5 查询转义函数和 TMDB 搜索路由测试
-- `test_database.py` - 数据库操作测试
-- `test_config.py` - 配置加载和验证测试
-- `test_media_renamer.py` - 媒体重命名逻辑测试
-- `test_subtitle_handler.py` - 字幕处理测试
+### 核心引擎
 
-### 集成测试
+| 文件 | 说明 |
+|------|------|
+| `test_app_service_core.py` | 核心同步引擎 `AppServiceCore` 主流程与状态机测试 |
+| `test_sync_service.py` | A→B 同步服务（`copy_a_record_to_b_if_needed` 等）测试 |
+| `test_area_watchers.py` | A/B/C 三区文件系统监视器事件处理测试 |
+| `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试 |
+| `test_refresh_service.py` | 周期性 WebDAV 刷新服务测试 |
 
-测试多个模块之间的交互：
+### 数据库 / FTS
 
-- `test_webui_routes.py` - WebUI API 路由测试
-- `test_tmdb_integration.py` - TMDB API 集成测试
-- `test_openlist_integration.py` - OpenList API 集成测试
+| 文件 | 说明 |
+|------|------|
+| `test_integration.py` | 数据库重构与核心流程集成测试（含 A/B/C 区 FTS 完整性回归） |
+| `test_fts5_search.py` | FTS5 全文检索查询与匹配测试 |
+| `test_fts5_escape_and_tmdb_search.py` | FTS5 查询转义函数与 TMDB 搜索路由测试 |
+| `test_fts_orphan_cleanup.py` | FTS 孤儿行清理与一致性测试 |
 
-### 端到端测试
+### 配置 / 安全
 
-模拟完整用户流程的测试：
+| 文件 | 说明 |
+|------|------|
+| `test_password_security.py` | 管理员密码 PBKDF2 哈希与校验安全测试 |
+| `test_secret_manager.py` | 密钥/凭据安全管理测试 |
+| `test_migrate_encryption.py` | 加密方案迁移测试 |
+| `test_integration_security.py` | 跨模块安全边界与鉴权测试 |
+| `test_strm_engines_validation.py` | STRM 引擎配置校验测试 |
 
-- `test_onboarding_e2e.py` - 新手引导流程端到端测试
-- `test_e2e_full_flow.py` - 完整业务流程端到端测试（需求 24-28）
+### 工具 / 媒体
+
+| 文件 | 说明 |
+|------|------|
+| `test_utils.py` | 通用工具函数测试 |
+| `test_media_renamer.py` | 媒体重命名与季/集号提取测试 |
+| `test_subtitle_handler.py` | 字幕同步与规范化测试 |
+| `test_boundary_conditions.py` | 边界条件与异常输入健壮性测试 |
+| `test_error_translator.py` | 错误码到用户可读信息的翻译测试 |
+
+### API 客户端
+
+| 文件 | 说明 |
+|------|------|
+| `test_openlist_admin_api.py` | OpenList Admin API 客户端测试 |
+| `test_openlist_hotreload.py` | OpenList 热重载/配置刷新测试 |
+| `test_webdav_client.py` | WebDAV 协议客户端测试 |
+| `test_tmdb_client.py` | TMDB API v3 客户端测试 |
+| `test_tmdb_api.py` | TMDB API 路由与缓存测试 |
+
+### WebUI
+
+| 文件 | 说明 |
+|------|------|
+| `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试 |
+| `test_webui_standalone.py` | WebUI 独立启动与静态资源服务测试 |
+| `test_call_coverage.py` | 路由调用覆盖率测试 |
+| `test_logging_system.py` | 日志系统测试 |
+| `test_concurrency.py` | 并发请求与锁竞争测试 |
+
+### 匹配 / 监视
+
+| 文件 | 说明 |
+|------|------|
+| `test_watchlist_match.py` | TMDB 想看列表与本地收藏匹配逻辑测试 |
+| `test_watchlist_match_state.py` | 匹配状态持久化与状态机测试 |
+
+### 端到端
+
+| 文件 | 说明 |
+|------|------|
+| `test_e2e_full_flow.py` | 完整业务流程端到端测试（登录→配置→A/B 区→状态校验） |
+| `test_onboarding_e2e.py` | 新手引导流程端到端测试 |
+| `test_real_server.py` | 真实服务器启动与存活探测测试 |
 
 ## 运行测试
 
 ### 运行所有测试
 
 ```bash
-cd src
-python -m pytest tests/ -v
+python -m pytest src/tests/ -v
 ```
 
 ### 运行特定测试文件
 
 ```bash
-cd src
-python -m pytest tests/test_e2e_full_flow.py -v
+python -m pytest src/tests/test_refresh_media.py -v
 ```
 
 ### 运行特定测试类
 
 ```bash
-cd src
-python -m pytest tests/test_fts5_escape_and_tmdb_search.py::TestEscapeFts5Query -v
+python -m pytest src/tests/test_refresh_media.py::TestSyncToBZone -v
 ```
 
 ### 运行特定测试方法
 
 ```bash
-cd src
-python -m pytest tests/test_fts5_escape_and_tmdb_search.py::TestEscapeFts5Query::test_escape_star -v
+python -m pytest src/tests/test_refresh_media.py::TestSyncToBZone::test_sync_counts_mixed_results -v
 ```
 
 ### 运行测试并生成覆盖率报告
 
 ```bash
-cd src
-python -m pytest tests/ --cov=. --cov-report=html
+python -m pytest src/tests/ --cov=src --cov-report=html
 ```
 
 ## 测试依赖
-
-运行测试需要以下依赖：
 
 ```bash
 pip install pytest pytest-cov
@@ -77,105 +125,21 @@ pip install pytest pytest-cov
 ## 测试环境
 
 - Python 3.11+
-- SQLite（内置）
-- 无需外部服务（所有外部依赖已 mock）
-
-## 测试文件说明
-
-### test_e2e_full_flow.py
-
-**覆盖场景：**
-
-1. **成功路径**
-   - 完整新用户流程：登录 → 配置 TMDB → 配置 OpenList → 查看 A/B 区 → 验证配置状态
-   - 引导步骤完成流程
-
-2. **失败场景**
-   - 不可达 OpenList 地址仍可保存配置
-   - OpenList 未配置时预检失败
-   - 非法 scope 被拒绝
-   - 包含空 engine 的 strm_engines 被拒绝
-
-**运行方式：**
-
-```bash
-cd src
-python -m pytest tests/test_e2e_full_flow.py -v
-```
-
-**预期输出：** 6 passed
-
-### test_fts5_escape_and_tmdb_search.py
-
-**覆盖场景：**
-
-1. **FTS5 查询清理函数测试**
-   - 特殊字符移除（* + " ^ ~ :）
-   - 括号替换为空格
-   - 连字符处理（词中间保留，首尾移除）
-   - 反斜杠替换为空格
-   - 中文混合特殊字符
-   - 多个空白合并
-
-2. **TMDB 搜索路由测试**
-   - 缺少 query 参数返回 400
-   - 空 query 返回 400
-   - 正常搜索返回电影和电视剧
-   - 搜索结果限制为前 10 条
-   - 无匹配结果返回空列表
-   - URL 解码和空白去除
-   - TMDB 客户端异常返回 500
-
-**运行方式：**
-
-```bash
-cd src
-python -m pytest tests/test_fts5_escape_and_tmdb_search.py -v
-```
-
-**预期输出：** 18 passed（FTS5 转义）+ 9 passed（TMDB 搜索）= 27 passed
-
-### test_onboarding_e2e.py
-
-**覆盖场景：**
-
-1. **引导流程**
-   - 初始状态所有步骤未完成
-   - 标记 view_ab 步骤完成
-   - 标记 tmdb_refresh 步骤完成
-   - 标记 tmdb_match 步骤完成
-   - 完成所有步骤
-
-2. **启动预检**
-   - OpenList 未配置时预检失败
-   - OpenList 已配置但不可达时预检失败
-   - 所有配置完成时预检通过
-
-3. **完整旅程**
-   - 从登录到完成引导的完整流程
-
-**运行方式：**
-
-```bash
-cd src
-python -m pytest tests/test_onboarding_e2e.py -v
-```
+- SQLite（内置，WAL 模式）
+- 多数测试无需外部服务（外部依赖已 mock）；端到端与真实服务器测试会启动本地 WebUI/引擎实例
 
 ## 测试策略
 
 ### Mock 策略
 
-所有测试使用 mock 避免真实网络调用和外部依赖：
-
 - `WebUIServer` 使用真实实例，但 mock 数据库和配置
-- `Database` 使用 mock，避免真实 SQLite 操作
+- `Database` 在集成/FTS 测试中多使用真实临时 SQLite（`tempfile.TemporaryDirectory`），单元测试中可 mock
 - `AppConfig` 使用 mock，提供最小化配置
-- TMDB 客户端使用 mock，避免真实 API 调用
-- OpenList 客户端使用 mock，避免真实 WebDAV 调用
+- TMDB / OpenList / WebDAV 客户端使用 mock，避免真实网络调用
 
 ### 测试隔离
 
-每个测试使用独立的 `tmp_path`，确保：
+每个测试使用独立的 `tmp_path` / 临时目录，确保：
 
 - 数据库文件隔离
 - 配置文件隔离
@@ -183,9 +147,7 @@ python -m pytest tests/test_onboarding_e2e.py -v
 
 ### 测试数据
 
-测试使用最小化数据集：
-
-- 空数据库（0 条记录）
+- 空数据库（0 条记录）或最小化数据集
 - 最小化配置（仅必要字段）
 - 固定测试密码（`test_password_123`）
 
@@ -193,11 +155,10 @@ python -m pytest tests/test_onboarding_e2e.py -v
 
 ### Q: 测试失败提示 "ModuleNotFoundError"
 
-**A:** 确保在 `src/` 目录下运行测试：
+**A:** 从**项目根目录**运行测试（不要 `cd src`）：
 
 ```bash
-cd src
-python -m pytest tests/
+python -m pytest src/tests/
 ```
 
 ### Q: 测试失败提示 "Port already in use"
@@ -210,33 +171,22 @@ python -m pytest tests/
 
 ### Q: 如何添加新测试
 
-**A:** 
+**A:**
 
-1. 在 `tests/` 目录下创建新文件 `test_xxx.py`
+1. 在 `src/tests/` 目录下创建新文件 `test_xxx.py`
 2. 使用 `pytest` 标准语法编写测试
 3. 如需 WebUIServer，参考 `test_e2e_full_flow.py` 的 fixture
 4. 运行测试验证
 
 ## 测试覆盖率
 
-当前测试覆盖率：
-
-- 核心模块：~80%
-- WebUI 路由：~70%
-- 端到端流程：~60%
+- 核心同步引擎与数据库/FTS：高覆盖（含孤儿行、rowid 复用等回归）
+- WebUI 路由：较高覆盖
+- 端到端流程：覆盖主路径与关键失败分支
 
 目标覆盖率：80%+
 
-## 持续集成
-
-测试已集成到 CI/CD 流程：
-
-- 每次提交自动运行测试
-- 测试失败阻止合并
-- 覆盖率报告自动生成
-
 ## 相关文档
 
-- [项目开发计划](../.kilo/plans/1784068382552-requirements-24-28-implementation.md)
 - [API 文档](../docs/)
 - [项目说明](../README.md)

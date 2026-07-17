@@ -331,18 +331,6 @@ class AppService:
         return self.is_path_under_any_root(
             root_path, self.config.strm_engine_paths)
 
-    def _find_matching_engine_path(self, webdav_path: str) -> str | None:
-        if not self.config.strm_engine_paths:
-            return None
-        candidates = []
-        for engine_path in self.config.strm_engine_paths:
-            if webdav_path == engine_path or webdav_path.startswith(
-                    engine_path + "/"):
-                candidates.append(engine_path)
-        if not candidates:
-            return None
-        return max(candidates, key=len)
-
     def _log_lineage_pass_once(self, reason: str, b_local_path: str) -> None:
         """把同类通过日志按目录前缀压缩成一行。"""
         summary_path = str(Path(b_local_path).parent)
