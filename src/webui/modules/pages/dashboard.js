@@ -63,7 +63,7 @@ function _renderOnboardingCard(status) {
       done: status.password_set,
       link: '#config',
       linkText: '前往配置',
-      message: '首次启动时系统已自动生成随机密码并显示在控制台日志中。如需修改，请前往配置页面。'
+      message: '首次启动时系统已自动生成随机密码并打印到控制台（仅显示一次，不写入日志）。如需修改，请前往配置页面。'
     },
     {
       key: 'tmdb',
@@ -444,7 +444,7 @@ export async function renderDashboard(el) {
 	
 	  <!-- 密码提示 -->
 	  <div style="text-align:center;font-size:12px;color:var(--text-muted);margin-top:8px">
-	    管理密码保存在 WebUI 控制台日志中 · 忘记密码可运行 <code style="background:var(--bg-control);padding:1px 4px;border-radius:3px">python reset_admin.py</code> 重置
+      管理密码仅在首次启动时打印到控制台（不写入日志） · 忘记密码可运行 <code style="background:var(--bg-control);padding:1px 4px;border-radius:3px">python reset_admin.py</code> 重置
 	  </div>`;
 
   // Bind start/stop buttons (replaces inline onclick)

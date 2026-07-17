@@ -40,7 +40,7 @@ export async function renderLogin(el) {
           <h2 style="margin:0 0 12px;font-size:20px;color:var(--text-main)">未设置管理员密码</h2>
           <p style="color:var(--text-muted);font-size:var(--font-base);line-height:1.6">
             WebUI 当前使用 IP 白名单保护，未设置密码。<br>
-            如需设置密码，请在控制台查看启动日志中的密码，<br>
+            首次启动时密码已打印到控制台（仅显示一次，不写入日志），<br>
             或运行 <code style="background:var(--bg-control);padding:2px 6px;border-radius:4px">python reset_admin.py</code> 生成一个新密码。
           </p>
           <button class="toolbar-btn primary" style="margin-top:12px" id="login-go-dashboard-btn">
@@ -73,7 +73,7 @@ export async function renderLogin(el) {
           </button>
         </div>
         <div style="margin-top:20px;text-align:center;font-size:12px;color:var(--text-muted);line-height:1.6">
-          管理密码打印在 WebUI 控制台日志中<br>
+          管理密码仅在首次启动时打印到控制台（仅显示一次，不写入日志）<br>
           忘记密码可运行 <code style="background:var(--bg-control);padding:1px 4px;border-radius:3px">python reset_admin.py</code> 重置
         </div>
       </div>
