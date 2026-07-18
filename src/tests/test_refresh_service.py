@@ -11,6 +11,7 @@ refresh_service.py 单元测试
 """
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -397,3 +398,91 @@ class TestCheckEngineAccessibility:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ============================================================
+# _run_cycle_with_breaker（熔断器）
+# ============================================================
+
+
+class TestCircuitBreaker:
+    """测试 _run_cycle_with_breaker 的连续失败熔断逻辑。"""
+
+    def test_success_resets_counter(self):
+        """成功执行 → _consecutive_failures 归零。"""
+        app = _make_app(refresh_paths=["/strm"])
+        svc = RefreshService(app)
+        svc._consecutive_failures = 5  # 模拟之前有失败
+        svc._last_error_summary = "old error"
+
+        with patch.object(svc, "execute_refresh_cycle"):
+            svc._run_cycle_with_breaker()
+
+        assert svc._consecutive_failures == 0
+        assert svc._last_error_summary == ""
+
+    def test_first_failures_log_error_with_traceback(self):
+        """前 N 次失败 → ERROR 级别 + exc_info（全栈）。"""
+        app = _make_app(refresh_paths=["/strm"])
+        svc = RefreshService(app)
+
+        with patch.object(svc, "execute_refresh_cycle",
+                          side_effect=sqlite3.OperationalError("readonly")):
+            with patch("refresh_service.logging") as mock_log:
+                svc._run_cycle_with_breaker()
+
+        assert svc._consecutive_failures == 1
+        mock_log.error.assert_called_once()
+        # exc_info=True 在 error 调用中
+        assert mock_log.error.call_args[1].get("exc_info") is True
+
+    def test_after_threshold_logs_warning_summary(self):
+        """超过阈值后 → WARNING 级别摘要，不再打全栈。"""
+        app = _make_app(refresh_paths=["/strm"])
+        svc = RefreshService(app)
+        svc._consecutive_failures = svc._CIRCUIT_BREAKER_THRESHOLD  # 已达阈值
+
+        with patch.object(svc, "execute_refresh_cycle",
+                          side_effect=sqlite3.OperationalError("readonly")):
+            with patch("refresh_service.logging") as mock_log:
+                svc._run_cycle_with_breaker()
+
+        assert svc._consecutive_failures == svc._CIRCUIT_BREAKER_THRESHOLD + 1
+        mock_log.warning.assert_called_once()
+        mock_log.error.assert_not_called()
+        # 摘要包含错误类型
+        assert "OperationalError" in svc._last_error_summary
+
+    def test_recovery_after_failures_logs_info(self):
+        """连续失败后恢复 → INFO 级别记录恢复信息。"""
+        app = _make_app(refresh_paths=["/strm"])
+        svc = RefreshService(app)
+        svc._consecutive_failures = 5
+        svc._last_error_summary = "old error"
+
+        with patch.object(svc, "execute_refresh_cycle"):
+            with patch("refresh_service.logging") as mock_log:
+                svc._run_cycle_with_breaker()
+
+        assert svc._consecutive_failures == 0
+        mock_log.info.assert_called_once()
+        assert "恢复正常" in mock_log.info.call_args[0][0]
+        assert "5" in str(mock_log.info.call_args[0])
+
+    def test_consecutive_failures_accumulate(self):
+        """连续失败正确累加。"""
+        app = _make_app(refresh_paths=["/strm"])
+        svc = RefreshService(app)
+
+        with patch.object(svc, "execute_refresh_cycle",
+                          side_effect=RuntimeError("boom")):
+            with patch("refresh_service.logging"):
+                svc._run_cycle_with_breaker()
+                svc._run_cycle_with_breaker()
+                svc._run_cycle_with_breaker()
+
+        assert svc._consecutive_failures == 3
+
+    def test_threshold_is_three(self):
+        """熔断阈值为 3。"""
+        assert RefreshService._CIRCUIT_BREAKER_THRESHOLD == 3

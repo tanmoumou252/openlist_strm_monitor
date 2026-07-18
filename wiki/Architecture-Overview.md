@@ -112,3 +112,21 @@ JWT 认证的 OpenList Admin API 客户端：
 | 事件驱动文件监控 | watchdog `Observer` + 3 个事件处理器 | `area_watchers.py` |
 | 子服务委托 | AppService 创建 SyncService、SubtitleHandler、RefreshService | `app_service_core.py` |
 | 渲染过时检测 | 前端 router 根据计数器判定渲染结果是否过时 | `router.js` |
+
+## 搜索架构（FTS5 / simple 分词器 / unicode61 降级）
+
+项目的中文智能搜索建立在 **SQLite FTS5 全文搜索虚拟表** 之上，核心由基础设施层的 `Database`（`src/database.py`）与 `TmdbWatchlistDb`（`src/tmdb_watchlist_db.py`）负责。
+
+- **分词器**：中文使用 `simple` 分词器（cppjieba 封装，源于 wangfenjin/simple，内置版本见 `src/tokenizers/simple/VERSION`，约 v0.7.1）。`database.py` 的 `_load_simple_tokenizer` 与 `tmdb_watchlist_db.py` 的 `_load_simple_into` 在连接建立时通过 `conn.load_extension` 加载 `src/tokenizers/simple/simple.dll`；加载成功后切换为 `simple` 并记录版本，失败则**软降级**到内建 `unicode61`（仅 warning，不阻断启动）。
+- **降级风险**：`unicode61` 不会对中文切分出有效 token，因此 `simple.dll` 缺失时中文搜索实际完全失效。本项目的 FTS 查询转义会移除 `*` 等通配符，前缀 `黑*` 之类的侥幸命中也不成立——**`simple` 是中文搜索的硬依赖**。
+- **FTS 虚拟表**：bridge.db 的 `a_strm_files_fts` / `b_strm_files_fts` / `c_ghost_files_fts` 索引 STRM/幽灵文件的 `local_path`、`webdav_path`；tmdb_watchlist.db 的 `tmdb_watchlist_fts` 索引待看列表的 `title`、`original_title`、`overview`。
+- **一致性**：`Database._rebuild_fts_if_stale` / `_backfill_fts_if_empty` 以及 `tmdb_watchlist_db.py` 中的孤儿清理，负责在基表变更后清理 FTS 中悬空的孤儿行，保证索引与基表一致。
+
+## 首次启动引导（Onboarding）
+
+为降低首次使用门槛，WebUI 提供 7 步新手引导，引导状态持久化在 tmdb_watchlist.db 的 `webui_config` 表中（`scope='ui'`，键如 `onboarding_completed`）。
+
+- **7 个步骤**（定义于前端 `src/webui/modules/pages/dashboard.js` 的 steps）：`password`（设置管理员密码）、`tmdb`（配置 TMDB）、`openlist`（配置 OpenList）、`main`（启动主程序）、`view_ab`（查看 A/B 区）、`tmdb_refresh`（刷新 TMDB 待看列表）、`tmdb_match`（检测 TMDB 收录状态）。
+- **单步完成**：前端调用 `POST /api/onboarding/complete-step` 手动标记某一步已完成。
+- **整体完成 / 跳过**：通过 `POST /api/webui/config/ui` 写入 `{ onboarding_completed: '1' }`（或 `onboarding_skipped`）标记引导结束；白名单键见 `routes.py` 的 `_UI_CONFIG_ALLOWED_KEYS`。
+- **状态读取**：`GET /api/main/status` 等接口回传 `onboarding_completed` 等字段，驱动前端步骤卡片的「已完成 / 进行中」展示。

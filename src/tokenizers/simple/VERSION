@@ -1,0 +1,34 @@
+simple-fts5-tokenizer
+=====================
+
+source:         https://github.com/wangfenjin/simple
+license:        dual MIT/GPL (since v0.5.2, PR #173)
+
+# --- 当前仓库内置版本 ---
+bundled-version:    v0.7.1
+bundled-release:    2026-02-23
+bundled-asset:      libsimple-windows-x64.zip  (解压得到 simple.dll)
+build-platform:     windows-x64 (GitHub Actions)
+release-notes:      update pinyin.txt (PR #202)
+
+# --- 判定依据 ---
+#   仓库内 assets/dict/ 下的 idf.utf8 / jieba.dict.utf8 时间戳为 2026-02-23，
+#   与 v0.7.1 的发布日一致 → 当前 simple.dll 基于 v0.7.1 构建。
+#   simple.dll 内无 FileVersion / ProductVersion 元数据（已用 strings 核实），
+#   版本判定依赖外部词典文件时间戳 + 上游 release 列表对照。
+
+# --- 上游邻近版本（仅供升级参考） ---
+#   v0.7.0 (2026-02-20, PR #201): Add support for custom pinyin dictionary file
+#   v0.6.1 (2026-02-15, PR #199): Add macOS-arm64 and OHOS build
+#   v0.6.0 (2026-02-15, PR #187): fix jieba_query error
+#   v0.5.2 (2025-04-18, PR #173): License changed to dual MIT/GPL
+
+# --- 升级指引 ---
+#   1. 从 https://github.com/wangfenjin/simple/releases 下载目标版本的
+#      libsimple-windows-x64.zip
+#   2. 解压并用其中的 simple.dll 覆盖本目录下的 simple.dll
+#   3. 同步更新本文件的 bundled-version / bundled-release / release-notes
+#   4. 如版本附带新词典，可一并替换 assets/dict/ 下的对应 .utf8 文件
+#      （注意：simple.dll 内部已通过 cmrc 嵌入词典，外部 assets/dict/
+#       仅用于替换/调试，并非运行时必需）
+#   5. 重启服务，查看日志确认 simple 分词器加载成功

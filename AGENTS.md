@@ -59,7 +59,8 @@ This file provides guidance to AI coding assistants when working with code in th
 | **Language** | Python 3.11+ (backend), JavaScript (frontend) |
 | **Frontend build** | Vite 8.x, vanilla JS (no React/Vue), MD3/Fluent2 dual theme |
 | **Backend HTTP** | Python stdlib `http.server` (single-threaded, one request at a time) |
-| **Database** | SQLite (WAL mode, two files) |
+| **Database** | SQLite (WAL mode, two files) + FTS5 with `simple` extension for Chinese search |
+| **Search/Tokenizer** | `simple` tokenizer (wangfenjin/simple, cppjieba wrapper, v0.7.1) loaded from `src/tokenizers/simple/simple.dll`; hard dependency for Chinese search |
 | **File watching** | `watchdog` library |
 | **HTTP client** | `requests` library |
 | **WebDAV XML** | `lxml` library |
@@ -170,6 +171,22 @@ The Vite config groups modules into chunks:
 - State includes: `CONFIG` constants, `OpenListState` (engines, status), `_hasPassword`, `_uiConfig`, TMDB cache
 - Floating-label form field pattern: `createField()` in `utils.js` generates label + input HTML
 - All API calls go through `api()` wrapper in `api.js` (auto token injection, 401 redirect, timeout)
+
+### Search & Tokenizer (FTS5 + Simple)
+- Chinese media-name search uses SQLite **FTS5** with the **`simple`** tokenizer — a cppjieba wrapper from the wangfenjin/simple project (built-in v0.7.1). The `simple.dll` lives in `src/tokenizers/simple/` (see that dir's `README.md` / `VERSION`).
+- Loading: `database.py._load_simple_tokenizer` and `tmdb_watchlist_db.py._load_simple_into` call `conn.load_extension(simple.dll)` when opening a connection.
+- Soft fallback: if `simple.dll` is missing/fails to load, the code downgrades to SQLite's built-in `unicode61` tokenizer and only logs a `WARNING` — startup is NOT blocked.
+- **Hard dependency**: `unicode61` produces no tokens for Chinese, so when `simple.dll` is absent, Chinese search silently returns empty. With a Chinese media library, `simple` is a hard dependency for search; always ship `src/tokenizers/simple/simple.dll` with the build.
+
+### Regional/Area Search
+- `GET /api/area/{area}?q=` runs FTS5 over the area tables; the query string is escaped via `_escape_fts5_query` before use.
+- The `kind` parameter (`anime` / `movie` / `other` / `all`, validated against `_KIND_FILTER_MAP`) classifies anime vs movie in the paginated media list.
+- The detail endpoint `GET /api/area/{area}/detail?media=` intentionally uses `LIKE` (small data, needs exact per-media match) rather than FTS5, and escapes LIKE wildcards with `ESCAPE '\'`.
+
+### Onboarding
+- A **7-step onboarding** flow guides first-run setup: confirm admin password (auto-generated on first startup) → configure TMDB → configure OpenList → start main program → view A/B zones → refresh TMDB watchlist → detect TMDB match status. Steps are defined in `dashboard.js`'s `steps` array.
+- State is stored in `tmdb_watchlist.db` → `webui_config` (scope=`ui`, keys like `onboarding_completed`, `onboarding_<step>_completed`).
+- Single step completion: `POST /api/onboarding/complete-step` (sets `onboarding_<step>_completed='1'`). Mark the whole flow complete or skip it via `POST /api/webui/config/ui` with `{ onboarding_completed: '1' }`.
 
 ## Common Pitfalls
 

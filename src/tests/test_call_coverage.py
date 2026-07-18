@@ -72,7 +72,6 @@ def _make_app_config(tmp_path: Path) -> AppConfig:
             sync_on_startup_wait=0,
             trash_dir_name="trash",
             action="MOVE",
-            b_delete_triggers_cloud_action=False,
             ghost_protect_seconds=300,
             a_to_b_restore_delay_seconds=30,
         ),
@@ -143,6 +142,7 @@ class TestMigrateConfigToDb:
         # 验证刷新配置
         assert wdb.get_config("openlist", "refresh_enabled") == "true"
         assert wdb.get_config("openlist", "refresh_interval_minutes") == "10"
+        assert wdb.get_config("openlist", "refresh_log_level") == "INFO"
 
         # 验证日志配置
         assert wdb.get_config("openlist", "log_level") == "INFO"

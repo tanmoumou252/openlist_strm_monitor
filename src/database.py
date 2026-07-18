@@ -168,16 +168,26 @@ class Database:
         for stmt in self._PRAGMA_STATEMENTS:
             conn.execute(stmt)
 
+    # Simple 分词器资源根目录（src/tokenizers/simple/）
+    _SIMPLE_TOKENIZER_DIR: Path = Path(__file__).parent / "tokenizers" / "simple"
+    _SIMPLE_DLL: Path = _SIMPLE_TOKENIZER_DIR / "simple.dll"
+    _SIMPLE_VERSION_FILE: Path = _SIMPLE_TOKENIZER_DIR / "VERSION"
+
     def _load_simple_tokenizer(self, conn: sqlite3.Connection) -> bool:
         """加载 simple 中文分词器扩展。成功返回 True，失败软降级返回 False。"""
         try:
             conn.enable_load_extension(True)
-            # 查找 simple.dll 的位置
-            simple_dll = Path(__file__).parent.parent / "simple.dll"
+            # simple.dll 位于 src/tokenizers/simple/simple.dll
+            simple_dll = self._SIMPLE_DLL
             if simple_dll.exists():
                 conn.load_extension(str(simple_dll))
                 self._fts_tokenizer = 'simple'
-                logging.debug("[DB] Simple tokenizer loaded successfully")
+                # 读取并缓存版本信息，供运维感知当前分词器版本
+                self._simple_version = self._read_simple_version()
+                logging.debug(
+                    "[DB] Simple tokenizer loaded successfully from %s (version: %s)",
+                    simple_dll, self._simple_version or "unknown",
+                )
                 return True
             else:
                 logging.warning(f"[DB] Simple tokenizer not found at {simple_dll}, falling back to unicode61")
@@ -186,14 +196,77 @@ class Database:
             logging.warning(f"[DB] Failed to load simple tokenizer: {e}, falling back to unicode61")
             return False
 
+    @classmethod
+    def _read_simple_version(cls) -> str:
+        """读取 src/tokenizers/simple/VERSION 的简明版本标识，失败返回空串。"""
+        try:
+            text = cls._SIMPLE_VERSION_FILE.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.lower().startswith("bundled-version:"):
+                    return stripped.split(":", 1)[1].strip()
+            # 兜底：返回首行非空内容
+            return next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+        except Exception:
+            return ""
+
+    # ---- 瞬时 SQLite 错误识别（Windows 杀毒锁文件/磁盘瞬断）----
+    _TRANSIENT_HINTS: tuple[str, ...] = (
+        "readonly", "database is locked", "disk i/o error",
+    )
+
+    def _is_transient_error(self, exc: sqlite3.OperationalError) -> bool:
+        """判断 OperationalError 是否为可恢复的瞬时错误。"""
+        msg = str(exc).lower()
+        return any(h in msg for h in self._TRANSIENT_HINTS)
+
+    def _probe_writeable(self, conn: sqlite3.Connection) -> None:
+        """用 BEGIN IMMEDIATE / ROLLBACK 探测连接是否可写（不变更 schema）。
+
+        BEGIN IMMEDIATE 会尝试获取 RESERVED 锁，在文件只读或 query_only
+        模式下均会抛 OperationalError。
+        仅在 connection() 内部调用。失败时抛出 OperationalError 并附诊断。
+        不做重试——重试由上层 _worker 周期自然完成，避免在持有
+        ReadWriteLock 期间阻塞。
+        """
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("ROLLBACK")
+        except sqlite3.OperationalError as exc:
+            self._log_db_diagnostics()
+            raise exc
+
+    def _log_db_diagnostics(self) -> None:
+        """输出数据库文件级诊断信息，辅助排查 readonly 问题。"""
+        try:
+            p = Path(self.db_path)
+            exists = p.exists()
+            if not exists:
+                logging.warning("[DB] 诊断: db_path=%s 文件不存在", self.db_path)
+                return
+            writable = os.access(str(p), os.W_OK)
+            parent = p.parent
+            parent_writable = os.access(str(parent), os.W_OK) if parent.exists() else False
+            size = p.stat().st_size
+            wal = Path(str(p) + "-wal")
+            shm = Path(str(p) + "-shm")
+            logging.warning(
+                "[DB] 诊断: db_path=%s exists=True writable=%s size=%s "
+                "parent_writable=%s wal_exists=%s shm_exists=%s",
+                self.db_path, writable, size, parent_writable,
+                wal.exists(), shm.exists(),
+            )
+        except Exception as diag_exc:
+            logging.debug("[DB] 诊断输出失败: %s", diag_exc)
+
     @contextmanager
     def connection(self) -> Generator[sqlite3.Connection, None, None]:
-        """写连接上下文管理器 - 用于修改数据库的操作
-        
-        注意：不在每次连接时调用 _ensure_db_writable()，因为：
-        1. __init__ 已经确保数据库文件存在且可写
-        2. 在 Windows 上，_ensure_db_writable 创建临时连接会导致文件锁竞争
-        3. 如果数据库真的不可写，sqlite3.connect 会抛出异常
+        """写连接上下文管理器 - 用于修改数据库的操作。
+
+        打开后做一次 BEGIN/ROLLBACK 写能力探测，捕获 Windows 杀软瞬时锁
+        等 readonly 异常。探测失败立即上抛（附诊断日志），不做重试——调用方
+        rw_lock.write_locked 持锁期间不得 sleep，重试由上层 _worker 周期
+        自然完成。
         """
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
 
@@ -202,6 +275,7 @@ class Database:
             conn = sqlite3.connect(self.db_path, timeout=30)
             self._apply_pragmas(conn)
             self._load_simple_tokenizer(conn)
+            self._probe_writeable(conn)
             yield conn
         finally:
             if conn is not None:
@@ -212,12 +286,21 @@ class Database:
 
     @contextmanager
     def read_connection(self) -> Generator[sqlite3.Connection, None, None]:
-        """只读连接上下文管理器 - 不持有写锁，允许并发读取 (WAL模式下安全)"""
+        """只读连接上下文管理器 - 不持有写锁，允许并发读取 (WAL模式下安全)。
+
+        与 connection() 共享诊断逻辑：WAL PRAGMA 本身需要写权限，
+        瞬时 readonly 同样可能击中读路径（WebUI 路由、watchlist_match）。
+        """
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         conn = None
         try:
             conn = sqlite3.connect(self.db_path, timeout=30)
-            self._apply_pragmas(conn)
+            try:
+                self._apply_pragmas(conn)
+            except sqlite3.OperationalError as exc:
+                if self._is_transient_error(exc):
+                    self._log_db_diagnostics()
+                raise
             self._load_simple_tokenizer(conn)
             conn.execute("PRAGMA query_only=ON")
             yield conn
@@ -248,6 +331,7 @@ class Database:
         self._last_ghost_cleanup = 0.0
         self._ghost_cleanup_lock = threading.Lock()
         self._fts_tokenizer = 'unicode61'  # 默认降级值，simple 加载成功后更新为 'simple'
+        self._simple_version: str | None = None  # simple 分词器版本（加载成功后填充，见 _load_simple_tokenizer）
 
         # ===== 修复：确保数据库文件可写 =====
         self._ensure_db_writable()

@@ -28,9 +28,26 @@ class TestFTS5Tokenizer:
     """测试 simple 分词器加载"""
 
     def test_simple_dll_exists(self):
-        """验证 simple.dll 文件存在"""
-        simple_dll = Path(__file__).resolve().parent.parent.parent / "simple.dll"
+        """验证 simple.dll 文件存在（迁移后位于 src/tokenizers/simple/）"""
+        simple_dll = (
+            Path(__file__).resolve().parent.parent
+            / "tokenizers" / "simple" / "simple.dll"
+        )
         assert simple_dll.exists(), f"simple.dll 不存在: {simple_dll}"
+
+    def test_simple_version_readable(self):
+        """验证 Database 加载 simple 分词器后 _simple_version 非空（来自 VERSION 文件）。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = Database(db_path)
+            with db.connection() as conn:
+                # 若 simple.dll 缺失则软降级 unicode61，_simple_version 可能为空；
+                # 有 dll 时必为版本号字符串（如 v0.7.1）。
+                if (Path(__file__).resolve().parent.parent / "tokenizers" / "simple" / "simple.dll").exists():
+                    assert db._simple_version, "simple 加载成功但 _simple_version 为空"
+                    assert db._simple_version.startswith("v"), (
+                        f"_simple_version 格式异常: {db._simple_version!r}"
+                    )
 
     def test_load_simple_tokenizer(self):
         """测试分词器加载"""
@@ -137,6 +154,56 @@ class TestChineseSearch:
                 # 应该匹配 3 条记录
                 assert len(results) == 3, f"应匹配 3 条记录，实际匹配 {len(results)} 条"
                 assert all("黑暗" in path for path in results)
+
+    def test_search_dark_vs_reverse(self):
+        """固化分词语义：simple 按词分词，'黑暗' 与 '暗黑' 是两个不同词，互不命中。
+
+        数据集含「黑暗骑士 / 黑暗之光 / 暗黑破坏神 / 黎明前的黑暗」：
+        - 搜 '黑暗' → 3 条（黑暗骑士、黑暗之光、黎明前的黑暗），不含 暗黑破坏神
+        - 搜 '暗黑' → 仅 1 条（暗黑破坏神）
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = Database(db_path)
+
+            data = [
+                ("/test/黑暗骑士/黑暗骑士.strm", "/test/黑暗骑士"),
+                ("/test/黑暗之光/黑暗之光.strm", "/test/黑暗之光"),
+                ("/test/暗黑破坏神/暗黑破坏神.strm", "/test/暗黑破坏神"),
+                ("/test/黎明前的黑暗/黎明前的黑暗.strm", "/test/黎明前的黑暗"),
+            ]
+            for local_path, parent_path in data:
+                db.upsert_a(
+                    local_path=local_path,
+                    webdav_path=local_path,
+                    parent_webdav_path=parent_path,
+                )
+
+            def _match(query: str) -> list[str]:
+                with db.read_connection() as conn:
+                    cursor = conn.execute(
+                        """
+                        SELECT local_path FROM a_strm_files
+                        WHERE rowid IN (
+                            SELECT rowid FROM a_strm_files_fts
+                            WHERE a_strm_files_fts MATCH ?
+                        )
+                        """,
+                        (query,),
+                    )
+                    return [row[0] for row in cursor.fetchall()]
+
+            dark = _match("黑暗")
+            assert len(dark) == 3, f"搜 '黑暗' 应命中 3 条，实际 {len(dark)} 条: {dark}"
+            assert not any("暗黑破坏神" in p for p in dark), (
+                f"搜 '黑暗' 不应命中 '暗黑破坏神'：{dark}"
+            )
+
+            reverse = _match("暗黑")
+            assert len(reverse) == 1, f"搜 '暗黑' 应仅命中 1 条，实际 {len(reverse)} 条: {reverse}"
+            assert any("暗黑破坏神" in p for p in reverse), (
+                f"搜 '暗黑' 应命中 '暗黑破坏神'：{reverse}"
+            )
 
     def test_search_mixed_language(self):
         """测试混合语言搜索"""
@@ -387,6 +454,98 @@ class TestFTS5Fallback:
             finally:
                 # 恢复原始方法
                 Database._load_simple_tokenizer = original_load
+
+    def test_unicode61_fallback_no_cjk_hits(self):
+        """固化降级行为：unicode61 降级后中文 FTS5 精确查询返回 0 条。
+
+        unicode61 默认 categories 包含 Lo（CJK 属此类），会将连续 CJK 字符拼为
+        整词 token（如「黑暗骑士」→ 单 token），不按词切分。
+        因此 MATCH '黑暗'（精确 token 匹配）对索引中的「黑暗骑士」不命中 → 0 条。
+
+        本测试 monkeypatch _load_simple_tokenizer 返回 False（模拟 dll 缺失），
+        建库后插入含中文媒体名的 A 区数据，断言 FTS5 MATCH 查询返回 0 条。
+        """
+        from database import Database
+        original_load = Database._load_simple_tokenizer
+
+        def mock_load(self, conn):
+            return False
+
+        Database._load_simple_tokenizer = mock_load
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = os.path.join(tmpdir, "test_cjk_fallback.db")
+                db = Database(db_path)
+
+                # 确认已降级到 unicode61
+                assert db._fts_tokenizer == "unicode61", (
+                    f"应降级到 unicode61，实际 _fts_tokenizer={db._fts_tokenizer!r}"
+                )
+
+                # 插入中文数据（与 test_search_dark_vs_reverse 同数据集）
+                data = [
+                    ("/test/黑暗骑士/黑暗骑士.strm", "/test/黑暗骑士"),
+                    ("/test/黑暗之光/黑暗之光.strm", "/test/黑暗之光"),
+                    ("/test/暗黑破坏神/暗黑破坏神.strm", "/test/暗黑破坏神"),
+                    ("/test/黎明前的黑暗/黎明前的黑暗.strm", "/test/黎明前的黑暗"),
+                ]
+                for local_path, parent_path in data:
+                    db.upsert_a(
+                        local_path=local_path,
+                        webdav_path=local_path,
+                        parent_webdav_path=parent_path,
+                    )
+
+                # 防御性断言：确认 FTS 表确实有数据（排除 FTS 同步失效导致的假阴性）
+                # 注意：upsert_a 内部由 Python 代码手动 INSERT/DELETE 同步 FTS 表，
+                # 非数据库触发器；若此处断言失败，应检查 upsert_a 的 FTS 同步逻辑。
+                with db.read_connection() as conn:
+                    fts_count = conn.execute(
+                        "SELECT count(*) FROM a_strm_files_fts"
+                    ).fetchone()[0]
+                    assert fts_count == 4, (
+                        f"FTS 表应有 4 条记录，实际 {fts_count}（FTS 同步可能未生效）"
+                    )
+
+                # FTS5 MATCH 查询「黑暗」—— unicode61 将连续 CJK 拼为整词 token，
+                # 不按词切分，因此精确 token「黑暗」不命中索引中的「黑暗骑士」→ 0 条
+                with db.read_connection() as conn:
+                    cursor = conn.execute(
+                        """
+                        SELECT local_path FROM a_strm_files
+                        WHERE rowid IN (
+                            SELECT rowid FROM a_strm_files_fts
+                            WHERE a_strm_files_fts MATCH ?
+                        )
+                        """,
+                        ("黑暗",),
+                    )
+                    results = [row[0] for row in cursor.fetchall()]
+
+                assert len(results) == 0, (
+                    f"unicode61 降级后搜 '黑暗' 应返回 0 条，实际 {len(results)} 条: {results}"
+                )
+
+                # 对照：「暗黑」同样不应命中
+                with db.read_connection() as conn:
+                    cursor = conn.execute(
+                        """
+                        SELECT local_path FROM a_strm_files
+                        WHERE rowid IN (
+                            SELECT rowid FROM a_strm_files_fts
+                            WHERE a_strm_files_fts MATCH ?
+                        )
+                        """,
+                        ("暗黑",),
+                    )
+                    results2 = [row[0] for row in cursor.fetchall()]
+
+                assert len(results2) == 0, (
+                    f"unicode61 降级后搜 '暗黑' 应返回 0 条，实际 {len(results2)} 条: {results2}"
+                )
+        finally:
+            Database._load_simple_tokenizer = original_load
 
     def test_special_chars_fallback_to_like(self):
         """测试搜索含特殊字符时回退到 LIKE"""

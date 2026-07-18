@@ -37,6 +37,7 @@ This file provides guidance to AI coding assistants when working with the `openl
 - **Backend**: Python 3.11+, stdlib `http.server` (single-threaded)
 - **Frontend**: Vanilla JS SPA, Vite 8.x build, MD3/Fluent2 dual theme
 - **Database**: SQLite (WAL mode): `bridge.db` + `tmdb_watchlist.db`
+- **Search/Tokenizer**: SQLite FTS5 + `simple` extension (wangfenjin/simple, cppjieba wrapper, v0.7.1, `simple.dll` under `src/tokenizers/simple/`). Hard dependency for Chinese search; falls back to `unicode61` (no Chinese tokens) on load failure.
 - **Dependencies**: watchdog, requests, lxml, pyotp, pytest
 
 ## Key Architecture
@@ -55,6 +56,18 @@ This file provides guidance to AI coding assistants when working with the `openl
 ### Frontend API Calls
 - ALWAYS use the `api()` function from `src/webui/modules/core/api.js` — it auto-attaches the auth token
 - Raw `fetch()` bypasses auth and will get 401
+
+### Search & Tokenizer (FTS5 + Simple)
+- Chinese media-name search uses SQLite **FTS5** with the **`simple`** tokenizer (cppjieba wrapper from wangfenjin/simple, built-in v0.7.1). The `simple.dll` lives in `src/tokenizers/simple/` (see that dir's `README.md` / `VERSION`).
+- Loading: `database.py._load_simple_tokenizer` and `tmdb_watchlist_db.py._load_simple_into` call `load_extension(simple.dll)` on connection open.
+- Soft fallback: if `simple.dll` is missing or fails to load, it downgrades to SQLite's built-in `unicode61` tokenizer and only logs a `WARNING` — it does NOT abort startup.
+- **Hard dependency**: `unicode61` produces no tokens for Chinese text, so when `simple.dll` is absent, Chinese search silently returns nothing. In a Chinese media library, `simple` is a hard dependency for search; always ensure `src/tokenizers/simple/simple.dll` ships with the build.
+- **Regional/Area search**: `GET /api/area/{area}?q=` runs FTS5 (query escaped via `_escape_fts5_query`); the `kind` param (`anime`/`movie`/`other`/`all`) classifies anime vs movie. The detail endpoint `GET /api/area/{area}/detail?media=` uses `LIKE` (small data, requires exact match), not FTS5.
+
+### Onboarding
+- A **7-step onboarding** flow guides first-run setup (confirm admin password → TMDB → OpenList → start engine → view A/B → refresh TMDB watchlist → detect TMDB match). Steps are defined in `dashboard.js`'s `steps` array.
+- State is stored in `tmdb_watchlist.db` → `webui_config` (scope=`ui`, e.g. `onboarding_completed`).
+- Single step: `POST /api/onboarding/complete-step`. Mark the whole flow complete/skip via `POST /api/webui/config/ui` with `{ onboarding_completed: '1' }`.
 
 ## Key Files
 

@@ -59,11 +59,11 @@ function _renderOnboardingCard(status) {
   const steps = [
     {
       key: 'password',
-      label: '设置管理员密码',
+      label: '确认管理员密码',
       done: status.password_set,
       link: '#config',
       linkText: '前往配置',
-      message: '首次启动时系统已自动生成随机密码并打印到控制台（仅显示一次，不写入日志）。如需修改，请前往配置页面。'
+      message: '首次启动时系统已自动生成随机密码并打印到控制台（仅显示一次，不写入日志）。遗忘或需自定义密码，请运行 reset_admin.py。'
     },
     {
       key: 'tmdb',

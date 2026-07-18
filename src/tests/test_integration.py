@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -697,3 +698,123 @@ class TestFTSIntegrityCGhost:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ============================================================
+# SQLite 只读保护 & 瞬时错误探测 测试
+# ============================================================
+
+class TestIsTransientError:
+    """_is_transient_error: 识别可恢复的瞬时 SQLite 错误。"""
+
+    def _make_db(self, tmp_path):
+        return Database(str(tmp_path / "test.db"))
+
+    def test_readonly_is_transient(self, tmp_path):
+        exc = sqlite3.OperationalError("attempt to write a readonly database")
+        assert self._make_db(tmp_path)._is_transient_error(exc) is True
+
+    def test_database_is_locked_is_transient(self, tmp_path):
+        exc = sqlite3.OperationalError("database is locked")
+        assert self._make_db(tmp_path)._is_transient_error(exc) is True
+
+    def test_disk_io_error_is_transient(self, tmp_path):
+        exc = sqlite3.OperationalError("disk I/O error")
+        assert self._make_db(tmp_path)._is_transient_error(exc) is True
+
+    def test_case_insensitive_match(self, tmp_path):
+        exc = sqlite3.OperationalError("Attempt to Write a Readonly Database")
+        assert self._make_db(tmp_path)._is_transient_error(exc) is True
+
+    def test_no_such_table_not_transient(self, tmp_path):
+        exc = sqlite3.OperationalError("no such table: foo")
+        assert self._make_db(tmp_path)._is_transient_error(exc) is False
+
+    def test_malformed_not_transient(self, tmp_path):
+        exc = sqlite3.OperationalError("database disk image is malformed")
+        assert self._make_db(tmp_path)._is_transient_error(exc) is False
+
+
+class TestProbeWriteable:
+    """_probe_writeable: BEGIN/ROLLBACK 写能力探测。"""
+
+    def test_normal_connection_probe_succeeds(self, tmp_path):
+        """正常可写连接探测不抛异常。"""
+        db = Database(str(tmp_path / "test.db"))
+        with db.connection() as conn:
+            conn.execute("SELECT 1")
+
+    def test_probe_raises_on_readonly_connection(self, tmp_path):
+        """对 query_only 连接探测应抛 OperationalError。"""
+        db = Database(str(tmp_path / "test.db"))
+        conn = sqlite3.connect(db.db_path, timeout=5)
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            with pytest.raises(sqlite3.OperationalError):
+                db._probe_writeable(conn)
+        finally:
+            conn.close()
+
+    def test_probe_does_not_leave_data(self, tmp_path):
+        """BEGIN/ROLLBACK 探测不留残余数据。"""
+        db = Database(str(tmp_path / "test.db"))
+        with db.connection() as conn:
+            tables_before = {
+                row[0] for row in
+                conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+        # 探测后表集合不变
+        with db.connection() as conn:
+            tables_after = {
+                row[0] for row in
+                conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+        assert tables_before == tables_after
+
+
+class TestConnectionReadonlyDiagnostic:
+    """connection(): readonly 错误通过 monkeypatch 模拟上抛。"""
+
+    def test_readonly_error_propagates(self, tmp_path, monkeypatch):
+        """connection() 内部 _probe_writeable 抛 readonly → OperationalError 上抛。"""
+        db = Database(str(tmp_path / "test.db"))
+
+        original_probe = db._probe_writeable
+
+        def _mock_probe(conn):
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+
+        monkeypatch.setattr(db, "_probe_writeable", _mock_probe)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            with db.connection() as conn:
+                conn.execute("SELECT 1")
+
+    def test_non_readonly_error_also_propagates(self, tmp_path, monkeypatch):
+        """非 readonly OperationalError 同样上抛。"""
+        db = Database(str(tmp_path / "test.db"))
+
+        def _mock_probe(conn):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(db, "_probe_writeable", _mock_probe)
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            with db.connection() as conn:
+                conn.execute("SELECT 1")
+
+
+class TestReadConnectionTransientDiagnostic:
+    """read_connection(): 瞬时 readonly 同样有诊断。"""
+
+    def test_readonly_pragma_error_propagates(self, tmp_path, monkeypatch):
+        """WAL PRAGMA 失败 → OperationalError 上抛。"""
+        db = Database(str(tmp_path / "test.db"))
+
+        original_apply = db._apply_pragmas
+
+        def _mock_pragmas(conn):
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+
+        monkeypatch.setattr(db, "_apply_pragmas", _mock_pragmas)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            with db.read_connection() as conn:
+                conn.execute("SELECT 1")

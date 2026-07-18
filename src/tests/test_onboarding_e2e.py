@@ -380,6 +380,56 @@ class TestCompleteJourney:
         assert resp["onboarding_completed"] is True
 
 
+class TestOnboardingCompleteViaConfig:
+    """整体完成/跳过的端到端闭环（前端 skip/complete 共用 POST /api/webui/config/ui）。
+
+    与单步 complete-step 不同，这里测试「一次性标记引导完成/复位」这一路径，
+    覆盖前端「跳过引导」「完成引导」「重新开始引导」按钮。
+    """
+
+    def test_onboarding_completed_via_config(self, webui_server):
+        """POST /api/webui/config/ui {onboarding_completed:'1'} → status 返回 true。"""
+        server, base, session_token = webui_server
+
+        # 初始未完成
+        status, _, resp = _http_get(base, "/api/config/status", session_token)
+        assert status == 200
+        assert resp["onboarding_completed"] is False
+
+        # 走前端 skip/complete 共用路径
+        status, _, resp = _http_post(
+            base, "/api/webui/config/ui",
+            {"onboarding_completed": "1"}, session_token)
+        assert status == 200
+
+        # 标记完成后 status 应为 true（前端据此隐藏引导卡片）
+        status, _, resp = _http_get(base, "/api/config/status", session_token)
+        assert status == 200
+        assert resp["onboarding_completed"] is True
+
+    def test_onboarding_reset(self, webui_server):
+        """POST /api/webui/config/ui {onboarding_completed:'0'} → 状态复位为 false。"""
+        server, base, session_token = webui_server
+
+        # 先标记完成
+        status, _, resp = _http_post(
+            base, "/api/webui/config/ui",
+            {"onboarding_completed": "1"}, session_token)
+        assert status == 200
+        status, _, resp = _http_get(base, "/api/config/status", session_token)
+        assert resp["onboarding_completed"] is True
+
+        # 复位（前端「重新开始引导」）
+        status, _, resp = _http_post(
+            base, "/api/webui/config/ui",
+            {"onboarding_completed": "0"}, session_token)
+        assert status == 200
+
+        status, _, resp = _http_get(base, "/api/config/status", session_token)
+        assert status == 200
+        assert resp["onboarding_completed"] is False
+
+
 # ============================================================
 # 场景 4：配置联动
 # ============================================================

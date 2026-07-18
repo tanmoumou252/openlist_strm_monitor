@@ -34,10 +34,24 @@ RANGES = [
     ("CJK基本区",  0x4E00, 0x9FFF, "SC"),
     ("全角符号",   0xFF00, 0xFFEF, "SC"),
     ("韩文谚文",   0xAC00, 0xD7AF, "KR"),
+    # 网页补充字符 —— 实际使用但不在上述大区块内的符号
+    ("补充U+00B7", 0x00B7, 0x00B7, "SC"),  # MIDDLE DOT ·
+    ("补充U+00D7", 0x00D7, 0x00D7, "SC"),  # MULTIPLICATION SIGN ×
+    ("补充U+2014", 0x2014, 0x2014, "SC"),  # EM DASH —
+    ("补充U+2026", 0x2026, 0x2026, "SC"),  # HORIZONTAL ELLIPSIS …
+    ("补充U+2192", 0x2192, 0x2192, "SC"),  # RIGHTWARDS ARROW →
+    ("补充U+25BE", 0x25BE, 0x25BE, "SC"),  # BLACK DOWN-POINTING SMALL TRIANGLE ▾
+    ("补充U+26A0", 0x26A0, 0x26A0, "SC"),  # WARNING SIGN ⚠
+    ("补充U+2713", 0x2713, 0x2713, "SC"),  # CHECK MARK ✓
+    ("补充U+FE0F", 0xFE0F, 0xFE0F, "SC"),  # VARIATION SELECTOR-16 ️
 ]
 
-DEFAULT_UNICODES = "U+0020-007F,U+3000-303F,U+3040-30FF,U+4E00-9FFF,U+FF00-FFEF,U+AC00-D7AF"
+DEFAULT_UNICODES = "U+0020-007F,U+3000-303F,U+3040-30FF,U+4E00-9FFF,U+FF00-FFEF,U+00B7,U+00D7,U+2014,U+2026,U+2192,U+25BE,U+26A0,U+2713,U+FE0F,U+AC00-D7AF"
 KR_UNICODES = "U+AC00-D7AF"
+
+# CSS @font-face unicode-range 值（SC 字体覆盖范围，不含韩文）
+# 与 main.css 行 10 的 unicode-range 保持一致
+_CSS_UNICODE_RANGE = "U+0020-00FF, U+2014, U+2026, U+2192, U+25BE, U+26A0, U+2713, U+FE0F, U+3000-303F, U+3040-30FF, U+4E00-9FFF, U+FF00-FFEF"
 
 # 脚本所在目录: src/webui/scripts/
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -269,7 +283,7 @@ def print_css_instructions(has_kr: bool, output_dir: str) -> None:
     if has_kr:
         print("1. 将第 10 行 unicode-range 改为:")
         print()
-        print("   unicode-range: U+0020-007F, U+3000-303F, U+3040-30FF, U+4E00-9FFF, U+FF00-FFEF;")
+        print(f"   unicode-range: {_CSS_UNICODE_RANGE};")
         print("   /* ASCII + 中日 + 标点 (韩文由第二个 @font-face 覆盖) */")
         print()
         print("2. 在第 11 行后追加韩文 @font-face:")
@@ -285,7 +299,7 @@ def print_css_instructions(has_kr: bool, output_dir: str) -> None:
     else:
         print("1. 将第 10 行 unicode-range 改为:")
         print()
-        print("   unicode-range: U+0020-007F, U+3000-303F, U+3040-30FF, U+4E00-9FFF, U+FF00-FFEF;")
+        print(f"   unicode-range: {_CSS_UNICODE_RANGE};")
         print("   /* ASCII + 中日 + 标点 */")
         print()
         print("   (韩文未生成, 无需追加 @font-face)")

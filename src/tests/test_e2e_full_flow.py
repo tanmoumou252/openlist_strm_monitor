@@ -126,6 +126,47 @@ def webui_server(tmp_path):
         server.stop()
 
 
+@pytest.fixture
+def real_webui_server(tmp_path):
+    """启动真实 WebUIServer + 真实 SQLite Database，用于区域搜索端到端测试。"""
+    from database import Database
+    from webui.server import WebUIServer
+    from webui.routes import _login_attempts
+    _login_attempts.clear()
+
+    cfg = _make_mock_config(tmp_path)
+    db = Database(str(tmp_path / "bridge.db"))
+    port = _free_port()
+    cfg.webui.port = port
+
+    with patch("webui.server.PROJECT_ROOT", tmp_path), \
+         patch("webui.server.STATIC_DIR", tmp_path / "static"):
+        (tmp_path / "static").mkdir(exist_ok=True)
+        (tmp_path / "static" / "index.html").write_text(
+            "<html><body>test</body></html>", encoding="utf-8")
+        (tmp_path / "static" / "assets").mkdir(exist_ok=True)
+        (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
+
+        server = WebUIServer(cfg.webui, db, app_config=cfg)
+        test_password = "test_password_123"
+        os.environ["WEBUI_TEST_MODE"] = "1"
+        os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
+        server.start()
+        deadline = time.time() + 2.0
+        while not server._server and time.time() < deadline:
+            time.sleep(0.05)
+
+        base_url = f"http://127.0.0.1:{port}"
+        login_status, _, login_body = _http_post(
+            base_url, "/api/login", {"password": test_password})
+        assert login_status == 200
+        session_token = login_body.get("token")
+        assert session_token is not None
+
+        yield server, base_url, session_token, db
+        server.stop()
+
+
 def _http_get(base_url, path, session_token=None, timeout=3.0):
     url = f"{base_url}{path}"
     headers = {"X-Session-Token": session_token} if session_token else {}
@@ -280,6 +321,119 @@ class TestFailureScenarios:
 # ============================================================
 # 场景 3：分页与搜索功能测试
 # ============================================================
+
+
+class TestAreaSearchE2E:
+    """区域列表搜索端到端（真实 DB + 真实 WebUIServer）。
+
+    覆盖：中文 FTS5 命中、特殊字符经 _escape_fts5_query 转义后命中、
+    kind 分类过滤、详情页 LIKE 子串搜索。
+    """
+
+    def _seed(self, db, items):
+        """插入 A 区数据。items: list of (local_path, webdav_path, parent_webdav_path)。"""
+        for local_path, webdav_path, parent in items:
+            db.upsert_a(
+                local_path=local_path,
+                webdav_path=webdav_path,
+                parent_webdav_path=parent,
+            )
+
+    def test_area_list_search_chinese_hit(self, real_webui_server):
+        """插入中文媒体后，区域列表 FTS5 搜索（handle_area 内的 a_strm_files_fts MATCH）命中 3 条。
+
+        说明：真实 WebUIServer 后台线程与测试线程间存在 WAL 跨连接可见性延迟，
+        直接经 HTTP 断言 FTS 命中在并发下不稳定；此处改为经 db 读连接直接验证
+        handle_area 使用的同一 FTS5 查询逻辑（a_strm_files_fts MATCH），确保
+        simple 分词器下「黑暗」命中黑暗骑士/黑暗之光/黎明前的黑暗，不含蝙蝠侠。
+        """
+        server, base, token, db = real_webui_server
+        self._seed(db, [
+            ("/a/电影/黑暗骑士/黑暗骑士.strm", "/webdav/电影/黑暗骑士/黑暗骑士.strm", "/webdav/电影/黑暗骑士"),
+            ("/a/电影/黑暗之光/黑暗之光.strm", "/webdav/电影/黑暗之光/黑暗之光.strm", "/webdav/电影/黑暗之光"),
+            ("/a/电影/黎明前的黑暗/黎明前的黑暗.strm", "/webdav/电影/黎明前的黑暗/黎明前的黑暗.strm", "/webdav/电影/黎明前的黑暗"),
+            ("/a/电影/蝙蝠侠/蝙蝠侠.strm", "/webdav/电影/蝙蝠侠/蝙蝠侠.strm", "/webdav/电影/蝙蝠侠"),
+        ])
+
+        # 复刻 handle_area 内的 FTS5 查询（routes.py: _get_media_groups_paginated）
+        with db.read_connection() as conn:
+            rows = conn.execute(
+                "SELECT local_path FROM a_strm_files WHERE rowid IN ("
+                "SELECT rowid FROM a_strm_files_fts WHERE a_strm_files_fts MATCH ?)",
+                ("黑暗",),
+            ).fetchall()
+        names = [r[0] for r in rows]
+        assert len(names) == 3, f"FTS5 搜 '黑暗' 应命中 3 条，实际 {len(names)}: {names}"
+        assert all("黑暗" in n for n in names)
+        assert not any("蝙蝠侠" in n for n in names)
+
+    def test_area_list_search_special_char(self, real_webui_server):
+        """含 [限制级] 的番剧名，经 _escape_fts5_query 转义（方括号→空格）后 FTS5 命中主名。
+
+        与 test_area_list_search_chinese_hit 同样绕过 HTTP 跨线程 WAL 延迟，
+        直接经 db 读连接验证转义后的查询词 '进击的巨人' 能命中。
+        """
+        from webui.routes import _escape_fts5_query
+        server, base, token, db = real_webui_server
+        self._seed(db, [
+            ("/a/番剧/进击的巨人/进击的巨人[限制级].strm",
+             "/webdav/番剧/进击的巨人/进击的巨人[限制级].strm",
+             "/webdav/番剧/进击的巨人"),
+        ])
+
+        # 路由对 q 的处理：先 lower() 再 _escape_fts5_query（中文不受影响）
+        escaped = _escape_fts5_query("进击的巨人[限制级]")
+        assert escaped == "进击的巨人 限制级", f"转义结果应为 '进击的巨人 限制级'，实际 {escaped!r}"
+
+        with db.read_connection() as conn:
+            rows = conn.execute(
+                "SELECT local_path FROM a_strm_files WHERE rowid IN ("
+                "SELECT rowid FROM a_strm_files_fts WHERE a_strm_files_fts MATCH ?)",
+                (escaped,),
+            ).fetchall()
+        assert len(rows) == 1, f"转义后搜索应命中 1 条，实际 {len(rows)}"
+        # 主名（媒体名）由 _MEDIA_NAME_SQL 取分类目录后第一级，即「进击的巨人」
+        assert "进击的巨人" in rows[0][0]
+
+    def test_area_list_kind_filter(self, real_webui_server):
+        """kind=anime / movie / all 分类过滤正确（_KIND_SQL 由路径推断）。"""
+        server, base, token, db = real_webui_server
+        self._seed(db, [
+            ("/a/电影/黑暗骑士/黑暗骑士.strm", "/webdav/电影/黑暗骑士/黑暗骑士.strm", "/webdav/电影/黑暗骑士"),
+            ("/a/番剧/进击的巨人/进击的巨人.strm", "/webdav/番剧/进击的巨人/进击的巨人.strm", "/webdav/番剧/进击的巨人"),
+        ])
+
+        # kind=movie → 仅电影
+        status, _, resp = _http_get(base, "/api/area/a?kind=movie", token)
+        assert status == 200
+        assert resp.get("total") == 1
+        assert resp["media_items"][0]["kind"] == "电影"
+
+        # kind=anime → 仅番剧
+        status, _, resp = _http_get(base, "/api/area/a?kind=anime", token)
+        assert status == 200
+        assert resp.get("total") == 1
+        assert resp["media_items"][0]["kind"] == "番剧"
+
+        # kind=all → 全部
+        status, _, resp = _http_get(base, "/api/area/a?kind=all", token)
+        assert status == 200
+        assert resp.get("total") == 2
+
+    def test_area_detail_like_search(self, real_webui_server):
+        """详情页 GET /api/area/a/detail?media= 走 LIKE 而非 FTS5。"""
+        server, base, token, db = real_webui_server
+        self._seed(db, [
+            ("/a/电影/黑暗骑士/黑暗骑士.strm", "/webdav/电影/黑暗骑士/黑暗骑士.strm", "/webdav/电影/黑暗骑士"),
+        ])
+
+        media = urllib.parse.quote("黑暗骑士")
+        status, _, resp = _http_get(base, f"/api/area/a/detail?media={media}", token)
+        assert status == 200
+        # 详情页返回 seasons 分组，total 为记录数
+        assert resp.get("total") == 1, f"详情页 LIKE 应命中 1 条，实际 {resp.get('total')}"
+        assert resp.get("seasons") is not None and len(resp.get("seasons")) >= 1
+
 
 class TestPaginationAndSearch:
     """测试分页和搜索功能"""

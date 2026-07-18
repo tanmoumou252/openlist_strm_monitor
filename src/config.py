@@ -62,7 +62,6 @@ class BehaviorConfig:
     sync_on_startup_wait: int
     trash_dir_name: str = "trash"
     action: str = "MOVE"
-    b_delete_triggers_cloud_action: bool = False
     ghost_protect_seconds: int = 300
     a_to_b_restore_delay_seconds: int = 30
 
@@ -235,7 +234,10 @@ class AppConfig:
                 ("behavior_a_to_b_restore_delay_seconds", self.behavior, "a_to_b_restore_delay_seconds", int),
                 ("behavior_sync_on_startup", self.behavior, "sync_on_startup", self._to_bool),
                 ("behavior_sync_on_startup_wait", self.behavior, "sync_on_startup_wait", int),
-                
+
+                # 刷新配置
+                ("refresh_log_level", self.refresh, "log_level", str),
+
                 # 日志配置
                 ("log_level", self.log, "level", str),
                 ("log_max_size_mb", self.log, "max_size_mb", int),
@@ -637,6 +639,8 @@ def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
                                 str(config.refresh.interval_seconds // 60))
         watchlist_db.set_config("openlist", "refresh_depth",
                                 str(config.refresh.depth))
+        watchlist_db.set_config("openlist", "refresh_log_level",
+                                config.refresh.log_level)
         
         # 行为配置
         watchlist_db.set_config("openlist", "behavior_action", config.behavior.action)

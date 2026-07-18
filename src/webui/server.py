@@ -1155,12 +1155,22 @@ class WebUIServer:
         """获取主程序状态
 
         Returns:
-            {"running": bool, "uptime": int | None}
+            {"running": bool, "uptime": int | None,
+             "refresh_healthy": bool, "refresh_consecutive_failures": int,
+             "refresh_last_error": str}
         """
-        return {
+        result: dict = {
             "running": self._app_running,
             "uptime": int(time.time() - self._app_start_time) if self._app_running and self._app_start_time else None,
         }
+        # 刷新服务健康状态（主程序运行时才有意义）
+        if self._app_running and self._app_service:
+            rs = getattr(self._app_service, 'refresh_service', None)
+            if rs:
+                result["refresh_healthy"] = rs._consecutive_failures == 0
+                result["refresh_consecutive_failures"] = rs._consecutive_failures
+                result["refresh_last_error"] = rs._last_error_summary
+        return result
 
 
 # ============================================================

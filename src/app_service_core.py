@@ -1963,11 +1963,9 @@ class AppService:
                     local_path)
                 self.db.delete_b_by_local(str(local))
                 return
-            if webdav_path and self.config.behavior.b_delete_triggers_cloud_action:
+            if webdav_path:
                 self._execute_webdav_deletion(webdav_path, parent_webdav_path)
                 self._delete_a_file_by_webdav(webdav_path)
-            else:
-                logging.info("[B区删除] 未启用云删除联动，跳过WebDAV删除与A区删除: %s", local_path)
             self.db.delete_b_by_local(str(local))
             if fingerprint:
                 self.refresh_identity_current_b_path(fingerprint)

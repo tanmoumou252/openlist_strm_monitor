@@ -23,6 +23,44 @@ if TYPE_CHECKING:
     from tmdb_client import TmdbClient
 
 # ============================================================
+# Simple FTS5 分词器（与 database.py 保持一致，指向 src/tokenizers/simple/）
+# ============================================================
+# simple.dll 是 wangfenjin/simple 项目的 Windows x64 构建（cppjieba 封装的
+# SQLite FTS5 分词器）。资源统一置于 src/tokenizers/simple/，避免与 dist/
+# 构建产物混淆。版本与接入说明见 src/tokenizers/simple/VERSION 与 README.md。
+# 加载失败时各调用点会软降级到 SQLite 默认的 unicode61 分词器。
+_SIMPLE_DLL_PATH = Path(__file__).parent / "tokenizers" / "simple" / "simple.dll"
+_SIMPLE_VERSION_PATH = Path(__file__).parent / "tokenizers" / "simple" / "VERSION"
+
+
+def _load_simple_into(conn: sqlite3.Connection) -> str | None:
+    """向连接加载 simple 分词器扩展。成功返回已加载的 simple 版本号字符串，失败返回 None。
+
+    保留原有的"静默失败 → unicode61 降级"语义；同时通过 VERSION 文件感知当前分词器版本。
+    """
+    try:
+        if not _SIMPLE_DLL_PATH.exists():
+            return None
+        conn.enable_load_extension(True)
+        conn.load_extension(str(_SIMPLE_DLL_PATH))
+        # 读取 VERSION 文件首行有效版本号（形如 v0.7.1）
+        version = None
+        try:
+            if _SIMPLE_VERSION_PATH.exists():
+                for line in _SIMPLE_VERSION_PATH.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("bundled-version:"):
+                        version = line.split(":", 1)[1].strip()
+                        break
+        except Exception:
+            pass
+        if version:
+            logging.debug("[TMDB-DB] Simple tokenizer loaded, version=%s", version)
+        return version
+    except Exception:
+        return None
+
+# ============================================================
 # 敏感配置键（需要加密存储）
 # ============================================================
 
@@ -32,6 +70,7 @@ _SENSITIVE_KEYS: frozenset[tuple[str, str]] = frozenset({
     ("tmdb", "access_token"),
     ("tmdb", "api_key"),
 })
+
 
 # ============================================================
 # Schema SQL
@@ -124,14 +163,8 @@ class TmdbWatchlistDb:
         conn.row_factory = sqlite3.Row
         
         # 尝试加载 simple 分词器（与 database.py 保持一致）
-        try:
-            conn.enable_load_extension(True)
-            simple_dll = Path(__file__).parent.parent / "simple.dll"
-            if simple_dll.exists():
-                conn.load_extension(str(simple_dll))
-        except Exception:
-            pass  # 静默失败，使用 unicode61 降级
-        
+        # 静默失败 → 后续 FTS5 建表统一降级到 unicode61
+        self._simple_version = _load_simple_into(conn) or ""
         return conn
 
     def _init_schema(self) -> None:
@@ -212,15 +245,13 @@ class TmdbWatchlistDb:
             
             # FTS5 全文搜索表（用于 TMDB 待看列表搜索）
             # 尝试使用 simple 分词器，失败则降级到 unicode61
-            tokenizer = 'unicode61'
-            try:
-                conn.enable_load_extension(True)
-                simple_dll = Path(__file__).parent.parent / "simple.dll"
-                if simple_dll.exists():
-                    conn.load_extension(str(simple_dll))
+            # _conn() 已尝试加载 simple；这里仅在尚未加载时再尝试一次（例如复用旧连接的情况）
+            tokenizer = 'simple' if getattr(self, "_simple_version", "") else 'unicode61'
+            if tokenizer == 'unicode61':
+                loaded = _load_simple_into(conn)
+                if loaded:
                     tokenizer = 'simple'
-            except Exception:
-                pass
+                    self._simple_version = loaded
             
             conn.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS tmdb_watchlist_fts USING fts5(

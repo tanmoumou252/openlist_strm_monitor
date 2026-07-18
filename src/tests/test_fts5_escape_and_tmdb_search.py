@@ -147,6 +147,35 @@ class TestEscapeFts5Query:
         assert "电影" in result
         assert "测试" in result
 
+    def test_escape_bracketed_anime(self):
+        """真实番剧名含 [限制级] 等方括号：(){}[] 替换为空格，主名仍可命中。"""
+        result = _escape_fts5_query("进击的巨人[限制级]")
+        # 方括号被替换为空格
+        assert "[" not in result and "]" not in result
+        # 主名保留，且方括号处变为空格分隔
+        assert "进击的巨人 限制级" == result, f"期望 '进击的巨人 限制级'，实际 {result!r}"
+        # 主名可独立作为搜索词命中（列表搜索场景下转义后能搜到主名）
+        assert _escape_fts5_query("进击的巨人") == "进击的巨人"
+
+    def test_escape_colon_star(self):
+        """'电影：测试*'：全角冒号不在移除集内（保留），星号移除。
+
+        实测：_escape_fts5_query 仅移除半角 *+"^~: 与 (){}[]（→空格），
+        全角冒号 U+FF1A 保留，故输出为 '电影：测试'。
+        """
+        result = _escape_fts5_query("电影：测试*")
+        assert "*" not in result
+        assert "：" in result, f"全角冒号应保留，实际 {result!r}"
+        assert "电影" in result and "测试" in result
+
+    def test_escape_fullwidth(self):
+        """'Spy×Family'：连字符/乘号处理——× 非 FTS5 运算符应保留为词内字符。"""
+        result = _escape_fts5_query("Spy×Family")
+        # ×（U+00D7 乘号）不在移除/空格化集合内，应原样保留
+        assert "Spy×Family" == result, f"期望 'Spy×Family' 原样保留，实际 {result!r}"
+        # 对照：普通半角连字符在词内保留（已有 test_hyphen_in_middle_preserved 覆盖）
+        assert "Family" in result
+
     def test_no_special_chars_returns_same(self):
         """不含特殊字符的输入应原样返回"""
         assert _escape_fts5_query("hello world") == "hello world"

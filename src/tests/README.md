@@ -1,8 +1,8 @@
 # 测试脚本说明
 
-本目录包含 `openlist_strm_bridge` 项目的全部测试文件，当前共 **34** 个 `test_*.py`。
+本目录包含 `openlist_strm_bridge` 项目的全部测试文件，当前共 **36** 个 `test_*.py`。
 
-所有测试均从**项目根目录**运行（根目录含 `conftest.py` 与 `src/` 路径注入），推荐命令：
+所有测试均从**项目根目录**运行（`src/tests/conftest.py` 负责 `src/` 路径注入），推荐命令：
 
 ```bash
 python -m pytest src/tests/ -v
@@ -19,14 +19,15 @@ python -m pytest src/tests/ -v
 | `test_area_watchers.py` | A/B/C 三区文件系统监视器事件处理测试 |
 | `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试 |
 | `test_refresh_service.py` | 周期性 WebDAV 刷新服务测试 |
+| `test_bootstrap.py` | 启动路径工具（`ensure_base_dir_first`、`load_local_module`）测试 |
 
 ### 数据库 / FTS
 
 | 文件 | 说明 |
 |------|------|
 | `test_integration.py` | 数据库重构与核心流程集成测试（含 A/B/C 区 FTS 完整性回归） |
-| `test_fts5_search.py` | FTS5 全文检索查询与匹配测试 |
-| `test_fts5_escape_and_tmdb_search.py` | FTS5 查询转义函数与 TMDB 搜索路由测试 |
+| `test_fts5_search.py` | FTS5 全文检索查询与匹配测试（含 simple 分词器加载、版本可读、`黑暗`/`暗黑` 按词分词语义断言） |
+| `test_fts5_escape_and_tmdb_search.py` | FTS5 查询转义函数（`_escape_fts5_query`）与 TMDB 搜索路由测试（含 `进击的巨人[限制级]`、`电影：测试*`、`Spy×Family` 真实媒体名转义） |
 | `test_fts_orphan_cleanup.py` | FTS 孤儿行清理与一致性测试 |
 
 ### 配置 / 安全
@@ -58,6 +59,7 @@ python -m pytest src/tests/ -v
 | `test_webdav_client.py` | WebDAV 协议客户端测试 |
 | `test_tmdb_client.py` | TMDB API v3 客户端测试 |
 | `test_tmdb_api.py` | TMDB API 路由与缓存测试 |
+| `test_openlist_login_shared.py` | OpenList 登录错误消息解析（`parse_login_error`）测试 |
 
 ### WebUI
 
@@ -90,6 +92,18 @@ python -m pytest src/tests/ -v
 
 ```bash
 python -m pytest src/tests/ -v
+```
+
+也可使用仓库根目录的封装脚本（自动从根目录运行，可选 `--cov` 生成覆盖率报告）：
+
+```bash
+# Windows
+run_tests.bat
+run_tests.bat --cov
+
+# Linux / macOS
+./run_tests.sh
+./run_tests.sh --cov
 ```
 
 ### 运行特定测试文件

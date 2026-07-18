@@ -30,6 +30,8 @@ OpenList STRM 引擎能够高效地生成 `.strm` 文件供本地媒体库刮削
 
 7. **被破坏文件自动恢复**：B 区 STRM 文件内容被清空或损坏时，逆向查库并从 A 区自动恢复。（`app_service_core.py` 恢复逻辑）
 
+8. **中文智能搜索**：基于 SQLite FTS5 + `simple` 中文分词器（cppjieba 封装），对 A/B 区 STRM 文件与 TMDB 待看列表实现中文标题/路径全文检索；分词器缺失时软降级但中文检索会失效，故 `simple` 为硬依赖。（`database.py`、`tmdb_watchlist_db.py`）
+
 ## 🚨 终极警示：OpenList 令牌与播放签名的强依赖关系
 
 由于 OpenList STRM 引擎下发的直链包含了签名（`?sign=`）：
@@ -44,6 +46,14 @@ OpenList STRM 引擎能够高效地生成 `.strm` 文件供本地媒体库刮削
 | **A 区** | 引擎原始 STRM 输出 | OpenList `SaveStrmLocalPath` | `AAreaEventHandler` — 创建/修改/删除 |
 | **B 区** | 媒体库消费 | 用户配置的 B 根目录 | `BAreaEventHandler` — 创建/修改/删除/移动 |
 | **C 区** | 幽灵收容 | 用户配置的 C 根目录 | `CAreaEventHandler` — 仅记录日志 |
+
+## 🔍 智能搜索
+
+项目内置中文友好的全文搜索：底层使用 SQLite **FTS5** 虚拟表，并加载 `simple` 中文分词器（cppjieba 封装，资源位于 `src/tokenizers/simple/`）对 A 区/B 区 STRM 文件路径及 TMDB 待看列表的标题、简介建立索引。当分词器扩展缺失时会软降级到 `unicode61`，但 `unicode61` 不对中文切词，导致中文搜索实际失效——因此部署时需确保 `simple.dll` 存在。索引的孤儿行由 `_rebuild_fts_if_stale` 等机制在基表变更后自动清理，保证检索结果与真实数据一致。
+
+## 🧭 首次启动引导
+
+新用户首次打开 WebUI 会看到 **7 步新手引导**（设置密码 → 配置 TMDB → 配置 OpenList → 启动主程序 → 查看 A/B 区 → 刷新 TMDB 待看列表 → 检测 TMDB 收录状态）。单步完成通过 `POST /api/onboarding/complete-step` 上报，整体完成或跳过则通过 `POST /api/webui/config/ui` 写入 `onboarding_completed` 标记；引导状态保存在 `tmdb_watchlist.db` 的 `webui_config` 表中，下次打开自动恢复进度。
 
 ## 🚀 快速开始
 

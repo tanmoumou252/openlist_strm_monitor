@@ -203,6 +203,11 @@ export async function _renderOpenListConfig(cfg) {
     <div class="field-grid">
       ${olField('ol-refresh-interval', '刷新间隔 (分钟)', refreshInterval, '10', 'number')}
       ${olField('ol-refresh-depth', '刷新深度', refreshDepth, '5', 'number')}
+      ${olSelect('ol-refresh-log-level', '刷新日志级别', openlistCfg.refresh_log_level || 'INFO', [
+        { value: 'DEBUG', label: 'DEBUG — 调试' },
+        { value: 'INFO', label: 'INFO — 信息（推荐）' },
+        { value: 'WARNING', label: 'WARNING — 警告' }
+      ])}
     </div>
     <div style="margin-top:12px">
       <div style="margin-bottom:6px">
@@ -540,6 +545,7 @@ const data = await api('/api/restart-webui', { method: 'POST' });
         refresh_enabled: document.querySelector('#ol-refresh-enabled button[data-value="on"].active') ? 'true' : 'false',
         refresh_interval_minutes: document.getElementById('ol-refresh-interval')?.value || '10',
         refresh_depth: document.getElementById('ol-refresh-depth')?.value || '5',
+        refresh_log_level: document.getElementById('ol-refresh-log-level')?.value || 'INFO',
         behavior_action: document.getElementById('ol-action')?.value || 'MOVE',
         behavior_trash_dir_name: document.getElementById('ol-trash-dir')?.value || 'trash',
         behavior_ghost_protect_seconds: document.getElementById('ol-ghost-protect')?.value || '300',

@@ -2754,6 +2754,7 @@ def handle_logs_api(handler, params: dict) -> None:
         return
     try:
         tail = _read_log_file_tail(log_file, lines_req)
+        tail = tail[::-1]  # 反转为倒序（最新在上），与 TMDB 操作日志保持一致
         handler._send_json({"lines": tail, "count": len(tail)})
     except Exception as e:
         handler._send_json({"error": str(e)}, 500)
@@ -2939,6 +2940,8 @@ def handle_config_api(handler) -> None:
         str(getattr(tmdb_cfg, "anime_min_ep_ratio", "0.30")) if tmdb_cfg else "0.30")
     tmdb_anime_max_season_diff = db_tmdb_cfg.get("anime_max_season_diff", "") or (
         str(getattr(tmdb_cfg, "anime_max_season_diff", "1")) if tmdb_cfg else "1")
+    tmdb_anime_min_season_ratio = db_tmdb_cfg.get("anime_min_season_ratio", "") or (
+        str(getattr(tmdb_cfg, "anime_min_season_ratio", "0.3")) if tmdb_cfg else "0.3")
     tmdb_cache_ttl = db_tmdb_cfg.get("watchlist_cache_ttl", "") or (
         str(getattr(tmdb_cfg, "watchlist_cache_ttl", "43200")) if tmdb_cfg else "43200")
 
@@ -2968,6 +2971,7 @@ def handle_config_api(handler) -> None:
         "tmdb_fuzzy_threshold": tmdb_fuzzy_threshold,
         "tmdb_anime_min_ep_ratio": tmdb_anime_min_ep_ratio,
         "tmdb_anime_max_season_diff": tmdb_anime_max_season_diff,
+        "tmdb_anime_min_season_ratio": tmdb_anime_min_season_ratio,
         "tmdb_cache_ttl": tmdb_cache_ttl,
         # 路径 & 文件夹
         "b_root": b_root,

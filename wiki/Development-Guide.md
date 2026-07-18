@@ -12,7 +12,7 @@
 | **HTTP 客户端** | `requests` 库 |
 | **WebDAV XML** | `lxml` 库 |
 | **二次验证** | `pyotp` 库 |
-| **测试** | pytest（20 个测试文件，`src/tests/`） |
+| **测试** | pytest（34 个测试文件，`src/tests/`） |
 
 ## 源码目录
 
@@ -34,7 +34,7 @@ src/
 ├── watchlist_match.py       # 待看列表匹配
 ├── utils/                   # 工具函数
 ├── webui/                   # SPA 前端 + HTTP 服务器
-└── tests/                   # 20 个测试文件
+└── tests/                   # 34 个测试文件
 ```
 
 ## 前端构建
@@ -87,11 +87,30 @@ A: 直接在浏览器打开 `dist/icon-preview.html`，查看所有 SVG 图标�
 
 ## 测试
 
+仓库根提供了跨平台测试封装脚本，内部执行 `python -m pytest src/tests/ -v`：
+
+```bash
+# Windows
+run_tests.bat            # 运行全部测试（等价于 python -m pytest src/tests/ -v）
+run_tests.bat --cov      # 额外生成覆盖率报告
+
+# Linux / macOS
+./run_tests.sh
+./run_tests.sh --cov
+```
+
+也可直接使用 pytest：
+
 ```bash
 pytest src/tests/ -v
 ```
 
-20 个测试文件覆盖：配置加载、数据库 CRUD、指纹计算、WebDAV 路径解析、字幕语言检测、媒体重命名、待看列表匹配。
+34 个测试文件覆盖：配置加载、数据库 CRUD、指纹计算、WebDAV 路径解析、字幕语言检测、媒体重命名、待看列表匹配，以及：
+
+- **FTS5 中文搜索**：`test_fts5_search.py`（黑暗/暗黑分词语义 `test_search_dark_vs_reverse`、`test_simple_version_readable`）、`test_fts5_escape_and_tmdb_search.py`（真实媒体名转义，如 `进击的巨人[限制级]`、`电影：测试*`、`Spy×Family`）。
+- **simple 分词器加载与版本**：`src/tokenizers/simple/` 下的 `simple.dll` + `VERSION` + `README.md`，由 `database.py` 的 `_load_simple_tokenizer` 与 `tmdb_watchlist_db.py` 的 `_load_simple_into` 加载，版本可读性由 `test_simple_version_readable` 校验。
+- **孤儿行清理**：`test_fts_orphan_cleanup.py` 验证 FTS 索引与业务表的孤儿记录清理逻辑。
+- **新手引导端到端**：`test_onboarding_e2e.py` 覆盖新手引导全流程的端到端测试。
 
 ## 代码规范
 
