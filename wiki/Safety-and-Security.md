@@ -2,20 +2,21 @@
 
 项目实现了多层安全机制，保护媒体库免受意外数据丢失、网络故障和用户误操作的影响。
 
-## 1. 血统验证（8 步管线）
+## 1. 血统验证（9 步管线）
 
-任何文件进入 B 区前必须通过血统校验，确保文件来自合法的 A 区源且未越界。
+任何文件进入 B 区前必须通过血统校验（`_verify_b_path_lineage`），确保文件来自合法的 A 区源且未越界。
 
-### 8 步流程
+### 9 步流程
 
-1. **基本路径验证** — 路径符合预期结构
-2. **季层提取** — 番剧：从路径提取季号
-3. **媒体名边界检查** — 验证文件属于其媒体组
-4. **云端 vs 物理名对齐** — 对比 WebDAV 路径与本地路径
-5. **边界条件检查** — 处理边界情况（单文件、多季）
-6. **单集特殊处理** — 目录中仅一集时特殊判断
-7. **跨引擎边界保护** — 防止文件在引擎间泄漏
-8. **最终验证** — 确认指纹匹配已知 A 区源
+1. **`_resolve_a_source`** — 解析 A 区源文件（确定 A/B 根路径、相对路径）
+2. **`_check_basic_lineage`** — 基础层级检查：A/B 目录完全一致时直接放行
+3. **`_check_season_layer_addition`** — B 区自动添加 Season 层级检查
+4. **`_check_media_name_match`** — 媒体名称匹配（提取 A/B 路径中的媒体名进行比对）
+5. **`_resolve_cloud_and_physical_names`** — 引擎配置与云端/物理名称解析
+6. **`_check_boundary_files`** — 越界文件检查（验证 B 区文件是否在合法范围内）
+7. **`_check_boundary_mappings`** — 边界映射匹配检查（比对 `strm_media_boundary` 记录）
+8. **`_handle_sync_phase_boundary`** — 同步阶段边界记录（仅同步阶段执行）
+9. **`_check_solo_episode`** — 单集/批量检测（间接触发 `trigger_delayed_solo_check` 30 秒观察定时器）
 
 ### 30 秒观察期
 
@@ -95,7 +96,7 @@ B 区文件变动（创建/修改/移动）
 
 ### 实现
 
-`ghost_protection` 表记录被删除文件的 WebDAV 路径和过期时间。在保护期内（默认 10 秒，`ghost_protect_seconds`），同指纹的新文件被拒绝。
+`ghost_protection` 表记录被删除文件的 WebDAV 路径和过期时间。在保护期内（默认 300 秒（5 分钟），`ghost_protect_seconds`），同指纹的新文件被拒绝。
 
 ### 幽灵 vs C 区迁移
 
@@ -113,16 +114,21 @@ B 区文件变动（创建/修改/移动）
 
 ### 打分机制
 
-决定保留哪个实例时按以下标准评分：
+决定保留哪个实例时使用**元组比较**（`_b_file_score` 方法），而非加法评分：
 
-| 分值 | 标准 |
-|------|------|
-| +100 | 标准 `S01E01` 命名 |
-| +10 | 路径最短（中间目录最少） |
-| +5 | 路径匹配 A 区原始 |
-| +3 | 文件名含年份 |
+```python
+# 返回 (is_standard_rank, match_count, path_len, name)
+return (0 if is_standard else 1, match_count, path_len, name)
+```
 
-最高分实例保持 `valid` 状态，其余改为 `.duplicate`。
+| 维度 | 说明 | 优先方向 |
+|------|------|----------|
+| `is_standard_rank` | `0` = 标准 `S01E01` 命名，`1` = 非标准 | 越小越优先 |
+| `match_count` | 从末尾反向匹配云端路径的段数 | 越大越优先 |
+| `path_len` | 路径字符串总长度 | 越短越优先 |
+| `name` | 文件名（小写） | 字典序兜底 |
+
+Python 排序使用元组字典序，最高优先实例保持 `valid` 状态，其余改为 `.duplicate`。
 
 ## 4. 隔离系统
 
@@ -164,8 +170,17 @@ B 区扫描时检查每个 STRM 文件：
 
 每个候选清理文件必须通过三层检查，任一层通过即保留：
 
-1. **幽灵保护检查**：`ghost_protection` 表中 `expire_at > now()` 时保留
+1. **幽灵保护检查**：`ghost_protection` 表中 `expire_time > now()` 时保留
 2. **A 区源存在性检查**：A 区仍有对应 STRM 文件时保留（引擎仍在生成）
 3. **WebDAV 存在性检查**：通过 `HEAD`/`GET` 验证云端文件真实存在时保留
 
 仅三层全不通过才执行物理删除。
+
+## 8. 未文档化安全机制补全
+
+以下安全机制在其他章节中未详细介绍：
+
+- **三重防误删**（`handle_b_deleted`）：`_restoring_markers`（恢复操作标记）→ `_engine_internal_markers`（引擎内部删除标记）→ `has_other_b_instance` + `_check_fingerprint_exists_in_b`（同指纹其他实例检查）。三重全不通过才执行云端删除。
+- **`ensure_single_visible_instance(prefer_path)`** — 同一指纹仅一个实例保持 `valid` 状态，其余强制改为 `.duplicate`。
+- **`get_webdav_lock(namespace)`** — 命名空间隔离的 WebDAV 操作锁，防止不同引擎/路径的并发冲突。
+- **DB 建表幂等性** — `_create_schema` 使用 `CREATE TABLE IF NOT EXISTS` 幂等语句，可安全重复调用，不存在回滚机制。

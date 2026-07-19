@@ -6,20 +6,20 @@
 |----|------|
 | **语言** | Python 3.11+（后端）、JavaScript（前端） |
 | **前端构建** | Vite 8.x，Vanilla JS（无 React/Vue） |
-| **后端 HTTP** | Python 标准库 `http.server`（单线程） |
+| **后端 HTTP** | Python 标准库 `http.server` - `ThreadingHTTPServer`（多线程） |
 | **数据库** | SQLite（WAL 模式，两个文件） |
 | **文件监控** | `watchdog` 库 |
 | **HTTP 客户端** | `requests` 库 |
 | **WebDAV XML** | `lxml` 库 |
-| **二次验证** | `pyotp` 库 |
-| **测试** | pytest（34 个测试文件，`src/tests/`） |
+| **TOML 解析** | `tomli` 库（Python < 3.11 回退） |
+| **测试** | pytest（36 个测试文件，`src/tests/`） |
 
 ## 源码目录
 
 ```
 src/
 ├── main.py                  # 入口
-├── app_service_core.py      # 核心同步引擎
+├── app_service_core.py       # 核心同步引擎
 ├── app_service.py           # re-export 桶
 ├── config.py                # 配置类
 ├── database.py              # SQLite bridge.db 管理器
@@ -27,14 +27,26 @@ src/
 ├── area_watchers.py         # Watchdog 事件处理器
 ├── refresh_service.py       # 周期刷新服务
 ├── media_renamer.py         # 媒体重命名 + 字幕检测
-├── sync_service.py          # 同步服务（domain/sync/）
-├── subtitle_handler.py      # 字幕处理（domain/media/）
 ├── tmdb_client.py           # TMDB API v3 客户端
 ├── tmdb_watchlist_db.py     # TMDB 待看列表 DB
+├── tmdb_watchlist.py        # TMDB 待看列表服务
 ├── watchlist_match.py       # 待看列表匹配
+├── secret_manager.py        # 密钥/凭据管理
+├── openlist_login_shared.py # OpenList 登录共享逻辑
+├── logger_setup.py          # 日志初始化
+├── domain/                  # 领域模块
+│   ├── sync/
+│   │   └── sync_service.py  # 同步服务
+│   └── media/
+│       └── subtitle_handler.py  # 字幕处理
 ├── utils/                   # 工具函数
+│   ├── strm_utils.py        # STRM 路径/指纹工具
+│   ├── file_utils.py       # 文件系统工具
+│   ├── webdav_utils.py      # WebDAV 路径工具
+│   ├── error_translator.py  # 错误信息翻译
+│   └── bootstrap.py        # 启动引导工具
 ├── webui/                   # SPA 前端 + HTTP 服务器
-└── tests/                   # 34 个测试文件
+└── tests/                   # 36 个测试文件
 ```
 
 ## 前端构建
@@ -46,6 +58,8 @@ npx vite          # 开发服务器（HMR）
 ```
 
 **重要**：修改 `src/webui/modules/` 下的文件后必须重新构建。生产服务器从 `dist/assets/` 加载编译文件。
+
+字体子集化（`src/webui/scripts/subset_font.py`）需要 `fonttools`，见 `src/webui/scripts/requirements.txt`。
 
 ### 构建产物说明
 
@@ -65,6 +79,8 @@ dist/
     ├── login-XXXX.js       # 登录页面
     ├── logs-XXXX.js        # 日志页面
     ├── index-XXXX.css      # 主样式文件
+    ├── favicon.ico         # 站点图标
+    ├── *.png               # Logo 与品牌图标（如 logo.01-04.png、openlist_strm_bridge.png）
     └── *.woff2             # 字体文件
 ```
 
@@ -87,25 +103,28 @@ A: 直接在浏览器打开 `dist/icon-preview.html`，查看所有 SVG 图标�
 
 ## 测试
 
-仓库根提供了跨平台测试封装脚本，内部执行 `python -m pytest src/tests/ -v`：
+测试依赖需单独安装：
 
 ```bash
-# Windows
-run_tests.bat            # 运行全部测试（等价于 python -m pytest src/tests/ -v）
-run_tests.bat --cov      # 额外生成覆盖率报告
+pip install -r src/tests/requirements-dev.txt
+```
 
-# Linux / macOS
-./run_tests.sh
-./run_tests.sh --cov
+> 包含 `pytest`（测试框架）、`flask`（Mock 服务器，仅 `test_tmdb_api.py` 使用）、`pytest-cov`（覆盖率报告，可选）。
+
+`src/tests/run_tests.bat` 封装了 pytest 调用：
+
+```bash
+src/tests/run_tests.bat            # 运行全部测试
+src/tests/run_tests.bat --cov      # 额外生成覆盖率报告
 ```
 
 也可直接使用 pytest：
 
 ```bash
-pytest src/tests/ -v
+python -m pytest src/tests/ -v
 ```
 
-34 个测试文件覆盖：配置加载、数据库 CRUD、指纹计算、WebDAV 路径解析、字幕语言检测、媒体重命名、待看列表匹配，以及：
+36 个测试文件覆盖：配置加载、数据库 CRUD、指纹计算、WebDAV 路径解析、字幕语言检测、媒体重命名、待看列表匹配，以及：
 
 - **FTS5 中文搜索**：`test_fts5_search.py`（黑暗/暗黑分词语义 `test_search_dark_vs_reverse`、`test_simple_version_readable`）、`test_fts5_escape_and_tmdb_search.py`（真实媒体名转义，如 `进击的巨人[限制级]`、`电影：测试*`、`Spy×Family`）。
 - **simple 分词器加载与版本**：`src/tokenizers/simple/` 下的 `simple.dll` + `VERSION` + `README.md`，由 `database.py` 的 `_load_simple_tokenizer` 与 `tmdb_watchlist_db.py` 的 `_load_simple_into` 加载，版本可读性由 `test_simple_version_readable` 校验。
@@ -161,7 +180,7 @@ if (isRenderStale(gen)) return; // 用户已导航离开
 ## 常见陷阱
 
 1. **未重新构建 dist**：修改 `src/webui/modules/*.js` 后必须运行 `npx vite build`，否则浏览器看不到更改。
-2. **服务器单线程**：Python 的 `http.server` 一次处理一个请求，长时间运行的 TMDB 同步会阻塞服务器。
+2. **服务器多线程但 DB 锁定**：Python 的 `ThreadingHTTPServer`（多线程）可并发处理请求，但长时间运行的操作（如 TMDB 同步）会持有数据库锁，可能阻塞其他请求。
 3. **SQLite WAL 文件**：不要删除 `-shm` 或 `-wal` 伴生文件，它们是 WAL 模式必需的。
 4. **配置分层**：DB 配置覆盖 config.toml。如果修改了 config.toml 但未生效，请检查 DB 的 `webui_config` 表。
 5. **密码重置**：管理员密码哈希存储在 `tmdb_watchlist.db` → `webui_config`，scope='ui'、key='admin_password'。使用 `reset_admin.py` 重置。
@@ -171,7 +190,7 @@ if (isRenderStale(gen)) return; // 用户已导航离开
 ### Windows
 
 两个启动脚本：
-- `嵌入式启动.bat` — 使用 `src/python_embed/` 中的 Python 3.14
+- `嵌入式启动.bat` — 使用嵌入式 Python 环境
 - `环境变量启动.bat` — 使用系统 Python
 
 均提供启动模式选择菜单（WebUI 仅模式 vs 完整模式）。

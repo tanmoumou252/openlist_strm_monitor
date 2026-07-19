@@ -183,9 +183,18 @@ pip install -r requirements.txt
 - `requests` (API 请求交互)
 - `lxml` (WebDAV XML解析)
 - `tomli` (Python < 3.11 环境下需要)
-- `pyotp` (TOTP 2FA 支持)
 
-嵌入式版本python应该存放于`/src/python_embed/`
+如需运行测试：
+
+```bash
+pip install -r src/tests/requirements-dev.txt
+```
+
+开发依赖（详见 `src/tests/requirements-dev.txt`）：
+
+- `pytest` (测试框架)
+- `pytest-cov` (测试覆盖率)
+- `flask` (测试用 Mock 服务器)
 
 ### 2. 运行程序
 
@@ -250,7 +259,7 @@ python src/webui/server.py
 | **B 区浏览** | 查看媒体库消费区目录，基本和A区一致 支持删除联动操作 |
 | **C 区浏览** | 查看幽灵/隔离区内容，基本和A区一致 |
 | **TMDB 待看列表** | 对接 TMDB API，展示用户待看列表并与本地已收录内容做对比 |
-| **日志查看** | 实时查看程序运行日志，支持按级别筛选 |
+| **日志查看** | 实时查看程序运行日志，支持 TMDB/主程序日志切换 |
 | **壁纸** | 内置水墨风遮罩壁纸效果 |
 
 ### TMDB 待看列表
@@ -311,6 +320,8 @@ python src/webui/server.py
 
 ---
 
+<!-- 仓库名说明：GitHub 源码仓库名为 openlist_strm_monitor，应用名为
+     openlist_strm_bridge（仓库名 ≠ 产品名，非 typo，后续 agent 请勿统一）。 -->
 ## ⚠️ 使用建议与注意事项
 
 详细的使用建议、安全注意事项与最佳实践请参看项目 Wiki：

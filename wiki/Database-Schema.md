@@ -4,7 +4,7 @@
 
 ## bridge.db — 核心同步状态
 
-由 `Database` 类管理（`src/database.py`）。通过 `threading.RLock()` 保证线程安全。所有表在 `_create_schema()` 方法中创建。
+由 `Database` 类管理（`src/database.py`）。通过自定义 `ReadWriteLock` 类（`database.py` 顶部定义，支持读写分离：多个读者并发、写者独占、写者优先防饥饿）保证线程安全。所有表在 `_create_schema()` 方法中创建。bridge.db 共 **14 张表**：10 张常规表、3 张 FTS5 虚拟表以及 1 张 `subtitles` 字幕表（由 `init_subtitle_table()` 独立创建）。
 
 ### 性能 PRAGMA 设置
 
@@ -32,7 +32,7 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 | `parent_webdav_path` | TEXT NOT NULL | 父级 WebDAV 目录 |
 | `updated_at` | REAL NOT NULL | 最后更新时间戳 |
 
-**索引**：`idx_a_strm_webdav_path`（webdav_path）
+**索引**：`idx_a_strm_webdav_path`（webdav_path）、`idx_a_strm_updated_at`（updated_at）
 
 #### `b_strm_files` — B 区 STRM 文件记录
 
@@ -46,7 +46,7 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 | `status` | TEXT DEFAULT 'valid' | 状态：valid/duplicate/quarantined/invalid/ghost |
 | `updated_at` | REAL NOT NULL | 更新时间戳 |
 
-**索引**：`idx_b_strm_webdav_path`、`idx_b_strm_fingerprint`、`idx_b_strm_status`
+**索引**：`idx_b_strm_webdav_path`、`idx_b_strm_fingerprint`、`idx_b_strm_status`、`idx_b_strm_updated_at`
 
 #### `strm_identity` — 身份指纹全局表
 
@@ -69,6 +69,8 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 | `original_b_path` | TEXT NOT NULL | 迁移前的 B 区路径 |
 | `ghost_root` | TEXT NOT NULL | 所在的 C 区根目录 |
 | `moved_at` | REAL NOT NULL | 迁移时间戳 |
+
+**索引**：`idx_c_ghost_moved_at`（moved_at）
 
 #### `ghost_protection` — 幽灵保护表
 
@@ -123,26 +125,40 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 
 **索引**：`idx_boundary_source_name`、`idx_boundary_current_name`
 
+#### FTS5 全文搜索虚拟表
+
+bridge.db 中包含三张 FTS5 虚拟表，使用 `simple` 或 `unicode61` 分词器（取决于 `simple.dll` 是否加载成功）：
+
+| 虚拟表 | 索引基表 | 索引字段 |
+|--------|----------|----------|
+| `a_strm_files_fts` | `a_strm_files` | `local_path`、`webdav_path` |
+| `b_strm_files_fts` | `b_strm_files` | `local_path`、`webdav_path` |
+| `c_ghost_files_fts` | `c_ghost_files` | `local_path`、`webdav_path` |
+
+维护：`_backfill_fts_if_empty`（首次回填）和 `_rebuild_fts_if_stale`（孤儿清理，rowid 不一致时全量重建）。
+
 #### `subtitles` — 字幕处理记录表
 
-由 `init_subtitle_table()` 单独创建，`AppService.__init__()` 时调用。
+由 `init_subtitle_table()` 单独创建，`Database.__init__()` 时调用。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `id` | INTEGER PRIMARY KEY | 自增 ID |
-| `local_path` | TEXT NOT NULL | 原始字幕文件路径 |
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | 自增 ID |
+| `local_path` | TEXT NOT NULL UNIQUE | 原始字幕文件路径 |
 | `target_path` | TEXT NOT NULL | B 区同步路径 |
-| `fingerprint` | TEXT | 关联 STRM 的指纹 |
+| `fingerprint` | TEXT NOT NULL | 关联 STRM 的指纹 |
 | `season` | INTEGER | 提取的季号（番剧） |
 | `episode` | INTEGER | 提取的集号（番剧） |
 | `lang_code` | TEXT | 检测的语言代码 |
-| `status` | TEXT | 处理状态 |
-| `created_at` | TEXT | 创建时间 |
-| `updated_at` | TEXT | 更新时间 |
+| `status` | TEXT DEFAULT 'valid' | 处理状态 |
+| `created_at` | TIMESTAMP DEFAULT CURRENT_TIMESTAMP | 创建时间 |
+| `updated_at` | TIMESTAMP DEFAULT CURRENT_TIMESTAMP | 更新时间 |
+
+**索引**：`idx_subtitle_fingerprint`（fingerprint）、`idx_subtitle_target`（target_path）
 
 ## tmdb_watchlist.db — TMDB 缓存 + WebUI 配置
 
-由 `TmdbWatchlistDb` 类管理（`src/tmdb_watchlist_db.py`）。
+由 `TmdbWatchlistDb` 类管理（`src/tmdb_watchlist_db.py`）。tmdb_watchlist.db 共 **6 张表**：5 张常规表（`movies`、`tv`、`meta`、`webui_config`、`tmdb_operation_log`）以及 1 张 FTS5 虚拟表 `tmdb_watchlist_fts`。
 
 ### 全文搜索与中文分词（FTS5 / simple / unicode61 降级）
 
@@ -164,13 +180,22 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 | `original_title` | TEXT | '' | 原始标题 |
 | `overview` | TEXT | '' | 剧情简介 |
 | `poster_path` | TEXT | '' | 海报路径 |
+| `backdrop_path` | TEXT | '' | 背景图路径 |
 | `release_date` | TEXT | '' | 上映日期 |
 | `vote_average` | REAL | 0.0 | TMDB 评分 |
+| `vote_count` | INTEGER | 0 | 评分人数 |
 | `genre_ids` | TEXT | '[]' | 类型 ID 数组（JSON） |
+| `popularity` | REAL | 0.0 | 人气值 |
+| `original_language` | TEXT | '' | 原始语言 |
+| `video` | INTEGER | 0 | 是否为视频 |
+| `adult` | INTEGER | 0 | 是否为成人内容 |
 | `_media_type` | TEXT | 'movie' | 媒体类型 |
-| `_synced_at` | REAL | 0 | 同步时间戳 |
+| `_synced_at` | REAL | 0 | 同步时间戳（NOT NULL） |
 | `match_status` | TEXT | 'uncomputed' | 匹配状态 |
 | `match_reason` | TEXT | '' | 匹配原因说明 |
+| `match_updated_at` | REAL | 0 | 匹配状态最后更新时间 |
+| `manual_override_at` | REAL | 0 | 手动覆盖时间 |
+| `manual_override_by` | TEXT | '' | 手动覆盖操作者 |
 
 #### `tv` — TMDB 待看列表电视剧
 
@@ -181,12 +206,25 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 | `original_name` | TEXT | '' | 原始名称 |
 | `overview` | TEXT | '' | 剧情简介 |
 | `poster_path` | TEXT | '' | 海报路径 |
+| `backdrop_path` | TEXT | '' | 背景图路径 |
 | `first_air_date` | TEXT | '' | 首播日期 |
 | `vote_average` | REAL | 0.0 | 评分 |
+| `vote_count` | INTEGER | 0 | 评分人数 |
+| `genre_ids` | TEXT | '[]' | 类型 ID 数组（JSON） |
+| `popularity` | REAL | 0.0 | 人气值 |
+| `origin_country` | TEXT | '[]' | 产地国家（JSON 数组） |
+| `original_language` | TEXT | '' | 原始语言 |
 | `_season_count` | INTEGER | 0 | 季数 |
 | `_episode_count` | INTEGER | 0 | 集数 |
+| `_last_ep_season` | INTEGER | 0 | 最后一季号 |
+| `_last_ep_episode` | INTEGER | 0 | 最后一集号 |
 | `_media_type` | TEXT | 'tv' | 媒体类型 |
+| `_synced_at` | REAL | 0 | 同步时间戳（NOT NULL） |
 | `match_status` | TEXT | 'uncomputed' | 匹配状态 |
+| `match_reason` | TEXT | '' | 匹配原因说明 |
+| `match_updated_at` | REAL | 0 | 匹配状态最后更新时间 |
+| `manual_override_at` | REAL | 0 | 手动覆盖时间 |
+| `manual_override_by` | TEXT | '' | 手动覆盖操作者 |
 
 #### `meta` — 元数据存储
 
@@ -199,18 +237,31 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `scope` | TEXT | 配置作用域（tmdb、openlist、ui、migration） |
-| `key` | TEXT | 配置键名 |
-| `value` | TEXT | 配置值（JSON 编码） |
-| `updated_at` | REAL | 更新时间戳 |
+| `scope` | TEXT NOT NULL | 配置作用域（tmdb、openlist、ui、migration） |
+| `key` | TEXT NOT NULL | 配置键名 |
+| `value` | TEXT NOT NULL DEFAULT '' | 配置值（JSON 编码） |
+| `updated_at` | REAL NOT NULL DEFAULT 0 | 更新时间戳 |
 
 **主键**：`(scope, key)`
 
 示例：`('tmdb', 'access_token', 'eyJ...', 1700000000)`、`('ui', 'admin_password', 'salt$600000$hash', 1700000000)`
 
+#### `tmdb_operation_log` — TMDB 操作日志
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | 自增 ID |
+| `ts` | REAL NOT NULL | 时间戳 |
+| `op` | TEXT NOT NULL | 操作类型（如 `sync`） |
+| `level` | TEXT NOT NULL DEFAULT 'info' | 日志级别（info/success/warn/error） |
+| `msg` | TEXT NOT NULL | 日志消息 |
+| `detail` | TEXT | 详细信息 |
+
+**索引**：`idx_tmdb_log_ts`（ts DESC）
+
 #### `tmdb_watchlist_fts` — FTS5 全文搜索虚拟表
 
-为 TMDB 待看列表（电影 `movies` / 电视剧 `tv`）提供全文搜索能力，建表语句见 `tmdb_watchlist_db.py` 的 `_create_schema`。该虚拟表使用与 bridge.db 相同的分词器选择逻辑（`simple` 优先，失败降级 `unicode61`，见上文「全文搜索与中文分词」）。
+为 TMDB 待看列表（电影 `movies` / 电视剧 `tv`）提供全文搜索能力，建表语句见 `tmdb_watchlist_db.py` 的 `_init_schema` 方法（注意：`database.py` 中对应的建表方法名为 `_create_schema`，两者不同）。该虚拟表使用与 bridge.db 相同的分词器选择逻辑（`simple` 优先，失败降级 `unicode61`，见上文「全文搜索与中文分词」）。
 
 - **索引字段**：`rowid`（关联基表主键 `id`）、`title`、`original_title`、`overview`，覆盖标题与简介的中英文检索。
 - **维护**：在电影/剧集写入、更新、删除时同步增删 FTS 行；通过 `DELETE ... WHERE rowid NOT IN (SELECT rowid FROM movies/tv)` 清除孤儿行，保证待看列表检索结果与真实数据一致。

@@ -13,7 +13,7 @@ WebUI 使用本地子集字体 `NotoSansSC-Subset.woff2` 作为首选中文字�
 - `brotli`
 
 ```bash
-pip install fonttools brotli
+pip install -r src/webui/scripts/requirements.txt
 ```
 
 ## 用法

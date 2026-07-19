@@ -32,7 +32,7 @@ This file provides guidance to AI coding assistants when working with code in th
 - **Sync engine only**: `python src/main.py` — starts the A/B/C zone sync engine, no WebUI.
 - **WebUI**: `python src/webui/server.py` — starts the management panel with an interactive menu to optionally launch the sync engine.
 
-> Do NOT use `python src/main.py --webui-only` — that flag does not exist.
+> Do NOT use `python src/main.py --webui-only` or `--webui` — those flags do not exist (both are rejected by `main.py`).
 
 ## Project Overview
 
@@ -58,14 +58,13 @@ This file provides guidance to AI coding assistants when working with code in th
 |-------|-----------|
 | **Language** | Python 3.11+ (backend), JavaScript (frontend) |
 | **Frontend build** | Vite 8.x, vanilla JS (no React/Vue), MD3/Fluent2 dual theme |
-| **Backend HTTP** | Python stdlib `http.server` (single-threaded, one request at a time) |
+| **Backend HTTP** | Python stdlib `http.server` (`ThreadingHTTPServer`, 多线程) |
 | **Database** | SQLite (WAL mode, two files) + FTS5 with `simple` extension for Chinese search |
 | **Search/Tokenizer** | `simple` tokenizer (wangfenjin/simple, cppjieba wrapper, v0.7.1) loaded from `src/tokenizers/simple/simple.dll`; hard dependency for Chinese search |
 | **File watching** | `watchdog` library |
 | **HTTP client** | `requests` library |
 | **WebDAV XML** | `lxml` library |
-| **2FA** | `pyotp` library |
-| **Testing** | pytest (20 test files under `src/tests/`) |
+| **Testing** | pytest (36 test files under `src/tests/`); dev deps in `src/tests/requirements-dev.txt` |
 
 ## Directory Structure
 
@@ -74,17 +73,20 @@ openlist_strm_bridge/
 ├── src/
 │   ├── main.py                  # Entry point
 │   ├── app_service_core.py      # Core sync engine
+│   ├── app_service.py           # Compat re-export layer
 │   ├── config.py                # Configuration classes (AppConfig, etc.)
 │   ├── database.py              # SQLite bridge.db manager
 │   ├── webdav_client.py         # OpenList Admin API + WebDAV client
 │   ├── area_watchers.py         # File system watchers for A/B/C zones
 │   ├── refresh_service.py       # Periodic WebDAV refresh
 │   ├── media_renamer.py         # Media renaming, season/episode extraction
-│   ├── subtitle_handler.py      # Subtitle synchronization
-│   ├── sync_service.py          # Sync service
 │   ├── tmdb_client.py           # TMDB API v3 client
 │   ├── tmdb_watchlist_db.py     # TMDB watchlist SQLite DB
+│   ├── tmdb_watchlist.py        # TMDB data classes (TmdbItem, etc.)
 │   ├── watchlist_match.py       # Watchlist matching logic
+│   ├── secret_manager.py        # Sensitive config encryption
+│   ├── logger_setup.py          # Logging setup
+│   ├── openlist_login_shared.py # Shared OpenList login logic
 │   ├── webui/
 │   │   ├── server.py            # HTTP server + auth + route dispatch
 │   │   ├── routes.py            # All API route handlers
@@ -98,15 +100,23 @@ openlist_strm_bridge/
 │   │       └── components/      # dialog.js, toast.js
 │   ├── domain/media/            # subtitle_handler.py
 │   ├── domain/sync/             # sync_service.py
-│   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py
-│   └── tests/                   # 20 test files
+│   ├── domain/storage/
+│   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py
+│   ├── tokenizers/              # simple/ (cppjieba wrapper for Chinese search)
+│   └── tests/                   # 36 test files
 ├── dist/                        # Built frontend (Vite output)
 │   └── assets/                  # Hashed JS/CSS/font files
+├── wiki/                        # Documentation
 ├── docs/                        # API docs, design docs, UI templates
 ├── config.toml                  # Main configuration
 ├── bridge.db                    # Core SQLite database
 ├── tmdb_watchlist.db            # TMDB watchlist SQLite database
-└── reset_admin.py               # Password reset utility
+├── reset_admin.py               # Password reset utility
+├── requirements.txt             # Production dependencies
+├── config.toml.example          # Example configuration
+├── 嵌入式启动.bat                  # Embedded Python launcher
+├── 环境变量启动.bat                  # System Python launcher
+└── LICENSE                      # License file
 ```
 
 ## WebUI Build System
@@ -164,7 +174,7 @@ The Vite config groups modules into chunks:
 - Two SQLite databases, both in WAL mode
 - `bridge.db`: A/B/C zone file records, fingerprints, ghost protection, subtitles, sync state
 - `tmdb_watchlist.db`: TMDB cache, webui_config (scopes: tmdb, openlist, ui, migration), operation logs
-- `Database` class uses read/write connection managers with reentrant lock
+- `Database` class uses read/write connection managers with `ReadWriteLock`
 
 ### Frontend State Management
 - Global state in `state.js` (singleton module pattern, not a framework)
@@ -191,7 +201,7 @@ The Vite config groups modules into chunks:
 ## Common Pitfalls
 
 1. **Dist not rebuilt**: If you change `src/webui/modules/*.js`, the browser won't see the changes until you run `npx vite build`. This is the #1 cause of "my fix didn't work" in this project.
-2. **Server single-threaded**: Python's `http.server` handles one request at a time. Long-running requests (like TMDB sync) block the server.
+2. **Server multi-threaded but DB-locked**: Python's `ThreadingHTTPServer` handles concurrent requests, but long-running operations (like TMDB sync) hold DB locks that may block other requests.
 3. **SQLite WAL mode**: The database files may have `-shm` and `-wal` companion files. Don't delete them.
 4. **Config layering**: DB configuration overrides config.toml. If you change config.toml and it doesn't take effect, check the DB `webui_config` table.
 5. **Password stored in DB**: The admin password hash is in `tmdb_watchlist.db` → `webui_config` where scope='ui' and key='admin_password'. Use `reset_admin.py` to reset.
@@ -201,7 +211,7 @@ The Vite config groups modules into chunks:
 | File | What to know |
 |------|-------------|
 | `src/app_service_core.py` | Heart of the engine. Lock ordering is critical. |
-| `src/database.py` | SQLite with WAL, read/write connection managers, reentrant lock. |
+| `src/database.py` | SQLite with WAL, read/write connection managers, `ReadWriteLock`. |
 | `src/webui/routes.py` | All API handlers. `_get_media_groups_paginated` method handles pagination logic. |
 | `src/webui/server.py` | Auth, routing, SPA serving. `_check_auth()` method handles authentication. |
 | `src/webui/modules/core/api.js` | API wrapper — always use this instead of raw fetch. |

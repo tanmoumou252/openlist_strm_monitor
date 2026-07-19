@@ -25,7 +25,7 @@ src/webui/
 │   │   ├── area.js      # A/B/C 区浏览
 │   │   ├── config.js    # 配置页
 │   │   ├── login.js     # 登录页
-│   │   ├── logs.js      # TMDB 操作日志
+│   │   ├── logs.js      # 日志页（TMDB 操作日志 + 主程序日志双来源）
 │   │   ├── openlist.js  # OpenList 配置
 │   │   └── tmdb.js      # TMDB 待看列表
 │   └── components/      # 可复用组件
@@ -52,6 +52,12 @@ npx vite          # 开发服务器（HMR）
 
 **注意**：修改 `modules/` 下文件后必须重新构建，浏览器加载的是 `dist/` 的编译文件，不是源文件。
 
+## 引导入口（`main.js`）
+
+`main.js` 是前端引导入口，在 `DOMContentLoaded` 中完成初始化。其中鉴权与路由的启动顺序为：**先** `fetch('/api/admin/status')` 获取管理员密码是否已设置（`setHasPassword(d.has_password)`），**再**在该请求的 `.finally` 回调中绑定 `hashchange` 事件并首次调用 `router()`。这样可确保密码状态就绪后再激活路由的 auth guard，避免竞争条件。
+
+此外，`main.js` **静态导入** `openlist.js`（`import { _checkApiStatus } from './modules/pages/openlist.js'`），因此 `openlist.js` 不属于路由懒加载的页面模块，而是随入口一同加载，用于页面渲染后的 API 状态检测。
+
 ## 核心模块
 
 ### `api.js` — API 客户端
@@ -71,7 +77,7 @@ npx vite          # 开发服务器（HMR）
 | `#dashboard` | `dashboard.js` | `renderDashboard` |
 | `#area_*` | `area.js` | `renderArea(el, area, params)` |
 | `#tmdb` | `tmdb.js` | `renderTmdb(el, params)` |
-| `#logs` | `logs.js` | `renderLogs` |
+| `#logs` | `logs.js` | `renderLogs`（TMDB 操作日志 `/api/tmdb/logs` + 主程序日志 `/api/logs` 双来源，Tab 切换） |
 | `#config` | `config.js` | `renderConfig(el, params)` |
 
 ### `state.js` — 状态管理
@@ -92,27 +98,31 @@ Canvas 水墨鼠标擦除效果（`destination-out` 合成模式）。5 种笔�
 
 ## 鉴权系统
 
-- **PBKDF2-HMAC-SHA256** 密码哈希（600,000 次迭代）— `_hash_password()` 方法
+> 注意：以下两项均为后端函数，不属于前端代码。
 
-- IP 白名单（仅局域网）— `_is_lan_ip()` 函数
+- **PBKDF2-HMAC-SHA256** 密码哈希（600,000 次迭代）— `_hash_password()` 为后端 `server.py` 中 `WebUIServer` 的方法（`routes.py` 另有等价的 `_hash_password_pbkdf2()` 供配置写入场景使用，前端不直接调用）。
+
+- IP 白名单（仅局域网）— `_is_lan_ip()` 为后端 `routes.py` 中定义的工具函数，`server.py` 导入并复用，前端不涉及。
 
 免 Token 路径：`/api/config`、`/api/webui/config/ui`、`/api/tmdb/avatar`、`/api/tmdb/poster`、`/api/openlist/status`、`/api/openlist/ping`、`/api/admin/status`、`/api/login`、静态资源
 
 ## 新手引导（Onboarding）
 
-首次使用以分步卡片形式引导，共 7 步卡片，覆盖以下引导步骤：
+首次使用以分步卡片形式引导，一张卡片含 7 步行，覆盖以下引导步骤：
 
-1. `password` — 设置管理员密码
+1. `password` — 确认管理员密码
 2. `tmdb` — 配置 TMDB
 3. `openlist` — 配置 OpenList
 4. `main` — 启动主程序
 5. `view_ab` — 浏览 A/B 区
-6. `tmdb_refresh` — 刷新 TMDB 待看列表匹配
-7. `tmdb_match` — 完成 TMDB 匹配
+6. `tmdb_refresh` — 刷新 TMDB 待看列表
+7. `tmdb_match` — 检测 TMDB 收录状态
 
-**状态读取**：引导状态**不通过独立 status 接口**，而是由前端通过 `GET /api/config/status` 读取（其响应包含 `onboarding_completed` 等键，驱动引导卡片展示）；`GET /api/webui/config/ui`（免 Token）用于读取/写入 UI 配置。关键键位包括 `onboarding_completed`、`onboarding_skipped`、`view_ab_completed`、`tmdb_refresh_completed`、`tmdb_match_completed`。前端据此决定显示哪些卡片及是否弹出引导。
+**状态读取**：引导状态**不通过独立 status 接口**，而是由前端通过 `GET /api/config/status` 读取（其响应包含 `onboarding_completed` 等键，驱动引导卡片展示）；`GET /api/webui/config/ui`（免 Token）用于读取/写入 UI 配置。关键键位包括 `onboarding_completed`、`view_ab_completed`、`tmdb_refresh_completed`、`tmdb_match_completed`（后三者由后端聚合为 `*_completed` 字段响应；底层存储键为 `onboarding_view_ab_completed` 等，前缀 `onboarding_`）。前端据此决定显示哪些卡片及是否弹出引导。
 
-**步骤完成调用**：单步完成时调用 `POST /api/onboarding/complete-step`，body 为 `{"step": "view_ab"}` 等形式（`step` 仅允许 `view_ab` / `tmdb_refresh` / `tmdb_match`，其它值返回 400）。整体完成或跳过共用 `onboarding_completed` / `onboarding_skipped` 配置键，通过 `POST /api/webui/config/ui` 写入（如 `{"onboarding_completed": "1"}`）。
+**步骤完成调用**：单步完成时调用 `POST /api/onboarding/complete-step`，body 为 `{"step": "view_ab"}` 等形式（`step` 仅允许 `view_ab` / `tmdb_refresh` / `tmdb_match`，其它值返回 400）。整体完成或跳过共用 `onboarding_completed` 配置键，通过 `POST /api/webui/config/ui` 写入（如 `{"onboarding_completed": "1"}`）。
+
+> 注意：`onboarding_skipped` 虽仍保留在后端 `_UI_CONFIG_ALLOWED_KEYS` 白名单中，但当前代码无任何位置写入或读取该键，属死键。跳过引导同样写入的是 `onboarding_completed`，并非独立的 `onboarding_skipped`。
 
 > 注意：不存在 `GET /api/onboarding/status` 端点，文档不做虚构。
 
@@ -122,4 +132,4 @@ Canvas 水墨鼠标擦除效果（`destination-out` 合成模式）。5 种笔�
 
 - **分类 Tab**：前端提供「番剧 / 电影 / 全部」等分类 Tab，通过 `kind` 参数切换（`anime` / `movie` / `other` / `all`）。`kind=all` 即「全部分类」Tab，不做类型筛选但后端仍返回各分类真实计数 `kind_counts`。后端分类由 `webdav_path` 路径推断（番剧 / 电影 / 其他）。
 - **搜索**：区域搜索框传入 `q` 参数，后端走 FTS5 全文搜索（经 `_escape_fts5_query` 转义，支持中文），FTS5 失败时回退 `LIKE` 子串匹配。
-- **空状态提示**：当 `q` 为空或搜索无结果时展示空搜索状态提示（空搜索状态提示已在近期提交加入），引导用户输入关键词。
+- **空状态提示**：当 `q` 为空或搜索无结果时展示空搜索状态提示，引导用户输入关键词。

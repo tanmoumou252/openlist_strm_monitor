@@ -1,0 +1,12 @@
+# 开发/测试依赖（非生产运行所需）
+# 安装：pip install -r src/tests/requirements-dev.txt
+
+# 测试框架（src/tests/ 全部 36 个测试文件使用）
+pytest>=7.0.0
+
+# 测试覆盖率报告（可选，src/tests/run_tests.bat --cov 使用）
+pytest-cov>=4.0.0
+
+# Mock TMDB API 服务器（仅 src/tests/test_tmdb_api.py 使用）
+flask>=2.0.0
+

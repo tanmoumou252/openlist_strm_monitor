@@ -24,7 +24,9 @@ OpenList STRM 引擎能够高效地生成 `.strm` 文件供本地媒体库刮削
 
 4. **单实例去重**：同一视频源只允许一个可见实例。命名打分机制确保最优命名存活，劣质命名被重命名为 `.duplicate`。（`app_service_core.py` 去重逻辑）
 
-5. **B 区逆向自同步**：启动时对 B 区进行全量盘点——物理磁盘 vs 数据库记录双向比对，自动注册新文件、清理失效记录、追踪改名文件。（`sync_service.py:initial_scan_a`）
+5. **B 区逆向自同步**：启动时对 B 区进行全量盘点——物理磁盘 vs 数据库记录双向比对，自动注册新文件、清理失效记录、追踪改名文件。（`app_service_core.py` 的 `initial_scan_b`，内部经 `_scan_b_disk` 扫描磁盘、`_reconcile_b_historical_records` 对比历史记录）
+
+> 注：`sync_service.py:initial_scan_a` 是**A 区**启动扫描（遍历 A 区现有 STRM 文件并触发处理），与上述 B 区逆向盘点不同，勿混淆。
 
 6. **云端回收站智能重建**：触发删除联动时，在云端配置的回收站内一比一重建原文件夹树再执行移动。（`utils/webdav_utils.py:build_webdav_trash_path`）
 
@@ -53,7 +55,7 @@ OpenList STRM 引擎能够高效地生成 `.strm` 文件供本地媒体库刮削
 
 ## 🧭 首次启动引导
 
-新用户首次打开 WebUI 会看到 **7 步新手引导**（设置密码 → 配置 TMDB → 配置 OpenList → 启动主程序 → 查看 A/B 区 → 刷新 TMDB 待看列表 → 检测 TMDB 收录状态）。单步完成通过 `POST /api/onboarding/complete-step` 上报，整体完成或跳过则通过 `POST /api/webui/config/ui` 写入 `onboarding_completed` 标记；引导状态保存在 `tmdb_watchlist.db` 的 `webui_config` 表中，下次打开自动恢复进度。
+新用户首次打开 WebUI 会看到 **7 步新手引导**（确认管理员密码 → 配置 TMDB → 配置 OpenList → 启动主程序 → 查看 A/B 区 → 刷新 TMDB 待看列表 → 检测 TMDB 收录状态）。单步完成通过 `POST /api/onboarding/complete-step` 上报，整体完成或跳过则通过 `POST /api/webui/config/ui` 写入 `onboarding_completed` 标记；引导状态保存在 `tmdb_watchlist.db` 的 `webui_config` 表中，下次打开自动恢复进度。
 
 ## 🚀 快速开始
 
@@ -71,6 +73,7 @@ openlist_strm_bridge/
 ├── src/
 │   ├── main.py                  # 入口 — 配置加载、DB 初始化、AppService 启动
 │   ├── app_service_core.py      # 核心同步引擎
+│   ├── app_service.py           # 兼容性 re-export 层
 │   ├── config.py                # 类型化 dataclass 配置
 │   ├── database.py              # SQLite bridge.db 管理器
 │   ├── webdav_client.py         # OpenList Admin API + WebDAV 客户端
@@ -79,16 +82,28 @@ openlist_strm_bridge/
 │   ├── refresh_service.py       # 周期 WebDAV 刷新
 │   ├── tmdb_client.py           # TMDB API v3 客户端
 │   ├── tmdb_watchlist_db.py     # TMDB 待看列表 SQLite 数据库
+│   ├── tmdb_watchlist.py        # TMDB 待看列表数据类
 │   ├── watchlist_match.py       # 待看列表 vs B 区收录匹配
+│   ├── secret_manager.py        # 敏感信息加密
+│   ├── logger_setup.py          # 日志初始化配置
+│   ├── openlist_login_shared.py # OpenList 共享登录逻辑
 │   ├── domain/media/subtitle_handler.py  # 字幕同步
 │   ├── domain/sync/sync_service.py      # A→B 同步编排
 │   ├── utils/strm_utils.py      # 指纹、WebDAV 路径解析
 │   ├── utils/file_utils.py      # 文件 I/O 操作
-│   └── utils/webdav_utils.py    # WebDAV 路径工具
+│   ├── utils/webdav_utils.py    # WebDAV 路径工具
+│   ├── utils/error_translator.py # 错误信息翻译
+│   ├── utils/bootstrap.py       # 启动引导辅助
+│   ├── webui/                   # WebUI 服务端 + 前端源码
+│   ├── tests/                   # 测试（36 个测试文件）
+│   └── tokenizers/              # simple 中文分词器（simple.dll 等资源）
+├── dist/                        # 构建后的前端产物（Vite 输出）
 ├── docs/                        # API 文档、设计文档
+├── wiki/                        # 项目文档
 ├── config.toml                  # 主配置文件
 ├── bridge.db                    # 核心 SQLite 数据库 (WAL 模式)
 ├── tmdb_watchlist.db            # TMDB 待看列表数据库 (WAL 模式)
+├── reset_admin.py               # 管理员密码重置工具
 └── requirements.txt             # Python 依赖
 ```
 

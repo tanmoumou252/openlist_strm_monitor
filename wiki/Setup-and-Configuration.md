@@ -3,7 +3,7 @@
 ## 系统要求
 
 - **操作系统**：Windows 10/11 或 Server 2016+
-- **Python**：3.11+（项目内置 Python 3.14 在 `src/python_embed/`）
+- **Python**：3.11+
 - **磁盘**：500MB+ 剩余空间
 - **网络**：可访问 OpenList 服务器（WebDAV + Admin API），可选 TMDB API 访问
 
@@ -23,13 +23,11 @@ pip install -r requirements.txt
 | `requests` | ≥2.31.0 | HTTP 客户端 |
 | `lxml` | ≥5.0.0 | WebDAV XML 解析（PROPFIND 响应） |
 | `tomli` | ≥2.0.1 | TOML 解析（Python <3.11 兼容） |
-| `pyotp` | ≥2.9.0 | TOTP 二次验证 |
 
 ### 启动方式
 
-1. **嵌入式 Python（推荐）** — 双击 `嵌入式启动.bat`（使用 `src/python_embed/` 中的 Python）
-2. **系统 Python** — 双击 `环境变量启动.bat` 或运行 `python src/webui/server.py`
-3. **启动选择** — 批处理脚本提供选择菜单：
+1. **系统 Python** — 双击批处理脚本或运行 `python src/webui/server.py`
+2. **启动选择** — 批处理脚本提供选择菜单：
    - 选项 1：自动启动主程序（AppService）
    - 选项 2：仅启动 WebUI（默认）
 
@@ -54,16 +52,18 @@ password = ""                     # 管理员密码
 totp_secret = ""                  # TOTP 二步验证密钥
 
 [refresh]
-enabled = false                   # 是否启用主动刷新
+enabled = true                    # 是否启用主动刷新
 interval_minutes = 20             # 刷新间隔（分钟）
 depth = 5                         # 目录扫描深度
+timeout_seconds = 300             # 刷新操作超时时间（秒）
+log_level = "INFO"                # 刷新日志级别
 
 [behavior]
-sync_on_startup = false           # 启动时是否全量同步
+sync_on_startup = true            # 启动时是否全量同步（默认 true，示例可改为 false 跳过）
 sync_on_startup_wait = 0          # 同步前等待秒数
 trash_dir_name = "trash"          # 云端回收站目录名
 action = "MOVE"                   # 删除动作：MOVE 或 DELETE
-ghost_protect_seconds = 10        # 幽灵保护冷却（秒）
+ghost_protect_seconds = 300       # 幽灵保护冷却（秒）
 a_to_b_restore_delay_seconds = 30 # 损坏文件恢复前等待秒数
 
 [log]
@@ -78,10 +78,12 @@ port = 8579                       # HTTP 端口
 bind = "0.0.0.0"                  # 监听地址
 
 [tmdb]
+# 注意：[tmdb] TOML 段已废弃，TMDB 配置仅从数据库加载
+# 以下仅供参考，用于首次迁移
 access_token = ""                 # TMDB API 访问令牌
 api_key = ""                      # TMDB API 密钥
 language = "zh-CN"                # 语言偏好
-watchlist_cache_ttl = 43200       # 缓存 TTL（秒）
+watchlist_cache_ttl = 604800      # 缓存 TTL（秒，默认 7 天）
 fuzzy_threshold = 0.60            # 标题匹配阈值
 ```
 
@@ -105,7 +107,7 @@ fuzzy_threshold = 0.60            # 标题匹配阈值
 | Scope | 示例 |
 |-------|------|
 | `tmdb` | access_token、api_key、language、host、fuzzy_threshold |
-| `openlist` | webdav_host、webdav_user、webdav_password、totp_secret、strm_engine_paths |
+| `openlist` | webdav_host、webdav_user、webdav_password、webdav_totp_secret、strm_engines |
 | `ui` | admin_password（PBKDF2 哈希）、主题偏好、UI 状态 |
 | `migration` | 迁移跟踪键 |
 
@@ -113,7 +115,7 @@ fuzzy_threshold = 0.60            # 标题匹配阈值
 
 1. 启动服务器（`python src/webui/server.py`）
 2. 打开 `http://localhost:8579`
-3. 在登录页面设置管理员密码
+3. 使用首次启动时控制台打印的密码登录
 4. 进入 **配置 → OpenList** 设置：
    - WebDAV 地址、管理员用户名/密码、TOTP 密钥
    - 点击"测试链接"验证连接
@@ -146,7 +148,7 @@ WebUI 和核心同步引擎同时启动。主程序状态显示在 WebUI 仪表�
 
 | 文件 | 用途 | 表数量 | 位置 |
 |------|------|--------|------|
-| `bridge.db` | 核心同步状态 | 10 张表 | `[local] db_file` 配置 |
-| `tmdb_watchlist.db` | TMDB 缓存 + WebUI 配置 | 4 张表 | 项目根目录（`main.py` 硬编码） |
+| `bridge.db` | 核心同步状态 | 14 张表 | `[local] db_file` 配置 |
+| `tmdb_watchlist.db` | TMDB 缓存 + WebUI 配置 | 6 张表 | 项目根目录（`main.py` 硬编码） |
 
 两个数据库均使用 **WAL 模式** 以获得并发读取性能。

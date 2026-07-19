@@ -16,7 +16,8 @@
 │  SubtitleHandler — 字幕检测与归档                             │
 ├──────────────────────────────────────────────────────────────┤
 │              领域服务层 (domain/)                              │
-│  SubtitleHandler（字幕处理）、SyncService（同步服务）           │
+│  SubtitleHandler（domain/media/subtitle_handler.py）           │
+│  SyncService（domain/sync/sync_service.py）                    │
 ├──────────────────────────────────────────────────────────────┤
 │              基础设施层                                        │
 │  Database — SQLite bridge.db 管理器                           │
@@ -54,8 +55,8 @@ class AppService:
 ```
 
 ### `Database`（`database.py`）
-SQLite 数据库管理器，WAL 模式。通过 `threading.RLock()` 保证线程安全。
-管理 bridge.db 中 10 张表，提供读写连接的上下文管理器。
+SQLite 数据库管理器，WAL 模式。通过自定义 `ReadWriteLock` 类保证线程安全（非 `RLock`）。
+管理 bridge.db 中 14 张表（10 张普通表 + 3 张 FTS5 虚拟表 + `subtitles`），提供读写连接的上下文管理器。
 
 ### `OpenListAdminClient`（`webdav_client.py`）
 JWT 认证的 OpenList Admin API 客户端：
@@ -106,7 +107,7 @@ JWT 认证的 OpenList Admin API 客户端：
 
 | 模式 | 用途 | 位置 |
 |------|------|------|
-| Dataclass 配置 | 所有配置段使用 `@dataclass(slots=True, frozen=True)` | `config.py` |
+| Dataclass 配置 | 所有配置段使用 `@dataclass(slots=True)`；`StrmStorageInfo` 等不可变快照使用 `frozen=True` | `config.py`、`app_service_core.py` |
 | 上下文管理器 DB 连接 | `with self.lock, self.connection() as conn:` | `database.py` |
 | 指纹去重 | `make_strm_fingerprint()` 对 WebDAV 路径做 SHA256 哈希 | `utils/strm_utils.py` |
 | 事件驱动文件监控 | watchdog `Observer` + 3 个事件处理器 | `area_watchers.py` |
@@ -126,7 +127,7 @@ JWT 认证的 OpenList Admin API 客户端：
 
 为降低首次使用门槛，WebUI 提供 7 步新手引导，引导状态持久化在 tmdb_watchlist.db 的 `webui_config` 表中（`scope='ui'`，键如 `onboarding_completed`）。
 
-- **7 个步骤**（定义于前端 `src/webui/modules/pages/dashboard.js` 的 steps）：`password`（设置管理员密码）、`tmdb`（配置 TMDB）、`openlist`（配置 OpenList）、`main`（启动主程序）、`view_ab`（查看 A/B 区）、`tmdb_refresh`（刷新 TMDB 待看列表）、`tmdb_match`（检测 TMDB 收录状态）。
+- **7 个步骤**（定义于前端 `src/webui/modules/pages/dashboard.js` 的 steps）：`password`（确认管理员密码）、`tmdb`（配置 TMDB）、`openlist`（配置 OpenList）、`main`（启动主程序）、`view_ab`（查看 A/B 区）、`tmdb_refresh`（刷新 TMDB 待看列表）、`tmdb_match`（检测 TMDB 收录状态）。
 - **单步完成**：前端调用 `POST /api/onboarding/complete-step` 手动标记某一步已完成。
-- **整体完成 / 跳过**：通过 `POST /api/webui/config/ui` 写入 `{ onboarding_completed: '1' }`（或 `onboarding_skipped`）标记引导结束；白名单键见 `routes.py` 的 `_UI_CONFIG_ALLOWED_KEYS`。
-- **状态读取**：`GET /api/main/status` 等接口回传 `onboarding_completed` 等字段，驱动前端步骤卡片的「已完成 / 进行中」展示。
+- **整体完成 / 跳过**：通过 `POST /api/webui/config/ui` 写入 `{ onboarding_completed: '1' }` 标记引导结束；白名单键见 `routes.py` 的 `_UI_CONFIG_ALLOWED_KEYS`。
+- **状态读取**：`GET /api/config/status` 等接口回传 `onboarding_completed` 等字段，驱动前端步骤卡片的「已完成 / 进行中」展示。

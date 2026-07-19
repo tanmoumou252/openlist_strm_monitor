@@ -1,6 +1,6 @@
 # 测试脚本说明
 
-本目录包含 `openlist_strm_bridge` 项目的全部测试文件，当前共 **36** 个 `test_*.py`。
+本目录包含 `openlist_strm_bridge` 项目的全部测试文件，当前共 **32** 个 pytest 测试文件 + **4** 个独立手动脚本。
 
 所有测试均从**项目根目录**运行（`src/tests/conftest.py` 负责 `src/` 路径注入），推荐命令：
 
@@ -14,7 +14,7 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_app_service_core.py` | 核心同步引擎 `AppServiceCore` 主流程与状态机测试 |
+| `test_app_service_core.py` | 核心同步引擎 `AppService` 主流程与状态机测试 |
 | `test_sync_service.py` | A→B 同步服务（`copy_a_record_to_b_if_needed` 等）测试 |
 | `test_area_watchers.py` | A/B/C 三区文件系统监视器事件处理测试 |
 | `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试 |
@@ -54,11 +54,9 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_openlist_admin_api.py` | OpenList Admin API 客户端测试 |
 | `test_openlist_hotreload.py` | OpenList 热重载/配置刷新测试 |
 | `test_webdav_client.py` | WebDAV 协议客户端测试 |
 | `test_tmdb_client.py` | TMDB API v3 客户端测试 |
-| `test_tmdb_api.py` | TMDB API 路由与缓存测试 |
 | `test_openlist_login_shared.py` | OpenList 登录错误消息解析（`parse_login_error`）测试 |
 
 ### WebUI
@@ -66,7 +64,6 @@ python -m pytest src/tests/ -v
 | 文件 | 说明 |
 |------|------|
 | `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试 |
-| `test_webui_standalone.py` | WebUI 独立启动与静态资源服务测试 |
 | `test_call_coverage.py` | 路由调用覆盖率测试 |
 | `test_logging_system.py` | 日志系统测试 |
 | `test_concurrency.py` | 并发请求与锁竞争测试 |
@@ -84,7 +81,17 @@ python -m pytest src/tests/ -v
 |------|------|
 | `test_e2e_full_flow.py` | 完整业务流程端到端测试（登录→配置→A/B 区→状态校验） |
 | `test_onboarding_e2e.py` | 新手引导流程端到端测试 |
-| `test_real_server.py` | 真实服务器启动与存活探测测试 |
+
+### 独立手动脚本（非 pytest 测试）
+
+以下脚本需外部服务运行，不纳入 pytest 收集（已在 `conftest.py` 的 `collect_ignore_glob` 中排除）：
+
+| 文件 | 说明 | 依赖 |
+|------|------|------|
+| `test_openlist_admin_api.py` | OpenList Admin API 手动烟雾测试 | 运行中的 OpenList 服务器 |
+| `test_tmdb_api.py` | TMDB API CLI/Flask 端点测试 | 有效的 TMDB access_token |
+| `test_real_server.py` | 真实服务器安全验证探测 | 运行中的 WebUI (8579) |
+| `test_webui_standalone.py` | WebUI 在线集成测试 | 运行中的 WebUI (8579) |
 
 ## 运行测试
 
@@ -94,16 +101,11 @@ python -m pytest src/tests/ -v
 python -m pytest src/tests/ -v
 ```
 
-也可使用仓库根目录的封装脚本（自动从根目录运行，可选 `--cov` 生成覆盖率报告）：
+也可使用封装脚本（可选 `--cov` 生成覆盖率报告）：
 
 ```bash
-# Windows
-run_tests.bat
-run_tests.bat --cov
-
-# Linux / macOS
-./run_tests.sh
-./run_tests.sh --cov
+src/tests/run_tests.bat
+src/tests/run_tests.bat --cov
 ```
 
 ### 运行特定测试文件
@@ -133,7 +135,7 @@ python -m pytest src/tests/ --cov=src --cov-report=html
 ## 测试依赖
 
 ```bash
-pip install pytest pytest-cov
+pip install -r src/tests/requirements-dev.txt
 ```
 
 ## 测试环境

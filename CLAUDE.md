@@ -5,7 +5,7 @@ This file provides guidance to AI coding assistants when working with the `openl
 ## Core Rules
 
 1. **Rebuild dist after frontend changes**: `cd src/webui && npx vite build`. Browser loads `dist/assets/`, not source files. This is the #1 cause of "fix didn't work."
-2. **Do NOT restart the server** — it's managed externally.
+2. **Server control is allowed** — this is a development/test-only project. The agent may freely start, stop, or restart the server for verification.
 3. **For OpenList API changes**, read `doc/` markdown files first.
 4. **For dangerous operations** (delete, move, cloud linkage), explain safety risk before editing.
 5. **Preserve the A/B/C three-zone model.** Do not merge or flatten zones.
@@ -26,7 +26,7 @@ This file provides guidance to AI coding assistants when working with the `openl
 - **Sync engine only**: `python src/main.py` — starts the A/B/C zone sync engine, no WebUI.
 - **WebUI**: `python src/webui/server.py` — starts the management panel with an interactive menu to optionally launch the sync engine.
 
-> Do NOT use `python src/main.py --webui-only` — that flag does not exist.
+> Do NOT use `python src/main.py --webui-only` or `--webui` — those flags do not exist (both are rejected by `main.py`).
 
 ## Project Purpose
 
@@ -34,11 +34,12 @@ This file provides guidance to AI coding assistants when working with the `openl
 
 ## Tech Stack
 
-- **Backend**: Python 3.11+, stdlib `http.server` (single-threaded)
+- **Backend**: Python 3.11+, stdlib `http.server` (`ThreadingHTTPServer`, 多线程)
 - **Frontend**: Vanilla JS SPA, Vite 8.x build, MD3/Fluent2 dual theme
 - **Database**: SQLite (WAL mode): `bridge.db` + `tmdb_watchlist.db`
 - **Search/Tokenizer**: SQLite FTS5 + `simple` extension (wangfenjin/simple, cppjieba wrapper, v0.7.1, `simple.dll` under `src/tokenizers/simple/`). Hard dependency for Chinese search; falls back to `unicode61` (no Chinese tokens) on load failure.
-- **Dependencies**: watchdog, requests, lxml, pyotp, pytest
+- **Dependencies**: watchdog, requests, lxml
+- **Dev dependencies**: pytest (36 test files under `src/tests/`), listed in `src/tests/requirements-dev.txt`
 
 ## Key Architecture
 
@@ -87,7 +88,7 @@ This file provides guidance to AI coding assistants when working with the `openl
 
 ## Safety Notes
 
-- Lock ordering in `app_service_core.py`: `_path_locks_lock` > `_path_locks[path]` > `_dav_write_lock` > `_b_file_lock` > `_cleanup_lock` > `_restoring_lock` > `_lineage_log_lock`
+- Lock ordering in `app_service_core.py`: `_path_locks_lock` > `_path_locks[path]` > `_dav_write_lock` > `_cleanup_lock` > `_restoring_lock` > `_lineage_log_lock`
 - Ghost protection: 30-second observation period for single-file desertion scenarios
 - Duplicate scoring: Standard `S01E01` naming ranks highest, inferior names get `.duplicate` suffix
 - Config layering: DB config overrides config.toml. If toml changes don't take effect, check DB `webui_config` table.

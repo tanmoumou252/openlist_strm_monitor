@@ -36,7 +36,7 @@ if %errorlevel% neq 0 (
 )
 
 :: 5. 检查依赖库是否完整
-"%PYTHON%" -c "import watchdog; import requests; import lxml; import pyotp" >nul 2>nul
+"%PYTHON%" -c "import watchdog; import requests; import lxml" >nul 2>nul
 if %errorlevel% neq 0 (
     echo [ERROR] 检测到缺失的依赖库。
     echo.

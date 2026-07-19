@@ -31,6 +31,7 @@
 class AAreaEventHandler(FileSystemEventHandler):
     def on_created(self, event):
         # 路由到 app.handle_a_created_or_modified()
+        # 不过滤扩展名（内部判断 .strm 或字幕）
     def on_modified(self, event):
         # 路由到 app.handle_a_created_or_modified()
     def on_deleted(self, event):
@@ -41,7 +42,7 @@ class AAreaEventHandler(FileSystemEventHandler):
 
 **关键操作**：
 - `handle_a_created_or_modified(src_path)` — 计算指纹、注册 DB、通过 `SyncService` 复制到 B 区
-- `handle_a_deleted(src_path)` — 传播删除到 B 区，更新身份跟踪
+- `handle_a_deleted(src_path)` — 删除 A 区 DB 记录，触发 `trigger_delayed_cleanup` 安排延迟清理（**不直接传播删除到 B 区**）
 
 ## B 区 — 媒体库消费区
 
@@ -60,7 +61,10 @@ class BAreaEventHandler(FileSystemEventHandler):
     def on_deleted(self, event):
         # 仅 .strm 文件 → app.handle_b_deleted()
     def on_moved(self, event):
-        # 仅 .strm 文件 → app.handle_b_moved()
+        # 根据源/目标扩展名分 3 种场景：
+        # 1. .strm → .strm：app.handle_b_moved()
+        # 2. .strm → 非.strm：app.handle_b_renamed_to_non_strm()
+        # 3. 非.strm → .strm：app.handle_b_created_or_modified()
 ```
 
 **关键事件处理器**（`app_service_core.py`）：
@@ -68,8 +72,9 @@ class BAreaEventHandler(FileSystemEventHandler):
 | 处理器 | 用途 |
 |--------|------|
 | `handle_b_created_or_modified` | 检测新 STRM（如手动复制），验证血统，注册 DB。如果重复则重命名为 `.duplicate` |
-| `handle_b_deleted` | 检测用户删除，翻译为云端 API 调用（MOVE 到回收站或 DELETE）。清理 A 区源文件 |
-| `handle_b_moved` | 检测用户重命名/移动，更新 DB 记录。如果越界则反转或清理 |
+| `handle_b_deleted` | 检测用户删除，三重安全机制验证后翻译为云端 API 调用（MOVE 到回收站或 DELETE）。清理 A 区源文件 |
+| `handle_b_moved` | 检测用户重命名/移动，路径规范化 + 双路径锁 + DB 更新。不做血统验证 |
+| `handle_b_renamed_to_non_strm` | `.strm` 被重命名为非 `.strm` 扩展名时的处理 |
 
 **B 区字幕处理**：
 - **电影**：字幕与 STRM 同目录
