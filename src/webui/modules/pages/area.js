@@ -1,7 +1,9 @@
 import { api } from '../core/api.js';
 import { icon } from '../core/icons.js';
-import { esc, fmtTime, createSortLink } from '../core/utils.js';
-import { navigate } from '../core/router.js';
+import { esc, fmtTime, createSortLink, renderTmdbResults } from '../core/utils.js';
+import { navigate, isRenderStale } from '../core/router.js';
+import { showToast } from '../components/toast.js';
+import { showConfirmDialog } from '../components/dialog.js';
 
 /** 根据 B 区状态返回 CSS class 名称 */
 function _statusClass(status) {
@@ -24,6 +26,7 @@ async function renderAreaList(el, area, params) {
   const sort = params.sort || 'name';
   const order = params.order || 'asc';
   const page = parseInt(params.page) || 1;
+  const pageSize = parseInt(params.page_size) || 50;
   let url = `/api/area/${area}`;
   const qs = [];
   qs.push('kind=' + encodeURIComponent(kind));
@@ -31,17 +34,30 @@ async function renderAreaList(el, area, params) {
   if (sort) qs.push('sort=' + encodeURIComponent(sort));
   if (order) qs.push('order=' + encodeURIComponent(order));
   qs.push('page=' + page);
+  qs.push('page_size=' + pageSize);
   if (qs.length) url += '?' + qs.join('&');
 
   const d = await api(url);
   const kindLabel = d.kind_label;
 
   // Category tabs
-  const kinds = [{ v: 'anime', l: '番剧', i: 'tv' }, { v: 'movie', l: '电影', i: 'movie' }];
+  // 根据是否有搜索词动态生成 tab 列表：搜索时增加"全部"tab（跨分类），非搜索时只有番剧/电影
+  const kinds = q
+    ? [
+        { v: 'all', l: '全部', i: 'grid_view' },
+        { v: 'anime', l: '番剧', i: 'tv' },
+        { v: 'movie', l: '电影', i: 'movie' }
+      ]
+    : [
+        { v: 'anime', l: '番剧', i: 'tv' },
+        { v: 'movie', l: '电影', i: 'movie' }
+      ];
   const tabsHtml = kinds.map(k => {
     const active = (kind || '') === k.v ? ' active' : '';
-    const href = `#area_${area}?kind=${k.v}&sort=${sort}&order=${order}`;
-    const count = d.kind_counts[k.v] || 0;
+    // tab href 保留搜索词，点击 tab 切分类时 q 不丢失
+    const href = `#area_${area}?kind=${k.v}&sort=${sort}&order=${order}${q ? '&q=' + encodeURIComponent(q) : ''}`;
+    // "全部"tab 计数用 d.total（跨分类去重总数）；后端 kind_counts 无 all 键，直接读会恒为 0
+    const count = k.v === 'all' ? (d.total || 0) : (d.kind_counts[k.v] || 0);
     return `<button class="category-tab${active}" data-kind-href="${href}">${icon(k.i)} ${k.l} <span class="count">${count}</span></button>`;
   }).join('');
 
@@ -52,11 +68,18 @@ async function renderAreaList(el, area, params) {
 
   // Media cards
   const _kindIconMap = { '番剧': 'tv', '动漫': 'tv', '动画': 'tv', '电影': 'movie' };
-  const cardsHtml = d.media_items.map(item => {
-    const href = `#area_${area}?media=${encodeURIComponent(item.name)}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}`;
-    const cardIcon = _kindIconMap[item.kind] || 'tv';
-    return `<a class="media-card" href="${href}">${icon(cardIcon)}<div class="title">${esc(item.name)}</div><div class="meta">${item.count} 个文件</div></a>`;
-  }).join('');
+  const areaLabels = { a: 'A 区', b: 'B 区', c: 'C 区' };
+  const areaLabel = areaLabels[area] || area.toUpperCase() + ' 区';
+  let cardsHtml = '';
+  if (d.media_items.length === 0 && q) {
+    cardsHtml = `<div class="empty-search-state" style="height:200px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:14px">${esc(areaLabel)}暂无搜索结果</div>`;
+  } else {
+    cardsHtml = d.media_items.map(item => {
+      const href = `#area_${area}?media=${encodeURIComponent(item.name)}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}`;
+      const cardIcon = _kindIconMap[item.kind] || 'tv';
+      return `<a class="media-card" href="${href}">${icon(cardIcon)}<div class="title">${esc(item.name)}</div><div class="meta">${item.count} 个文件</div></a>`;
+    }).join('');
+  }
 
   // Pager
   let pagerHtml = '';
@@ -82,19 +105,45 @@ async function renderAreaList(el, area, params) {
   ${sortLink('名称', 'name')}
   ${sortLink('文件数', 'count')}
   ${sortLink('时间', 'time')}
+  <select id="page-size-select" style="margin-left:auto;padding:4px 8px;border:1px solid var(--border-color);border-radius:var(--radius-control);background:var(--bg-control);color:var(--text-main);font-size:calc(var(--font-base) - 1px)">
+    <option value="50"${d.page_size === 50 ? ' selected' : ''}>50 条/页</option>
+    <option value="100"${d.page_size === 100 ? ' selected' : ''}>100 条/页</option>
+    <option value="200"${d.page_size === 200 ? ' selected' : ''}>200 条/页</option>
+  </select>
 </div>
 <div class="media-grid">${cardsHtml}</div>
-${pagerHtml}`;
+${pagerHtml}
+<div id="tmdb-search-results"></div>`;
+
+  // 有搜索词时，同时查询 TMDB 在线结果
+  if (q) {
+    const searchContainer = document.getElementById('tmdb-search-results');
+    api(`/api/tmdb/search?query=${encodeURIComponent(q)}`)
+      .then(results => {
+        if (isRenderStale()) return;  // 双保险 1：页面代际校验
+        renderTmdbResults(results, "你可能还在找", q, searchContainer);  // 双保险 2：container.isConnected 在函数内校验
+      })
+      .catch(() => {
+        if (isRenderStale()) return;
+        showToast('TMDB 在线搜索失败，请稍后重试', 'error');
+      });
+  }
 
   // Bind search
   document.getElementById('area-search-btn').addEventListener('click', () => {
     const val = document.getElementById('media-search').value.trim();
+    if (val === (q || '')) return;  // 值未变化则不导航（原守卫位于 navigate 之后为死代码，已移到前面）
     let h = `#area_${area}?sort=${sort}&order=${order}`;
     const p = [];
-    if (kind) p.push('kind=' + encodeURIComponent(kind));
-    if (val) p.push('q=' + encodeURIComponent(val));
+    if (val) {
+      // 有搜索词 → 跨分类搜索（全部 tab）
+      p.push('kind=all');
+      p.push('q=' + encodeURIComponent(val));
+    } else {
+      // 清空搜索 → 回到当前分类浏览（非"全部"）
+      p.push('kind=' + encodeURIComponent(kind === 'all' ? 'anime' : kind));
+    }
     if (p.length) h += '&' + p.join('&');
-    if (val === (q || '')) return;
     navigate(h);
   });
   document.getElementById('media-search').addEventListener('keydown', e => {
@@ -106,6 +155,12 @@ ${pagerHtml}`;
       e.preventDefault();
       navigate(tab.dataset.kindHref);
     });
+  });
+  // Bind page size selector
+  document.getElementById('page-size-select')?.addEventListener('change', (e) => {
+    const newSize = e.target.value;
+    const newHash = `#area_${area}?kind=${encodeURIComponent(kind)}&sort=${sort}&order=${order}&page_size=${newSize}&page=1`;
+    navigate(newHash);
   });
 }
 
@@ -130,6 +185,7 @@ async function renderAreaDetail(el, area, params) {
   }
   const localRoot = d.local_root || '';
   const webdavRoot = d.webdav_root || '';
+  const strmEngineRoot = d.strm_engine_root || '';
 
   const kindPart = kind ? '?kind=' + encodeURIComponent(kind) : '';
   const areaLabels = { a: 'A 区', b: 'B 区', c: 'C 区' };
@@ -139,6 +195,7 @@ async function renderAreaDetail(el, area, params) {
   <a href="#area_${area}${kindPart}" class="back-icon-btn" title="返回列表">${icon('back')}</a>
   <span style="color:var(--text-main);font-size:14px;font-weight:600">${esc(media)}</span>
   <span style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px)">· ${d.total} 个文件</span>
+  ${(area === 'a' || area === 'b') ? `<button class="toolbar-btn" id="refresh-media-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button>` : ''}
 </div>`;
 
   const expandBtns = `<div class="detail-actions">
@@ -146,10 +203,11 @@ async function renderAreaDetail(el, area, params) {
   <button class="toolbar-btn" id="collapse-all-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('collapse')} 折叠全部</button>
 </div>`;
 
-  if (localRoot || webdavRoot) {
+  if (localRoot || webdavRoot || strmEngineRoot) {
     html += `<div class="area-detail-head"><div class="area-path-block">`;
     if (localRoot) html += `<div class="path-line"><span class="path-label">${areaLabel} 本地根：</span><span class="path-value mono">${esc(localRoot)}</span></div>`;
     if (webdavRoot) html += `<div class="path-line"><span class="path-label">WebDAV 根：</span><span class="path-value mono">${esc(webdavRoot)}</span></div>`;
+    if (strmEngineRoot) html += `<div class="path-line"><span class="path-label">STRM 入口：</span><span class="path-value mono">${esc(strmEngineRoot)}</span></div>`;
     html += `</div>${expandBtns}</div>`;
   } else {
     html += `<div class="area-detail-head" style="justify-content:flex-end">${expandBtns}</div>`;
@@ -226,4 +284,42 @@ if (area === 'a') {
     setDetailToggleState(false);
   });
   setDetailToggleState(document.querySelectorAll('.season-details').length > 0);
+
+  // 绑定刷新按钮事件
+  const refreshBtn = document.getElementById('refresh-media-btn');
+  if (refreshBtn) {
+    const doRefresh = async () => {
+      refreshBtn.disabled = true;
+      refreshBtn.innerHTML = `${icon('loading')} 刷新中...`;
+      try {
+        const result = await api(`/api/area/${area}/refresh`, {
+          method: 'POST',
+          body: JSON.stringify({ media })
+        });
+
+        if (result.ok) {
+          const msg = result.message || '刷新完成';
+          showToast(msg, 'success');
+          // 自动刷新页面数据
+          await renderAreaDetail(el, area, params);
+        } else {
+          showToast(`刷新失败：${result.error || '未知错误'}`, 'error');
+        }
+      } catch (err) {
+        showToast(`刷新请求失败：${err.message}`, 'error');
+      } finally {
+        refreshBtn.disabled = false;
+        refreshBtn.innerHTML = `${icon('refresh')} 刷新`;
+      }
+    };
+
+    refreshBtn.addEventListener('click', () => {
+      showConfirmDialog(
+        '刷新媒体数据',
+        `将触发 STRM 引擎重新生成并同步。<br><br>媒体：${esc(media)}<br><br>是否继续？`,
+        async () => { await doRefresh(); },
+        null
+      );
+    });
+  }
 }

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator
 
+from utils import escape_like
+
 class ReadWriteLock:
     """读写锁：允许多个读者并发访问，写者独占。
 
@@ -148,11 +150,6 @@ class SubtitleRecord:
     updated_at: str
 
 
-# ============================================================
-# 数据库操作
-# ============================================================
-
-
 class Database:
     _last_ghost_cleanup: float
 
@@ -171,14 +168,105 @@ class Database:
         for stmt in self._PRAGMA_STATEMENTS:
             conn.execute(stmt)
 
+    # Simple 分词器资源根目录（src/tokenizers/simple/）
+    _SIMPLE_TOKENIZER_DIR: Path = Path(__file__).parent / "tokenizers" / "simple"
+    _SIMPLE_DLL: Path = _SIMPLE_TOKENIZER_DIR / "simple.dll"
+    _SIMPLE_VERSION_FILE: Path = _SIMPLE_TOKENIZER_DIR / "VERSION"
+
+    def _load_simple_tokenizer(self, conn: sqlite3.Connection) -> bool:
+        """加载 simple 中文分词器扩展。成功返回 True，失败软降级返回 False。"""
+        try:
+            conn.enable_load_extension(True)
+            # simple.dll 位于 src/tokenizers/simple/simple.dll
+            simple_dll = self._SIMPLE_DLL
+            if simple_dll.exists():
+                conn.load_extension(str(simple_dll))
+                self._fts_tokenizer = 'simple'
+                # 读取并缓存版本信息，供运维感知当前分词器版本
+                self._simple_version = self._read_simple_version()
+                logging.debug(
+                    "[DB] Simple tokenizer loaded successfully from %s (version: %s)",
+                    simple_dll, self._simple_version or "unknown",
+                )
+                return True
+            else:
+                logging.warning(f"[DB] Simple tokenizer not found at {simple_dll}, falling back to unicode61")
+                return False
+        except Exception as e:
+            logging.warning(f"[DB] Failed to load simple tokenizer: {e}, falling back to unicode61")
+            return False
+
+    @classmethod
+    def _read_simple_version(cls) -> str:
+        """读取 src/tokenizers/simple/VERSION 的简明版本标识，失败返回空串。"""
+        try:
+            text = cls._SIMPLE_VERSION_FILE.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.lower().startswith("bundled-version:"):
+                    return stripped.split(":", 1)[1].strip()
+            # 兜底：返回首行非空内容
+            return next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+        except Exception:
+            return ""
+
+    # ---- 瞬时 SQLite 错误识别（Windows 杀毒锁文件/磁盘瞬断）----
+    _TRANSIENT_HINTS: tuple[str, ...] = (
+        "readonly", "database is locked", "disk i/o error",
+    )
+
+    def _is_transient_error(self, exc: sqlite3.OperationalError) -> bool:
+        """判断 OperationalError 是否为可恢复的瞬时错误。"""
+        msg = str(exc).lower()
+        return any(h in msg for h in self._TRANSIENT_HINTS)
+
+    def _probe_writeable(self, conn: sqlite3.Connection) -> None:
+        """用 BEGIN IMMEDIATE / ROLLBACK 探测连接是否可写（不变更 schema）。
+
+        BEGIN IMMEDIATE 会尝试获取 RESERVED 锁，在文件只读或 query_only
+        模式下均会抛 OperationalError。
+        仅在 connection() 内部调用。失败时抛出 OperationalError 并附诊断。
+        不做重试——重试由上层 _worker 周期自然完成，避免在持有
+        ReadWriteLock 期间阻塞。
+        """
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("ROLLBACK")
+        except sqlite3.OperationalError as exc:
+            self._log_db_diagnostics()
+            raise exc
+
+    def _log_db_diagnostics(self) -> None:
+        """输出数据库文件级诊断信息，辅助排查 readonly 问题。"""
+        try:
+            p = Path(self.db_path)
+            exists = p.exists()
+            if not exists:
+                logging.warning("[DB] 诊断: db_path=%s 文件不存在", self.db_path)
+                return
+            writable = os.access(str(p), os.W_OK)
+            parent = p.parent
+            parent_writable = os.access(str(parent), os.W_OK) if parent.exists() else False
+            size = p.stat().st_size
+            wal = Path(str(p) + "-wal")
+            shm = Path(str(p) + "-shm")
+            logging.warning(
+                "[DB] 诊断: db_path=%s exists=True writable=%s size=%s "
+                "parent_writable=%s wal_exists=%s shm_exists=%s",
+                self.db_path, writable, size, parent_writable,
+                wal.exists(), shm.exists(),
+            )
+        except Exception as diag_exc:
+            logging.debug("[DB] 诊断输出失败: %s", diag_exc)
+
     @contextmanager
     def connection(self) -> Generator[sqlite3.Connection, None, None]:
-        """写连接上下文管理器 - 用于修改数据库的操作
-        
-        注意：不在每次连接时调用 _ensure_db_writable()，因为：
-        1. __init__ 已经确保数据库文件存在且可写
-        2. 在 Windows 上，_ensure_db_writable 创建临时连接会导致文件锁竞争
-        3. 如果数据库真的不可写，sqlite3.connect 会抛出异常
+        """写连接上下文管理器 - 用于修改数据库的操作。
+
+        打开后做一次 BEGIN/ROLLBACK 写能力探测，捕获 Windows 杀软瞬时锁
+        等 readonly 异常。探测失败立即上抛（附诊断日志），不做重试——调用方
+        rw_lock.write_locked 持锁期间不得 sleep，重试由上层 _worker 周期
+        自然完成。
         """
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
 
@@ -186,6 +274,8 @@ class Database:
         try:
             conn = sqlite3.connect(self.db_path, timeout=30)
             self._apply_pragmas(conn)
+            self._load_simple_tokenizer(conn)
+            self._probe_writeable(conn)
             yield conn
         finally:
             if conn is not None:
@@ -196,12 +286,22 @@ class Database:
 
     @contextmanager
     def read_connection(self) -> Generator[sqlite3.Connection, None, None]:
-        """只读连接上下文管理器 - 不持有写锁，允许并发读取 (WAL模式下安全)"""
+        """只读连接上下文管理器 - 不持有写锁，允许并发读取 (WAL模式下安全)。
+
+        与 connection() 共享诊断逻辑：WAL PRAGMA 本身需要写权限，
+        瞬时 readonly 同样可能击中读路径（WebUI 路由、watchlist_match）。
+        """
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         conn = None
         try:
             conn = sqlite3.connect(self.db_path, timeout=30)
-            self._apply_pragmas(conn)
+            try:
+                self._apply_pragmas(conn)
+            except sqlite3.OperationalError as exc:
+                if self._is_transient_error(exc):
+                    self._log_db_diagnostics()
+                raise
+            self._load_simple_tokenizer(conn)
             conn.execute("PRAGMA query_only=ON")
             yield conn
         finally:
@@ -230,12 +330,15 @@ class Database:
         self.rw_lock = ReadWriteLock()
         self._last_ghost_cleanup = 0.0
         self._ghost_cleanup_lock = threading.Lock()
+        self._fts_tokenizer = 'unicode61'  # 默认降级值，simple 加载成功后更新为 'simple'
+        self._simple_version: str | None = None  # simple 分词器版本（加载成功后填充，见 _load_simple_tokenizer）
 
         # ===== 修复：确保数据库文件可写 =====
         self._ensure_db_writable()
         # ====================================
         logging.info("[DB] 开始初始化数据库表结构")
         self._create_schema()
+        self.init_subtitle_table()  # 字幕表单独初始化（避免 _create_schema 重复定义）
         logging.info("[DB] 数据库核心表与索引核对并创建完成！")
 
     def _create_schema(self) -> None:
@@ -345,6 +448,43 @@ class Database:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_boundary_source_name ON strm_media_boundary(source_media_name)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_boundary_current_name ON strm_media_boundary(current_media_name)")
 
+            # 排序字段索引（local_path 是 PRIMARY KEY，SQLite 自动索引，无需重复）
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_a_strm_updated_at ON a_strm_files(updated_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_b_strm_updated_at ON b_strm_files(updated_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_c_ghost_moved_at ON c_ghost_files(moved_at)")
+
+            # 创建 FTS5 全文搜索虚拟表（使用 self._fts_tokenizer，simple 或 unicode61 降级）
+            tok = self._fts_tokenizer
+            cur.execute(f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS a_strm_files_fts USING fts5(
+                    local_path,
+                    webdav_path,
+                    tokenize='{tok}'
+                )
+            """)
+            
+            cur.execute(f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS b_strm_files_fts USING fts5(
+                    local_path,
+                    webdav_path,
+                    tokenize='{tok}'
+                )
+            """)
+            
+            cur.execute(f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS c_ghost_files_fts USING fts5(
+                    local_path,
+                    webdav_path,
+                    tokenize='{tok}'
+                )
+            """)
+
+            # 首次回填：FTS 表为空但主表非空时，从主表批量填充
+            self._backfill_fts_if_empty(conn)
+
+            # 孤儿清理：FTS 行数与主表不一致时重建
+            self._rebuild_fts_if_stale(conn)
+
             conn.commit()
 
     def init_db(self) -> None:
@@ -352,10 +492,55 @@ class Database:
         logging.debug("[DB] init_db 被调用，确保所有表已创建")
         self._create_schema()
 
+    def _backfill_fts_if_empty(self, conn: sqlite3.Connection) -> None:
+        """首次回填：FTS 表为空但主表非空时，从主表批量填充。"""
+        tables = [
+            ("a_strm_files", "a_strm_files_fts"),
+            ("b_strm_files", "b_strm_files_fts"),
+            ("c_ghost_files", "c_ghost_files_fts"),
+        ]
+        for main_table, fts_table in tables:
+            fts_count = conn.execute(f"SELECT COUNT(*) FROM {fts_table}").fetchone()[0]
+            if fts_count == 0:
+                main_count = conn.execute(f"SELECT COUNT(*) FROM {main_table}").fetchone()[0]
+                if main_count > 0:
+                    conn.execute(
+                        f"INSERT INTO {fts_table}(rowid, local_path, webdav_path) "
+                        f"SELECT rowid, local_path, webdav_path FROM {main_table}"
+                    )
+                    logging.info(f"[DB] 首次回填 {fts_table}: {main_count} 条记录")
+
+    def _rebuild_fts_if_stale(self, conn: sqlite3.Connection) -> None:
+        """孤儿清理：FTS 行数与主表不一致时，全清后重建。"""
+        tables = [
+            ("a_strm_files", "a_strm_files_fts"),
+            ("b_strm_files", "b_strm_files_fts"),
+            ("c_ghost_files", "c_ghost_files_fts"),
+        ]
+        for main_table, fts_table in tables:
+            main_count = conn.execute(f"SELECT COUNT(*) FROM {main_table}").fetchone()[0]
+            fts_count = conn.execute(f"SELECT COUNT(*) FROM {fts_table}").fetchone()[0]
+            if fts_count != main_count:
+                conn.execute(f"DELETE FROM {fts_table}")
+                if main_count > 0:
+                    conn.execute(
+                        f"INSERT INTO {fts_table}(rowid, local_path, webdav_path) "
+                        f"SELECT rowid, local_path, webdav_path FROM {main_table}"
+                    )
+                logging.info(
+                    f"[DB] 重建 {fts_table}: FTS={fts_count} → 主表={main_count}（修复孤儿/缺失）"
+                )
+
     def upsert_a(self, local_path: str, webdav_path: str,
                  parent_webdav_path: str) -> None:
         now = time.time()
         with self.rw_lock.write_locked(), self.connection() as conn:
+            # 先获取旧 rowid（如果存在），删除旧 FTS 行（避免 REPLACE 改变 rowid 后残留孤儿）
+            old_row = conn.execute(
+                "SELECT rowid FROM a_strm_files WHERE local_path = ?", (local_path,)
+            ).fetchone()
+            if old_row:
+                conn.execute("DELETE FROM a_strm_files_fts WHERE rowid = ?", (old_row[0],))
             conn.execute(
                 """
                 INSERT OR REPLACE INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
@@ -363,6 +548,17 @@ class Database:
                 """,
                 (local_path, webdav_path, parent_webdav_path, now),
             )
+            # 获取新 rowid，插入新 FTS 行
+            new_row = conn.execute(
+                "SELECT rowid FROM a_strm_files WHERE local_path = ?", (local_path,)
+            ).fetchone()
+            if new_row:
+                # 先删除该 rowid 上可能残留的孤儿 FTS 行（防止 constraint failed）
+                conn.execute("DELETE FROM a_strm_files_fts WHERE rowid = ?", (new_row[0],))
+                conn.execute(
+                    "INSERT INTO a_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                    (new_row[0], local_path, webdav_path),
+                )
             conn.commit()
 
     def upsert_b(
@@ -376,6 +572,12 @@ class Database:
     ) -> None:
         now = time.time()
         with self.rw_lock.write_locked(), self.connection() as conn:
+            # 先获取旧 rowid（如果存在），删除旧 FTS 行（避免 REPLACE 改变 rowid 后残留孤儿）
+            old_row = conn.execute(
+                "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
+            ).fetchone()
+            if old_row:
+                conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (old_row[0],))
             conn.execute(
                 """
                 INSERT OR REPLACE INTO b_strm_files(
@@ -399,6 +601,17 @@ class Database:
                     now,
                 ),
             )
+            # 获取新 rowid，插入新 FTS 行
+            new_row = conn.execute(
+                "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
+            ).fetchone()
+            if new_row:
+                # 先删除该 rowid 上可能残留的孤儿 FTS 行（防止 constraint failed）
+                conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (new_row[0],))
+                conn.execute(
+                    "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                    (new_row[0], local_path, webdav_path),
+                )
             conn.commit()
 
     def upsert_c(
@@ -410,6 +623,12 @@ class Database:
     ) -> None:
         now = time.time()
         with self.rw_lock.write_locked(), self.connection() as conn:
+            # 先获取旧 rowid（如果存在），删除旧 FTS 行（避免 REPLACE 改变 rowid 后残留孤儿）
+            old_row = conn.execute(
+                "SELECT rowid FROM c_ghost_files WHERE local_path = ?", (local_path,)
+            ).fetchone()
+            if old_row:
+                conn.execute("DELETE FROM c_ghost_files_fts WHERE rowid = ?", (old_row[0],))
             conn.execute(
                 """
                 INSERT OR REPLACE INTO c_ghost_files(local_path, webdav_path, original_b_path, ghost_root, moved_at)
@@ -417,24 +636,59 @@ class Database:
                 """,
                 (local_path, webdav_path, original_b_path, ghost_root, now),
             )
+            # 获取新 rowid，插入新 FTS 行
+            new_row = conn.execute(
+                "SELECT rowid FROM c_ghost_files WHERE local_path = ?", (local_path,)
+            ).fetchone()
+            if new_row:
+                # 先删除该 rowid 上可能残留的孤儿 FTS 行（防止 constraint failed）
+                conn.execute("DELETE FROM c_ghost_files_fts WHERE rowid = ?", (new_row[0],))
+                conn.execute(
+                    "INSERT INTO c_ghost_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                    (new_row[0], local_path, webdav_path),
+                )
             conn.commit()
 
     def delete_a_by_local(self, local_path: str) -> None:
         with self.rw_lock.write_locked(), self.connection() as conn:
-            conn.execute(
-                "DELETE FROM a_strm_files WHERE local_path = ?", (local_path,))
+            # 先获取 rowid
+            row = conn.execute(
+                "SELECT rowid FROM a_strm_files WHERE local_path = ?", (local_path,)
+            ).fetchone()
+            if row:
+                rowid = row[0]
+                conn.execute(
+                    "DELETE FROM a_strm_files WHERE local_path = ?", (local_path,)
+                )
+                conn.execute(
+                    "DELETE FROM a_strm_files_fts WHERE rowid = ?", (rowid,)
+                )
             conn.commit()
 
     def delete_b_by_local(self, local_path: str) -> None:
         with self.rw_lock.write_locked(), self.connection() as conn:
-            conn.execute(
-                "DELETE FROM b_strm_files WHERE local_path = ?", (local_path,))
+            row = conn.execute(
+                "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
+            ).fetchone()
+            if row:
+                rowid = row[0]
+                conn.execute(
+                    "DELETE FROM b_strm_files WHERE local_path = ?", (local_path,))
+                conn.execute(
+                    "DELETE FROM b_strm_files_fts WHERE rowid = ?", (rowid,))
             conn.commit()
 
     def delete_c_by_local(self, local_path: str) -> None:
         with self.rw_lock.write_locked(), self.connection() as conn:
-            conn.execute(
-                "DELETE FROM c_ghost_files WHERE local_path = ?", (local_path,))
+            row = conn.execute(
+                "SELECT rowid FROM c_ghost_files WHERE local_path = ?", (local_path,)
+            ).fetchone()
+            if row:
+                rowid = row[0]
+                conn.execute(
+                    "DELETE FROM c_ghost_files WHERE local_path = ?", (local_path,))
+                conn.execute(
+                    "DELETE FROM c_ghost_files_fts WHERE rowid = ?", (rowid,))
             conn.commit()
 
     def get_a_by_local(self, local_path: str) -> ARecord | None:
@@ -523,8 +777,8 @@ class Database:
     def remove_known_folder_prefix(self, folder_path: str) -> None:
         with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
-                "DELETE FROM known_folders WHERE folder_path = ? OR folder_path LIKE ?",
-                (folder_path, folder_path.rstrip("/") + "/%"),
+                "DELETE FROM known_folders WHERE folder_path = ? OR folder_path LIKE ? ESCAPE '\\'",
+                (folder_path, escape_like(folder_path.rstrip("/")) + "/%"),
             )
             conn.commit()
 
@@ -649,25 +903,34 @@ class Database:
             return row[0] if row else default
 
     def get_b_under_root(self, webdav_root: str) -> list[BRecord]:
-        pattern = webdav_root.rstrip("/") + "/%"
+        pattern = escape_like(webdav_root.rstrip("/")) + "/%"
         with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
                 FROM b_strm_files
-                WHERE webdav_path LIKE ?
+                WHERE webdav_path LIKE ? ESCAPE '\\'
                 """,
                 (pattern,),
             )
             return [BRecord(*row) for row in cur.fetchall()]
 
     def delete_b_under_root(self, webdav_root: str) -> None:
-        pattern = webdav_root.rstrip("/") + "/%"
+        pattern = escape_like(webdav_root.rstrip("/")) + "/%"
         with self.rw_lock.write_locked(), self.connection() as conn:
+            # 先收集待删 rowid，用于同步清理 FTS 行（防止孤儿）
+            rowids = [
+                r[0] for r in conn.execute(
+                    "SELECT rowid FROM b_strm_files WHERE webdav_path = ? OR webdav_path LIKE ? ESCAPE '\\'",
+                    (webdav_root, pattern),
+                ).fetchall()
+            ]
             conn.execute(
-                "DELETE FROM b_strm_files WHERE webdav_path = ? OR webdav_path LIKE ?",
+                "DELETE FROM b_strm_files WHERE webdav_path = ? OR webdav_path LIKE ? ESCAPE '\\'",
                 (webdav_root, pattern),
             )
+            for rid in rowids:
+                conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (rid,))
             conn.commit()
 
     def upsert_identity(
@@ -790,6 +1053,13 @@ class Database:
                 now = time.time()
                 new_status = status or "valid"
 
+                # 记录旧行 rowid，用于稍后同步清理 FTS 行（防止孤儿）
+                old_rowid_row = conn.execute(
+                    "SELECT rowid FROM b_strm_files WHERE local_path = ?",
+                    (old_local_path,),
+                ).fetchone()
+                old_rowid = old_rowid_row[0] if old_rowid_row else None
+
                 # 检查新路径是否已被其他 fingerprint 占用 (P2-6)
                 conflict = conn.execute(
                     "SELECT fingerprint FROM b_strm_files WHERE local_path = ?",
@@ -831,6 +1101,21 @@ class Database:
                     "DELETE FROM b_strm_files WHERE local_path = ?",
                     (old_local_path,),
                 )
+                # 同步 FTS：清理旧行，重建新行（防止孤儿 / rowid 复用冲突）
+                if old_rowid is not None:
+                    conn.execute(
+                        "DELETE FROM b_strm_files_fts WHERE rowid = ?", (old_rowid,))
+                new_rowid_row = conn.execute(
+                    "SELECT rowid FROM b_strm_files WHERE local_path = ?",
+                    (new_local_path,),
+                ).fetchone()
+                if new_rowid_row:
+                    conn.execute(
+                        "DELETE FROM b_strm_files_fts WHERE rowid = ?", (new_rowid_row[0],))
+                    conn.execute(
+                        "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                        (new_rowid_row[0], new_local_path, webdav_path),
+                    )
                 conn.commit()
                 return True
             except sqlite3.Error as e:
@@ -898,10 +1183,19 @@ class Database:
 
     def delete_b_by_fingerprint(self, fingerprint: str) -> None:
         with self.rw_lock.write_locked(), self.connection() as conn:
+            # 先收集待删 rowid，用于同步清理 FTS 行（防止孤儿）
+            rowids = [
+                r[0] for r in conn.execute(
+                    "SELECT rowid FROM b_strm_files WHERE fingerprint = ?",
+                    (fingerprint,),
+                ).fetchall()
+            ]
             conn.execute(
                 "DELETE FROM b_strm_files WHERE fingerprint = ?",
                 (fingerprint,),
             )
+            for rid in rowids:
+                conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (rid,))
             conn.commit()
 
     def get_b_by_local_full(self, local_path: str) -> BRecord | None:
@@ -1046,50 +1340,12 @@ class Database:
             conn.commit()
             return cur.rowcount > 0
 
-    def insert_b_strm_file(
-        self,
-        local_path: str,
-        webdav_path: str,
-        parent_webdav_path: str,
-        source_a_path: str,
-        fingerprint: str = "",
-        status: str = "valid",
-        updated_at: float | None = None,
-    ) -> bool:
-        """插入或更新 B 区 STRM 文件记录"""
-        with self.rw_lock.write_locked(), self.connection() as conn:
-            cur = conn.cursor()
-            if updated_at is None:
-                updated_at = time.time()
-            try:
-                cur.execute(
-                    """
-                    INSERT OR REPLACE INTO b_strm_files
-                    (local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        local_path,
-                        webdav_path,
-                        parent_webdav_path,
-                        source_a_path,
-                        fingerprint,
-                        status,
-                        updated_at,
-                    ),
-                )
-                conn.commit()
-                return True
-            except sqlite3.Error as e:
-                logging.error("[DB] 插入 B 区记录失败: %s", e)
-                return False
-
     def get_a_count_under_root(self, cloud_media_root: str) -> int:
         """统计 A 区某个剧集根路径下共有多少集"""
-        pattern = cloud_media_root.rstrip('/') + '/%'
+        pattern = escape_like(cloud_media_root.rstrip('/')) + '/%'
         with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute(
-                "SELECT COUNT(*) FROM a_strm_files WHERE webdav_path LIKE ?",
+                "SELECT COUNT(*) FROM a_strm_files WHERE webdav_path LIKE ? ESCAPE '\\'",
                 (pattern,)
             )
             row = cur.fetchone()
@@ -1351,6 +1607,15 @@ class Database:
         now = time.time()
         data = [(lp, wp, pwp, now) for lp, wp, pwp in records]
         with self.rw_lock.write_locked(), self.connection() as conn:
+            # INSERT OR REPLACE 会改变已存在行的 rowid，先记录旧 rowid 以清理其 FTS 行，
+            # 避免旧 FTS 行成为孤儿（防止孤儿 / rowid 复用冲突）
+            old_rowids: list[int] = []
+            for lp, _wp, _pwp in records:
+                row = conn.execute(
+                    "SELECT rowid FROM a_strm_files WHERE local_path = ?", (lp,)
+                ).fetchone()
+                if row:
+                    old_rowids.append(row[0])
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
@@ -1358,6 +1623,20 @@ class Database:
                 """,
                 data,
             )
+            # 同步 FTS：先清理旧 rowid 的 FTS 行，再按新 rowid 重建
+            for rid in old_rowids:
+                conn.execute("DELETE FROM a_strm_files_fts WHERE rowid = ?", (rid,))
+            for lp, wp, _pwp in records:
+                new_row = conn.execute(
+                    "SELECT rowid FROM a_strm_files WHERE local_path = ?", (lp,)
+                ).fetchone()
+                if new_row:
+                    conn.execute(
+                        "DELETE FROM a_strm_files_fts WHERE rowid = ?", (new_row[0],))
+                    conn.execute(
+                        "INSERT INTO a_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                        (new_row[0], lp, wp),
+                    )
             conn.commit()
             return len(data)
 
@@ -1372,6 +1651,15 @@ class Database:
         now = time.time()
         data = [(*r, now) for r in records]
         with self.rw_lock.write_locked(), self.connection() as conn:
+            # INSERT OR REPLACE 会改变已存在行的 rowid，先记录旧 rowid 以清理其 FTS 行，
+            # 避免旧 FTS 行成为孤儿（防止孤儿 / rowid 复用冲突）
+            old_rowids: list[int] = []
+            for r in records:
+                row = conn.execute(
+                    "SELECT rowid FROM b_strm_files WHERE local_path = ?", (r[0],)
+                ).fetchone()
+                if row:
+                    old_rowids.append(row[0])
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO b_strm_files(
@@ -1382,6 +1670,22 @@ class Database:
                 """,
                 data,
             )
+            # 同步 FTS：先清理旧 rowid 的 FTS 行，再按新 rowid 重建
+            for rid in old_rowids:
+                conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (rid,))
+            for r in records:
+                local_path = r[0]
+                webdav_path = r[1]
+                new_row = conn.execute(
+                    "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
+                ).fetchone()
+                if new_row:
+                    conn.execute(
+                        "DELETE FROM b_strm_files_fts WHERE rowid = ?", (new_row[0],))
+                    conn.execute(
+                        "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                        (new_row[0], local_path, webdav_path),
+                    )
             conn.commit()
             return len(data)
 
@@ -1390,10 +1694,20 @@ class Database:
         if not local_paths:
             return 0
         with self.rw_lock.write_locked(), self.connection() as conn:
+            # 先收集待删 rowid，用于同步清理 FTS 行（防止孤儿）
+            rowids: list[int] = []
+            for p in local_paths:
+                row = conn.execute(
+                    "SELECT rowid FROM a_strm_files WHERE local_path = ?", (p,)
+                ).fetchone()
+                if row:
+                    rowids.append(row[0])
             conn.executemany(
                 "DELETE FROM a_strm_files WHERE local_path = ?",
                 [(p,) for p in local_paths],
             )
+            for rid in rowids:
+                conn.execute("DELETE FROM a_strm_files_fts WHERE rowid = ?", (rid,))
             conn.commit()
             return len(local_paths)
 
@@ -1402,10 +1716,20 @@ class Database:
         if not local_paths:
             return 0
         with self.rw_lock.write_locked(), self.connection() as conn:
+            # 先收集待删 rowid，用于同步清理 FTS 行（防止孤儿）
+            rowids: list[int] = []
+            for p in local_paths:
+                row = conn.execute(
+                    "SELECT rowid FROM b_strm_files WHERE local_path = ?", (p,)
+                ).fetchone()
+                if row:
+                    rowids.append(row[0])
             conn.executemany(
                 "DELETE FROM b_strm_files WHERE local_path = ?",
                 [(p,) for p in local_paths],
             )
+            for rid in rowids:
+                conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (rid,))
             conn.commit()
             return len(local_paths)
 

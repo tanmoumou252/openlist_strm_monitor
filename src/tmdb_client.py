@@ -99,13 +99,16 @@ class TmdbClient:
     def _save_cached_account_id(self) -> None:
         """保存 account_id 到本地缓存文件"""
         try:
+            import os
             data = {
                 "account_id": self._account_id,
                 "username": self._username,
                 "avatar_path": self._avatar_path,
                 "ts": time.time(),
             }
-            with open(_CACHE_FILE, "w", encoding="utf-8") as f:
+            # 创建文件时设置权限为 0o600（仅所有者可读写）
+            fd = os.open(_CACHE_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             logging.info("[TMDB] account_id 已缓存到 %s", _CACHE_FILE)
         except Exception as e:

@@ -1,8 +1,8 @@
 ### 🗂️ Wiki 页面目录导航
 
 * [🏡 Wiki 首页](Home)
-* [📂 一、架构设计与 A/B/C 三区模型](ABC-Three-Zone-Model)
-* [🏗️ 二、分层架构与关键类](Architecture-Overview)
+* [📂 一、架构设计与关键类](Architecture-Overview)
+* [🏗️ 二、A/B/C 三区模型](ABC-Three-Zone-Model)
 * [⚙️ 三、安装与配置](Setup-and-Configuration)
 * [🔄 四、核心同步引擎](Core-Sync-Engine)
 * [🗃️ 五、数据库结构参考](Database-Schema)

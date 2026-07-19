@@ -52,6 +52,8 @@ class RefreshConfig:
     interval_seconds: int
     enabled: bool = True
     depth: int = 5
+    timeout_seconds: int = 300  # 刷新操作超时时间（秒）
+    log_level: str = "INFO"  # 刷新日志级别：DEBUG/INFO/WARNING
 
 
 @dataclass(slots=True)
@@ -60,7 +62,6 @@ class BehaviorConfig:
     sync_on_startup_wait: int
     trash_dir_name: str = "trash"
     action: str = "MOVE"
-    b_delete_triggers_cloud_action: bool = False
     ghost_protect_seconds: int = 300
     a_to_b_restore_delay_seconds: int = 30
 
@@ -70,7 +71,7 @@ class LogConfig:
     level: str
     max_size_mb: int
     backup_count: int
-    file: str = "logs/strm_bridge.log"
+    file: str = "strm_bridge.log"
 
 
 @dataclass(slots=True)
@@ -101,7 +102,7 @@ class TmdbConfig:
     fuzzy_threshold: float = 0.60
     anime_min_ep_ratio: float = 0.3
     anime_max_season_diff: float = 0.3  # 新增：动漫最大季度差异阈值
-    anime_min_season_ratio: float = 0.3  # 新增：动漫最少级数比例阈值
+    anime_min_season_ratio: float = 0.3  # 新增：动漫最少季数比例阈值
     proxy: TmdbProxyConfig = field(default_factory=TmdbProxyConfig)
     # 扁平化代理字段（供前端/测试 WebUI 直接读写，与嵌套 proxy 双向同步）
     proxy_enabled: bool = False
@@ -233,12 +234,15 @@ class AppConfig:
                 ("behavior_a_to_b_restore_delay_seconds", self.behavior, "a_to_b_restore_delay_seconds", int),
                 ("behavior_sync_on_startup", self.behavior, "sync_on_startup", self._to_bool),
                 ("behavior_sync_on_startup_wait", self.behavior, "sync_on_startup_wait", int),
-                
+
+                # 刷新配置
+                ("refresh_log_level", self.refresh, "log_level", str),
+
                 # 日志配置
                 ("log_level", self.log, "level", str),
                 ("log_max_size_mb", self.log, "max_size_mb", int),
                 ("log_backup_count", self.log, "backup_count", int),
-                # 日志保存路径（DB 往返的关键键，勿删；留空时回退 logs/strm_bridge.log）
+                # 日志保存路径（DB 往返的关键键，勿删；留空时回退 strm_bridge.log）
                 ("log_file", self.log, "file", str),
             ]
             
@@ -250,7 +254,15 @@ class AppConfig:
                         setattr(target, attr, value)
                     except (ValueError, TypeError) as e:
                         logging.warning("[Config] 转换 %s 失败: %s", db_key, e)
-            
+
+            # log_file 确保为绝对路径：DB 中可能存的是相对路径（如旧迁移数据
+            # "strm_bridge.log"），此处拼接项目根目录，避免覆盖 from_file()
+            # 生成的绝对路径
+            if hasattr(self, 'log') and self.log.file:
+                log_path = Path(self.log.file)
+                if not log_path.is_absolute():
+                    self.log.file = str((Path(self.local.base_dir) / log_path).resolve())
+
             # 特殊处理：b_root 和 c_root 需要同步到 local 配置
             if "b_root" in db_cfg:
                 self.local.b_dir = db_cfg["b_root"]
@@ -341,17 +353,18 @@ class AppConfig:
 
         local_data = data.get("local", {})
         paths_data = data.get("paths", {})
-        b_root = paths_data.get("b_root", os.path.join(base_dir, "b"))
-        c_root = paths_data.get("c_root", os.path.join(base_dir, "c"))
+        b_root = paths_data.get("b_root", "")
+        c_root = paths_data.get("c_root", "")
 
-        if not Path(b_root).is_absolute():
+        # 仅在路径非空时检查是否为绝对路径
+        if b_root and not Path(b_root).is_absolute():
             logging.warning("[Config] b_root 不是绝对路径: %s", b_root)
-        if not Path(c_root).is_absolute():
+        if c_root and not Path(c_root).is_absolute():
             logging.warning("[Config] c_root 不是绝对路径: %s", c_root)
 
         local = LocalConfig(
             base_dir=base_dir,
-            a_dir=os.path.join(base_dir, "a"),
+            a_dir="",  # 默认为空，需在 WebUI 配置
             b_dir=b_root,
             c_dir=c_root,
             db_file=os.path.normpath(os.path.join(
@@ -369,9 +382,11 @@ class AppConfig:
 
         refresh_data = data.get("refresh", {})
         refresh = RefreshConfig(
-            interval_seconds=refresh_data.get("interval_minutes", 5) * 60,
+            interval_seconds=refresh_data.get("interval_minutes", 10) * 60,
             enabled=refresh_data.get("enabled", True),
             depth=refresh_data.get("depth", 5),
+            timeout_seconds=refresh_data.get("timeout_seconds", 300),
+            log_level=refresh_data.get("log_level", "INFO"),
         )
 
         behavior_data = data.get("behavior", {})
@@ -392,7 +407,7 @@ class AppConfig:
             level=log_data.get("level", "INFO"),
             max_size_mb=log_data.get("max_size_mb", 2),
             backup_count=log_data.get("backup_count", 5),
-            file=os.path.normpath(os.path.join(base_dir, log_data.get("file", "logs/strm_bridge.log"))),
+            file=os.path.normpath(os.path.join(base_dir, log_data.get("file", "strm_bridge.log"))),
         )
 
         paths = PathsConfig(
@@ -449,19 +464,31 @@ class AppConfig:
             # 复用外部 client 避免重复登录；未传入时自建（向后兼容）
             owns_client = admin_client is None
             if owns_client:
+                # 前置检查：host 未配置时直接给出明确提示，避免误报为"网络请求异常"
+                if not self.webdav.host:
+                    logging.info(
+                        "[STRM存储API] OpenList 未配置（host 为空），跳过 STRM 存储映射加载。"
+                        "请在 WebUI 配置页面填写 OpenList 连接信息。")
+                    return
                 admin_client = OpenListAdminClient(
                     host=self.webdav.host,
                     user=self.webdav.user,
                     password=self.webdav.password,
                     totp_secret=self.webdav.totp_secret,
                 )
-                if not admin_client.login():
-                    logging.warning("[STRM存储API] 登录失败，跳过 STRM 存储映射")
+                # 强制重新登录，不使用缓存 token，确保真实验证连接
+                if not admin_client.login(force=True):
+                    logging.warning("[STRM存储API] 登录失败，跳过 STRM 存储映射加载")
                     return
 
             content = admin_client.get_strm_storages_full_info()
             if not content:
-                logging.warning("[STRM存储 API] 获取 STRM 存储完整信息失败")
+                err = admin_client.last_error_message or "未知"
+                logging.warning(
+                    "[STRM存储 API] 获取 STRM 存储信息失败（原因: %s）。"
+                    "若 OpenList 尚未配置 STRM 引擎或连接不可达，此为正常现象。",
+                    err,
+                )
                 return
 
             # strm_storage_map 加载全部引擎（供 UI 下拉框发现）；
@@ -612,6 +639,8 @@ def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
                                 str(config.refresh.interval_seconds // 60))
         watchlist_db.set_config("openlist", "refresh_depth",
                                 str(config.refresh.depth))
+        watchlist_db.set_config("openlist", "refresh_log_level",
+                                config.refresh.log_level)
         
         # 行为配置
         watchlist_db.set_config("openlist", "behavior_action", config.behavior.action)

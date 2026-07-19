@@ -9,6 +9,22 @@ import { _renderOpenListConfig } from './openlist.js';
 
 export async function renderConfig(el, params) {
   const cfg = await api('/api/config');
+  // /api/config 是白名单端点，代理 URL 已脱敏为 tmdb_proxy_configured（布尔值）。
+  // 配置页需要回显代理 URL，从已认证的 /api/webui/config/tmdb 获取。
+  if (cfg.tmdb_proxy_configured) {
+    try {
+      const tmdbCfg = await api('/api/webui/config/tmdb');
+      if (tmdbCfg && tmdbCfg.config && typeof tmdbCfg.config.proxy_http === 'string') {
+        cfg.tmdb_proxy_http = tmdbCfg.config.proxy_http;
+      } else {
+        cfg.tmdb_proxy_http = '';
+      }
+    } catch {
+      cfg.tmdb_proxy_http = '';
+    }
+  } else {
+    cfg.tmdb_proxy_http = '';
+  }
   const sub = params.sub || '';
   const isSubpage = ['config', 'openlist', 'about', 'help'].includes(sub);
   const sections = {
@@ -83,7 +99,7 @@ function _renderConfigContent(cfg) {
   let html = `<div class="config-blocks-wrapper">`;
   html += `<div class="config-blocks-row">`;
   html += section('database', 'Bridge数据库', `
-    <div class="config-row"><span class="key">路径</span><span class="val">${esc(cfg.db_file.replace(/^.*[\\\/]/, ''))}</span></div>
+    <div class="config-row"><span class="key">路径</span><span class="val">${esc(cfg.db_file.split(/[\\/]/).pop())}</span></div>
     <div class="config-row"><span class="key">存在</span><span class="val">${cfg.db_exists ? icon('check') : icon('error')}</span></div>
   `);
   const webuiRows = [];

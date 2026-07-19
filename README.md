@@ -150,6 +150,7 @@ flowchart TD
 
 - 字幕语言自动识别：支持 `.sc`、`.chs`、`.tc`、`.cht` 等后缀标识，以及"简中""繁体"等关键词
 - 多语种时简中优先标记 `forced`
+- 无法识别语言时回退为 `.forced.und`（undetermined）
 - 使用数据库 `subtitles` 表追踪处理状态，避免重复处理
 
 ---
@@ -182,7 +183,18 @@ pip install -r requirements.txt
 - `requests` (API 请求交互)
 - `lxml` (WebDAV XML解析)
 - `tomli` (Python < 3.11 环境下需要)
-- `pyotp` (TOTP 2FA 支持)
+
+如需运行测试：
+
+```bash
+pip install -r src/tests/requirements-dev.txt
+```
+
+开发依赖（详见 `src/tests/requirements-dev.txt`）：
+
+- `pytest` (测试框架)
+- `pytest-cov` (测试覆盖率)
+- `flask` (测试用 Mock 服务器)
 
 ### 2. 运行程序
 
@@ -199,7 +211,7 @@ python src/webui/server.py
 
 ## 📝 日志分级说明
 
-默认日志文件输出至 `activity.log`，内置按大小截断轮转机制。
+默认日志文件输出至 `strm_bridge.log`（位于项目根目录），内置按大小截断轮转机制。
 
 | 级别 | 用途 |
 | :--- | :--- |
@@ -209,6 +221,28 @@ python src/webui/server.py
 | `ERROR` | API 联动失败、数据库写入失败等严重操作异常。 |
 
 > **建议：** 大媒体库正常服役时使用 `INFO` 级别即可保持日志清爽；排查同步问题时临时切换为 `DEBUG`。
+
+### 错误消息翻译
+
+程序内置**错误消息翻译工具**，将技术性网络错误（如 `ConnectionRefusedError 10061`、`HTTPError 401` 等）转换为普通用户能理解的中文描述。
+
+**示例对比：**
+
+| 原始错误 | 翻译后 |
+| :--- | :--- |
+| `ConnectionRefusedError: [WinError 10061] 由于其目标计算机主动拒绝，无法建立连接` | `登录失败 — 无法连接到服务器，请检查：1. OpenList 是否已启动 2. 地址和端口是否正确 3. 防火墙是否阻止了连接` |
+| `HTTPError: 401 Client Error: Unauthorized` | `登录失败 — 认证失败，用户名或密码错误` |
+| `ConnectTimeout: HTTPSConnectionPool...` | `登录失败 — 连接超时，服务器无响应` |
+
+翻译覆盖的错误类型：
+- 连接拒绝 / 连接重置 / 连接中断
+- 超时（连接超时 / 读取超时）
+- DNS 解析失败
+- HTTP 状态码（400–504）
+- SSL 证书错误
+- 网络不可达 / 路由失败
+
+开发者可在日志中附加 `[技术详情: ...]` 后缀用于调试，通过 `format_error_for_log(error, context, include_technical=True)` 控制。
 
 ---
 
@@ -220,12 +254,12 @@ python src/webui/server.py
 
 | 功能 | 说明 |
 | :--- | :--- |
-| **仪表盘** | 展示 A/B/C 区文件总数、各模块运行状态、磁盘占用概览 |
+| **仪表盘** | 展示 A/B/C 区文件总数、各模块运行状态 |
 | **A 区浏览** | 查看 STRM 引擎生成的原始目录结构，按子类/文件两级展开 |
-| **B 区浏览** | 查看媒体库消费区目录，支持删除联动操作 |
-| **C 区浏览** | 查看幽灵/隔离区内容 |
+| **B 区浏览** | 查看媒体库消费区目录，基本和A区一致 支持删除联动操作 |
+| **C 区浏览** | 查看幽灵/隔离区内容，基本和A区一致 |
 | **TMDB 待看列表** | 对接 TMDB API，展示用户待看列表并与本地已收录内容做对比 |
-| **日志查看** | 实时查看程序运行日志，支持按级别筛选 |
+| **日志查看** | 实时查看程序运行日志，支持 TMDB/主程序日志切换 |
 | **壁纸** | 内置水墨风遮罩壁纸效果 |
 
 ### TMDB 待看列表
@@ -248,14 +282,52 @@ python src/webui/server.py
 | `[webui] bind` | `0.0.0.0` | 监听地址（仅本地和局域网） |
 | `access_token` | — | TMDB API 访问令牌（通过 WebUI 配置页填写，存储在 `tmdb_watchlist.db`） |
 
+> 🔐 **登录密码**：WebUI 访问需要管理员密码。**首次启动** WebUI 时，程序会自动生成一个随机密码，并**仅打印一次到控制台**（不写入日志文件），请务必记下；之后再次启动不会再显示该密码。密码以 PBKDF2-HMAC-SHA256 加盐哈希后存储在 `tmdb_watchlist.db` 的 `webui_config` 表（`scope='ui'`、`key='admin_password'`），明文不落盘。
+>
+> **忘记密码 / 自定义密码**：运行项目根目录的 `reset_admin.py`：
+> - `python reset_admin.py` —— 生成随机新密码并打印。
+> - `python reset_admin.py 我的密码` —— 在脚本后手动输入自定义密码（支持含空格的密码，最少 4 个字符），即可把登录密码改成你想要的值。
+> - 脚本直接写入数据库，登录验证实时读取，**无需重启 WebUI** 即可用新密码登录。
+
 ---
 
+## 🔍 中文搜索与分词
+
+程序的中文媒体名搜索依赖 **SQLite FTS5 + simple 分词器**。simple 是 [wangfenjin/simple](https://github.com/wangfenjin/simple) 项目的 Windows x64 构建，底层封装了 **cppjieba** 中文分词，当前内置版本为 **v0.7.1**，资源统一放在 `src/tokenizers/simple/` 目录（含 `simple.dll`、`VERSION` 与 `README.md`，版本与接入说明见该目录的 `README.md`）。
+
+- **加载机制**：`database.py` 中的 `_load_simple_tokenizer` 与 `tmdb_watchlist_db.py` 中的 `_load_simple_into` 在建立 SQLite 连接时通过 `load_extension` 加载 `simple.dll`。
+- **软降级**：若 `simple.dll` 缺失或加载失败，程序不会中断，而是降级为 SQLite 内置的 `unicode61` 分词器（仅记录 `WARNING` 日志）。
+- **硬依赖提醒**：`unicode61` 不对中文产生 token，因此一旦 `simple.dll` 缺失，中文搜索实际上会**完全失效**（降级后的搜索对中文名返回空结果）。在中文媒体库场景下，**simple 是中文搜索的硬依赖**，部署时务必确保 `src/tokenizers/simple/simple.dll` 存在。
+- **区域搜索中的中文**：区域搜索接口（`GET /api/area/{area}?q=`）走 FTS5，查询串经过 `_escape_fts5_query` 转义后执行；番剧/电影分类通过 `kind` 参数（`anime` / `movie` / `other` / `all`）实现。媒体详情接口（`GET /api/area/{area}/detail?media=`）数据量小、要求精准匹配，因此走 `LIKE` 而非 FTS5。
+
+---
+
+## 🧭 新手引导（Onboarding）
+
+程序内置 **7 步新手引导**，登录后在仪表盘自动展示，帮助首次使用的用户按顺序完成关键配置：
+
+1. 确认管理员密码（首次启动时已自动生成并打印到控制台，遗忘或需自定义请用 `reset_admin.py`）
+2. 配置 TMDB
+3. 配置 OpenList
+4. 启动主程序
+5. 查看 A/B 分区
+6. 刷新 TMDB 待看列表
+7. 检测 TMDB 收录状态
+
+- **状态存储**：引导状态保存在 `tmdb_watchlist.db` 的 `webui_config` 表（scope=`ui`，如 `onboarding_completed` 等键）。前端步骤定义在 `dashboard.js` 的 `steps` 数组中。
+- **单步完成**：`POST /api/onboarding/complete-step` 标记某一步完成。
+- **整体完成 / 跳过**：通过 `POST /api/webui/config/ui` 写入 `{ onboarding_completed: '1' }` 标记引导已完成或已跳过。
+
+---
+
+<!-- 仓库名说明：GitHub 源码仓库名为 openlist_strm_monitor，应用名为
+     openlist_strm_bridge（仓库名 ≠ 产品名，非 typo，后续 agent 请勿统一）。 -->
 ## ⚠️ 使用建议与注意事项
 
-1. **初期安全建议**：在 `config.toml` 中强烈建议使用 `action = "MOVE"` 而非 `DELETE`。先在云端回收站观察联动效果，确认无误后再视情况调整。
-2. **字幕测试**：正式接入前，建议先用测试目录验证字幕同步：`电影字幕同目录保留`、`番剧字幕Season归档`、`多语种forced标记`。
-3. **测试验证**：正式接入庞大媒体库前，建议先用测试目录验证：`A -> B 优选同步`、`B 跨级移动血统拦截`、`B 删除联动云端回收站`。
-4. **数据库重建**：如果大规模修改了 OpenList 的存储结构，建议清空 `bridge.db` 让程序重新逆向建库。
+详细的使用建议、安全注意事项与最佳实践请参看项目 Wiki：
+
+- 📚 [Wiki 首页](https://github.com/tanmoumou252/openlist_strm_monitor/wiki)
+- 🛡️ [安全与自保机制](https://github.com/tanmoumou252/openlist_strm_monitor/wiki/Safety-and-Security)
 
 ---
 

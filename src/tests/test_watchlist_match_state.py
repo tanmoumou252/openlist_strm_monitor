@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from watchlist_match import score_watchlist_item as _score_watchlist_item, refresh_watchlist_match_state as _refresh_watchlist_match_state
@@ -249,6 +250,42 @@ def test_override_match_state_sets_manual_tracking(tmp_path: Path):
     assert state["match_reason"] == "manual_override"
     assert state["manual_override_by"] == "tester"
     assert state["manual_override_at"] > 0
+
+
+def test_batch_update_skips_manually_overridden(tmp_path: Path):
+    """replace_match_state 跳过已被手动覆盖的条目。
+
+    覆盖 tmdb_watchlist_db.py:321-327：UPDATE 语句带 manual_override_at=0 条件，
+    仅更新尚未被手动覆盖的条目；已被用户手动设置状态的条目跳过。
+    """
+    db = TmdbWatchlistDb(tmp_path / "batch.db")
+
+    # 插入 movie id=1，初始状态 uncomputed
+    db._upsert_movie({"id": 1, "title": "Movie1", "original_title": "Movie1"}, 0.0)
+    # 手动覆盖 id=1
+    db.override_match_state("movie", 1, "matched", "manual_override", "tester")
+
+    # 插入 movie id=2，无手动覆盖
+    db._upsert_movie({"id": 2, "title": "Movie2", "original_title": "Movie2"}, 0.0)
+
+    # 批量更新：尝试将 id=1 和 id=2 都更新为 "out"
+    now = time.time()
+    db.replace_match_state("movie", [
+        (1, "out", "auto_reason", now, 0, ""),
+        (2, "out", "auto_reason", now, 0, ""),
+    ])
+
+    # id=1 应保持手动覆盖的 "matched"（未被 replace_match_state 覆盖）
+    state1 = db.get_match_state("movie", 1)
+    assert state1["match_status"] == "matched", \
+        f"手动覆盖的 id=1 应保持 matched，实际: {state1['match_status']}"
+    assert state1["match_reason"] == "manual_override", \
+        f"手动覆盖的 id=1 应保持 manual_override，实际: {state1['match_reason']}"
+
+    # id=2 应被更新为 "out"
+    state2 = db.get_match_state("movie", 2)
+    assert state2["match_status"] == "out", \
+        f"未手动覆盖的 id=2 应被更新为 out，实际: {state2['match_status']}"
 
 
 # ============================================================

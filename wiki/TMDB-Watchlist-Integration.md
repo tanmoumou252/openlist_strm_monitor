@@ -13,8 +13,10 @@ TMDB 集成由三个组件组成：
 ### 认证
 
 支持两种认证方式：
-- **Access Token**（v4 Bearer）— 首选，用于账户特定端点
-- **API Key**（v3 查询参数）— 基本数据访问的备用方式
+- **Access Token**（v3 Bearer，`Authorization: Bearer {access_token}`）— 首选，用于账户特定端点
+- **API Key**（v3 查询参数 `?api_key=xxx`）— 基本数据访问的备用方式
+
+优先级：(1) `access_token` → Bearer header，(2) `api_key` → query param，(3) 均为空 → 返回 None。
 
 ### 代理支持
 
@@ -26,21 +28,25 @@ TMDB 集成由三个组件组成：
 
 | 方法 | 端点 | 用途 |
 |------|------|------|
-| `get_account_details()` | `/3/account/{account_id}` | 获取账户信息 |
+| `fetch_account_id()` | `/3/account` | 获取账户 ID（结果缓存到 `.tmdb_account.json`，TTL 7 天） |
 | `get_watchlist_movies()` | `/3/account/{account_id}/watchlist/movies` | 电影待看列表 |
 | `get_watchlist_tv()` | `/3/account/{account_id}/watchlist/tv` | 剧集待看列表 |
 | `get_movie_details(id)` | `/3/movie/{id}` | 电影详情（含 `append_to_response`） |
 | `get_tv_details(id)` | `/3/tv/{id}` | 剧集详情 |
 | `search_movie(query)` | `/3/search/movie` | 搜索电影 |
 | `search_tv(query)` | `/3/search/tv` | 搜索剧集 |
-| `get_movie_alternative_titles(id)` | `/3/movie/{id}/alternative_titles` | 别名 |
-| `get_tv_alternative_titles(id)` | `/3/tv/{id}/alternative_titles` | 别名 |
+| `get_movie_aliases(id)` | `/3/movie/{id}/alternative_titles` | 电影别名（注：存在但不在匹配流程中使用） |
+| `get_tv_aliases(id)` | `/3/tv/{id}/alternative_titles` | 剧集别名（注：存在但不在匹配流程中使用） |
+
+### 请求重试策略
+
+`request()` 方法内建重试：默认 3 次重试，指数退避（`backoff=1.0`）。遇到 429 状态码时解析 `Retry-After` header 等待；网络错误时按指数退避重试。
 
 ## TmdbWatchlistDb
 
 ### 数据库
 
-四张表：`movies`、`tv`、`meta`、`webui_config`。`TmdbWatchlistDb` 使用 `ThreadPoolExecutor` 并行同步。
+六张表：`movies`、`tv`、`meta`、`webui_config`、`tmdb_operation_log`（操作日志，level 含 `success`）、`tmdb_watchlist_fts`（FTS5 虚拟表，用于标题搜索）。`TmdbWatchlistDb` 使用 `ThreadPoolExecutor` 仅用于 `_populate_tv_details` 批量补齐 TV 详情（非全量并行同步）。
 
 ### 缓存 TTL
 
@@ -58,14 +64,15 @@ TMDB 集成由三个组件组成：
 
 ### 匹配算法
 
-#### 阶段 1：基于标题的搜索
+#### 阶段 1：三级标题匹配
 
-对每个待看条目按以下名称搜索 B 区：
-- 标题（原文和翻译）
-- 别名（来自 TMDB 别名端点）
-- 中文译名
+对每个待看条目，使用条目自身的字段（`title`、`name`、`original_title`、`original_name`、`name_cn`、`original_name_cn`）搜索 B 区，**不调用 TMDB 别名 API**：
 
-使用 `SequenceMatcher` 模糊匹配，阈值可通过 WebUI 配置页 → TMDB 设置中的"模糊匹配阈值"字段调整（`fuzzy_threshold`，默认 0.60）。
+1. **精确匹配**（`exact`）— 标准化后完全相等
+2. **松散匹配**（`loose`）— 子串匹配（≥3 字符）
+3. **模糊匹配**（`fuzzy`）— `SequenceMatcher` ≥ 阈值（默认 0.60，可通过 WebUI 配置页 → TMDB 设置中的"模糊匹配阈值"字段调整）
+
+匹配结果生成 `match_reason` 格式：`{type}:{detail}`，如 `movie_exact:{name}`、`tv_loose:{name}|S{num}`、`tv_few_episodes:{ratio}%<{min}%`。
 
 #### 阶段 2：结构验证
 
@@ -76,7 +83,7 @@ TMDB 集成由三个组件组成：
 - `_extract_season_from_local_path()` — 统计季数和集数
 - 对比 TMDB 的 `_season_count` 和 `_last_ep_episode`
 - `anime_min_ep_ratio`（默认 0.30，可通过 WebUI 配置页 → TMDB 设置中的"番剧最少集数比例"字段调整）— 本地集数 >= TMDB 集数的 30%
-- `anime_max_season_diff`（默认 1，可通过 WebUI 配置页 → TMDB 设置中的"番剧最大季数差"字段调整）— 季数最多差 1
+- 季数检查：硬编码 `season_num > total_seasons + 1`（注：`anime_max_season_diff` 配置字段存在但 `watchlist_match.py` 未读取，运行时无效）
 
 **电影**：
 - 按文件夹名相似度匹配
@@ -89,7 +96,7 @@ TMDB 集成由三个组件组成：
 | `uncomputed` | 尚未尝试匹配 |
 | `matched` | 在 B 区找到，置信度足够 |
 | `unmatched` | 未在 B 区找到 |
-| `ambiguous` | 多个可能匹配，无法区分 |
+| `fuzzy` | 多个可能匹配，无法确定唯一匹配 |
 
 ### 手动覆盖
 
@@ -105,7 +112,7 @@ TMDB 待看列表页面提供：
 - **筛选控制**：全部/已收录/未收录
 - **卡片翻转**：点击显示详情和匹配原因
 - **同步按钮**：从 TMDB API 刷新待看列表
-- **导出**：CSV 和 JSON 格式
+- **导出**：CSV 格式（`export_watchlist_csv()`，UTF-8 BOM 编码）
 
 ### 缓存过期告警
 
@@ -114,3 +121,21 @@ TMDB 待看列表页面提供：
 ### 收录状态
 
 每个卡片显示收录状态、匹配原因。收录状态通过 `match_status` 字段跟踪，`match_reason` 记录匹配依据。
+
+## 未文档化机制
+
+### `account_id` 文件缓存
+
+`fetch_account_id()` 获取的 `account_id` 缓存到 `src/.tmdb_account.json`，TTL 7 天。避免每次启动都重新调用 `/3/account` 端点。
+
+### 敏感配置加解密
+
+`TmdbWatchlistDb` 的 `webui_config` 表中，敏感键（`access_token`、`api_key`、`proxy_http`、`webdav_password`、`webdav_totp_secret`）通过 `secret_manager.encrypt()`/`decrypt()` 加密存储。`get_config()`/`set_config()` 透明处理加解密。`migrate_plaintext_to_encrypted()` 用于从旧版明文迁移。
+
+### 数据模型（`tmdb_watchlist.py`）
+
+独立文件定义三个 dataclass：`TmdbItem`（待看条目）、`LastEpisode`（最近一集信息）、`MatchResult`（匹配结果）。`export_watchlist_csv()` 也在此文件中。
+
+### 手动覆盖机制
+
+`POST /api/tmdb/watchlist/match/override` 允许手动设置匹配状态。写入 `match_status` + `manual_override_at`（时间戳）+ `match_reason`（默认 `"manual_override"`）。后续自动匹配不会覆盖 `manual_override_at > 0` 的条目（除非用户再次手动触发）。

@@ -36,3 +36,12 @@ def make_app():
     用法：def test_xxx(make_app, tmp_path): app = make_app(tmp_path, ...)
     """
     return build_mock_app
+
+
+# 独立手动脚本（非 pytest 测试，需运行中的外部服务），不纳入 pytest 收集
+collect_ignore_glob = [
+    "test_openlist_admin_api.py",
+    "test_tmdb_api.py",
+    "test_real_server.py",
+    "test_webui_standalone.py",
+]

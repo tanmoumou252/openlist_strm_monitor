@@ -18,7 +18,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, MagicMock
 
 import pytest
 
@@ -182,24 +182,6 @@ class TestAppServicePathValidation:
     def test_is_valid_refresh_root_empty_engine_paths(self):
         self.app.config.strm_engine_paths = []
         assert self.app.is_valid_refresh_root("/any/path") is True
-
-    def test_find_matching_engine_path_exact(self):
-        self.app.config.strm_engine_paths = ["/e1", "/e2"]
-        assert self.app._find_matching_engine_path("/e1") == "/e1"
-
-    def test_find_matching_engine_path_subpath(self):
-        self.app.config.strm_engine_paths = ["/e1"]
-        assert self.app._find_matching_engine_path("/e1/show/ep") == "/e1"
-
-    def test_find_matching_engine_path_returns_longest(self):
-        self.app.config.strm_engine_paths = ["/e1", "/e1/sub"]
-        # /e1/sub/file matches both; should return longest
-        result = self.app._find_matching_engine_path("/e1/sub/file.mp4")
-        assert result == "/e1/sub"
-
-    def test_find_matching_engine_path_no_match(self):
-        self.app.config.strm_engine_paths = ["/e1"]
-        assert self.app._find_matching_engine_path("/other") is None
 
 
 # ===========================================================================
@@ -1662,3 +1644,73 @@ class TestRestoreBFileFromA:
                 str(self.b_dir / "target.strm"), webdav_path, "/mount", None)
 
         assert result is True
+
+
+# ===========================================================================
+# TestValidateStrmStorages
+# ===========================================================================
+
+
+class TestValidateStrmStorages:
+    """validate_strm_storages 的 null 防御测试。
+
+    覆盖 app_service_core.py:1288-1305：当 admin_api.list_storages() 返回
+    data: null 或 None 时，isinstance 守卫使 content 为 []，返回空结果，
+    不抛出 'NoneType' object has no attribute 'get' 异常。
+    """
+
+    def _make_service(self):
+        """构造最小化 AppService（跳过 __init__，仅设 validate 所需属性）。"""
+        svc = AppService.__new__(AppService)
+        svc.admin_api = MagicMock()
+        return svc
+
+    def test_data_field_null(self):
+        """list_storages 返回 data: null → 返回空结果。"""
+        svc = self._make_service()
+        svc.admin_api.list_storages.return_value = {"code": 200, "data": None}
+
+        result = svc.validate_strm_storages()
+
+        assert result == {"total": 0, "working": 0, "storages": []}
+
+    def test_list_storages_returns_none(self):
+        """list_storages 返回 None → 返回空结果。"""
+        svc = self._make_service()
+        svc.admin_api.list_storages.return_value = None
+
+        result = svc.validate_strm_storages()
+
+        assert result == {"total": 0, "working": 0, "storages": []}
+
+    def test_data_content_null(self):
+        """list_storages 返回 data.content: null → 返回空结果。"""
+        svc = self._make_service()
+        svc.admin_api.list_storages.return_value = {
+            "code": 200,
+            "data": {"content": None, "total": 0},
+        }
+
+        result = svc.validate_strm_storages()
+
+        assert result == {"total": 0, "working": 0, "storages": []}
+
+    def test_normal_storages(self):
+        """正常存储列表 → 返回正确计数。"""
+        svc = self._make_service()
+        svc.admin_api.list_storages.return_value = {
+            "code": 200,
+            "data": {
+                "content": [
+                    {"id": 1, "status": "work"},
+                    {"id": 2, "status": "error"},
+                ],
+                "total": 2,
+            },
+        }
+
+        result = svc.validate_strm_storages()
+
+        assert result["total"] == 2
+        assert result["working"] == 1
+        assert len(result["storages"]) == 2

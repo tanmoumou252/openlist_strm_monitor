@@ -47,22 +47,24 @@ try {
   };
 }
 
-export function showConfirmDialog(title, message, onConfirm, onCancel) {
+export function showConfirmDialog(title, message, onConfirm, onCancel, options = {}) {
   const existing = document.getElementById('confirm-dialog');
   if (existing) existing.remove();
 
   const overlay = document.createElement('div');
   overlay.id = 'confirm-dialog';
   overlay.className = 'modal-overlay';
+  // 支持 HTML 内容（用于预检对话框等富文本场景）
+  const bodyContent = options.htmlContent ? message : `<p>${message}</p>`;
   overlay.innerHTML = `
     <div class="modal-box">
       <div class="modal-title">${icon('warn')} ${title}</div>
       <div class="modal-body">
-        <p>${message}</p>
+        ${bodyContent}
       </div>
       <div class="modal-actions">
-        <button class="modal-btn secondary" id="confirm-cancel">取消</button>
-        <button class="modal-btn primary" id="confirm-ok">确定</button>
+        <button class="modal-btn secondary" id="confirm-cancel">${options.cancelText || '取消'}</button>
+        <button class="modal-btn primary" id="confirm-ok">${options.confirmText || '确定'}</button>
       </div>
     </div>`;
   document.body.appendChild(overlay);

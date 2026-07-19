@@ -26,7 +26,12 @@ import secrets
 import sys
 import threading
 import time
-import tomllib
+
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib  # type: ignore[no-redef]
+
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -75,7 +80,8 @@ try:
         _handle_openlist_monitored_paths, _handle_openlist_status,
         _handle_openlist_ping, _handle_openlist_paths,
         _handle_main_status, _handle_main_start, _handle_main_stop,
-        handle_dashboard, handle_area, handle_area_detail,
+        _handle_config_status, _handle_config_validate,
+        handle_dashboard, handle_area, handle_area_detail, handle_area_refresh,
         handle_records_api, handle_logs_api, handle_download_log_api,
         handle_config_api,
     )
@@ -90,7 +96,8 @@ except ImportError:
         _handle_openlist_monitored_paths, _handle_openlist_status,
         _handle_openlist_ping, _handle_openlist_paths,
         _handle_main_status, _handle_main_start, _handle_main_stop,
-        handle_dashboard, handle_area, handle_area_detail,
+        _handle_config_status, _handle_config_validate,
+        handle_dashboard, handle_area, handle_area_detail, handle_area_refresh,
         handle_records_api, handle_logs_api, handle_download_log_api,
         handle_config_api,
     )
@@ -118,9 +125,6 @@ if not STATIC_DIR.exists():
         "请运行 'cd src/webui && npm run build' 构建前端资源",
         STATIC_DIR
     )
-
-
-
 
 
 # ============================================================
@@ -183,7 +187,8 @@ class FontProxyMixin:
         cdn_host = self._configured_cdn_host()
 
         if not cdn_host:
-            self.send_error(502, "cdn host not configured")  # type: ignore[attr-defined]
+            # type: ignore[attr-defined]
+            self.send_error(502, "cdn host not configured")
             return
 
         location = f"{cdn_host}{path}"
@@ -192,8 +197,11 @@ class FontProxyMixin:
 
         self.send_response(302)  # type: ignore[attr-defined]
         self.send_header("Location", location)  # type: ignore[attr-defined]
-        self.send_header("Cache-Control", "no-store")  # type: ignore[attr-defined]
-        self.send_header("Access-Control-Allow-Origin", "*")  # type: ignore[attr-defined]
+        # type: ignore[attr-defined]
+        self.send_header("Cache-Control", "no-store")
+        self.send_header(
+            "Access-Control-Allow-Origin",
+            "*")  # type: ignore[attr-defined]
         self.end_headers()  # type: ignore[attr-defined]
 
     # ----------------------------------------------------------
@@ -211,7 +219,8 @@ class FontProxyMixin:
 
         try:
             req = urllib.request.Request(url, headers={
-                "User-Agent": self.headers.get("User-Agent", ""),  # type: ignore[attr-defined]
+                # type: ignore[attr-defined]
+                "User-Agent": self.headers.get("User-Agent", ""),
                 "Accept": "text/css,*/*;q=0.1",
             })
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -223,10 +232,15 @@ class FontProxyMixin:
                 body = body_text.encode("utf-8")
 
             self.send_response(200)  # type: ignore[attr-defined]
-            self.send_header("Content-Type", "text/css; charset=utf-8")  # type: ignore[attr-defined]
-            self.send_header("Cache-Control", "public, max-age=86400")  # type: ignore[attr-defined]
-            self.send_header("Access-Control-Allow-Origin", "*")  # type: ignore[attr-defined]
-            self.send_header("Content-Length", str(len(body)))  # type: ignore[attr-defined]
+            # type: ignore[attr-defined]
+            self.send_header("Content-Type", "text/css; charset=utf-8")
+            # type: ignore[attr-defined]
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header(
+                "Access-Control-Allow-Origin",
+                "*")  # type: ignore[attr-defined]
+            self.send_header("Content-Length", str(len(body))
+                             )  # type: ignore[attr-defined]
             self.end_headers()  # type: ignore[attr-defined]
             try:
                 self.wfile.write(body)  # type: ignore[attr-defined]
@@ -235,7 +249,8 @@ class FontProxyMixin:
 
         except Exception as e:
             logging.debug("[WebUI] 字体 CSS 代理失败 (%s): %s", url, e)
-            self.send_error(502, "font proxy failed")  # type: ignore[attr-defined]
+            # type: ignore[attr-defined]
+            self.send_error(502, "font proxy failed")
 
     def _proxy_google_font_file(self, path: str) -> None:
         """代理字体文件：/fonts/gstatic/<rest> → fonts.gstatic.com/<rest>
@@ -245,17 +260,23 @@ class FontProxyMixin:
         url = f"https://fonts.gstatic.com/{rest}"
         try:
             req = urllib.request.Request(url, headers={
-                "User-Agent": self.headers.get("User-Agent", ""),  # type: ignore[attr-defined]
+                # type: ignore[attr-defined]
+                "User-Agent": self.headers.get("User-Agent", ""),
                 "Origin": "https://fonts.googleapis.com",
             })
             with urllib.request.urlopen(req, timeout=15) as resp:
                 body = resp.read()
                 content_type = resp.headers.get("Content-Type", "font/woff2")
             self.send_response(200)  # type: ignore[attr-defined]
-            self.send_header("Content-Type", content_type)  # type: ignore[attr-defined]
-            self.send_header("Cache-Control", "public, max-age=31536000")  # type: ignore[attr-defined]
-            self.send_header("Access-Control-Allow-Origin", "*")  # type: ignore[attr-defined]
-            self.send_header("Content-Length", str(len(body)))  # type: ignore[attr-defined]
+            # type: ignore[attr-defined]
+            self.send_header("Content-Type", content_type)
+            # type: ignore[attr-defined]
+            self.send_header("Cache-Control", "public, max-age=31536000")
+            self.send_header(
+                "Access-Control-Allow-Origin",
+                "*")  # type: ignore[attr-defined]
+            self.send_header("Content-Length", str(len(body))
+                             )  # type: ignore[attr-defined]
             self.end_headers()  # type: ignore[attr-defined]
             try:
                 self.wfile.write(body)  # type: ignore[attr-defined]
@@ -264,7 +285,8 @@ class FontProxyMixin:
 
         except Exception as e:
             logging.debug("[WebUI] 字体文件代理失败 (%s): %s", url, e)
-            self.send_error(502, "font proxy failed")  # type: ignore[attr-defined]
+            # type: ignore[attr-defined]
+            self.send_error(502, "font proxy failed")
 
 
 # ============================================================
@@ -300,7 +322,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
 
     def _check_auth(self) -> bool:
         """检查请求是否已通过密码认证。
-        
+
         如果未设置密码 → 放行（向后兼容）
         如果已设置密码 → 检查 X-Session-Token 头
         """
@@ -326,16 +348,24 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             return True
         # API 白名单：登录前初始化和图片代理（非敏感数据）
         if path in ("/api/config", "/api/webui/config/ui",
-                     "/api/tmdb/avatar", "/api/tmdb/poster",
-                     "/api/openlist/status", "/api/openlist/ping"):
+                    "/api/tmdb/avatar", "/api/tmdb/poster",
+                    "/api/openlist/status", "/api/openlist/ping"):
             return True
         # 验证 session token
         token = self.headers.get("X-Session-Token", "")
         now = time.time()
         with webui._sessions_lock:
-            if token in webui._sessions and now < webui._sessions[token]:
+            # 使用常量时间比较防止时序攻击
+            import hmac
+            matched_token = None
+            for stored_token in webui._sessions:
+                if hmac.compare_digest(token.encode('utf-8'), stored_token.encode('utf-8')):
+                    matched_token = stored_token
+                    break
+            
+            if matched_token and now < webui._sessions[matched_token]:
                 # 滑动过期：刷新 7 天
-                webui._sessions[token] = now + 604800
+                webui._sessions[matched_token] = now + 604800
                 return True
         self._send_json({"error": "unauthorized", "need_login": True}, 401)
         return False
@@ -398,7 +428,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         # CORS header for crossorigin attribute in HTML
         self.send_header("Access-Control-Allow-Origin", "*")
-        
+
         # Cache-Control 策略：
         # - index.html: no-store（始终重新验证）
         # - assets/ 目录下的哈希文件: 长缓存（1年）
@@ -408,12 +438,14 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
         elif filename.startswith("assets/"):
             # Vite 构建的哈希文件，文件名包含内容哈希
-            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.send_header(
+                "Cache-Control",
+                "public, max-age=31536000, immutable")
         elif ext in (".woff2", ".woff", ".ttf"):
             self.send_header("Cache-Control", "public, max-age=604800")
         else:
             self.send_header("Cache-Control", "no-store")
-        
+
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:
@@ -426,23 +458,23 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         # 安全检查：禁止路径穿越
         if ".." in path or path.startswith("//"):
             return False
-        
+
         # 移除开头的 /
         fname = path.lstrip("/")
         if not fname:
             return False
-        
+
         # 检查文件是否存在
         file_path = STATIC_DIR / fname
         if not file_path.is_file():
             return False
-        
+
         # 确保文件在 STATIC_DIR 内（防止符号链接攻击）
         try:
             file_path.resolve().relative_to(STATIC_DIR.resolve())
         except ValueError:
             return False
-        
+
         self._send_static_file(fname)
         return True
 
@@ -478,9 +510,11 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         elif path == "/logo.png":
             logos = sorted(STATIC_DIR.glob("assets/logo.*.png"))
             if logos:
-                self._send_static_file(str(random.choice(logos).relative_to(STATIC_DIR)))
+                self._send_static_file(
+                    str(random.choice(logos).relative_to(STATIC_DIR)))
             else:
-                logger.error("_send_static_file: Logos not found in assets, returning 404.")
+                logger.error(
+                    "_send_static_file: Logos not found in assets, returning 404.")
                 self.send_error(404, "Logo not found")
         elif path == "/api/dashboard":
             handle_dashboard(self)
@@ -525,6 +559,8 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             handle_records_api(self, params)
         elif path == "/api/config":
             handle_config_api(self)
+        elif path == "/api/config/status":
+            _handle_config_status(self, self.webui)
         elif path.startswith("/api/webui/config/"):
             scope = path.split(
                 "/api/webui/config/")[1].split("/")[0].split("?")[0]
@@ -584,10 +620,28 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             _handle_restart_webui(self, self.webui)
         elif path == "/api/openlist/test-connection":
             _handle_openlist_test_connection(self, self.webui, body)
+        elif path == "/api/config/validate":
+            _handle_config_validate(self, self.webui)
+        elif path == "/api/onboarding/complete-step":
+            from webui.routes import _handle_onboarding_complete_step
+            _handle_onboarding_complete_step(self, self.webui, body)
         elif path == "/api/main/start":
             _handle_main_start(self, self.webui, body)
         elif path == "/api/main/stop":
             _handle_main_stop(self, self.webui)
+        elif path.startswith("/api/area/") and path.endswith("/refresh"):
+            # POST /api/area/{area}/refresh
+            parts = path.split("/api/area/")
+            if len(parts) == 2:
+                rest = parts[1]
+                area_and_refresh = rest.split("/")
+                if len(area_and_refresh) == 2 and area_and_refresh[1] == "refresh":
+                    area = area_and_refresh[0]
+                    handle_area_refresh(self, area, body)
+                else:
+                    self._send_json({"error": "not found"}, 404)
+            else:
+                self._send_json({"error": "not found"}, 404)
         elif path.startswith("/api/webui/config/"):
             scope = path.split(
                 "/api/webui/config/")[1].split("/")[0].split("?")[0]
@@ -650,7 +704,6 @@ class WebUIServer:
         self._log_file: str | None = None
         log_candidates = [
             PROJECT_ROOT / "strm_bridge.log",
-            PROJECT_ROOT / "logs" / "strm_bridge.log",
             SRC_DIR / "strm_bridge.log",
         ]
         for p in log_candidates:
@@ -742,7 +795,8 @@ class WebUIServer:
         self._tmdb_client = None  # type: ignore[assignment]
         # 若 watchlist 已禁用，跳过 TMDB 客户端初始化（节省 API 配额）
         if self._watchlist_db:
-            enabled_raw = self._watchlist_db.get_config("tmdb", "watchlist_enabled")
+            enabled_raw = self._watchlist_db.get_config(
+                "tmdb", "watchlist_enabled")
             if str(enabled_raw).lower() == "false":
                 logging.info("[WebUI] TMDB 待看列表已禁用，跳过客户端初始化")
                 return
@@ -782,6 +836,11 @@ class WebUIServer:
                 604800)) if tmdb_cfg else 604800
         try:
             self._watchlist_db = TmdbWatchlistDb(db_path, ttl)
+            # 兜底加密：旧版本 DB 可能残留明文凭据
+            try:
+                self._watchlist_db.migrate_plaintext_to_encrypted()
+            except Exception as e:
+                logging.warning("[WebUI] 凭据加密迁移失败: %s", e)
         except Exception as e:
             logging.warning("[WebUI] 待看列表数据库初始化失败: %s", e)
             self._watchlist_db = None
@@ -791,7 +850,8 @@ class WebUIServer:
         if not self._tmdb_client or not self._watchlist_db:
             return []
         # 检查 watchlist_enabled 开关（只有明确设为 "false" 才禁用，未设置/空字符串默认启用）
-        enabled_raw = self._watchlist_db.get_config("tmdb", "watchlist_enabled")
+        enabled_raw = self._watchlist_db.get_config(
+            "tmdb", "watchlist_enabled")
         if str(enabled_raw).lower() == "false":
             return []
         return self._watchlist_db.get_all()
@@ -875,7 +935,8 @@ class WebUIServer:
             while not self._session_cleanup_event.is_set():
                 now = time.time()
                 with self._sessions_lock:
-                    self._sessions = {k: v for k, v in self._sessions.items() if v > now}
+                    self._sessions = {
+                        k: v for k, v in self._sessions.items() if v > now}
                 self._session_cleanup_event.wait(timeout=3600)
 
         threading.Thread(target=_cleanup_sessions, daemon=True).start()
@@ -901,7 +962,11 @@ class WebUIServer:
         """对密码加盐 PBKDF2-HMAC-SHA256 哈希，返回 salt$iterations$hash 格式。"""
         salt = secrets.token_hex(16)
         iterations = 600000
-        h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iterations)
+        h = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode(),
+            salt.encode(),
+            iterations)
         return f"{salt}${iterations}${h.hex()}"
 
     @staticmethod
@@ -913,7 +978,11 @@ class WebUIServer:
                 return False
             salt, iterations_str, stored_hash = parts
             iterations = int(iterations_str)
-            h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iterations)
+            h = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode(),
+                salt.encode(),
+                iterations)
             return h.hex() == stored_hash
         except (ValueError, AttributeError):
             return False
@@ -948,34 +1017,31 @@ class WebUIServer:
                 new_password = test_password
             else:
                 new_password = secrets.token_urlsafe(12)
-            
+
             hashed = self._hash_password(new_password)
             self._watchlist_db.set_config("ui", "admin_password", hashed)
             self._has_password = True
-            login_url = f"http://{getattr(self, '_bind', '0.0.0.0')}:{self._port}"
+            login_url = f"http://{getattr(self,
+                                          '_bind',
+                                          '0.0.0.0')}:{self._port}"
             logging.info(
                 "[WebUI] ╔══════════════════════════════════════════════╗")
             logging.info(
-                "[WebUI] ║  WebUI 管理密码已生成                       ║")
+                "[WebUI] ║  WebUI 管理密码已生成                        ║")
             logging.info(
                 "[WebUI] ║                                              ║")
             logging.info(
-                "[WebUI] ║  访问地址: %s  ║",
-                login_url)
-            # 密码仅输出到控制台（print），不写入日志文件
-            print(f"[WebUI] 管理密码: {new_password}")
-            logging.info(
-                "[WebUI] （请务必在浏览器中登录后立即修改密码）")
+                "[WebUI] ║  访问地址: %s               ║", login_url)
             logging.info(
                 "[WebUI] ║  请在浏览器中打开访问地址                    ║")
             logging.info(
-                "[WebUI] ║  首次访问会自动跳转至登录页面                ║")
-            logging.info(
-                "[WebUI] ║                                              ║")
+                "[WebUI] ║  手动设置密码: python reset_admin.py 1111    ║")
             logging.info(
                 "[WebUI] ║  忘记密码请运行: python reset_admin.py       ║")
             logging.info(
                 "[WebUI] ╚══════════════════════════════════════════════╝")
+            # 密码仅输出到控制台（print），不写入日志文件
+            print(f"[WebUI] 管理密码: {new_password}")
 
     def stop(self):
         """停止 WebUI 服务器"""
@@ -994,17 +1060,17 @@ class WebUIServer:
 
     def start_main(self) -> dict:
         """启动主程序（AppService）
-        
+
         Returns:
             {"success": bool, "message": str}
         """
         with self._app_start_lock:
             if self._app_running:
                 return {"success": False, "message": "主程序已在运行中"}
-            
+
             if not self._config:
                 return {"success": False, "message": "配置未加载"}
-            
+
             try:
                 from app_service import AppService
                 from webdav_client import OpenListAdminClient
@@ -1017,14 +1083,16 @@ class WebUIServer:
                     totp_secret=self._config.webdav.totp_secret,
                 )
 
-                # 登录验证
-                if not admin_client.login():
+                # 登录验证（强制重新登录，不使用缓存 token，确保真实验证连接）
+                if not admin_client.login(force=True):
                     error_msg = admin_client.last_error_message or "未知错误"
-                    return {"success": False, "message": f"OpenList 登录失败: {error_msg}"}
+                    return {"success": False,
+                            "message": f"OpenList 登录失败: {error_msg}"}
 
                 # 从 OpenList API 加载 STRM 存储映射（复用 admin_client，避免重复登录）
                 try:
-                    self._config.load_strm_storage_from_api(admin_client=admin_client)
+                    self._config.load_strm_storage_from_api(
+                        admin_client=admin_client)
                 except Exception as exc:
                     logging.warning("[Main] 加载 STRM 存储映射失败: %s", exc)
 
@@ -1033,70 +1101,81 @@ class WebUIServer:
 
                 # 启动主程序前按配置页的日志级别/路径重新初始化日志系统，
                 # 确保 WebUI 启动的主程序不仅输出到控制台，也写入日志文件。
-                # log_file 留空时回退 logs/strm_bridge.log（始终写文件）。
+                # log_file 留空时回退 strm_bridge.log（始终写文件）。
                 try:
                     from logger_setup import setup_logging
                     setup_logging(
                         level=self._config.log.level,
-                        log_file=self._config.log.file or "logs/strm_bridge.log",
+                        log_file=self._config.log.file or "strm_bridge.log",
                         max_size_mb=self._config.log.max_size_mb,
                         backup_count=self._config.log.backup_count,
                     )
                     logging.info(
                         "[Main] 日志已按配置初始化: level=%s, file=%s",
                         self._config.log.level,
-                        self._config.log.file or "logs/strm_bridge.log",
+                        self._config.log.file or "strm_bridge.log",
                     )
                 except Exception as log_exc:
                     logging.warning("[Main] 日志初始化失败（沿用原配置）: %s", log_exc)
 
                 # 创建 AppService
-                self._app_service = AppService(self._config, self._db, admin_client)
+                self._app_service = AppService(
+                    self._config, self._db, admin_client)
                 self._app_service.start()
                 self._app_running = True
                 self._app_start_time = time.time()
-                
+
                 logging.info("[Main] 主程序已启动")
                 return {"success": True, "message": "主程序已启动"}
-                
+
             except Exception as e:
                 logging.error("[Main] 启动失败: %s", e)
                 return {"success": False, "message": f"启动失败: {e}"}
 
     def stop_main(self) -> dict:
         """停止主程序（AppService）
-        
+
         Returns:
             {"success": bool, "message": str}
         """
         with self._app_start_lock:
             if not self._app_running:
                 return {"success": False, "message": "主程序未在运行"}
-            
+
             try:
                 if self._app_service:
                     self._app_service.stop()
                     self._app_service = None
                 self._app_running = False
                 self._app_start_time = None
-                
+
                 logging.info("[Main] 主程序已停止")
                 return {"success": True, "message": "主程序已停止"}
-                
+
             except Exception as e:
                 logging.error("[Main] 停止失败: %s", e)
                 return {"success": False, "message": f"停止失败: {e}"}
 
     def get_main_status(self) -> dict:
         """获取主程序状态
-        
+
         Returns:
-            {"running": bool, "uptime": int | None}
+            {"running": bool, "uptime": int | None,
+             "refresh_healthy": bool, "refresh_consecutive_failures": int,
+             "refresh_last_error": str}
         """
-        return {
+        result: dict = {
             "running": self._app_running,
             "uptime": int(time.time() - self._app_start_time) if self._app_running and self._app_start_time else None,
         }
+        # 刷新服务健康状态（主程序运行时才有意义）
+        if self._app_running and self._app_service:
+            rs = getattr(self._app_service, 'refresh_service', None)
+            if rs:
+                result["refresh_healthy"] = rs._consecutive_failures == 0
+                result["refresh_consecutive_failures"] = rs._consecutive_failures
+                result["refresh_last_error"] = rs._last_error_summary
+        return result
 
 
 # ============================================================
@@ -1193,16 +1272,15 @@ def main():
 
     # 询问是否自动启动主程序
     auto_start_main = False
-    if '--daemon' not in sys.argv:
-        print("\n请选择启动模式:")
-        print("  1. 自动启动主程序 (AppService)")
-        print("  2. 仅启动 WebUI")
-        try:
-            choice = input("请输入选项 [1/2] (默认 2): ").strip().lower()
-            if choice == "1":
-                auto_start_main = True
-        except (EOFError, KeyboardInterrupt):
-            pass
+    print("\n请选择启动模式:")
+    print("  1. 自动启动主程序 (AppService)")
+    print("  2. 仅启动 WebUI")
+    try:
+        choice = input("请输入选项 [1/2] (默认 2): ").strip().lower()
+        if choice == "1":
+            auto_start_main = True
+    except (EOFError, KeyboardInterrupt):
+        pass
 
     # 如果选择自动启动主程序
     if auto_start_main:
@@ -1216,14 +1294,10 @@ def main():
     logger.info("按 Ctrl+C 或输入 q 退出")
 
     try:
-        if '--daemon' not in sys.argv:
-            while True:
-                cmd = input().strip().lower()
-                if cmd in ("q", "quit", "exit"):
-                    break
-        else:
-            # 守护模式：挂起主线程等待服务器终止
-            server._thread.join()
+        while True:
+            cmd = input().strip().lower()
+            if cmd in ("q", "quit", "exit"):
+                break
     except (KeyboardInterrupt, EOFError):
         pass
 
