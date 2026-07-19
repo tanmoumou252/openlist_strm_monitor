@@ -1272,16 +1272,15 @@ def main():
 
     # 询问是否自动启动主程序
     auto_start_main = False
-    if '--daemon' not in sys.argv:
-        print("\n请选择启动模式:")
-        print("  1. 自动启动主程序 (AppService)")
-        print("  2. 仅启动 WebUI")
-        try:
-            choice = input("请输入选项 [1/2] (默认 2): ").strip().lower()
-            if choice == "1":
-                auto_start_main = True
-        except (EOFError, KeyboardInterrupt):
-            pass
+    print("\n请选择启动模式:")
+    print("  1. 自动启动主程序 (AppService)")
+    print("  2. 仅启动 WebUI")
+    try:
+        choice = input("请输入选项 [1/2] (默认 2): ").strip().lower()
+        if choice == "1":
+            auto_start_main = True
+    except (EOFError, KeyboardInterrupt):
+        pass
 
     # 如果选择自动启动主程序
     if auto_start_main:
@@ -1295,14 +1294,10 @@ def main():
     logger.info("按 Ctrl+C 或输入 q 退出")
 
     try:
-        if '--daemon' not in sys.argv:
-            while True:
-                cmd = input().strip().lower()
-                if cmd in ("q", "quit", "exit"):
-                    break
-        else:
-            # 守护模式：挂起主线程等待服务器终止
-            server._thread.join()
+        while True:
+            cmd = input().strip().lower()
+            if cmd in ("q", "quit", "exit"):
+                break
     except (KeyboardInterrupt, EOFError):
         pass
 
