@@ -8,7 +8,7 @@ This file provides guidance to AI coding assistants when working with code in th
 2. **When modifying files, always rebuild dist/ if you changed any file under `src/webui/modules/`**. The browser loads compiled files from `dist/assets/`, not the source files.
 3. **Server control is allowed** — this is a development/test-only project with no production environment assumption. The agent may freely start, stop, or restart the server for verification.
 4. **Do NOT run lint or full test suites** unless the user explicitly asks. Targeted unit tests for your change are fine.
-5. **For OpenList API changes, read `doc/` markdown files first** before guessing endpoint behavior.
+5. **For OpenList API changes, read `docs/` markdown files first** before guessing endpoint behavior.
 6. **For dangerous operations** (delete, move, cloud linkage), explain the safety risk before editing. Preserve fail-safe behavior.
 7. **Preserve the A/B/C three-zone model.** Do not merge or flatten zones.
 8. **Preserve the TMDB integration.** Do not refactor TMDB API code unless specifically requested.
@@ -64,7 +64,7 @@ This file provides guidance to AI coding assistants when working with code in th
 | **File watching** | `watchdog` library |
 | **HTTP client** | `requests` library |
 | **WebDAV XML** | `lxml` library |
-| **Testing** | pytest (36 test files under `src/tests/`); dev deps in `src/tests/requirements-dev.txt` |
+| **Testing** | pytest (37 test files under `src/tests/`); dev deps in `src/tests/requirements-dev.txt` |
 
 ## Directory Structure
 
@@ -103,7 +103,7 @@ openlist_strm_bridge/
 │   ├── domain/storage/
 │   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py
 │   ├── tokenizers/              # simple/ (cppjieba wrapper for Chinese search)
-│   └── tests/                   # 36 test files
+│   └── tests/                   # 37 test files
 ├── dist/                        # Built frontend (Vite output)
 │   └── assets/                  # Hashed JS/CSS/font files
 ├── wiki/                        # Documentation

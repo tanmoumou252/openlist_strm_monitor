@@ -6,7 +6,7 @@ This file provides guidance to AI coding assistants when working with the `openl
 
 1. **Rebuild dist after frontend changes**: `cd src/webui && npx vite build`. Browser loads `dist/assets/`, not source files. This is the #1 cause of "fix didn't work."
 2. **Server control is allowed** — this is a development/test-only project. The agent may freely start, stop, or restart the server for verification.
-3. **For OpenList API changes**, read `doc/` markdown files first.
+3. **For OpenList API changes**, read `docs/` markdown files first.
 4. **For dangerous operations** (delete, move, cloud linkage), explain safety risk before editing.
 5. **Preserve the A/B/C three-zone model.** Do not merge or flatten zones.
 6. **Prefer small, targeted changes** over large rewrites.
@@ -39,7 +39,7 @@ This file provides guidance to AI coding assistants when working with the `openl
 - **Database**: SQLite (WAL mode): `bridge.db` + `tmdb_watchlist.db`
 - **Search/Tokenizer**: SQLite FTS5 + `simple` extension (wangfenjin/simple, cppjieba wrapper, v0.7.1, `simple.dll` under `src/tokenizers/simple/`). Hard dependency for Chinese search; falls back to `unicode61` (no Chinese tokens) on load failure.
 - **Dependencies**: watchdog, requests, lxml
-- **Dev dependencies**: pytest (36 test files under `src/tests/`), listed in `src/tests/requirements-dev.txt`
+- **Dev dependencies**: pytest (37 test files under `src/tests/`), listed in `src/tests/requirements-dev.txt`
 
 ## Key Architecture
 

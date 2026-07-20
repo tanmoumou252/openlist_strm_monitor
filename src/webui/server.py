@@ -69,38 +69,20 @@ from tmdb_client import create_tmdb_client  # noqa: E402
 from database import Database  # noqa: E402
 from app_service_core import AppService  # noqa: E402
 # 路由与处理器统一从 webui.routes 引入
-try:
-    # 作为包导入时（从 src/ 运行）
-    from webui.routes import (  # noqa: E402
-        _tmdb_routes, _is_lan_ip, _try_bind_port,
-        _handle_login, _handle_tmdb_configure, _handle_tmdb_watchlist_match_refresh,
-        _handle_tmdb_watchlist_match_override, _handle_tmdb_watchlist_bg_sync,
-        _handle_restart_webui, _handle_webui_config_get, _handle_webui_config_post,
-        _handle_openlist_test_connection, _handle_openlist_strm_engines,
-        _handle_openlist_monitored_paths, _handle_openlist_status,
-        _handle_openlist_ping, _handle_openlist_paths,
-        _handle_main_status, _handle_main_start, _handle_main_stop,
-        _handle_config_status, _handle_config_validate,
-        handle_dashboard, handle_area, handle_area_detail, handle_area_refresh,
-        handle_records_api, handle_logs_api, handle_download_log_api,
-        handle_config_api,
-    )
-except ImportError:
-    # 直接运行时（python src/webui/server.py）
-    from webui.routes import (  # noqa: E402
-        _tmdb_routes, _is_lan_ip, _try_bind_port,
-        _handle_login, _handle_tmdb_configure, _handle_tmdb_watchlist_match_refresh,
-        _handle_tmdb_watchlist_match_override, _handle_tmdb_watchlist_bg_sync,
-        _handle_restart_webui, _handle_webui_config_get, _handle_webui_config_post,
-        _handle_openlist_test_connection, _handle_openlist_strm_engines,
-        _handle_openlist_monitored_paths, _handle_openlist_status,
-        _handle_openlist_ping, _handle_openlist_paths,
-        _handle_main_status, _handle_main_start, _handle_main_stop,
-        _handle_config_status, _handle_config_validate,
-        handle_dashboard, handle_area, handle_area_detail, handle_area_refresh,
-        handle_records_api, handle_logs_api, handle_download_log_api,
-        handle_config_api,
-    )
+from webui.routes import (  # noqa: E402
+    _tmdb_routes, _is_lan_ip, _try_bind_port,
+    _handle_login, _handle_tmdb_configure, _handle_tmdb_watchlist_match_refresh,
+    _handle_tmdb_watchlist_match_override, _handle_tmdb_watchlist_bg_sync,
+    _handle_restart_webui, _handle_webui_config_get, _handle_webui_config_post,
+    _handle_openlist_test_connection, _handle_openlist_strm_engines,
+    _handle_openlist_monitored_paths, _handle_openlist_status,
+    _handle_openlist_ping, _handle_openlist_paths,
+    _handle_main_status, _handle_main_start, _handle_main_stop,
+    _handle_config_status, _handle_config_validate,
+    handle_dashboard, handle_area, handle_area_detail, handle_area_refresh,
+    handle_records_api, handle_logs_api, handle_download_log_api,
+    handle_config_api,
+)
 
 if TYPE_CHECKING:
     from config import WebUIConfig

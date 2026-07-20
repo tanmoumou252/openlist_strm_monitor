@@ -237,9 +237,11 @@ class SubtitleHandler:
                 if s == season and e == episode:
                     episode_subs.append(sub)
 
+        # 统一先检测语言，避免多字幕成功映射分支未定义 lang_info 导致 NameError
+        lang_info = detect_subtitle_language(sub_file.name)
+
         # 如果只有当前一个字幕，直接处理
         if len(episode_subs) <= 1:
-            lang_info = detect_subtitle_language(sub_file.name)
             if lang_info is None:
                 new_name = f"{base_name}.forced.und{sub_file.suffix.lower()}"
             else:

@@ -6,7 +6,7 @@ WebUI 管理员密码重置脚本。
   python reset_admin.py              → 生成随机新密码并打印
   python reset_admin.py 我的密码     → 使用指定密码
 
-该脚本会直接操作数据库，对密码加盐 SHA256 哈希后写入 webui_config 表。
+该脚本会直接操作数据库，对密码加盐 PBKDF2-HMAC-SHA256 哈希（600000 次迭代）后写入 webui_config 表。
 登录验证实时读取数据库，无需重启 WebUI 即可使用新密码。
 """
 
