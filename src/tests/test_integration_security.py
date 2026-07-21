@@ -153,7 +153,7 @@ def _make_mock_watchlist_db(tmp_path: Path) -> MagicMock:
     return wdb
 
 
-class TestServer:
+class _TestServerHelper:
     """测试服务器上下文管理器。"""
 
     def __init__(self, tmp_path: Path):
@@ -242,7 +242,7 @@ class TestAuthentication:
 
     def test_whitelist_endpoints_no_auth(self, tmp_path):
         """测试白名单端点无需认证。"""
-        with TestServer(tmp_path) as ts:
+        with _TestServerHelper(tmp_path) as ts:
             whitelist = [
                 ("/api/config", "GET"),
                 ("/api/webui/config/ui", "GET"),
@@ -268,7 +268,7 @@ class TestAuthentication:
 
     def test_protected_endpoints_require_auth(self, tmp_path):
         """测试受保护端点需要认证。"""
-        with TestServer(tmp_path) as ts:
+        with _TestServerHelper(tmp_path) as ts:
             # 先设置密码
             ts.server._has_password = True
             ts.server._sessions.clear()
@@ -308,7 +308,7 @@ class TestAuthentication:
 
     def test_session_token_validation(self, tmp_path):
         """测试 session token 验证。"""
-        with TestServer(tmp_path) as ts:
+        with _TestServerHelper(tmp_path) as ts:
             ts.server._has_password = True
 
             # 无效 token
@@ -355,7 +355,7 @@ class TestPasswordManagement:
 
     def test_admin_status_no_password(self, tmp_path):
         """测试无密码时 admin/status 返回正确状态。"""
-        with TestServer(tmp_path) as ts:
+        with _TestServerHelper(tmp_path) as ts:
             ts.server._has_password = False
             status, body = _request(ts.port, "GET", "/api/admin/status")
             passed = status == 200 and body.get("has_password") is False
@@ -369,7 +369,7 @@ class TestPasswordManagement:
 
     def test_admin_status_with_password(self, tmp_path):
         """测试有密码时 admin/status 返回正确状态。"""
-        with TestServer(tmp_path) as ts:
+        with _TestServerHelper(tmp_path) as ts:
             ts.server._has_password = True
             status, body = _request(ts.port, "GET", "/api/admin/status")
             passed = status == 200 and body.get("has_password") is True
@@ -383,7 +383,7 @@ class TestPasswordManagement:
 
     def test_login_no_password_set(self, tmp_path):
         """测试未设置密码时登录行为。"""
-        with TestServer(tmp_path) as ts:
+        with _TestServerHelper(tmp_path) as ts:
             ts.server._has_password = False
             status, body = _request(ts.port, "POST", "/api/login",
                                     body={"password": "any_password"})
@@ -399,7 +399,7 @@ class TestPasswordManagement:
 
     def test_login_wrong_password(self, tmp_path):
         """测试错误密码登录。"""
-        with TestServer(tmp_path) as ts:
+        with _TestServerHelper(tmp_path) as ts:
             ts.server._has_password = True
             # 模拟存储的密码哈希
             ts.server._watchlist_db.get_admin_password.return_value = (
@@ -418,7 +418,7 @@ class TestPasswordManagement:
 
     def test_login_rate_limiting(self, tmp_path):
         """测试登录频率限制。"""
-        with TestServer(tmp_path) as ts:
+        with _TestServerHelper(tmp_path) as ts:
             ts.server._has_password = True
             ts.server._watchlist_db.get_admin_password.return_value = (
                 "salt123$600000$hash456"
@@ -447,7 +447,7 @@ class TestSensitiveDataLeak:
 
     def test_config_endpoint_no_secrets(self, tmp_path):
         """测试 /api/config 不泄露敏感信息。"""
-        with TestServer(tmp_path) as ts:
+        with _TestServerHelper(tmp_path) as ts:
             status, body = _request(ts.port, "GET", "/api/config")
 
             if isinstance(body, dict):
@@ -497,7 +497,7 @@ class TestSensitiveDataLeak:
 
     def test_openlist_config_requires_auth(self, tmp_path):
         """测试 /api/webui/config/openlist 需要认证。"""
-        with TestServer(tmp_path) as ts:
+        with _TestServerHelper(tmp_path) as ts:
             ts.server._has_password = True
             status, body = _request(ts.port, "GET", "/api/webui/config/openlist")
             passed = status == 401
@@ -515,7 +515,7 @@ class TestRequestLimits:
 
     def test_max_content_length(self, tmp_path):
         """测试请求体大小限制。"""
-        with TestServer(tmp_path) as ts:
+        with _TestServerHelper(tmp_path) as ts:
             # 发送超大请求体（11MB）
             large_body = {"data": "x" * (11 * 1024 * 1024)}
             status, body = _request(ts.port, "POST", "/api/login",
@@ -535,7 +535,7 @@ class TestBusinessLogic:
 
     def test_dashboard_data_structure(self, tmp_path):
         """测试 dashboard 数据结构。"""
-        with TestServer(tmp_path) as ts:
+        with _TestServerHelper(tmp_path) as ts:
             ts.server._has_password = False
             status, body = _request(ts.port, "GET", "/api/dashboard")
 
@@ -561,7 +561,7 @@ class TestBusinessLogic:
 
     def test_area_endpoints(self, tmp_path):
         """测试 area 端点。"""
-        with TestServer(tmp_path) as ts:
+        with _TestServerHelper(tmp_path) as ts:
             ts.server._has_password = False
             for area in ["a", "b", "c"]:
                 status, body = _request(ts.port, "GET", f"/api/area/{area}")

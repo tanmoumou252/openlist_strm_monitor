@@ -46,7 +46,7 @@ python src/webui/scripts/subset_font.py --source-kr C:\path\to\NotoSansKR-VF.ttf
 | `--source` | `C:\Windows\Fonts\NotoSansSC-VF.ttf` | 主源字体路径（中日标点） |
 | `--source-kr` | 空 | 韩文源字体路径，不提供则跳过韩文 |
 | `--output` | `src/webui/assets/fonts/` | 输出目录 |
-| `--unicodes` | `U+0020-007F,U+3000-303F,U+3040-30FF,U+4E00-9FFF,U+FF00-FFEF,U+AC00-D7AF` | Unicode 范围串 |
+| `--unicodes` | `U+0020-007F,U+3000-303F,U+3040-30FF,U+4E00-9FFF,U+FF00-FFEF,U+00B7,U+00D7,U+2014,U+2026,U+2192,U+25BE,U+26A0,U+2713,U+FE0F,U+AC00-D7AF` | Unicode 范围串 |
 | `--weights` | `300-700` | 字重范围（仅自检报告用，不裁轴） |
 
 ## 生成后操作
@@ -67,6 +67,7 @@ python src/webui/scripts/subset_font.py --source-kr C:\path\to\NotoSansKR-VF.ttf
 | CJK 基本区 | `U+4E00-9FFF` | SC |
 | 全角符号 | `U+FF00-FFEF` | SC |
 | 韩文谚文 | `U+AC00-D7AF` | KR |
+| 补充符号 | `U+00B7,U+00D7,U+2014,U+2026,U+2192,U+25BE,U+26A0,U+2713,U+FE0F` | SC |
 
 ## 技术说明
 

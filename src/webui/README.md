@@ -23,6 +23,7 @@ src/webui/
 │   │   ├── toast.js              # showToast
 │   │   └── dialog.js             # showConfirmDialog、showCacheStaleModal
 │   └── pages/                    # 懒加载页面
+│       ├── login.js
 │       ├── dashboard.js
 │       ├── area.js
 │       ├── tmdb.js

@@ -203,6 +203,14 @@ python -m pytest src/tests/
 
 目标覆盖率：80%+
 
+### 辅助工具（非测试、非 pytest 收集）
+
+| 文件 | 说明 |
+|------|------|
+| `debug_console.py` | 调试控制台交互工具（数据库/区域状态检查） |
+| `verify_login_flow.py` | 登录流程手动验证脚本 |
+| `_test_helpers.py` | 测试共用辅助函数（被其他测试文件 import） |
+
 ## 相关文档
 
 - [API 文档](../../docs/)
