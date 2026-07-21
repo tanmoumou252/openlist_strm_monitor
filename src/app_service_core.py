@@ -14,6 +14,7 @@ import sqlite3
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext as _nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -437,6 +438,7 @@ class AppService:
         return True
 
     def start(self) -> None:
+        t_start = time.time()
         logging.info("[启动] 准备环境并初始化数据库...")
         self.prepare_environment()
         self.db.init_db()
@@ -452,22 +454,42 @@ class AppService:
         if wait_seconds > 0:
             logging.info("[启动] 等待 %d 秒，让 OpenList 服务就绪...", wait_seconds)
             time.sleep(wait_seconds)
+        
+        t_phase = time.time()
         self.initial_scan_b()
+        logging.info("[启动] B 区扫描耗时: %.1fs", time.time() - t_phase)
+        
         self.sync_protected_roots_from_config()
         self.scan_removed_protected_roots()
         self.persist_current_roots_snapshot()
+        
+        t_phase = time.time()
         self.initial_scan_a()
+        logging.info("[启动] A 区扫描耗时: %.1fs", time.time() - t_phase)
+        
+        # 使用 OpenList API 批量清理 A 区冗余文件（云端已删除但本地残留的 .strm）
+        # 必须在 A→B 全量同步之前执行，避免把已经失效的 A 区记录同步到 B 区
+        t_phase = time.time()
+        self.cleanup_a_redundant_using_api()
+        logging.info("[启动] A 区冗余清理耗时: %.1fs", time.time() - t_phase)
+        
         # 根据配置决定是否执行 A→B 全量同步（实际复制文件）
         sync_on_startup = getattr(behavior_cfg, "sync_on_startup", True)
         if sync_on_startup:
+            t_phase = time.time()
             self.scan_a_to_b_full_sync(
-                valid_engine_paths=list(self.config.paths.strm_engine_paths))
+                valid_engine_paths=list(self.config.paths.strm_engine_paths),
+                use_bulk=True)
+            logging.info("[启动] A→B 同步耗时: %.1fs", time.time() - t_phase)
         else:
             logging.info("[启动] 跳过 A→B 全量同步（sync_on_startup=false）")
+        
         self.cleanup_b_redundant()
         self.start_watchers()
+        # 启动后立即扫描 A 区字幕文件（补偿 initial_scan_a 不处理字幕）
+        self._scan_a_subtitles_on_startup()
         self.refresh_service.start()
-        logging.info("嗨嗨，应用启动成功咯！")
+        logging.info("嗨嗨，应用启动成功咯！(总耗时 %.1fs)", time.time() - t_start)
 
     def stop(self) -> None:
         # 取消所有待执行的延迟清理定时器
@@ -968,7 +990,8 @@ class AppService:
         3. _reconcile_b_historical_records: 对比历史 DB 记录与磁盘数据
         4. _insert_new_b_records: 插入磁盘上新的 B 区记录
         """
-        logging.info("[初始化] 开始扫描 B 区现有文件...")
+        t_total = time.time()
+        logging.info("[初始化] B 区逆向自同步开始...")
         disk_data = self._scan_b_disk()
         if disk_data is None:
             return
@@ -980,7 +1003,7 @@ class AppService:
         processed = set()
         self._reconcile_b_historical_records(disk_data, db_records, processed)
         self._insert_new_b_records(disk_data, processed)
-        logging.info("[初始化] B 区扫描自同步完成")
+        logging.info("[初始化] B 区逆向自同步完成 (%.1fs)", time.time() - t_total)
 
     def _scan_b_disk(self) -> tuple[dict, dict] | None:
         """扫描 B 区磁盘文件，返回 (fingerprint_to_paths, path_to_data)"""
@@ -989,6 +1012,7 @@ class AppService:
             logging.info("[初始化] B 区根目录不存在，跳过扫描")
             return None
         
+        t0 = time.time()
         disk_fingerprint_to_paths: dict[str, set[str]] = {}
         disk_path_to_data: dict[str, dict] = {}
         scanned_count = 0
@@ -1005,10 +1029,16 @@ class AppService:
                     disk_fingerprint_to_paths[fingerprint].add(path_str)
                     disk_path_to_data[path_str] = {
                         "webdav": webdav_path, "fp": fingerprint}
+                
+                # 每 500 个文件输出进度
+                if scanned_count % 500 == 0:
+                    logging.info("[初始化] B 区扫描进度: %d 个文件 (%.1fs)", 
+                               scanned_count, time.time() - t0)
             except Exception as e:
                 logging.warning("[初始化] 读取 B 区文件失败: %s (%s)", strm_file, e)
         
-        logging.info("[初始化] B 区磁盘扫描完毕，共发现 %d 个 STRM 文件", scanned_count)
+        logging.info("[初始化] B 区磁盘扫描完毕，共发现 %d 个 STRM 文件 (%.1fs)", 
+                    scanned_count, time.time() - t0)
         return disk_fingerprint_to_paths, disk_path_to_data
 
     def _load_b_db_records(self) -> list | None:
@@ -1121,15 +1151,198 @@ class AppService:
                 if fingerprint:
                     self.ensure_single_visible_instance(fingerprint, disk_path)
                 new_insert_count += 1
+                
+                # 每 200 条输出进度
+                if new_insert_count % 200 == 0:
+                    logging.info("[初始化] B 区新增记录进度: %d 条", new_insert_count)
         
         logging.info("[初始化] B 区新增 %d 条数据库记录", new_insert_count)
 
     def initial_scan_a(self):
         return self.sync_service.initial_scan_a()
 
+    def cleanup_a_redundant_using_api(self) -> None:
+        """使用 OpenList API 批量清理 A 区冗余文件。
+        
+        性能优化策略（混合方案）：
+        1. 基于本地记录优化遍历范围：只遍历本地 A 区记录的父目录
+        2. 并发分页：使用线程池并发请求多个页面（5 个并发）
+        3. 客户端过滤：只保留 .strm 文件，忽略字幕、nfo、图片等
+        
+        性能对比：
+        - 旧方案：5万次 check_exists × 150ms = 7500秒（2小时）
+        - 新方案：500次 /api/fs/list × 100ms / 5并发 = 10秒
+        - 提升750倍
+        """
+        logging.info("[初始化] 使用 OpenList API 清理 A 区冗余文件...")
+        t0 = time.time()
+
+        a_records = self.db.get_all_a_records()
+        if not a_records:
+            logging.info("[初始化] A 区无记录，跳过冗余清理")
+            return
+
+        parent_dirs = {rec.parent_webdav_path for rec in a_records}
+        logging.info("[初始化] 需要检查 %d 个云端目录", len(parent_dirs))
+
+        cloud_webdav_paths: set[str] = set()
+        for parent_dir in parent_dirs:
+            try:
+                self._collect_cloud_files_concurrent(parent_dir, cloud_webdav_paths)
+            except Exception as e:
+                logging.warning(
+                    "[初始化] 获取云端文件列表失败: %s, 错误: %s",
+                    parent_dir, e)
+
+        local_webdav_paths = {rec.webdav_path for rec in a_records}
+        redundant_paths = local_webdav_paths - cloud_webdav_paths
+
+        if not redundant_paths:
+            logging.info("[初始化] A 区无冗余文件")
+            return
+
+        logging.info("[初始化] 发现 %d 个冗余文件，开始清理...", len(redundant_paths))
+
+        cleaned = 0
+        for rec in a_records:
+            if rec.webdav_path in redundant_paths:
+                try:
+                    safe_remove_file(rec.local_path)
+                    self.db.delete_a_by_local(rec.local_path)
+                    self.db.set_ghost_protection(
+                        rec.webdav_path,
+                        self.config.behavior.ghost_protect_seconds,
+                        reason="cloud_deleted",
+                    )
+                    cleaned += 1
+                    if cleaned % 100 == 0:
+                        logging.info(
+                            "[初始化] A 区冗余清理进度: %d/%d (%.1fs)",
+                            cleaned, len(redundant_paths), time.time() - t0)
+                except Exception as e:
+                    logging.warning(
+                        "[初始化] 删除冗余文件失败: %s, 错误: %s",
+                        rec.local_path, e)
+
+        logging.info(
+            "[初始化] A 区冗余清理完成，清理 %d 个文件 (%.1fs)",
+            cleaned, time.time() - t0)
+
+    def _collect_cloud_files_concurrent(
+            self, cloud_path: str, file_set: set[str]) -> None:
+        """使用并发请求收集云端 .strm 文件。
+        
+        优化策略：
+        1. 先获取第一页，获取 total
+        2. 计算需要的页数
+        3. 并发请求所有页面（5 个并发，带重试机制）
+        4. 客户端过滤：只保留 .strm 文件
+        
+        Args:
+            cloud_path: 云端目录路径
+            file_set: 用于收集文件路径的集合（会修改）
+        """
+        first_page = self.admin_api.list_directory(
+            path=cloud_path, page=1, per_page=100)
+
+        if not first_page:
+            logging.warning("[初始化] 获取云端目录首页失败: %s", cloud_path)
+            return
+
+        data = first_page.get("data", {})
+        total = data.get("total", 0)
+        content = data.get("content", [])
+
+        for item in content:
+            name = item.get("name")
+            if not name:
+                continue
+            if (not item.get("is_dir")
+                    and name.lower().endswith(".strm")):
+                # API 返回的 "path" 是存储系统原始路径（如 D:\files\xxx），
+                # 而非 WebDAV 虚拟路径；应从 cloud_path + name 重构路径
+                file_set.add(cloud_path + "/" + name)
+
+        total_pages = (total + 99) // 100
+        if total_pages <= 1:
+            return
+
+        def fetch_page_with_retry(page_num: int, max_retries: int = 3):
+            """带重试的页面获取"""
+            for attempt in range(max_retries):
+                try:
+                    result = self.admin_api.list_directory(
+                        path=cloud_path, page=page_num, per_page=100)
+                    if result:
+                        return result
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        logging.debug(
+                            "[初始化] 获取页面 %d 失败（尝试 %d/%d）: %s",
+                            page_num, attempt + 1, max_retries, e)
+                        time.sleep(0.5 * (attempt + 1))
+                    else:
+                        logging.warning(
+                            "[初始化] 获取页面 %d 失败（已重试 %d 次）: %s",
+                            page_num, max_retries, e)
+            return None
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(fetch_page_with_retry, page): page
+                for page in range(2, total_pages + 1)
+            }
+
+            failed_pages: list[int] = []
+            for future in as_completed(futures):
+                page_num = futures[future]
+                try:
+                    result = future.result()
+                    if not result:
+                        failed_pages.append(page_num)
+                        continue
+                    data = result.get("data", {})
+                    content = data.get("content", [])
+                    for item in content:
+                        name = item.get("name")
+                        if not name:
+                            continue
+                        if (not item.get("is_dir")
+                                and name.lower().endswith(".strm")):
+                            # API 返回的 "path" 是存储系统原始路径，
+                            # 应从 cloud_path + name 重构 WebDAV 虚拟路径
+                            file_set.add(cloud_path + "/" + name)
+                except Exception as e:
+                    logging.warning(
+                        "[初始化] 处理页面 %d 失败: %s", page_num, e)
+                    failed_pages.append(page_num)
+
+            if failed_pages:
+                logging.warning(
+                    "[初始化] 云端目录 %s 有 %d 个页面获取失败: %s",
+                    cloud_path, len(failed_pages), failed_pages)
+
+    def _scan_a_subtitles_on_startup(self) -> None:
+        """启动后扫描 A 区字幕文件（补偿 initial_scan_a 不处理字幕）"""
+        logging.info("[初始化] 扫描 A 区字幕文件...")
+        t0 = time.time()
+        count = 0
+        for a_root in self.a_roots:
+            if not a_root.exists():
+                continue
+            for root, _dirs, files in os.walk(a_root):
+                for name in files:
+                    if is_subtitle_file(Path(root) / name):
+                        self.process_subtitle_file(Path(root) / name)
+                        count += 1
+        logging.info(
+            "[初始化] A 区字幕扫描完成，处理 %d 个文件 (%.1fs)",
+            count, time.time() - t0)
+
     def scan_a_to_b_full_sync(
-            self, valid_engine_paths: list[str] | None = None) -> None:
-        return self.sync_service.scan_a_to_b_full_sync(valid_engine_paths)
+            self, valid_engine_paths: list[str] | None = None,
+            use_bulk: bool = False) -> None:
+        return self.sync_service.scan_a_to_b_full_sync(valid_engine_paths, use_bulk)
 
     def cleanup_b_redundant(self) -> None:
         b_root = Path(self.config.paths.b_root)

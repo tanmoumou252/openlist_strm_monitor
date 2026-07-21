@@ -15,7 +15,7 @@ python -m pytest src/tests/ -v
 | 文件 | 说明 |
 |------|------|
 | `test_app_service_core.py` | 核心同步引擎 `AppService` 主流程与状态机测试 |
-| `test_sync_service.py` | A→B 同步服务（`copy_a_record_to_b_if_needed` 等）测试 |
+| `test_sync_service.py` | A→B 同步服务（`initial_scan_a` 批量索引、`scan_a_to_b_full_sync` 双模式同步、`_bulk_upsert_b` FTS 孤儿行处理）测试 |
 | `test_area_watchers.py` | A/B/C 三区文件系统监视器事件处理测试 |
 | `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试 |
 | `test_refresh_service.py` | 周期性 WebDAV 刷新服务测试 |

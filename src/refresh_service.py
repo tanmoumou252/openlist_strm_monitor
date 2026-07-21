@@ -378,7 +378,7 @@ class RefreshService:
 
         # 同步是本地文件复制，不涉及 WebDAV 网络请求
         # 引擎路径可访问性只影响清理/迁移等涉及 WebDAV 的操作
-        self.app.scan_a_to_b_full_sync(valid_engine_paths=None)
+        self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
 
         self.app.cleanup_local_empty_dirs()
 

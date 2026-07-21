@@ -198,6 +198,35 @@ The Vite config groups modules into chunks:
 - State is stored in `tmdb_watchlist.db` → `webui_config` (scope=`ui`, keys like `onboarding_completed`, `onboarding_<step>_completed`).
 - Single step completion: `POST /api/onboarding/complete-step` (sets `onboarding_<step>_completed='1'`). Mark the whole flow complete or skip it via `POST /api/webui/config/ui` with `{ onboarding_completed: '1' }`.
 
+### Bulk Connection Mode (Performance Optimization)
+- `database.py` adds `bulk_connection()` context manager for startup batch sync: opens one connection, loads PRAGMAs/tokenizer once, reuses throughout
+- Bypasses `rw_lock` and `_probe_writeable` — safe only for single-threaded startup batch sync (watchdog not yet started)
+- Cross-process safe (SQLite WAL handles concurrency); same-process multi-thread unsafe
+- Three scenarios:
+  1. **First startup**: `use_bulk=True`, single transaction commit, no blocking
+  2. **Active refresh**: `use_bulk=False`, batched commits (every 1000 records), briefly blocks watchdog (max 100ms)
+  3. **User manual refresh**: per-record processing via `copy_a_record_to_b_if_needed()`, no blocking
+
+### `initial_scan_a()` Behavior Change
+- Changed from per-file `handle_a_created_or_modified()` calls to pure batch DB indexing
+- No longer processes subtitles per-file or triggers A→B copy during scan
+- Uses `upsert_a_batch()` for batch writes
+- Only does DB indexing, no WebDAV checks
+- Progress logs every 100 records (solves log freeze issue)
+
+### `cleanup_a_redundant_using_api()` New Method
+- Uses OpenList API `/api/fs/list` to batch-clean A-zone redundant files (local exists but cloud deleted)
+- Optimizes traversal scope based on local records (only traverses parent dirs with records)
+- Concurrent pagination (5 threads) + client-side filtering (only keeps .strm files)
+- Performance: from 2 hours down to <10 seconds
+
+### `scan_a_to_b_full_sync()` Dual Mode
+- New `use_bulk` parameter:
+  - `use_bulk=True`: single transaction commit (first startup, no concurrency)
+  - `use_bulk=False`: batched commits (active refresh, with concurrency)
+- Startup sync skips lineage verification and per-file `check_exists` HTTP
+- Preloads ghost protection and B-zone fingerprints into memory caches (`_cache_ghost`, `_cache_b_fp`)
+
 ## Common Pitfalls
 
 1. **Dist not rebuilt**: If you change `src/webui/modules/*.js`, the browser won't see the changes until you run `npx vite build`. This is the #1 cause of "my fix didn't work" in this project.

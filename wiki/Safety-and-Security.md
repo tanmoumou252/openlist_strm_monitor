@@ -102,6 +102,35 @@ B 区文件变动（创建/修改/移动）
 
 幽灵保护是**短期**机制（秒级），防止回灌竞态。C 区迁移是**长期**机制（永久），用于引擎根目录被移除时。
 
+## 2.5 批量同步的安全机制
+
+### `bulk_connection()` 的安全约束
+
+`bulk_connection()` 绕过 `rw_lock` 和 `_probe_writeable`，仅在以下场景安全：
+
+1. **首次启动**：watchdog 未启动，无并发线程
+2. **主动刷新**：分批提交（每 1000 条），watchdog 最多等待 100ms
+
+**跨进程安全**：SQLite WAL 模式自身处理并发，多进程场景安全。
+
+**同进程多线程不安全**：启动同步期间禁止其他线程写 DB。WebUI 读不受影响，写操作等待 SQLite `busy_timeout`（30 秒）。
+
+### 血统校验跳过
+
+启动同步跳过 `_verify_b_path_lineage`，原因：
+- 首次运行：B 区为空，血统校验始终通过
+- 后续运行：大多数记录被 `_cache_b_fp` 跳过
+- `build_b_path_from_a` 已包含分类逻辑
+- `initial_scan_b` 在 sync 之前做 reconciliation
+- watchdog 运行时仍执行完整血统校验
+
+### A 区冗余清理的安全性
+
+`cleanup_a_redundant_using_api()` 使用 OpenList API 清理冗余文件：
+- 客户端过滤：只保留 `.strm` 文件，忽略字幕、nfo、图片等
+- 并发分页：5 个并发，避免阻塞 API
+- Ghost 保护：删除的文件设置 ghost 保护，防止回灌
+
 ## 3. 重复文件隔离
 
 ### 检测

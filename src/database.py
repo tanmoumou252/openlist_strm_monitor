@@ -311,6 +311,27 @@ class Database:
                 except Exception:
                     pass
 
+    @contextmanager
+    def bulk_connection(self) -> Generator[sqlite3.Connection, None, None]:
+        """批量操作专用连接——打开一次，PRAGMA/分词器只加载一次，全程复用。
+
+        调用方在 with 块内执行所有 SQL。正常结束时自动 COMMIT，异常时 ROLLBACK。
+
+        ⚠️ 绕过 rw_lock 和 _probe_writeable——仅用于启动时单线程批量同步。
+        跨进程场景安全（SQLite WAL 自身处理并发），同进程多线程场景不安全。
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        self._apply_pragmas(conn)
+        self._load_simple_tokenizer(conn)
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def _ensure_column(
         self,
         cur: sqlite3.Cursor,
@@ -746,6 +767,12 @@ class Database:
                 """)
             return [BRecord(*row) for row in cur.fetchall()]
 
+    def get_all_b_fingerprints(self) -> set[str]:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
+            cur = conn.execute(
+                "SELECT DISTINCT fingerprint FROM b_strm_files WHERE fingerprint IS NOT NULL")
+            return {row[0] for row in cur.fetchall()}
+
     def get_all_c(self) -> list[CRecord]:
         with self.rw_lock.read_locked(), self.connection() as conn:
             cur = conn.execute("""
@@ -768,6 +795,21 @@ class Database:
                 (folder_path, source, now),
             )
             conn.commit()
+
+    def save_known_folders_batch(self, folder_paths: list[str],
+                                 source: str = "unknown") -> int:
+        if not folder_paths:
+            return 0
+        now = time.time()
+        data = [(fp, source, now) for fp in folder_paths if fp and fp != "/"]
+        if not data:
+            return 0
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO known_folders(folder_path, source, updated_at) VALUES (?, ?, ?)",
+                data)
+            conn.commit()
+            return len(data)
 
     def get_known_folders(self) -> list[str]:
         with self.rw_lock.read_locked(), self.connection() as conn:
@@ -821,6 +863,13 @@ class Database:
             )
             row = cur.fetchone()
             return bool(row and row[0] > now)
+
+    def get_all_ghost_protected_paths(self) -> set[str]:
+        now = time.time()
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
+            cur = conn.execute(
+                "SELECT webdav_path FROM ghost_protection WHERE expire_time > ?", (now,))
+            return {row[0] for row in cur.fetchall()}
 
     def set_protected_root(self, root_path: str,
                            trash_path: str, active: bool = True) -> None:

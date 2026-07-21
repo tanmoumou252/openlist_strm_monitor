@@ -1714,3 +1714,429 @@ class TestValidateStrmStorages:
         assert result["total"] == 2
         assert result["working"] == 1
         assert len(result["storages"]) == 2
+
+
+# ===========================================================================
+# TestCleanupARedundantUsingApi
+# ===========================================================================
+
+
+class TestCleanupARedundantUsingApi:
+    """Test cleanup_a_redundant_using_api using OpenList API."""
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = Path(self.tmp) / "a"
+        self.b_dir = Path(self.tmp) / "b"
+        self.c_dir = Path(self.tmp) / "c"
+        for d in [self.a_dir, self.b_dir, self.c_dir]:
+            d.mkdir()
+
+        config = Mock(spec=AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.paths = Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.behavior = Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.strm_engine_paths = []
+
+        db = Mock(spec=Database)
+        db.init_subtitle_table = Mock()
+        self.db = db
+        self.admin_api = Mock()
+
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, self.admin_api)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_empty_a_records_skips(self):
+        """No A records → skips cleanup."""
+        self.db.get_all_a_records.return_value = []
+        self.app.cleanup_a_redundant_using_api()
+        self.admin_api.list_directory.assert_not_called()
+
+    def test_no_redundant_files(self):
+        """All local files exist in cloud → no deletion.
+        
+        API 的 path 字段是存储系统路径，代码从 cloud_path + name 构建
+        WebDAV 路径来与 rec.webdav_path 比较。
+        """
+        a_file = self.a_dir / "keep.strm"
+        a_file.write_text("/mount/keep.strm", encoding="utf-8")
+        self.db.get_all_a_records.return_value = [
+            Mock(local_path=str(a_file), webdav_path="/mount/keep.strm",
+                 parent_webdav_path="/mount")
+        ]
+        self.admin_api.list_directory.return_value = {
+            "code": 200,
+            "data": {
+                "total": 1,
+                "content": [{"name": "keep.strm", "is_dir": False,
+                             "path": "D:\\storage\\keep.strm"}],
+            },
+        }
+
+        self.app.cleanup_a_redundant_using_api()
+
+        self.db.delete_a_by_local.assert_not_called()
+
+    def test_redundant_file_deleted(self):
+        """Local file not in cloud → deleted with ghost protection."""
+        a_file = self.a_dir / "gone.strm"
+        a_file.write_text("/mount/gone.mp4", encoding="utf-8")
+        self.db.get_all_a_records.return_value = [
+            Mock(local_path=str(a_file), webdav_path="/mount/gone.mp4",
+                 parent_webdav_path="/mount")
+        ]
+        # Cloud returns empty → all local files are redundant
+        self.admin_api.list_directory.return_value = {
+            "code": 200,
+            "data": {"total": 0, "content": []},
+        }
+
+        self.app.cleanup_a_redundant_using_api()
+
+        self.db.delete_a_by_local.assert_called_once_with(str(a_file))
+        self.db.set_ghost_protection.assert_called_once()
+
+    def test_only_strm_files_from_cloud(self):
+        """Cloud returns non-.strm files → only .strm paths collected,
+        so local .strm records are flagged as redundant."""
+        a_file = self.a_dir / "good.strm"
+        a_file.write_text("/mount/good.strm", encoding="utf-8")
+        self.db.get_all_a_records.return_value = [
+            Mock(local_path=str(a_file), webdav_path="/mount/good.strm",
+                 parent_webdav_path="/mount")
+        ]
+        # Cloud has .nfo and .srt files but NOT the .strm file
+        self.admin_api.list_directory.return_value = {
+            "code": 200,
+            "data": {
+                "total": 2,
+                "content": [
+                    {"name": "good.nfo", "is_dir": False,
+                     "path": "D:\\storage\\good.nfo"},
+                    {"name": "good.srt", "is_dir": False,
+                     "path": "D:\\storage\\good.srt"},
+                ],
+            },
+        }
+
+        self.app.cleanup_a_redundant_using_api()
+
+        self.db.delete_a_by_local.assert_called_once_with(str(a_file))
+
+
+# ===========================================================================
+# TestCollectCloudFilesConcurrent
+# ===========================================================================
+
+
+class TestCollectCloudFilesConcurrent:
+    """Test _collect_cloud_files_concurrent pagination logic."""
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = Path(self.tmp) / "a"
+        self.b_dir = Path(self.tmp) / "b"
+        self.c_dir = Path(self.tmp) / "c"
+        for d in [self.a_dir, self.b_dir, self.c_dir]:
+            d.mkdir()
+
+        config = Mock(spec=AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.paths = Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.behavior = Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.strm_engine_paths = []
+
+        db = Mock(spec=Database)
+        db.init_subtitle_table = Mock()
+        self.db = db
+        self.admin_api = Mock()
+
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, self.admin_api)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_single_page_collection(self):
+        """Directory with ≤100 files → single page request.
+        
+        API 的 path 字段是存储系统原始路径（如 D:\\files\\xxx），
+        但代码应从 cloud_path + name 重构 WebDAV 虚拟路径。
+        """
+        self.admin_api.list_directory.return_value = {
+            "code": 200,
+            "data": {
+                "total": 2,
+                "content": [
+                    {"name": "f1.strm", "is_dir": False,
+                     "path": "D:\\storage\\movies\\f1.strm"},
+                    {"name": "f2.strm", "is_dir": False,
+                     "path": "D:\\storage\\movies\\f2.strm"},
+                ],
+            },
+        }
+        file_set: set[str] = set()
+        self.app._collect_cloud_files_concurrent("/mount", file_set)
+
+        # 路径应从 cloud_path + name 重构，而非使用 API 的 path 字段
+        assert file_set == {"/mount/f1.strm", "/mount/f2.strm"}
+        self.admin_api.list_directory.assert_called_once()
+
+    def test_multi_page_concurrent_collection(self):
+        """Directory with 150 files → 2 pages, page 2 fetched concurrently."""
+        page1 = {
+            "code": 200,
+            "data": {
+                "total": 150,
+                "content": [
+                    {"name": f"f{i}.strm", "is_dir": False,
+                     "path": f"D:\\storage\\f{i}.strm"}
+                    for i in range(100)
+                ],
+            },
+        }
+        page2 = {
+            "code": 200,
+            "data": {
+                "total": 150,
+                "content": [
+                    {"name": f"f{i}.strm", "is_dir": False,
+                     "path": f"D:\\storage\\f{i}.strm"}
+                    for i in range(100, 150)
+                ],
+            },
+        }
+        self.admin_api.list_directory.side_effect = [page1, page2]
+
+        file_set: set[str] = set()
+        self.app._collect_cloud_files_concurrent("/mount", file_set)
+
+        assert len(file_set) == 150
+
+    def test_empty_directory(self):
+        """Empty directory → no files collected."""
+        self.admin_api.list_directory.return_value = {
+            "code": 200,
+            "data": {"total": 0, "content": []},
+        }
+        file_set: set[str] = set()
+        self.app._collect_cloud_files_concurrent("/mount", file_set)
+
+        assert len(file_set) == 0
+
+    def test_filters_non_strm_files(self):
+        """Non-.strm files in cloud are filtered out."""
+        self.admin_api.list_directory.return_value = {
+            "code": 200,
+            "data": {
+                "total": 3,
+                "content": [
+                    {"name": "good.strm", "is_dir": False,
+                     "path": "D:\\storage\\good.strm"},
+                    {"name": "bad.nfo", "is_dir": False,
+                     "path": "D:\\storage\\bad.nfo"},
+                    {"name": "dir", "is_dir": True,
+                     "path": "D:\\storage\\dir"},
+                ],
+            },
+        }
+        file_set: set[str] = set()
+        self.app._collect_cloud_files_concurrent("/mount", file_set)
+
+        assert file_set == {"/mount/good.strm"}
+
+    def test_api_failure_returns_empty(self):
+        """API failure → returns empty, no exception."""
+        self.admin_api.list_directory.return_value = None
+        file_set: set[str] = set()
+        self.app._collect_cloud_files_concurrent("/mount", file_set)
+
+        assert len(file_set) == 0
+
+    def test_items_with_missing_name_are_skipped(self):
+        """Items with no name field are skipped, not added to the set."""
+        self.admin_api.list_directory.return_value = {
+            "code": 200,
+            "data": {
+                "total": 3,
+                "content": [
+                    {"name": "good.strm", "is_dir": False,
+                     "path": "D:\\storage\\good.strm"},
+                    {"is_dir": False, "path": "D:\\storage\\noname.strm"},
+                    {"name": None, "is_dir": False,
+                     "path": "D:\\storage\\none.strm"},
+                ],
+            },
+        }
+        file_set: set[str] = set()
+        self.app._collect_cloud_files_concurrent("/mount", file_set)
+
+        assert file_set == {"/mount/good.strm"}
+
+    def test_path_reconstructed_from_cloud_path_plus_name(self):
+        """Verify path is built from cloud_path + name, not from API path field.
+        
+        The API's path field returns a full system storage path like 
+        D:\\movies\\show\\file.strm, which is NOT a WebDAV virtual path.
+        The code must reconstruct the WebDAV path from the cloud_path 
+        (parent directory) and the item name.
+        """
+        self.admin_api.list_directory.return_value = {
+            "code": 200,
+            "data": {
+                "total": 1,
+                "content": [
+                    {"name": "episode.strm", "is_dir": False,
+                     "path": "E:\\cloud\\movies\\Show\\Season 01\\episode.strm"},
+                ],
+            },
+        }
+        file_set: set[str] = set()
+        self.app._collect_cloud_files_concurrent("/mount/show", file_set)
+
+        # Should be cloud_path + "/" + name, NOT item["path"]
+        assert file_set == {"/mount/show/episode.strm"}
+
+
+# ===========================================================================
+# TestScanASubtitlesOnStartup
+# ===========================================================================
+
+
+class TestScanASubtitlesOnStartup:
+    """Test _scan_a_subtitles_on_startup subtitle scanning."""
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = Path(self.tmp) / "a"
+        self.b_dir = Path(self.tmp) / "b"
+        self.c_dir = Path(self.tmp) / "c"
+        for d in [self.a_dir, self.b_dir, self.c_dir]:
+            d.mkdir()
+
+        config = Mock(spec=AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.paths = Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.behavior = Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.strm_engine_paths = []
+
+        db = Mock(spec=Database)
+        db.init_subtitle_table = Mock()
+        self.db = db
+
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, Mock())
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_finds_subtitle_files(self):
+        """Subtitle files in A directory are processed."""
+        sub = self.a_dir / "movie.srt"
+        sub.write_text("subtitle content", encoding="utf-8")
+        # Also create a non-subtitle file
+        (self.a_dir / "movie.strm").write_text(
+            "/mount/movie.mp4", encoding="utf-8")
+
+        with patch.object(self.app, "process_subtitle_file") as mock_proc:
+            self.app._scan_a_subtitles_on_startup()
+
+        mock_proc.assert_called_once()
+
+
+# ===========================================================================
+# TestStartCallsCleanupARedundant
+# ===========================================================================
+
+
+class TestStartCallsCleanupARedundant:
+    """Verify start() calls cleanup_a_redundant_using_api between initial_scan_a and scan_a_to_b_full_sync."""
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = Path(self.tmp) / "a"
+        self.b_dir = Path(self.tmp) / "b"
+        self.c_dir = Path(self.tmp) / "c"
+        for d in [self.a_dir, self.b_dir, self.c_dir]:
+            d.mkdir()
+
+        config = Mock(spec=AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.paths = Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.paths.strm_engine_paths = []
+        config.behavior = Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.behavior.sync_on_startup_wait = 0
+        config.behavior.sync_on_startup = True
+        config.behavior.subtitle_extensions = []
+        config.behavior.subtitle_scan_roots = []
+
+        db = Mock(spec=Database)
+        db.init_subtitle_table = Mock()
+        self.db = db
+
+        with patch("app_service_core.RefreshService") as mock_refresh, \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, Mock())
+            self.mock_refresh = mock_refresh.return_value
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_start_calls_cleanup_a_redundant_in_order(self):
+        """start() calls cleanup_a_redundant_using_api after initial_scan_a."""
+        call_order = []
+        with patch.object(self.app, "prepare_environment"), \
+             patch.object(self.app, "update_engine_configs"), \
+             patch.object(self.app, "initial_scan_b"), \
+             patch.object(self.app, "sync_protected_roots_from_config"), \
+             patch.object(self.app, "scan_removed_protected_roots"), \
+             patch.object(self.app, "persist_current_roots_snapshot"), \
+             patch.object(self.app, "initial_scan_a",
+                          side_effect=lambda: call_order.append("initial_scan_a")), \
+             patch.object(self.app, "cleanup_a_redundant_using_api",
+                          side_effect=lambda: call_order.append("cleanup_a_redundant_using_api")), \
+             patch.object(self.app, "scan_a_to_b_full_sync",
+                          side_effect=lambda **kw: call_order.append("scan_a_to_b_full_sync")), \
+             patch.object(self.app, "cleanup_b_redundant"), \
+             patch.object(self.app, "start_watchers"), \
+             patch.object(self.app, "_scan_a_subtitles_on_startup"), \
+             patch.object(self.app.admin_api, "list_storages"):
+            self.db.get_all_a_records.return_value = []
+            self.app.start()
+
+        assert "initial_scan_a" in call_order
+        assert "cleanup_a_redundant_using_api" in call_order
+        idx_scan = call_order.index("initial_scan_a")
+        idx_cleanup = call_order.index("cleanup_a_redundant_using_api")
+        assert idx_cleanup == idx_scan + 1
+
+    def test_missing_root_skipped(self):
+        """Non-existent A root is skipped."""
+        self.app.a_roots = [Path(self.tmp) / "nonexistent"]
+
+        with patch.object(self.app, "process_subtitle_file") as mock_proc:
+            self.app._scan_a_subtitles_on_startup()
+
+        mock_proc.assert_not_called()

@@ -55,43 +55,102 @@ class TestSyncServiceInitialScanA:
         app = _make_app(tmp_path)
         a_root = app.a_roots[0]
         # Create some STRM files
-        (a_root / "movie.strm").write_text("/mount/movie.mp4", encoding="utf-8")
+        (a_root / "movie.strm").write_text(
+            "/mount/movie.mp4", encoding="utf-8")
         subdir = a_root / "show" / "Season 01"
         subdir.mkdir(parents=True)
-        (subdir / "ep01.strm").write_text("/mount/show/S01E01.mp4", encoding="utf-8")
+        (subdir / "ep01.strm").write_text(
+            "/mount/show/S01E01.mp4", encoding="utf-8")
+
+        svc = SyncService(app)
+        # Use patch to capture the batch before it's cleared
+        with patch.object(svc.db, "upsert_a_batch") as mock_upsert:
+            svc.initial_scan_a()
+            assert mock_upsert.call_count == 1
+            # Mock stores a reference; call_args_list preserves the reference
+            # at call time. Verify via the captured list argument.
+            # Note: call_args reflects current state (after clear), so
+            # verify count and that save_known_folders was called.
+            saved_folders = app.db.save_known_folders_batch.call_args[0][0]
+            assert "/mount" in saved_folders
+            assert "/mount/show" in saved_folders
+
+    def test_scan_a_saves_parent_folders(self, tmp_path):
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        (a_root / "movie.strm").write_text(
+            "/mount/movie.mp4", encoding="utf-8")
+        subdir = a_root / "show"
+        subdir.mkdir(parents=True)
+        (subdir / "ep01.strm").write_text(
+            "/mount/show/ep01.mp4", encoding="utf-8")
 
         svc = SyncService(app)
         svc.initial_scan_a()
 
-        assert app.handle_a_created_or_modified.call_count == 2
+        assert app.db.save_known_folders_batch.call_count == 1
+        saved_folders = app.db.save_known_folders_batch.call_args[0][0]
+        assert "/mount" in saved_folders
+        assert "/mount/show" in saved_folders
 
     def test_scan_a_empty_directory(self, tmp_path):
         app = _make_app(tmp_path)
         # a_root exists but is empty
         svc = SyncService(app)
         svc.initial_scan_a()
-        app.handle_a_created_or_modified.assert_not_called()
+        app.db.upsert_a_batch.assert_not_called()
+        app.db.save_known_folders_batch.assert_not_called()
 
     def test_scan_a_missing_root_is_skipped(self, tmp_path):
         app = _make_app(tmp_path)
         missing_root = tmp_path / "nonexistent"
-        app.a_roots = [missing_root]  # override to a non-existing path
+        app.a_roots = [missing_root]
         svc = SyncService(app)
         svc.initial_scan_a()
-        app.handle_a_created_or_modified.assert_not_called()
+        app.db.upsert_a_batch.assert_not_called()
 
     def test_scan_a_ignores_non_strm_files(self, tmp_path):
         app = _make_app(tmp_path)
         a_root = app.a_roots[0]
         (a_root / "video.mp4").write_text("binary", encoding="utf-8")
         (a_root / "info.nfo").write_text("nfo", encoding="utf-8")
-        (a_root / "real.strm").write_text("/mount/file.mp4", encoding="utf-8")
+        (a_root / "real.strm").write_text(
+            "/mount/file.mp4", encoding="utf-8")
 
         svc = SyncService(app)
         svc.initial_scan_a()
 
-        # Only the .strm file triggers handle_a_created_or_modified
-        assert app.handle_a_created_or_modified.call_count == 1
+        # Only the .strm file is batched
+        assert app.db.upsert_a_batch.call_count == 1
+
+    def test_scan_a_batch_flush_at_boundary(self, tmp_path):
+        """Records are flushed when batch reaches BATCH_SIZE."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        # Create 501 files to trigger one flush + one final flush
+        for i in range(501):
+            (a_root / f"file{i}.strm").write_text(
+                f"/mount/f{i}.mp4", encoding="utf-8")
+
+        svc = SyncService(app)
+        svc.initial_scan_a()
+
+        # BATCH_SIZE=500, so 501 files → 2 upsert calls (500 + 1)
+        assert app.db.upsert_a_batch.call_count == 2
+
+    def test_scan_a_skips_unparseable_strm(self, tmp_path):
+        """STRM files that can't be parsed are skipped."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        (a_root / "good.strm").write_text(
+            "/mount/good.mp4", encoding="utf-8")
+        # Empty STRM file — read_strm_webdav_path returns None
+        (a_root / "empty.strm").write_text("", encoding="utf-8")
+
+        svc = SyncService(app)
+        svc.initial_scan_a()
+
+        assert app.db.upsert_a_batch.call_count == 1
 
 
 # ===========================================================================
@@ -109,6 +168,15 @@ class TestSyncServiceScanAToBFullSync:
         app.db.get_all_a_records.return_value = records
         app.db.is_ghost_protected.return_value = False
         app.db.b_fingerprint_exists.return_value = False
+        app.db.get_all_ghost_protected_paths.return_value = set()
+        app.db.get_all_b_fingerprints.return_value = set()
+
+    def _make_bulk_conn_mock(self):
+        """Create a mock connection that supports context manager protocol."""
+        mock_conn = Mock()
+        mock_conn.__enter__ = Mock(return_value=mock_conn)
+        mock_conn.__exit__ = Mock(return_value=False)
+        return mock_conn
 
     def test_full_sync_all_records(self, tmp_path):
         app = _make_app(tmp_path)
@@ -123,10 +191,13 @@ class TestSyncServiceScanAToBFullSync:
         app.build_b_path_from_a.return_value = b_root / "file1.strm"
 
         svc = SyncService(app)
-        with patch.object(svc, "copy_a_record_to_b", return_value=True) as mock_copy:
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
             svc.scan_a_to_b_full_sync()
 
-        assert mock_copy.call_count == 2
+        assert mock_sync.call_count == 2
 
     def test_full_sync_with_engine_path_filter(self, tmp_path):
         app = _make_app(tmp_path)
@@ -138,38 +209,223 @@ class TestSyncServiceScanAToBFullSync:
         self._setup_records(app, records, tmp_path)
 
         svc = SyncService(app)
-        with patch.object(svc, "copy_a_record_to_b", return_value=True) as mock_copy:
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
             svc.scan_a_to_b_full_sync(valid_engine_paths=["/engine"])
 
-        # only /engine path should be synced
-        assert mock_copy.call_count == 1
-        call_args = mock_copy.call_args[0]
-        assert call_args[1].startswith("/engine")
+        # _sync_one_record is called for all records; filtering happens inside it
+        assert mock_sync.call_count == 2
+        # Verify valid_engine_paths is passed through
+        for call in mock_sync.call_args_list:
+            assert call[0][1] == ["/engine"]
 
     def test_full_sync_skip_ghost_protected(self, tmp_path):
         app = _make_app(tmp_path)
         a_root = app.a_roots[0]
         records = [_make_a_record(str(a_root / "f1.strm"), "/m/f1.mp4", "/m")]
         self._setup_records(app, records, tmp_path)
-        app.db.is_ghost_protected.return_value = True
+        app.db.get_all_ghost_protected_paths.return_value = {"/m/f1.mp4"}
 
         svc = SyncService(app)
-        with patch.object(svc, "copy_a_record_to_b") as mock_copy:
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="skip_ghost") as mock_sync:
             svc.scan_a_to_b_full_sync()
 
-        mock_copy.assert_not_called()
+        mock_sync.assert_called_once()
 
     def test_full_sync_skip_missing_source(self, tmp_path):
         app = _make_app(tmp_path)
         records = [_make_a_record("/nonexistent/path/file.strm", "/m/f.mp4", "/m")]
         app.db.get_all_a_records.return_value = records
-        app.db.is_ghost_protected.return_value = False
+        app.db.get_all_ghost_protected_paths.return_value = set()
+        app.db.get_all_b_fingerprints.return_value = set()
 
         svc = SyncService(app)
-        with patch.object(svc, "copy_a_record_to_b") as mock_copy:
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="skip_missing") as mock_sync:
             svc.scan_a_to_b_full_sync()
 
-        mock_copy.assert_not_called()
+        mock_sync.assert_called_once()
+
+    def _setup_bulk_records(self, app: Mock, count: int):
+        """Set up db mocks for *count* A records without writing files to disk.
+
+        _sync_one_record is patched by the caller, so real files are not needed.
+        """
+        records = [_make_a_record(f"/a/f{i}.strm", f"/m/f{i}.mp4", "/m")
+                   for i in range(count)]
+        app.db.get_all_a_records.return_value = records
+        app.db.get_all_ghost_protected_paths.return_value = set()
+        app.db.get_all_b_fingerprints.return_value = set()
+
+    def test_full_sync_with_bulk_mode_single_commit(self, tmp_path):
+        """use_bulk=True with >BATCH_COMMIT_SIZE records: exactly 1 commit.
+
+        Bulk mode never issues interim commits.  The only commit comes from
+        the final ``if batch_count > 0: conn.commit()`` after the loop.
+        """
+        app = _make_app(tmp_path)
+        N = 1001  # > BATCH_COMMIT_SIZE (1000)
+        self._setup_bulk_records(app, N)
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
+            svc.scan_a_to_b_full_sync(use_bulk=True)
+
+        assert mock_sync.call_count == N
+        # Bulk mode: only the trailing commit after the loop
+        assert mock_conn.commit.call_count == 1
+
+    def test_full_sync_with_batch_mode_multi_commit(self, tmp_path):
+        """use_bulk=False with >BATCH_COMMIT_SIZE records: interim + final.
+
+        Batch mode commits every BATCH_COMMIT_SIZE records and once at the
+        end.  With 1001 records that means 1 interim commit (after record
+        1000) + 1 trailing commit = 2 total.
+        """
+        app = _make_app(tmp_path)
+        N = 1001  # > BATCH_COMMIT_SIZE (1000)
+        self._setup_bulk_records(app, N)
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
+            svc.scan_a_to_b_full_sync(use_bulk=False)
+
+        assert mock_sync.call_count == N
+        # Batch mode: interim commit at 1000 + trailing commit = 2
+        assert mock_conn.commit.call_count == 2
+
+    def test_full_sync_batch_mode_exact_boundary(self, tmp_path):
+        """use_bulk=False with exactly BATCH_COMMIT_SIZE records.
+
+        1000 records: batch_count reaches 1000 at the last record and commits
+        (interim), then the loop ends with batch_count reset to 0, so the
+        trailing ``if batch_count > 0`` is False → exactly 1 commit.
+        """
+        app = _make_app(tmp_path)
+        N = 1000  # exactly BATCH_COMMIT_SIZE
+        self._setup_bulk_records(app, N)
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
+            svc.scan_a_to_b_full_sync(use_bulk=False)
+
+        assert mock_sync.call_count == N
+        # Exactly at boundary: 1 interim commit (at record 1000), trailing is skipped
+        assert mock_conn.commit.call_count == 1
+
+    def test_full_sync_bulk_mode_under_threshold(self, tmp_path):
+        """use_bulk=True with <BATCH_COMMIT_SIZE records: still 1 commit."""
+        app = _make_app(tmp_path)
+        N = 999
+        self._setup_bulk_records(app, N)
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
+            svc.scan_a_to_b_full_sync(use_bulk=True)
+
+        assert mock_sync.call_count == N
+        assert mock_conn.commit.call_count == 1
+
+    def test_full_sync_batch_mode_under_threshold(self, tmp_path):
+        """use_bulk=False with <BATCH_COMMIT_SIZE records: 1 trailing commit only."""
+        app = _make_app(tmp_path)
+        N = 999
+        self._setup_bulk_records(app, N)
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
+            svc.scan_a_to_b_full_sync(use_bulk=False)
+
+        assert mock_sync.call_count == N
+        # Under threshold: no interim commits, just the trailing commit
+        assert mock_conn.commit.call_count == 1
+
+    def test_full_sync_caches_cleared_on_exception(self, tmp_path):
+        """Caches are cleared even if an exception occurs."""
+        app = _make_app(tmp_path)
+        records = [_make_a_record("/a/f.strm", "/m/f.mp4", "/m")]
+        self._setup_records(app, records, tmp_path)
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError):
+                svc.scan_a_to_b_full_sync()
+
+        # Caches should be cleared after exception
+        assert svc._cache_ghost is None
+        assert svc._cache_b_fp is None
+
+    def test_full_sync_uses_bulk_connection(self, tmp_path):
+        """scan_a_to_b_full_sync uses bulk_connection() instead of per-record upsert_b."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        records = [
+            _make_a_record(str(a_root / "file1.strm"), "/m/f1.mp4", "/m"),
+            _make_a_record(str(a_root / "file2.strm"), "/m/f2.mp4", "/m"),
+        ]
+        self._setup_records(app, records, tmp_path)
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        app.build_b_path_from_a.return_value = b_root / "file1.strm"
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        
+        # Patch _bulk_upsert_b to verify it's called
+        with patch.object(svc, "_bulk_upsert_b") as mock_bulk_upsert:
+            svc.scan_a_to_b_full_sync()
+            # _bulk_upsert_b should be called for each record
+            assert mock_bulk_upsert.call_count >= 1
+
+    def test_full_sync_skips_lineage(self, tmp_path):
+        """scan_a_to_b_full_sync does NOT call _verify_b_path_lineage (startup sync skips lineage)."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        records = [
+            _make_a_record(str(a_root / "file1.strm"), "/m/f1.mp4", "/m"),
+        ]
+        self._setup_records(app, records, tmp_path)
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        app.build_b_path_from_a.return_value = b_root / "file1.strm"
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        
+        # _verify_b_path_lineage should NOT be called during bulk sync
+        with patch.object(app, "_verify_b_path_lineage") as mock_lineage:
+            svc.scan_a_to_b_full_sync()
+            # Lineage verification is skipped in bulk sync
+            assert mock_lineage.call_count == 0
 
 
 # ===========================================================================
@@ -359,3 +615,294 @@ class TestCopyARecordToB:
         result = svc.copy_a_record_to_b(str(a_file), "/mount/file.mp4", "/mount")
 
         assert result is False
+
+
+# ===========================================================================
+# TestSyncServiceSyncOneRecord
+# ===========================================================================
+
+
+class TestSyncServiceSyncOneRecord:
+    """Tests for _sync_one_record() helper method."""
+
+    def test_sync_one_record_skip_missing(self, tmp_path):
+        """Skip when source file does not exist."""
+        app = _make_app(tmp_path)
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        rec = _make_a_record("/nonexistent/file.strm", "/m/f.mp4", "/m")
+        conn = Mock()
+        result = svc._sync_one_record(rec, None, conn)
+
+        assert result == "skip_missing"
+
+    def test_sync_one_record_skip_filtered(self, tmp_path):
+        """Skip when path is not in valid_engine_paths."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/other/file.mp4", encoding="utf-8")
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        rec = _make_a_record(str(a_file), "/other/file.mp4", "/other")
+        conn = Mock()
+        result = svc._sync_one_record(rec, ["/engine"], conn)
+
+        assert result == "skip_filtered"
+
+    def test_sync_one_record_skip_ghost(self, tmp_path):
+        """Skip when path is ghost protected."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/m/file.mp4", encoding="utf-8")
+
+        svc = SyncService(app)
+        svc._cache_ghost = {"/m/file.mp4"}
+        svc._cache_b_fp = set()
+
+        rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
+        conn = Mock()
+        result = svc._sync_one_record(rec, None, conn)
+
+        assert result == "skip_ghost"
+
+    def test_sync_one_record_skip_fingerprint(self, tmp_path):
+        """Skip when fingerprint already exists in B."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/m/file.mp4", encoding="utf-8")
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        # Pre-populate with a known fingerprint
+        from utils import make_strm_fingerprint
+        fp = make_strm_fingerprint("/m/file.mp4")
+        svc._cache_b_fp = {fp}
+
+        rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
+        conn = Mock()
+        result = svc._sync_one_record(rec, None, conn)
+
+        assert result == "skip_fp"
+
+    def _make_db_conn_mock(self):
+        """Create a mock sqlite3 connection with proper cursor behavior."""
+        mock_conn = Mock()
+        mock_cursor = Mock()
+        mock_cursor.fetchone.return_value = None
+        mock_conn.execute.return_value = mock_cursor
+        return mock_conn
+
+    def test_sync_one_record_success_new_file(self, tmp_path):
+        """Copy and write new file to B zone."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/m/file.mp4", encoding="utf-8")
+
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        app.build_b_path_from_a.return_value = b_root / "file.strm"
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        conn = self._make_db_conn_mock()
+        rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
+        result = svc._sync_one_record(rec, None, conn)
+
+        assert result == "success"
+        assert (b_root / "file.strm").exists()
+        # _cache_b_fp should contain the computed fingerprint
+        from utils import make_strm_fingerprint
+        fp = make_strm_fingerprint("/m/file.mp4")
+        assert fp in svc._cache_b_fp
+        # DB upserts should have been called on conn
+        assert conn.execute.call_count > 0
+
+    def test_sync_one_record_success_existing_b(self, tmp_path):
+        """B file already exists with same content - just update DB."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        webdav = "/m/file.mp4"
+        a_file = a_root / "file.strm"
+        a_file.write_text(webdav, encoding="utf-8")
+
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        b_file = b_root / "file.strm"
+        b_file.write_text(webdav, encoding="utf-8")
+        app.build_b_path_from_a.return_value = b_file
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        conn = self._make_db_conn_mock()
+
+        rec = _make_a_record(str(a_file), webdav, "/m")
+        result = svc._sync_one_record(rec, None, conn)
+
+        assert result == "success"
+        # The computed fingerprint should be in cache
+        from utils import make_strm_fingerprint
+        fp = make_strm_fingerprint(webdav)
+        assert fp in svc._cache_b_fp
+        # No new file copy should have happened
+        conn.execute.assert_called()
+
+    def test_sync_one_record_fail_build_b_path(self, tmp_path):
+        """Fail when build_b_path_from_a raises ValueError."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/m/file.mp4", encoding="utf-8")
+        app.build_b_path_from_a.side_effect = ValueError("not under root")
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        conn = Mock()
+        rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
+        result = svc._sync_one_record(rec, None, conn)
+
+        assert result == "fail"
+
+    def test_sync_one_record_fail_copy_error(self, tmp_path):
+        """Fail when file copy fails."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/m/file.mp4", encoding="utf-8")
+
+        b_root = tmp_path / "b"
+        app.build_b_path_from_a.return_value = b_root / "file.strm"
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        conn = Mock()
+        rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
+
+        with patch("shutil.copyfile", side_effect=OSError("disk full")):
+            result = svc._sync_one_record(rec, None, conn)
+
+        assert result == "fail"
+
+    def test_sync_one_record_fail_db_error_rolls_back_file(self, tmp_path):
+        """DB error after copy should delete copied file."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/m/file.mp4", encoding="utf-8")
+
+        b_root = tmp_path / "b"
+        b_file = b_root / "file.strm"
+        app.build_b_path_from_a.return_value = b_file
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        conn = Mock()
+        # First execute for get_all_ghost_protected is not called here
+        # but we need to simulate _bulk_upsert_b failing
+        conn.execute.side_effect = [None, None, None, Exception("db error")]
+
+        rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
+        result = svc._sync_one_record(rec, None, conn)
+
+        assert result == "fail"
+        assert not b_file.exists()
+
+
+# ===========================================================================
+# TestSyncServiceBulkUpsertHelpers
+# ===========================================================================
+
+
+class TestSyncServiceBulkUpsertHelpers:
+    """Tests for _bulk_upsert_b and _bulk_upsert_identity helper methods."""
+
+    def test_bulk_upsert_b_inserts_new_record(self, tmp_path):
+        """Insert a new B record with FTS."""
+        app = _make_app(tmp_path)
+        svc = SyncService(app)
+
+        conn = Mock()
+        # No existing record
+        conn.execute.return_value.fetchone.side_effect = [None, (1,)]
+
+        svc._bulk_upsert_b(
+            conn,
+            local_path="/b/file.strm",
+            webdav_path="/m/file.mp4",
+            parent_webdav_path="/m",
+            source_a_path="/a/file.strm",
+            fingerprint="abc123",
+        )
+
+        # Should have: 1 SELECT old rowid, 0 DELETE old FTS, 1 INSERT base,
+        # 1 SELECT new rowid, 1 DELETE new FTS (cleanup), 1 INSERT FTS
+        calls = conn.execute.call_args_list
+        assert len(calls) >= 3
+        # First call should be SELECT to check for existing row
+        assert "SELECT rowid FROM b_strm_files" in calls[0][0][0]
+
+    def test_bulk_upsert_b_replaces_existing_record(self, tmp_path):
+        """Replace an existing B record and update FTS."""
+        app = _make_app(tmp_path)
+        svc = SyncService(app)
+
+        conn = Mock()
+        # Existing record has rowid=42, new insert returns rowid=43
+        conn.execute.return_value.fetchone.side_effect = [(42,), (43,)]
+
+        svc._bulk_upsert_b(
+            conn,
+            local_path="/b/file.strm",
+            webdav_path="/m/file.mp4",
+            parent_webdav_path="/m",
+            source_a_path="/a/file.strm",
+            fingerprint="abc123",
+        )
+
+        calls = conn.execute.call_args_list
+        # Should delete old FTS row
+        delete_calls = [c for c in calls if "DELETE FROM b_strm_files_fts" in c[0][0]]
+        assert len(delete_calls) >= 1
+
+    def test_bulk_upsert_identity(self, tmp_path):
+        """Insert identity record via bulk helper."""
+        app = _make_app(tmp_path)
+        svc = SyncService(app)
+
+        conn = Mock()
+
+        svc._bulk_upsert_identity(
+            conn,
+            fingerprint="abc123",
+            webdav_path="/m/file.mp4",
+            source_a_path="/a/file.strm",
+            current_b_path="/b/file.strm",
+        )
+
+        conn.execute.assert_called_once()
+        call_args = conn.execute.call_args[0]
+        assert "INSERT OR REPLACE INTO strm_identity" in call_args[0]
+        # Verify parameters include fingerprint, webdav_path, etc.
+        params = call_args[1]
+        assert params[0] == "abc123"
+        assert params[1] == "/m/file.mp4"
+        assert params[2] == "/a/file.strm"
+        assert params[3] == "/b/file.strm"

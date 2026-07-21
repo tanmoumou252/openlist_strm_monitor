@@ -61,9 +61,11 @@ AppService.__init__()
 
 5. **持久化当前根目录快照** — 将当前引擎路径写入 `protected_roots_snapshot` 表
 
-6. **A 区全量扫描与索引建立** — 遍历所有 A 区目录，解析 `.strm` 文件内容，计算指纹，注册 `a_strm_files` 表。发现字幕文件（`.ass`/`.srt`/`.ssa`）路由到 `SubtitleHandler`
+6. **A 区全量扫描与索引建立** — 批量遍历所有 A 区目录，解析 `.strm` 文件内容，批量写入 `a_strm_files` 表（不再逐文件处理字幕或触发 A→B 复制）。每 100 条输出进度日志，解决日志冻结问题。字幕处理由启动后的 `_scan_a_subtitles_on_startup()` 补偿
 
-7. **A → B 全量同步**（可选，受 `sync_on_startup` 配置控制，方法 `scan_a_to_b_full_sync`） — 对每个 A 区记录，检查指纹是否已在 B 区。不在时复制 STRM 到 B 区并注册。已存在时跳过（防止劣质命名回灌）。当 `sync_on_startup = false` 时跳过此步骤（日志输出"跳过 A→B 全量同步"），但启动等待仍然执行。
+6.5. **A 区冗余清理**（`cleanup_a_redundant_using_api()`） — 使用 OpenList API `/api/fs/list` 批量获取云端文件列表，对比本地 A 区记录，找出冗余文件（本地有但云端没有）。并发分页（5 个并发）+ 客户端过滤（只保留 .strm 文件）。性能提升：从 2 小时降至 <10 秒
+
+7. **A → B 全量同步**（可选，受 `sync_on_startup` 配置控制，方法 `scan_a_to_b_full_sync`） — 启动时使用 `bulk_connection()` 长连接模式（1 个连接 + 1 次提交），跳过血统校验和 per-file `check_exists` HTTP。预加载 ghost 保护和 B 区指纹到内存缓存。`use_bulk` 参数控制模式选择：`use_bulk=True` 单事务提交（首次启动，无并发），`use_bulk=False` 分批提交（每 1000 条，主动刷新，有并发）。当 `sync_on_startup = false` 时跳过此步骤（日志输出"跳过 A→B 全量同步"），但启动等待仍然执行。
 
 8. **B 区冗余清理** — 删除状态为 `duplicate`、`quarantined`、`invalid` 的文件。清理空目录（保留含 `.nfo`、`.jpg`、`.png` 等刮削元数据的目录）
 
