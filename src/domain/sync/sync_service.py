@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from database import Database
     from config import AppConfig
 
-from utils import read_strm_webdav_path, safe_remove_file, webdav_parent
+from utils import read_strm_webdav_path, safe_remove_file, webdav_parent, make_strm_fingerprint
 
 
 class SyncService:
@@ -93,6 +93,16 @@ class SyncService:
             valid_engine_paths: 限制同步范围。
             use_bulk: True 用单事务提交（首次启动，无并发）。
                       False 用分批提交（主动刷新，有并发，每 1000 条提交一次）。
+        
+        并发安全说明
+        -----------
+        批量同步使用 bulk_connection 绕过 rw_lock，写入未提交前对其他连接不可见。
+        _sync_one_record 不使用指纹锁，依赖三层防御：
+        - L1: 内存缓存 _cache_b_fp（处理同批次重复）
+        - L2: 文件系统检查 b_local.exists()（磁盘文件可见）
+        - L3: ensure_single_visible_instance（兜底去重，通过 dedup_queue 延迟到提交后执行）
+        
+        详见 _sync_one_record 方法的设计决策注释。
         """
         BATCH_COMMIT_SIZE = 1000  # 分批提交大小
         
@@ -197,6 +207,38 @@ class SyncService:
         Returns:
             "success" / "skip_ghost" / "skip_fp" / "skip_missing" / "skip_filtered"
             / "skip_exists_diff" / "fail"
+        
+        设计决策：为什么不使用指纹锁（get_fingerprint_lock）
+        --------------------------------------------------
+        经过代码验证，_sync_one_record 不需要添加指纹锁，原因如下：
+        
+        1. 现有三层防御已经足够：
+           - L1: 内存缓存 _cache_b_fp — 快速过滤已知指纹
+           - L2: 文件系统检查 b_local.exists() — 磁盘文件对所有线程可见
+           - L3: ensure_single_visible_instance — 兜底去重（将多余实例改名为 .duplicate）
+        
+        2. 添加指纹锁会引入性能灾难：
+           - 指纹锁持有时间从毫秒级变成秒级（包含文件拷贝）
+           - 50,000 条记录 × 每次持锁 0.1-1 秒 = 1.4-2.8 小时总锁持有时间
+           - 会严重阻塞 watchdog 的 handle_a_created_or_modified（使用同一把锁）
+        
+        3. b_fingerprint_exists 看不到 bulk_connection 的未提交写入：
+           - bulk_connection 绕过 rw_lock，直接 sqlite3.connect
+           - b_fingerprint_exists 获取 rw_lock 读锁，打开新连接
+           - SQLite 事务隔离导致新连接看不到未提交写入
+           - "双重检查"只能看到 watchdog 的已提交写入，看不到同批次写入
+           - 内存缓存 _cache_b_fp 已经能处理同批次重复
+        
+        4. 并发场景分析：
+           - _sync_one_record vs handle_a_created_or_modified：
+             handle_a_created_or_modified 在指纹锁内检查 b_local.exists()，
+             如果文件已存在则 upsert 已有文件并 return，不到达 copy_a_record_to_b
+           - _sync_one_record vs copy_a_record_to_b_if_needed：
+             同样被 L2 文件系统检查覆盖
+           - 真正的 TOCTOU（两个线程同时检查 b_local.exists() → 都得到 False）：
+             概率极低（需要微秒级时序），且 L3 兜底
+        
+        结论：添加指纹锁不带来实质安全提升，但引入性能风险和代码复杂度。
         """
         local_path = rec.local_path
         webdav_path = rec.webdav_path
@@ -217,7 +259,6 @@ class SyncService:
             return "skip_ghost"
 
         # 4. 计算指纹并检查 B 区是否已存在（使用缓存）
-        from utils import make_strm_fingerprint
         fingerprint = make_strm_fingerprint(webdav_path)
         if fingerprint in self._cache_b_fp:
             return "skip_fp"
@@ -363,7 +404,6 @@ class SyncService:
         """复制 A→B，但会先检查指纹是否已存在。如果存在则跳过。"""
         if self.db.is_ghost_protected(webdav_path):
             return None
-        from utils import make_strm_fingerprint
         fingerprint = make_strm_fingerprint(webdav_path)
         # 按 fingerprint 串行化，与 handle_a_created_or_modified 共用同一锁（P1-4）
         fp_lock = self.app.get_fingerprint_lock(fingerprint)
@@ -393,7 +433,6 @@ class SyncService:
             existing_webdav_path = read_strm_webdav_path(b_local)
             if existing_webdav_path == webdav_path:
                 try:
-                    from utils import make_strm_fingerprint
                     fingerprint = make_strm_fingerprint(webdav_path)
                     self.db.upsert_b(
                         str(b_local), webdav_path, parent, a_local_path, fingerprint=fingerprint, status="valid"
@@ -445,7 +484,6 @@ class SyncService:
 
         # 5. 写入数据库
         try:
-            from utils import make_strm_fingerprint
             fingerprint = make_strm_fingerprint(webdav_path)
             self.db.upsert_b(
                 str(b_local),

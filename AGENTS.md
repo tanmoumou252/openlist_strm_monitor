@@ -227,6 +227,15 @@ The Vite config groups modules into chunks:
 - Startup sync skips lineage verification and per-file `check_exists` HTTP
 - Preloads ghost protection and B-zone fingerprints into memory caches (`_cache_ghost`, `_cache_b_fp`)
 
+### Three-Layer Defense Model (Concurrency Safety)
+
+`_sync_one_record` in bulk sync does not use a fingerprint lock; instead it relies on a three-layer defense to ensure concurrency safety:
+- **L1**: In-memory cache `_cache_b_fp` — fast filtering of known fingerprints
+- **L2**: Filesystem check `b_local.exists()` — on-disk files are visible to all threads
+- **L3**: `ensure_single_visible_instance` — last-resort dedup (renames extra instances to `.duplicate`)
+
+**Design decision**: Adding a fingerprint lock would cause a performance disaster (blocking the watchdog), and `b_fingerprint_exists` cannot see uncommitted writes from `bulk_connection`. See the "Concurrency Safety Design" section in `wiki/Core-Sync-Engine.md` for details.
+
 ## Common Pitfalls
 
 1. **Dist not rebuilt**: If you change `src/webui/modules/*.js`, the browser won't see the changes until you run `npx vite build`. This is the #1 cause of "my fix didn't work" in this project.

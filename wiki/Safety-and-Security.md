@@ -131,6 +131,18 @@ B 区文件变动（创建/修改/移动）
 - 并发分页：5 个并发，避免阻塞 API
 - Ghost 保护：删除的文件设置 ghost 保护，防止回灌
 
+### 三层防御机制（并发安全）
+
+批量同步（`scan_a_to_b_full_sync`）中的 `_sync_one_record` 不使用指纹锁，依赖三层防御确保并发安全：
+
+| 防御层 | 机制 | 防护场景 |
+|--------|------|---------|
+| **L1**: 内存缓存 `_cache_b_fp` | 快速过滤已知指纹 | 同批次内重复、已收录条目 |
+| **L2**: 文件系统检查 `b_local.exists()` | 检查 B 区文件是否已存在 | 几乎所有并发场景 |
+| **L3**: `ensure_single_visible_instance` | 去重，将多余实例改名为 `.duplicate` | 兜底清理 |
+
+**设计决策**：添加指纹锁会引入性能灾难（阻塞 watchdog），且 `b_fingerprint_exists` 看不到 `bulk_connection` 的未提交写入，因此不采用指纹锁方案。详见 `wiki/Core-Sync-Engine.md` 的"并发安全设计"章节。
+
 ## 3. 重复文件隔离
 
 ### 检测

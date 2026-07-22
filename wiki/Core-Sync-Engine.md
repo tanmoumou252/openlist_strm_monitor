@@ -80,6 +80,36 @@ AppService.__init__()
 
 ## 同步管线：A → B
 
+### 并发安全设计：为什么 `_sync_one_record` 不使用指纹锁
+
+`_sync_one_record` 在批量同步（`scan_a_to_b_full_sync`）中使用，**不使用** `get_fingerprint_lock`。这是经过代码验证的设计决策，而非遗漏。
+
+**现有三层防御**：
+
+| 防御层 | 机制 | 防护场景 |
+|--------|------|---------|
+| **L1**: 内存缓存 `_cache_b_fp` | 快速过滤已知指纹 | 同批次内重复、已收录条目 |
+| **L2**: 文件系统检查 `b_local.exists()` | 检查 B 区文件是否已存在 | 几乎所有并发场景 |
+| **L3**: `ensure_single_visible_instance` | 去重，将多余实例改名为 `.duplicate` | 兜底清理 |
+
+**为什么不添加指纹锁**：
+
+1. **性能灾难**：指纹锁持有时间从毫秒级变成秒级（包含文件拷贝），50,000 条记录 × 每次持锁 0.1-1 秒 = 1.4-2.8 小时总锁持有时间，会严重阻塞 watchdog 的 `handle_a_created_or_modified`（使用同一把锁）
+
+2. **`b_fingerprint_exists` 看不到 `bulk_connection` 的未提交写入**：
+   - `bulk_connection` 绕过 `rw_lock`，直接 `sqlite3.connect`
+   - `b_fingerprint_exists` 获取 `rw_lock` 读锁，打开新连接
+   - SQLite 事务隔离导致新连接看不到未提交写入
+   - "双重检查"只能看到 watchdog 的已提交写入，看不到同批次写入
+   - 内存缓存 `_cache_b_fp` 已经能处理同批次重复
+
+3. **并发场景已被覆盖**：
+   - `_sync_one_record` vs `handle_a_created_or_modified`：后者在指纹锁内检查 `b_local.exists()`，如果文件已存在则 upsert 已有文件并 return，不到达 `copy_a_record_to_b`
+   - `_sync_one_record` vs `copy_a_record_to_b_if_needed`：同样被 L2 文件系统检查覆盖
+   - 真正的 TOCTOU（两个线程同时检查 `b_local.exists()` → 都得到 False）：概率极低（需要微秒级时序），且 L3 兜底
+
+**结论**：添加指纹锁不带来实质安全提升，但引入性能风险和代码复杂度。
+
 ### `SyncService.copy_a_record_to_b()`（`domain/sync/sync_service.py`）
 
 核心复制操作：

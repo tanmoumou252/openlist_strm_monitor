@@ -115,6 +115,7 @@ JWT 认证的 OpenList Admin API 客户端：
 | 事件驱动文件监控 | watchdog `Observer` + 3 个事件处理器 | `area_watchers.py` |
 | 子服务委托 | AppService 创建 SyncService、SubtitleHandler、RefreshService | `app_service_core.py` |
 | 渲染过时检测 | 前端 router 根据计数器判定渲染结果是否过时 | `router.js` |
+| 三层防御模式 | 批量同步使用内存缓存 + 文件系统检查 + 去重清理，不使用指纹锁（避免性能灾难） | `sync_service.py` |
 
 ## 搜索架构（FTS5 / simple 分词器 / unicode61 降级）
 
