@@ -109,7 +109,11 @@ B 区文件变动（创建/修改/移动）
 `bulk_connection()` 绕过 `rw_lock` 和 `_probe_writeable`，仅在以下场景安全：
 
 1. **首次启动**：watchdog 未启动，无并发线程
+   - `initial_scan_a(use_bulk=True)`：A 区启动扫描，使用 `_upsert_a_batch_bulk()` 批量写入，延迟 FTS 重建
+   - `scan_a_to_b_full_sync(use_bulk=True)`：A→B 启动同步，单事务提交（详见三层防御机制章节）
 2. **主动刷新**：分批提交（每 1000 条），watchdog 最多等待 100ms
+   - `initial_scan_a(use_bulk=False)`：使用 `upsert_a_batch()`，逐批维护 FTS
+   - `scan_a_to_b_full_sync(use_bulk=False)`：分批提交
 
 **跨进程安全**：SQLite WAL 模式自身处理并发，多进程场景安全。
 

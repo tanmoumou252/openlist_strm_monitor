@@ -210,9 +210,13 @@ The Vite config groups modules into chunks:
 ### `initial_scan_a()` Behavior Change
 - Changed from per-file `handle_a_created_or_modified()` calls to pure batch DB indexing
 - No longer processes subtitles per-file or triggers A→B copy during scan
-- Uses `upsert_a_batch()` for batch writes
+- **双模式写入**（详见 Bulk Connection Mode 章节）：
+  - `use_bulk=True`（启动时）：使用 `bulk_connection` + `_upsert_a_batch_bulk()`，延迟 FTS 重建
+  - `use_bulk=False`（刷新时）：使用 `upsert_a_batch()`，逐批维护 FTS
+- **多线程读取**：使用 `ThreadPoolExecutor(max_workers=4)` 并发读取 .strm 文件
+- **批量大小**：`BATCH_SIZE = 1000`（每 1000 条批量写入一次）
+- **日志优化**：每 100 条或每 2 秒输出进度日志 + records/s 性能基准（解决日志冻结问题）
 - Only does DB indexing, no WebDAV checks
-- Progress logs every 100 records (solves log freeze issue)
 
 ### `cleanup_a_redundant_using_api()` New Method
 - Uses OpenList API `/api/fs/list` to batch-clean A-zone redundant files (local exists but cloud deleted)

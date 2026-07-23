@@ -1052,10 +1052,24 @@ class AppService:
     ) -> None:
         """对比历史 DB 记录与磁盘数据，处理越界/迁移/删除"""
         disk_fingerprint_to_paths, disk_path_to_data = disk_data
-        
+
+        total_records = len(db_records)
+        last_log_time = time.time()
+        processed_count = 0
+
         for row in db_records:
+            processed_count += 1
             db_local_path = row.local_path
             db_fingerprint = row.fingerprint
+
+            # 进度日志：每 100 条或每 2 秒
+            current_time = time.time()
+            if processed_count % 100 == 0 or (current_time - last_log_time) >= 2.0:
+                logging.info(
+                    "[初始化] B 区历史记录对比进度: %d/%d 条",
+                    processed_count, total_records
+                )
+                last_log_time = current_time
             
             if not db_fingerprint:
                 self.db.delete_b_by_local(db_local_path)
@@ -1514,6 +1528,9 @@ class AppService:
             return
         if is_subtitle_file(local):
             self.process_subtitle_file(local)
+            return
+        if local.suffix.lower() != ".strm":
+            logging.debug("[A区跳过] 非 STRM 文件: %s", local)
             return
         webdav_path = read_strm_webdav_path(local)
         if not webdav_path:

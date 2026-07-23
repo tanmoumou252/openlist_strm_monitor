@@ -68,7 +68,7 @@ vX.X.X 版本对启动流程进行了重大优化：
 - A 区冗余清理：500 次 API 请求 × 100ms / 5 并发 = 10 秒
 
 **关键技术**：
-- `initial_scan_a()` 批量索引 A 区 STRM 文件（每 100 条输出进度日志）
+- `initial_scan_a()` 批量索引 A 区 STRM 文件（多线程 4 线程并发读取，每 100 条或每 2 秒输出进度日志 + records/s 性能基准）
 - `cleanup_a_redundant_using_api()` 使用 OpenList API 批量清理冗余（并发分页 + 客户端过滤）
 - `scan_a_to_b_full_sync()` 双模式同步（单事务 / 分批提交）
 - 预加载 ghost 保护和 B 区指纹到内存缓存

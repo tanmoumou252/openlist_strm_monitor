@@ -26,7 +26,7 @@ OpenList STRM 引擎能够高效地生成 `.strm` 文件供本地媒体库刮削
 
 5. **B 区逆向自同步**：启动时对 B 区进行全量盘点——物理磁盘 vs 数据库记录双向比对，自动注册新文件、清理失效记录、追踪改名文件。（`app_service_core.py` 的 `initial_scan_b`，内部经 `_scan_b_disk` 扫描磁盘、`_reconcile_b_historical_records` 对比历史记录）
 
-> 注：`sync_service.py:initial_scan_a` 是**A 区**启动扫描（批量索引 A 区 STRM 文件，仅 DB 索引，不做 WebDAV 检查或 A→B 复制。每 100 条输出进度日志），与上述 B 区逆向盘点不同，勿混淆。`cleanup_a_redundant_using_api()` 使用 OpenList API 批量清理 A 区冗余文件（本地有但云端没有）。并发分页 + 客户端过滤，性能提升 750 倍。
+> 注：`sync_service.py:initial_scan_a` 是**A 区**启动扫描（批量索引 A 区 STRM 文件，多线程 4 线程并发读取，启动时使用 bulk_connection 长连接模式，仅 DB 索引，不做 WebDAV 检查或 A→B 复制。每 100 条或每 2 秒输出进度日志 + records/s 性能基准），与上述 B 区逆向盘点不同，勿混淆。`cleanup_a_redundant_using_api()` 使用 OpenList API 批量清理 A 区冗余文件（本地有但云端没有）。并发分页 + 客户端过滤，性能提升 750 倍。
 
 6. **云端回收站智能重建**：触发删除联动时，在云端配置的回收站内一比一重建原文件夹树再执行移动。（`utils/webdav_utils.py:build_webdav_trash_path`）
 

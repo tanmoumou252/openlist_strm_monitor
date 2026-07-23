@@ -109,7 +109,7 @@ JWT 认证的 OpenList Admin API 客户端：
 |------|------|------|
 | Dataclass 配置 | 所有配置段使用 `@dataclass(slots=True)`；`StrmStorageInfo` 等不可变快照使用 `frozen=True` | `config.py`、`app_service_core.py` |
 | 上下文管理器 DB 连接 | `with self.lock, self.connection() as conn:` | `database.py` |
-| `bulk_connection()` 长连接模式 | 启动时批量同步使用单一连接+单一事务，绕过 `rw_lock`（跨进程安全，同进程多线程不安全） | `database.py` |
+| `bulk_connection()` 长连接模式 | 启动时批量同步使用单一连接+单一事务，绕过 `rw_lock`（跨进程安全，同进程多线程不安全）。消费函数：`initial_scan_a(use_bulk=True)`、`scan_a_to_b_full_sync(use_bulk=True)` | `database.py` |
 | 并发分页模式 | 使用 `ThreadPoolExecutor` 并发请求多个 API 页面（5 并发 + 重试机制） | `app_service_core.py` |
 | 指纹去重 | `make_strm_fingerprint()` 对 WebDAV 路径做 SHA256 哈希 | `utils/strm_utils.py` |
 | 事件驱动文件监控 | watchdog `Observer` + 3 个事件处理器 | `area_watchers.py` |
