@@ -63,13 +63,11 @@ AppService.__init__()
 
 6. **A 区全量扫描与索引建立** — 批量遍历所有 A 区目录，解析 `.strm` 文件内容，批量写入 `a_strm_files` 表（不再逐文件处理字幕或触发 A→B 复制）。每 100 条输出进度日志，解决日志冻结问题。字幕处理由启动后的 `_scan_a_subtitles_on_startup()` 补偿
 
-6.5. **A 区冗余清理**（`cleanup_a_redundant_using_api()`） — 使用 OpenList API `/api/fs/list` 批量获取云端文件列表，对比本地 A 区记录，找出冗余文件（本地有但云端没有）。并发分页（5 个并发）+ 客户端过滤（只保留 .strm 文件）。性能提升：从 2 小时降至 <10 秒
-
 7. **A → B 全量同步**（可选，受 `sync_on_startup` 配置控制，方法 `scan_a_to_b_full_sync`） — 启动时使用 `bulk_connection()` 长连接模式（1 个连接 + 1 次提交），跳过血统校验和 per-file `check_exists` HTTP。预加载 ghost 保护和 B 区指纹到内存缓存。`use_bulk` 参数控制模式选择：`use_bulk=True` 单事务提交（首次启动，无并发），`use_bulk=False` 分批提交（每 1000 条，主动刷新，有并发）。当 `sync_on_startup = false` 时跳过此步骤（日志输出"跳过 A→B 全量同步"），但启动等待仍然执行。
 
-8. **B 区冗余清理** — 删除状态为 `duplicate`、`quarantined`、`invalid` 的文件。清理空目录（保留含 `.nfo`、`.jpg`、`.png` 等刮削元数据的目录）
+8. **启动 Watchdog 监控与刷新定时器** — 创建 `watchdog.Observer` 及三个事件处理器，启动 `RefreshService` 定时器
 
-9. **启动 Watchdog 监控与刷新定时器** — 创建 `watchdog.Observer` 及三个事件处理器，启动 `RefreshService` 定时器
+> **设计原则：冗余清理永远只在局部触发，不做全盘扫描。** 启动时不再执行 `cleanup_a_redundant_using_api()` 和 `cleanup_b_redundant()`。冗余清理改为运行时按需触发：WebUI 手动刷新媒体时、watchdog 检测到 A/B 区文件删除时（通过 `trigger_delayed_cleanup`）。
 
 #### 停止序列（`stop()`）
 - 取消所有待执行的延迟清理定时器（`_pending_cleanups`）
@@ -225,19 +223,20 @@ def _worker(self) -> None:
 | `only_refresh` | 仅在刷新列表，不在引擎管辖 | 只读模式（仅刷新，不清理 B 区） |
 | `only_engine` | 仅在引擎管辖，不在刷新列表 | 不参与本次刷新 |
 
-### 完整刷新周期（9 步）
+### 完整刷新周期（8 步）
 
 | 步骤 | 方法 | 说明 |
 |------|------|------|
 | 1 | `_sync_and_scan_protected_roots` | 同步并扫描受保护根目录（与 DB 快照对比） |
 | 2 | `_analyze_paths` + `_log_path_analysis` | 路径分析（交叉校验 `refresh_paths` vs `strm_engine_paths`） |
 | 3 | `_check_engine_accessibility` | 通过 Admin API 验证每个引擎存储状态 |
-| 4 | **`_cleanup_a_for_update_mode`** | **Update 模式 A 区清理**（清理云端已不存在的 A 区残留 STRM） |
-| 5 | `_calculate_safe_refresh_paths` | 计算安全刷新路径（`valid_refresh_paths` 与 `accessible_engines` 交集） |
-| 6 | `_execute_webdav_refreshes` | 对安全路径调用 `trigger_refresh_via_fs_list()` |
-| 7 | `_wait_for_sync` | 等待同步落地（睡眠 `a_to_b_restore_delay_seconds`，默认 30s） |
-| 8 | `_scan_and_sync` | 扫描与同步（`initial_scan_a()` → `scan_a_to_b_full_sync()`） |
-| 9 | `_persist_snapshot` | 持久化根目录快照（写入 `protected_roots_snapshot`） |
+| 4 | `_calculate_safe_refresh_paths` | 计算安全刷新路径（`valid_refresh_paths` 与 `accessible_engines` 交集） |
+| 5 | `_execute_webdav_refreshes` | 对安全路径调用 `trigger_refresh_via_fs_list()` |
+| 6 | `_wait_for_sync` | 等待同步落地（睡眠 `a_to_b_restore_delay_seconds`，默认 30s） |
+| 7 | `_scan_and_sync` | 扫描与同步（`initial_scan_a()` → `scan_a_to_b_full_sync()`） |
+| 8 | `_persist_snapshot` | 持久化根目录快照（写入 `protected_roots_snapshot`） |
+
+> **设计原则：冗余清理永远只在局部触发，不做全盘扫描。** 定期刷新不再调用 `_cleanup_a_for_update_mode()`（该方法会对全量 A 区记录逐条调用 `check_exists`，导致 OpenList 挂载被扫挂）。冗余清理改为运行时按需触发：WebUI 手动刷新媒体时、watchdog 检测到 A/B 区文件删除时（通过 `trigger_delayed_cleanup`）。
 
 ### 三层验证清理
 

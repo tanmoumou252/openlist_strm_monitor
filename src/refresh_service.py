@@ -124,10 +124,6 @@ class RefreshService:
         accessible_engines = self._check_engine_accessibility(
             path_analysis.engine_set)
 
-        # ===== update 模式：清理 A 区过期文件 =====
-        self._cleanup_a_for_update_mode(accessible_engines)
-        # =========================================
-
         safe_refresh_paths = self._calculate_safe_refresh_paths(
             path_analysis, accessible_engines)
 

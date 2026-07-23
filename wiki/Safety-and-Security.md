@@ -201,11 +201,28 @@ B 区扫描时检查每个 STRM 文件：
 
 ## 7. 冗余清理
 
-启动时和定期刷新中：
-1. 扫描 `.duplicate` 文件 → 删除
-2. 扫描 `.quarantined` 文件 → 删除
-3. 扫描 `.invalid` 文件 → 删除
-4. 扫描空目录 → 删除（保留含 `.nfo`、`.jpg`、`.png`、`.srt`、`.ass` 等刮削元数据的目录）
+**设计原则：冗余清理永远只在局部触发，不做全盘扫描。**
+
+### 局部触发场景
+
+1. **WebUI 手动刷新媒体时** — `_do_media_refresh()` 在刷新完成后调用 `cleanup_b_zombies_under_folder(common_parent)`，清理该媒体目录下的 B 区僵尸文件
+2. **watchdog 检测到 A 区文件删除时** — `handle_a_deleted()` 调用 `trigger_delayed_cleanup(parent_webdav_path)`，异步清理该父目录下的 B 区僵尸文件
+3. **watchdog 检测到 B 区文件删除时** — `handle_b_deleted()` 调用 `trigger_delayed_cleanup(parent_webdav_path)`，异步清理该父目录下的 B 区僵尸文件
+
+### 全局触发场景（已移除）
+
+启动时和定期刷新中**不再执行**全盘冗余清理：
+- ~~`cleanup_a_redundant_using_api()`~~ — 启动时不再调用（避免阻塞启动）
+- ~~`cleanup_b_redundant()`~~ — 启动时不再调用（避免全盘扫描）
+- ~~`_cleanup_a_for_update_mode()`~~ — 定期刷新时不再调用（避免扫挂 OpenList 挂载）
+- ~~`cleanup_b_zombies_under_folder()` 在 `refresh_webdav_root()` 中~~ — 不再调用（改为局部触发）
+
+### 批量优化
+
+`cleanup_b_zombies_under_folder()` 使用批量 API 检查替代逐条 `check_exists()`：
+- 按父目录分组，使用 `list_directory()` 一次性获取目录下所有文件
+- 在内存中进行集合比对，大幅减少 API 调用次数
+- 性能对比：N 条记录 × 1 次 `check_exists()` = N 次 API 调用 → M 个父目录 × 1 次 `list_directory()` = M 次 API 调用
 
 ### 三层验证清理
 

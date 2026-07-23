@@ -430,6 +430,8 @@ class TestHandleBDeleted:
         config.behavior = Mock()
         config.behavior.ghost_protect_seconds = 300
         config.behavior.action = "DELETE"
+        config.behavior.a_to_b_restore_delay_seconds = 30
+        config.behavior.trash_dir_name = ".trash"
         config.strm_engine_paths = []
 
         db = Mock(spec=Database)
@@ -1131,7 +1133,7 @@ class TestCleanupBZombiesUnderFolder:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_cleanup_zombies_webdav_not_exists(self):
-        """WebDAV doesn't exist → zombie file is cleaned up."""
+        """WebDAV doesn't exist → zombie file is cleaned up (batch API optimization)."""
         b_file = self.b_dir / "zombie.strm"
         b_file.write_text("/mount/zombie.mp4", encoding="utf-8")
         record = BRecord(
@@ -1144,7 +1146,9 @@ class TestCleanupBZombiesUnderFolder:
             updated_at=0,
         )
         self.db.get_b_under_root.return_value = [record]
-        self.admin_api.check_exists.return_value = False
+        # 新实现使用 list_directory 批量获取云端文件列表（而非逐条 check_exists）
+        # 返回空列表表示云端没有该文件 → 判定为僵尸文件
+        self.admin_api.list_directory.return_value = {"code": 0, "data": {"content": []}}
         self.db.get_b_by_local_full.return_value = record
         self.db.delete_b_by_local = Mock()
         self.db.set_ghost_protection = Mock()
@@ -1158,7 +1162,7 @@ class TestCleanupBZombiesUnderFolder:
         self.db.set_ghost_protection.assert_called()
 
     def test_cleanup_zombies_webdav_exists_skipped(self):
-        """WebDAV exists → zombie file is NOT cleaned up."""
+        """WebDAV exists → zombie file is NOT cleaned up (batch API optimization)."""
         b_file = self.b_dir / "alive.strm"
         b_file.write_text("/mount/alive.mp4", encoding="utf-8")
         record = BRecord(
@@ -1171,7 +1175,12 @@ class TestCleanupBZombiesUnderFolder:
             updated_at=0,
         )
         self.db.get_b_under_root.return_value = [record]
-        self.admin_api.check_exists.return_value = True
+        # 新实现使用 list_directory 批量获取云端文件列表
+        # 返回列表包含该文件 → 判定为存活文件，跳过清理
+        self.admin_api.list_directory.return_value = {
+            "code": 0,
+            "data": {"content": [{"name": "alive.mp4", "is_dir": False}]},
+        }
 
         self.app.cleanup_b_zombies_under_folder("/mount")
 
@@ -2068,7 +2077,10 @@ class TestScanASubtitlesOnStartup:
 
 
 class TestStartCallsCleanupARedundant:
-    """Verify start() calls cleanup_a_redundant_using_api between initial_scan_a and scan_a_to_b_full_sync."""
+    """Verify start() does NOT call cleanup_a_redundant_using_api or cleanup_b_redundant.
+    
+    冗余清理已改为局部触发（WebUI 手动刷新 / B 区删除事件），不再在启动时执行全盘清理。
+    """
 
     def setup_method(self):
         self.tmp = tempfile.mkdtemp()
@@ -2104,33 +2116,27 @@ class TestStartCallsCleanupARedundant:
     def teardown_method(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_start_calls_cleanup_a_redundant_in_order(self):
-        """start() calls cleanup_a_redundant_using_api after initial_scan_a."""
-        call_order = []
+    def test_start_does_not_call_cleanup_a_redundant(self):
+        """start() does NOT call cleanup_a_redundant_using_api (redundant cleanup is now local-only)."""
         with patch.object(self.app, "prepare_environment"), \
              patch.object(self.app, "update_engine_configs"), \
              patch.object(self.app, "initial_scan_b"), \
              patch.object(self.app, "sync_protected_roots_from_config"), \
              patch.object(self.app, "scan_removed_protected_roots"), \
              patch.object(self.app, "persist_current_roots_snapshot"), \
-             patch.object(self.app, "initial_scan_a",
-                          side_effect=lambda: call_order.append("initial_scan_a")), \
-             patch.object(self.app, "cleanup_a_redundant_using_api",
-                          side_effect=lambda: call_order.append("cleanup_a_redundant_using_api")), \
-             patch.object(self.app, "scan_a_to_b_full_sync",
-                          side_effect=lambda **kw: call_order.append("scan_a_to_b_full_sync")), \
-             patch.object(self.app, "cleanup_b_redundant"), \
+             patch.object(self.app, "initial_scan_a"), \
+             patch.object(self.app, "cleanup_a_redundant_using_api") as mock_cleanup_a, \
+             patch.object(self.app, "scan_a_to_b_full_sync"), \
+             patch.object(self.app, "cleanup_b_redundant") as mock_cleanup_b, \
              patch.object(self.app, "start_watchers"), \
              patch.object(self.app, "_scan_a_subtitles_on_startup"), \
              patch.object(self.app.admin_api, "list_storages"):
             self.db.get_all_a_records.return_value = []
             self.app.start()
 
-        assert "initial_scan_a" in call_order
-        assert "cleanup_a_redundant_using_api" in call_order
-        idx_scan = call_order.index("initial_scan_a")
-        idx_cleanup = call_order.index("cleanup_a_redundant_using_api")
-        assert idx_cleanup == idx_scan + 1
+        # 启动时不再调用全局冗余清理
+        mock_cleanup_a.assert_not_called()
+        mock_cleanup_b.assert_not_called()
 
     def test_missing_root_skipped(self):
         """Non-existent A root is skipped."""
@@ -2140,3 +2146,149 @@ class TestStartCallsCleanupARedundant:
             self.app._scan_a_subtitles_on_startup()
 
         mock_proc.assert_not_called()
+
+
+# ===========================================================================
+# TestCleanupBZombiesBatchOptimization
+# ===========================================================================
+
+
+class TestCleanupBZombiesBatchOptimization:
+    """Verify cleanup_b_zombies_under_folder uses batch API calls instead of per-record check_exists."""
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = Path(self.tmp) / "a"
+        self.b_dir = Path(self.tmp) / "b"
+        self.c_dir = Path(self.tmp) / "c"
+        for d in [self.a_dir, self.b_dir, self.c_dir]:
+            d.mkdir()
+
+        config = Mock(spec=AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.paths = Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.behavior = Mock()
+
+        db = Mock(spec=Database)
+        self.db = db
+
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, Mock())
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_cleanup_b_zombies_uses_batch_api(self):
+        """cleanup_b_zombies_under_folder groups records by parent and uses list_directory instead of check_exists."""
+        # 准备测试数据：3 个记录在 2 个不同的父目录下
+        records = [
+            BRecord("/b/file1.strm", "/cloud/dir1/file1.strm", "/cloud/dir1", "/a/file1.strm", "fp1", "valid", "2024-01-01"),
+            BRecord("/b/file2.strm", "/cloud/dir1/file2.strm", "/cloud/dir1", "/a/file2.strm", "fp2", "valid", "2024-01-01"),
+            BRecord("/b/file3.strm", "/cloud/dir2/file3.strm", "/cloud/dir2", "/a/file3.strm", "fp3", "valid", "2024-01-01"),
+        ]
+        self.db.get_b_under_root.return_value = records
+        self.db.get_b_by_local_full.return_value = None
+
+        # Mock list_directory 返回云端文件列表
+        def mock_list_directory(path, **kwargs):
+            if path == "/cloud/dir1":
+                return {"code": 0, "data": {"content": [
+                    {"name": "file1.strm", "is_dir": False},
+                    # file2.strm 不在云端（僵尸文件）
+                ]}}
+            elif path == "/cloud/dir2":
+                return {"code": 0, "data": {"content": [
+                    {"name": "file3.strm", "is_dir": False},
+                ]}}
+            return None
+
+        # 使用 Mock 包装以便追踪调用次数
+        list_dir_mock = Mock(side_effect=mock_list_directory)
+        self.app.admin_api.list_directory = list_dir_mock
+
+        with patch.object(self.app, "_handle_b_zombie") as mock_handle:
+            self.app.cleanup_b_zombies_under_folder("/cloud")
+
+            # 验证：只调用 list_directory 2 次（每个父目录一次），而不是 check_exists 3 次
+            assert list_dir_mock.call_count == 2
+            # 验证：file2.strm 被识别为僵尸文件
+            assert mock_handle.call_count == 1
+            call_args = mock_handle.call_args[0]
+            assert call_args[0] == "/b/file2.strm"  # local_path
+            assert call_args[1] == "/cloud/dir1/file2.strm"  # webdav_path
+
+    def test_cleanup_b_zombies_handles_api_failure(self):
+        """cleanup_b_zombies_under_folder skips directory when list_directory fails."""
+        records = [
+            BRecord("/b/file1.strm", "/cloud/dir1/file1.strm", "/cloud/dir1", "/a/file1.strm", "fp1", "valid", "2024-01-01"),
+        ]
+        self.db.get_b_under_root.return_value = records
+
+        # Mock list_directory 返回失败
+        self.app.admin_api.list_directory.return_value = {"code": 500, "data": {}}
+
+        with patch.object(self.app, "_handle_b_zombie") as mock_handle:
+            self.app.cleanup_b_zombies_under_folder("/cloud")
+
+            # 验证：API 失败时不处理任何文件
+            mock_handle.assert_not_called()
+
+
+# ===========================================================================
+# TestHandleBDeletedTriggersCleanup
+# ===========================================================================
+
+
+class TestHandleBDeletedTriggersCleanup:
+    """Verify handle_b_deleted triggers delayed cleanup for the parent directory."""
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = Path(self.tmp) / "a"
+        self.b_dir = Path(self.tmp) / "b"
+        self.c_dir = Path(self.tmp) / "c"
+        for d in [self.a_dir, self.b_dir, self.c_dir]:
+            d.mkdir()
+
+        config = Mock(spec=AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.paths = Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.behavior = Mock()
+        config.behavior.a_to_b_restore_delay_seconds = 30
+
+        db = Mock(spec=Database)
+        db.get_b_by_local_full.return_value = BRecord(
+            "/b/file1.strm", "/cloud/dir1/file1.strm", "/cloud/dir1",
+            "/a/file1.strm", "fp1", "valid", "2024-01-01"
+        )
+        db.has_other_b_instance.return_value = False
+        self.db = db
+
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, Mock())
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_handle_b_deleted_triggers_delayed_cleanup(self):
+        """handle_b_deleted calls trigger_delayed_cleanup with parent_webdav_path."""
+        local_path = self.b_dir / "file1.strm"
+        local_path.touch()
+
+        with patch.object(self.app, "_execute_webdav_deletion"), \
+             patch.object(self.app, "_delete_a_file_by_webdav"), \
+             patch.object(self.app, "refresh_identity_current_b_path"), \
+             patch.object(self.app, "_check_fingerprint_exists_in_b", return_value=False), \
+             patch.object(self.app, "trigger_delayed_cleanup") as mock_trigger:
+            self.app.handle_b_deleted(str(local_path))
+
+            # 验证：调用 trigger_delayed_cleanup 并传入父目录路径
+            mock_trigger.assert_called_once_with("/cloud/dir1")

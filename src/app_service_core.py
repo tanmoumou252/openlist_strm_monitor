@@ -396,8 +396,8 @@ class AppService:
                 self.migrate_b_under_root_to_c(root_path)
                 self.db.remove_known_folder_prefix(root_path)
             return
-        if cleanup_allowed:
-            self.cleanup_b_zombies_under_folder(root_path)
+        # 注意：不再在此处调用 cleanup_b_zombies_under_folder(root_path)
+        # 冗余清理改为局部触发：WebUI 手动刷新 / B 区删除事件（trigger_delayed_cleanup）
 
     def refresh_webdav_root_readonly(self, root_path: str, depth: int) -> None:
         root_path = root_path.rstrip("/") or "/"
@@ -467,12 +467,6 @@ class AppService:
         self.initial_scan_a()
         logging.info("[启动] A 区扫描耗时: %.1fs", time.time() - t_phase)
         
-        # 使用 OpenList API 批量清理 A 区冗余文件（云端已删除但本地残留的 .strm）
-        # 必须在 A→B 全量同步之前执行，避免把已经失效的 A 区记录同步到 B 区
-        t_phase = time.time()
-        self.cleanup_a_redundant_using_api()
-        logging.info("[启动] A 区冗余清理耗时: %.1fs", time.time() - t_phase)
-        
         # 根据配置决定是否执行 A→B 全量同步（实际复制文件）
         sync_on_startup = getattr(behavior_cfg, "sync_on_startup", True)
         if sync_on_startup:
@@ -484,7 +478,6 @@ class AppService:
         else:
             logging.info("[启动] 跳过 A→B 全量同步（sync_on_startup=false）")
         
-        self.cleanup_b_redundant()
         self.start_watchers()
         # 启动后立即扫描 A 区字幕文件（补偿 initial_scan_a 不处理字幕）
         self._scan_a_subtitles_on_startup()
@@ -2182,6 +2175,10 @@ class AppService:
             self.db.delete_b_by_local(str(local))
             if fingerprint:
                 self.refresh_identity_current_b_path(fingerprint)
+            # 异步触发局部冗余检查：清理该父目录下的 B 区僵尸文件
+            # 与 A 区删除保持一致的异步处理模式，避免阻塞 watchdog 事件处理线程
+            if parent_webdav_path:
+                self.trigger_delayed_cleanup(parent_webdav_path)
 
     def _check_fingerprint_exists_in_b(
             self, fingerprint: str, exclude_path: str | None = None) -> bool:
@@ -2338,19 +2335,93 @@ class AppService:
             logging.warning("[B区迁移→C区] 完成迁移，共处理 %s 个文件", migrated_count)
 
     def cleanup_b_zombies_under_folder(self, root_path: str) -> None:
+        """清理指定目录下的 B 区僵尸文件（云端已删除但本地残留的文件）
+        
+        优化策略：按父目录分组，使用 list_directory() 批量获取云端文件列表，
+        在内存中进行集合比对，避免逐条 check_exists() 调用。
+        
+        性能对比：
+        - 原方案：N 条记录 × 1 次 check_exists() = N 次 API 调用
+        - 新方案：M 个父目录 × 1 次 list_directory() = M 次 API 调用
+        - 优化效果：当 N >> M 时（如 1000 条记录在 10 个目录下），API 调用从 1000 次降至 10 次
+        """
+        import posixpath
         root_path = root_path.rstrip("/") or "/"
         logging.info("[B区僵尸清理] 开始扫描: %s", root_path)
         records = self.db.get_b_under_root(root_path)
-        removed_count = 0
+        if not records:
+            logging.info("[B区僵尸清理] 目录下无记录，跳过: %s", root_path)
+            return
+        
+        # 按父目录分组
+        parent_to_records = {}
         for record in records:
-            if record.webdav_path and self.admin_api.check_exists(record.webdav_path):
+            if not record.webdav_path:
                 continue
-            full_row = self.db.get_b_by_local_full(record.local_path)
-            fingerprint = full_row.fingerprint if full_row else None
-            self._handle_b_zombie(record.local_path, record.webdav_path, fingerprint)
-            removed_count += 1
+            parent = webdav_parent(record.webdav_path)
+            if parent not in parent_to_records:
+                parent_to_records[parent] = []
+            parent_to_records[parent].append(record)
+        
+        # 批量检查每个父目录
+        removed_count = 0
+        for parent, parent_records in parent_to_records.items():
+            # 一次性获取该目录下的所有云端文件
+            cloud_files = self._collect_cloud_files_in_directory(parent)
+            if cloud_files is None:
+                # API 调用失败，跳过该目录
+                logging.warning("[B区僵尸清理] 无法获取云端文件列表: %s", parent)
+                continue
+            
+            # 在内存中比对
+            for record in parent_records:
+                if record.webdav_path in cloud_files:
+                    continue
+                # 云端不存在，处理僵尸文件
+                full_row = self.db.get_b_by_local_full(record.local_path)
+                fingerprint = full_row.fingerprint if full_row else None
+                self._handle_b_zombie(record.local_path, record.webdav_path, fingerprint)
+                removed_count += 1
+        
         if removed_count:
             logging.warning("[B区僵尸清理] 完成清理，共处理 %s 个文件", removed_count)
+    
+    def _collect_cloud_files_in_directory(self, directory_path: str) -> set[str] | None:
+        """获取指定目录下的所有文件的完整 WebDAV 路径集合
+        
+        Args:
+            directory_path: 目录的 WebDAV 路径
+            
+        Returns:
+            set[str]: 文件路径集合（如 {"/path/to/file1.strm", "/path/to/file2.strm"}）
+            None: API 调用失败时返回
+        """
+        import posixpath
+        result = set()
+        page = 1
+        per_page = 1000
+        
+        while page <= 100:  # 安全阀
+            res = self.admin_api.list_directory(directory_path, page=page, per_page=per_page)
+            if not res or res.get("code") not in (0, 200):
+                return None
+            
+            data = res.get("data", {})
+            content = data.get("content", []) if isinstance(data, dict) else []
+            
+            for item in content:
+                if isinstance(item, dict) and not item.get("is_dir", False):
+                    file_name = item.get("name", "")
+                    if file_name:
+                        # 使用 posixpath.join 处理根目录边界（避免 "//xxx.strm"）
+                        full_path = posixpath.join(directory_path, file_name)
+                        result.add(full_path)
+            
+            if len(content) < per_page:
+                break
+            page += 1
+        
+        return result
 
     def refresh_identity_current_b_path(self, fingerprint: str) -> None:
         if not fingerprint:

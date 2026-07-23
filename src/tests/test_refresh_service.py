@@ -302,7 +302,7 @@ class TestExecuteRefreshCycle:
     """测试 execute_refresh_cycle 的编排逻辑（验证方法调用序列）"""
 
     def test_calls_all_orchestration_steps(self):
-        """execute_refresh_cycle 应该按序调用所有步骤"""
+        """execute_refresh_cycle 应该按序调用所有步骤（不再调用 _cleanup_a_for_update_mode）"""
         app = _make_app(refresh_paths=["/strm"], strm_engine_paths=["/strm"])
         svc = RefreshService(app)
 
@@ -321,29 +321,13 @@ class TestExecuteRefreshCycle:
             # 验证所有步骤都被调用
             m_sync.assert_called_once()
             m_check.assert_called_once()
-            m_cleanup.assert_called_once()
+            # 冗余清理已改为局部触发，不再在定期刷新时调用
+            m_cleanup.assert_not_called()
             m_calc.assert_called_once()
             m_exec.assert_called_once()
             m_wait.assert_called_once()
             m_scan.assert_called_once()
             m_persist.assert_called_once()
-
-    def test_cleanup_receives_accessible_engines(self):
-        """_cleanup_a_for_update_mode 接收可访问的引擎路径"""
-        app = _make_app(refresh_paths=["/strm"], strm_engine_paths=["/strm"])
-        svc = RefreshService(app)
-
-        with patch.object(svc, "_sync_and_scan_protected_roots"), \
-             patch.object(svc, "_check_engine_accessibility", return_value={"/strm", "/data"}), \
-             patch.object(svc, "_cleanup_a_for_update_mode") as m_cleanup, \
-             patch.object(svc, "_calculate_safe_refresh_paths", return_value=[]), \
-             patch.object(svc, "_execute_webdav_refreshes"), \
-             patch.object(svc, "_wait_for_sync"), \
-             patch.object(svc, "_scan_and_sync"), \
-             patch.object(svc, "_persist_snapshot"):
-
-            svc.execute_refresh_cycle()
-            m_cleanup.assert_called_once_with({"/strm", "/data"})
 
     def test_empty_engine_set_completes_without_error(self):
         """可访问引擎为空集合时，完整编排流程仍正常完成不抛异常"""
@@ -352,7 +336,7 @@ class TestExecuteRefreshCycle:
 
         with patch.object(svc, "_sync_and_scan_protected_roots"), \
              patch.object(svc, "_check_engine_accessibility", return_value=set()), \
-             patch.object(svc, "_cleanup_a_for_update_mode"), \
+             patch.object(svc, "_cleanup_a_for_update_mode") as m_cleanup, \
              patch.object(svc, "_calculate_safe_refresh_paths", return_value=[]), \
              patch.object(svc, "_execute_webdav_refreshes"), \
              patch.object(svc, "_wait_for_sync"), \
@@ -360,6 +344,8 @@ class TestExecuteRefreshCycle:
              patch.object(svc, "_persist_snapshot"):
             # 空引擎路径应该正常完成
             svc.execute_refresh_cycle()
+            # 冗余清理已改为局部触发，不再在定期刷新时调用
+            m_cleanup.assert_not_called()
 
 
 # ============================================================

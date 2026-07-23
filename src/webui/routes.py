@@ -2616,6 +2616,14 @@ def _do_media_refresh(app_service, area: str, media_name: str) -> dict:
                  "[Refresh] 同步到 B 区完成 耗时=%.2fs 成功=%d 跳过=%d 失败=%d",
                  time.monotonic() - phase_start, synced, skipped, failed)
 
+    # 6. 局部冗余检查：清理该媒体目录下的 B 区僵尸文件（云端已删除但本地残留）
+    # 设计原则：冗余清理永远只在局部触发，不做全盘扫描
+    if app_service and common_parent:
+        try:
+            app_service.cleanup_b_zombies_under_folder(common_parent)
+        except Exception as e:
+            logging.warning("[Refresh] 局部冗余清理失败 %s: %s", common_parent, e)
+
     _refresh_log("info", "[Refresh] 刷新完成 目录=%s", refresh_dir)
 
     return {
