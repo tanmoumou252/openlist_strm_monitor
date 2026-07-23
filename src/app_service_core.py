@@ -464,7 +464,7 @@ class AppService:
         self.persist_current_roots_snapshot()
         
         t_phase = time.time()
-        self.initial_scan_a()
+        self.initial_scan_a(use_bulk=True)
         logging.info("[启动] A 区扫描耗时: %.1fs", time.time() - t_phase)
         
         # 根据配置决定是否执行 A→B 全量同步（实际复制文件）
@@ -1151,8 +1151,8 @@ class AppService:
         
         logging.info("[初始化] B 区新增 %d 条数据库记录", new_insert_count)
 
-    def initial_scan_a(self):
-        return self.sync_service.initial_scan_a()
+    def initial_scan_a(self, use_bulk: bool = False):
+        return self.sync_service.initial_scan_a(use_bulk=use_bulk)
 
     def cleanup_a_redundant_using_api(self) -> None:
         """使用 OpenList API 批量清理 A 区冗余文件。

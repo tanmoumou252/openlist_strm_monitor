@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,61 +29,147 @@ class SyncService:
         self._cache_ghost: set[str] | None = None
         self._cache_b_fp: set[str] | None = None
 
-    def initial_scan_a(self) -> None:
+    def initial_scan_a(self, use_bulk: bool = False) -> None:
         """启动时批量索引 A 区 STRM 文件到数据库。
         
-        性能优化：不再调用 handle_a_created_or_modified()（完整处理流程），
-        改为纯批量索引。跳过 HTTP 检查、血统校验、字幕处理。
+        性能优化：
+        - 启动时使用 bulk_connection 长连接模式（核心优化：消除反复获取 rw_lock + 打开连接的开销）
+        - 使用多线程并发读取 .strm 文件（辅助优化：利用多核 CPU 并发 I/O）
+        - 每 100 条或每 2 秒输出一次日志 + records/s 性能基准
+        - use_bulk=True 时使用 bulk_connection 长连接模式（仅启动时）
+        - use_bulk=False 时使用 upsert_a_batch（定期刷新时）
+        - 延迟 FTS 重建（仅 use_bulk=True 时，扫描完成后一次性重建）
         
-        A区冗余清理：由 cleanup_a_redundant_using_api() 负责（使用 OpenList API）。
+        设计决策：为什么不用 OpenList API 扫描 A 区？
+        - OpenList API /api/fs/list 单页最多返回 100 个文件（maximum: 100）
+        - API 返回目录下所有文件类型（.strm、.nfo、.jpg、.srt 等），无法过滤
+        - 因此，使用本地文件系统遍历 + 多线程并发读取是更好的选择
         
-        日志优化：每 100 条输出进度，解决日志冻结问题。
+        Args:
+            use_bulk: True 用 bulk_connection（启动时，单线程安全）。
+                      False 用 upsert_a_batch（刷新时，多线程安全）。
         """
-        logging.info("[初始化] 扫描 A 区 STRM 文件...")
+        logging.info("[初始化] 扫描 A 区 STRM 文件（%s）...", 
+                     "bulk模式" if use_bulk else "标准模式")
         t0 = time.time()
-        BATCH_SIZE = 500
+        BATCH_SIZE = 1000
         LOG_INTERVAL = 100
         total_strm = 0
         batch: list[tuple[str, str, str]] = []
         parent_set: set[str] = set()
+        last_log_time = time.time()
 
-        for a_root in self.app.a_roots:
-            if not a_root.exists():
-                logging.warning("[初始化] A 区根目录不存在: %s", a_root)
-                continue
-            for root, _dirs, files in os.walk(a_root):
-                for name in files:
-                    if not name.lower().endswith(".strm"):
-                        continue
-                    file_path = Path(root) / name
-                    webdav_path = read_strm_webdav_path(file_path)
-                    if not webdav_path:
-                        logging.warning("[初始化] 无法解析 STRM: %s", file_path)
-                        continue
-                    parent = webdav_parent(webdav_path)
-                    batch.append((str(file_path), webdav_path, parent))
-                    parent_set.add(parent)
-                    total_strm += 1
+        def process_strm_file(file_path: Path) -> tuple[str, str, str] | None:
+            """处理单个 .strm 文件，返回 (local_path, webdav_path, parent) 或 None"""
+            webdav_path = read_strm_webdav_path(file_path)
+            if not webdav_path:
+                logging.debug("[初始化] 无法解析 STRM: %s", file_path)
+                return None
+            parent = webdav_parent(webdav_path)
+            return (str(file_path), webdav_path, parent)
 
-                    if total_strm % LOG_INTERVAL == 0:
-                        logging.info(
-                            "[初始化] A 区扫描进度: %d 条已索引 (%.1fs)...",
-                            total_strm, time.time() - t0)
-
-                    if len(batch) >= BATCH_SIZE:
-                        self.db.upsert_a_batch(batch)
-                        batch.clear()
-
-            if batch:
+        def flush_batch():
+            """批量写入数据库。闭包捕获 conn 和 batch。"""
+            if not batch:
+                return
+            if use_bulk:
+                self._upsert_a_batch_bulk(conn, batch)
+            else:
                 self.db.upsert_a_batch(batch)
-                batch.clear()
+            batch.clear()
 
+        # 根据模式选择连接：bulk_connection 绕过 rw_lock，仅启动时单线程安全
+        conn = None
+        bulk_ctx = None
+        if use_bulk:
+            bulk_ctx = self.db.bulk_connection()
+            conn = bulk_ctx.__enter__()
+
+        try:
+            for a_root in self.app.a_roots:
+                if not a_root.exists():
+                    logging.warning("[初始化] A 区根目录不存在: %s", a_root)
+                    continue
+                
+                # 收集所有 .strm 文件路径
+                strm_files: list[Path] = []
+                for root, _dirs, files in os.walk(a_root):
+                    for name in files:
+                        if name.lower().endswith(".strm"):
+                            strm_files.append(Path(root) / name)
+                
+                logging.info("[初始化] 发现 %d 个 .strm 文件，开始多线程处理...", len(strm_files))
+                
+                # 使用多线程并发处理
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    futures = {executor.submit(process_strm_file, fp): fp for fp in strm_files}
+                    
+                    for future in as_completed(futures):
+                        result = future.result()
+                        if result:
+                            local_path, webdav_path, parent = result
+                            batch.append((local_path, webdav_path, parent))
+                            parent_set.add(parent)
+                            total_strm += 1
+
+                            # 日志输出（每 100 条或每 2 秒）+ 性能基准
+                            current_time = time.time()
+                            if total_strm % LOG_INTERVAL == 0 or (current_time - last_log_time) >= 2.0:
+                                elapsed = current_time - t0
+                                rate = total_strm / elapsed if elapsed > 0 else 0
+                                logging.info(
+                                    "[初始化] A 区扫描进度: %d 条已索引 (%.1fs, %.0f 条/秒)...",
+                                    total_strm, elapsed, rate)
+                                last_log_time = current_time
+
+                            # 批量写入
+                            if len(batch) >= BATCH_SIZE:
+                                flush_batch()
+
+                # 刷新当前 a_root 的剩余记录
+                flush_batch()
+        finally:
+            # bulk_connection 在 __exit__ 时自动 commit（正常退出）或 rollback（异常）
+            if bulk_ctx is not None:
+                bulk_ctx.__exit__(None, None, None)
+
+        # 以下操作使用 self.connection()（独立连接），必须在 bulk_connection 提交后执行
         if parent_set:
             self.db.save_known_folders_batch(list(parent_set), source="a")
 
+        # 仅 bulk 模式需要重建 FTS（upsert_a_batch 已逐批维护 FTS）
+        if use_bulk:
+            logging.info("[初始化] 重建 FTS 索引...")
+            self.db.rebuild_fts_table("a_strm_files", "a_strm_files_fts")
+
+        elapsed = time.time() - t0
+        rate = total_strm / elapsed if elapsed > 0 else 0
         logging.info(
-            "[初始化] A 区扫描完成，共索引 %d 个 STRM 文件 (%.1fs)",
-            total_strm, time.time() - t0)
+            "[初始化] A 区扫描完成，共索引 %d 个 STRM 文件 (%.1fs, %.0f 条/秒)",
+            total_strm, elapsed, rate)
+
+    def _upsert_a_batch_bulk(self, conn, records: list[tuple[str, str, str]]) -> int:
+        """批量插入 A 区记录（使用 bulk_connection，跳过 FTS 同步）。
+        
+        性能优化：
+        - 使用单个连接（不获取 rw_lock）
+        - 跳过 FTS 同步（延迟到扫描完成后由 rebuild_fts_table 一次性重建）
+        - 使用 INSERT OR REPLACE（简化逻辑，延迟 FTS 重建不关心中间 rowid 变化）
+        """
+        if not records:
+            return 0
+        now = time.time()
+        data = [(lp, wp, pwp, now) for lp, wp, pwp in records]
+        
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            data,
+        )
+        
+        return len(data)
 
     def scan_a_to_b_full_sync(
             self, valid_engine_paths: list[str] | None = None,

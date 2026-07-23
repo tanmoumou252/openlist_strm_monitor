@@ -65,7 +65,7 @@ class TestSyncServiceInitialScanA:
         svc = SyncService(app)
         # Use patch to capture the batch before it's cleared
         with patch.object(svc.db, "upsert_a_batch") as mock_upsert:
-            svc.initial_scan_a()
+            svc.initial_scan_a(use_bulk=False)
             assert mock_upsert.call_count == 1
             # Mock stores a reference; call_args_list preserves the reference
             # at call time. Verify via the captured list argument.
@@ -86,7 +86,7 @@ class TestSyncServiceInitialScanA:
             "/mount/show/ep01.mp4", encoding="utf-8")
 
         svc = SyncService(app)
-        svc.initial_scan_a()
+        svc.initial_scan_a(use_bulk=False)
 
         assert app.db.save_known_folders_batch.call_count == 1
         saved_folders = app.db.save_known_folders_batch.call_args[0][0]
@@ -97,7 +97,7 @@ class TestSyncServiceInitialScanA:
         app = _make_app(tmp_path)
         # a_root exists but is empty
         svc = SyncService(app)
-        svc.initial_scan_a()
+        svc.initial_scan_a(use_bulk=False)
         app.db.upsert_a_batch.assert_not_called()
         app.db.save_known_folders_batch.assert_not_called()
 
@@ -106,7 +106,7 @@ class TestSyncServiceInitialScanA:
         missing_root = tmp_path / "nonexistent"
         app.a_roots = [missing_root]
         svc = SyncService(app)
-        svc.initial_scan_a()
+        svc.initial_scan_a(use_bulk=False)
         app.db.upsert_a_batch.assert_not_called()
 
     def test_scan_a_ignores_non_strm_files(self, tmp_path):
@@ -118,7 +118,7 @@ class TestSyncServiceInitialScanA:
             "/mount/file.mp4", encoding="utf-8")
 
         svc = SyncService(app)
-        svc.initial_scan_a()
+        svc.initial_scan_a(use_bulk=False)
 
         # Only the .strm file is batched
         assert app.db.upsert_a_batch.call_count == 1
@@ -127,15 +127,15 @@ class TestSyncServiceInitialScanA:
         """Records are flushed when batch reaches BATCH_SIZE."""
         app = _make_app(tmp_path)
         a_root = app.a_roots[0]
-        # Create 501 files to trigger one flush + one final flush
-        for i in range(501):
+        # Create 1001 files to trigger one flush at 1000 + one final flush of 1
+        for i in range(1001):
             (a_root / f"file{i}.strm").write_text(
                 f"/mount/f{i}.mp4", encoding="utf-8")
 
         svc = SyncService(app)
-        svc.initial_scan_a()
+        svc.initial_scan_a(use_bulk=False)
 
-        # BATCH_SIZE=500, so 501 files → 2 upsert calls (500 + 1)
+        # BATCH_SIZE=1000, so 1001 files → 2 upsert calls (1000 + 1)
         assert app.db.upsert_a_batch.call_count == 2
 
     def test_scan_a_skips_unparseable_strm(self, tmp_path):
@@ -148,9 +148,44 @@ class TestSyncServiceInitialScanA:
         (a_root / "empty.strm").write_text("", encoding="utf-8")
 
         svc = SyncService(app)
-        svc.initial_scan_a()
+        svc.initial_scan_a(use_bulk=False)
 
         assert app.db.upsert_a_batch.call_count == 1
+
+    def test_scan_a_bulk_mode_writes_to_bulk_connection(self, tmp_path):
+        """use_bulk=True 时使用 bulk_connection 而非 upsert_a_batch。"""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        (a_root / "movie.strm").write_text("/mount/movie.mp4", encoding="utf-8")
+
+        svc = SyncService(app)
+        mock_conn = Mock()
+        mock_conn.__enter__ = Mock(return_value=mock_conn)
+        mock_conn.__exit__ = Mock(return_value=False)
+        app.db.bulk_connection.return_value = mock_conn
+
+        svc.initial_scan_a(use_bulk=True)
+
+        # bulk_connection 被调用
+        app.db.bulk_connection.assert_called_once()
+        # upsert_a_batch 不被调用（bulk 模式用 _upsert_a_batch_bulk）
+        app.db.upsert_a_batch.assert_not_called()
+        # rebuild_fts_table 被调用
+        app.db.rebuild_fts_table.assert_called_once_with("a_strm_files", "a_strm_files_fts")
+
+    def test_scan_a_non_bulk_mode_rebuilds_no_fts(self, tmp_path):
+        """use_bulk=False 时不调用 rebuild_fts_table。"""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        (a_root / "movie.strm").write_text("/mount/movie.mp4", encoding="utf-8")
+
+        svc = SyncService(app)
+        svc.initial_scan_a(use_bulk=False)
+
+        # rebuild_fts_table 不被调用（upsert_a_batch 已逐批维护 FTS）
+        app.db.rebuild_fts_table.assert_not_called()
+        # upsert_a_batch 被调用
+        app.db.upsert_a_batch.assert_called()
 
 
 # ===========================================================================

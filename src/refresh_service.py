@@ -370,7 +370,7 @@ class RefreshService:
 
     def _scan_and_sync(self, accessible_engines: set[str]) -> None:
         """执行 A 区扫描和 A→B 同步。"""
-        self.app.initial_scan_a()
+        self.app.initial_scan_a(use_bulk=False)
 
         # 同步是本地文件复制，不涉及 WebDAV 网络请求
         # 引擎路径可访问性只影响清理/迁移等涉及 WebDAV 的操作

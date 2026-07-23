@@ -61,7 +61,7 @@ AppService.__init__()
 
 5. **持久化当前根目录快照** — 将当前引擎路径写入 `protected_roots_snapshot` 表
 
-6. **A 区全量扫描与索引建立** — 批量遍历所有 A 区目录，解析 `.strm` 文件内容，批量写入 `a_strm_files` 表（不再逐文件处理字幕或触发 A→B 复制）。每 100 条输出进度日志，解决日志冻结问题。字幕处理由启动后的 `_scan_a_subtitles_on_startup()` 补偿
+6. **A 区全量扫描与索引建立** — 批量遍历所有 A 区目录，使用多线程并发读取 .strm 文件（4 个工作线程）。启动时使用 bulk_connection 长连接模式批量写入数据库（绕过 rw_lock，复用连接），扫描完成并提交后一次性重建 FTS 索引。定期刷新时使用 upsert_a_batch（保持线程安全，逐批维护 FTS）。每 100 条或每 2 秒输出进度日志（含 records/s 性能基准），解决日志冻结问题。字幕处理由启动后的 `_scan_a_subtitles_on_startup()` 补偿
 
 7. **A → B 全量同步**（可选，受 `sync_on_startup` 配置控制，方法 `scan_a_to_b_full_sync`） — 启动时使用 `bulk_connection()` 长连接模式（1 个连接 + 1 次提交），跳过血统校验和 per-file `check_exists` HTTP。预加载 ghost 保护和 B 区指纹到内存缓存。`use_bulk` 参数控制模式选择：`use_bulk=True` 单事务提交（首次启动，无并发），`use_bulk=False` 分批提交（每 1000 条，主动刷新，有并发）。当 `sync_on_startup = false` 时跳过此步骤（日志输出"跳过 A→B 全量同步"），但启动等待仍然执行。
 

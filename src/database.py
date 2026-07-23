@@ -1689,6 +1689,27 @@ class Database:
             conn.commit()
             return len(data)
 
+    def rebuild_fts_table(self, main_table: str, fts_table: str) -> None:
+        """一次性重建 FTS 表（用于批量操作后）。
+        
+        性能优化：
+        - 清空 FTS 表
+        - 从主表批量插入所有记录
+        - 使用单个事务
+        
+        Args:
+            main_table: 主表名（如 "a_strm_files"）
+            fts_table: FTS 表名（如 "a_strm_files_fts"）
+        """
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            conn.execute(f"DELETE FROM {fts_table}")
+            conn.execute(
+                f"INSERT INTO {fts_table}(rowid, local_path, webdav_path) "
+                f"SELECT rowid, local_path, webdav_path FROM {main_table}"
+            )
+            conn.commit()
+            logging.info("[DB] 重建 %s 完成", fts_table)
+
     def upsert_b_batch(self, records: list[tuple]) -> int:
         """
         批量 upsert B 区记录。
