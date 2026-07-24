@@ -168,7 +168,7 @@ return (0 if is_standard else 1, match_count, path_len, name)
 
 | 维度 | 说明 | 优先方向 |
 |------|------|----------|
-| `is_standard_rank` | `0` = 标准 `S01E01` 命名，`1` = 非标准 | 越小越优先 |
+| `is_standard_rank` | `0` = 标准 `SxxExx` 命名（episode 支持 1～4 位，数值上限 9999），`1` = 非标准 | 越小越优先 |
 | `match_count` | 从末尾反向匹配云端路径的段数 | 越大越优先 |
 | `path_len` | 路径字符串总长度 | 越短越优先 |
 | `name` | 文件名（小写） | 字典序兜底 |

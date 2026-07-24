@@ -174,7 +174,17 @@ class SyncService:
     def scan_a_to_b_full_sync(
             self, valid_engine_paths: list[str] | None = None,
             use_bulk: bool = False) -> None:
-        """A -> B 全量同步。
+        """A -> B 全量同步（两遍结构：索引 + 执行）。
+        
+        第一遍（索引阶段）：遍历所有 A 记录，计算目标路径，建立
+        target_path -> [source_info, ...] 索引，并检测目标路径冲突。
+        只读操作（ghost/fp 缓存检查），不产生文件复制或 DB 写入。
+        
+        冲突检测：第一遍完成后，遍历索引，标记存在多个不同 WebDAV
+        身份的目标为冲突，全部安全跳过。
+        
+        第二遍（执行阶段）：遍历原始记录，对非冲突目标调用
+        _sync_one_record 执行现有同步逻辑；对冲突目标跳过。
         
         Args:
             valid_engine_paths: 限制同步范围。
@@ -188,10 +198,10 @@ class SyncService:
         - L1: 内存缓存 _cache_b_fp（处理同批次重复）
         - L2: 文件系统检查 b_local.exists()（磁盘文件可见）
         - L3: ensure_single_visible_instance（兜底去重，通过 dedup_queue 延迟到提交后执行）
-        
-        详见 _sync_one_record 方法的设计决策注释。
         """
         BATCH_COMMIT_SIZE = 1000  # 分批提交大小
+        MAX_CONFLICT_EXAMPLES = 5  # 汇总输出最多示例数
+        SLOW_OP_THRESHOLD = 3.0  # 慢操作告警阈值（秒）
         
         logging.info("[初始化] A -> B 全量同步开始 (%s)", 
                      "单事务模式" if use_bulk else "分批提交模式")
@@ -210,10 +220,102 @@ class SyncService:
                      len(self._cache_ghost), len(self._cache_b_fp),
                      time.time() - t0)
 
-        counters = {"success": 0, "skip_ghost": 0, "skip_fp": 0,
-                    "skip_missing": 0, "skip_filtered": 0,
-                    "skip_exists_diff": 0, "fail": 0}
-        log_interval = max(100, total_count // 100)  # 每 100 条或 1%，取较大值（保证最多 0.5 秒间隔）
+        # ===================================================================
+        # 第一遍：索引阶段 —— 计算目标路径，检测冲突
+        # ===================================================================
+        t_pass1 = time.time()
+        # target_path -> [(source_a_path, webdav_path, fingerprint, original_index), ...]
+        target_index: dict[str, list[tuple[str, str, str, int]]] = {}
+        target_conflicts: set[str] = set()  # 存在多个不同 WebDAV 的目标
+        # 记录每条 A 记录对应的 target_path（第二遍复用）
+        rec_target_map: list[str | None] = [None] * total_count
+        pass1_skipped = {"skip_ghost": 0, "skip_fp": 0, "skip_missing": 0,
+                         "skip_filtered": 0}
+        
+        for idx, rec in enumerate(all_a_records):
+            local_path = rec.local_path
+            webdav_path = rec.webdav_path
+            
+            # 与 _sync_one_record 一致的预检
+            if not Path(local_path).exists():
+                pass1_skipped["skip_missing"] += 1
+                continue
+            
+            if valid_engine_paths is not None:
+                if not any(webdav_path == p or webdav_path.startswith(p + "/")
+                           for p in valid_engine_paths):
+                    pass1_skipped["skip_filtered"] += 1
+                    continue
+            
+            if webdav_path in self._cache_ghost:
+                pass1_skipped["skip_ghost"] += 1
+                continue
+            
+            fingerprint = make_strm_fingerprint(webdav_path)
+            if fingerprint in self._cache_b_fp:
+                pass1_skipped["skip_fp"] += 1
+                continue
+            
+            # 计算目标路径（只读，无副作用）
+            try:
+                b_local = self.app.build_b_path_from_a(local_path, webdav_path)
+            except ValueError:
+                continue
+            
+            target_path = str(b_local)
+            rec_target_map[idx] = target_path
+            
+            if target_path not in target_index:
+                target_index[target_path] = []
+            target_index[target_path].append(
+                (local_path, webdav_path, fingerprint, idx))
+            
+            # 冲突检测：同目标 + 不同 WebDAV 身份
+            existing_webdavs = {info[1] for info in target_index[target_path]}
+            if len(existing_webdavs) > 1:
+                target_conflicts.add(target_path)
+        
+        t_pass1_elapsed = time.time() - t_pass1
+        logging.info(
+            "[初始化] A -> B 索引阶段完成: %d 条索引, %d 个唯一目标, "
+            "%d 个冲突目标, 预跳过=%d (%.1fs)",
+            total_count - sum(pass1_skipped.values()),
+            len(target_index), len(target_conflicts),
+            sum(pass1_skipped.values()), t_pass1_elapsed)
+        
+        # 输出冲突示例（限量，避免日志洪水）
+        # 不可逆边界说明：如果 OpenList 上游已将同名不同扩展名（如 .mkv/.mp4）
+        # 覆盖成同一个 .strm，桥接程序只能观察到当前剩余的单个 .strm，无法证明
+        # 第二个源曾存在，也不能从云端或 B 区猜测恢复。此处只处理桥接仍能观察到
+        # 的冲突（同批次多条 A 记录计算出相同 target_path 但 WebDAV 不同），全部
+        # 安全跳过，不输出猜测性“已检测上游覆盖”警告。
+        if target_conflicts:
+            for i, ct in enumerate(sorted(target_conflicts)[:MAX_CONFLICT_EXAMPLES]):
+                sources = target_index[ct]
+                webdavs = sorted(set(info[1] for info in sources))
+                logging.warning(
+                    "[初始化] 目标路径冲突 (%d 个不同 WebDAV): %s | "
+                    "WebDAV: %s | 来源数: %d",
+                    len(webdavs), ct, webdavs, len(sources))
+            if len(target_conflicts) > MAX_CONFLICT_EXAMPLES:
+                logging.warning(
+                    "[初始化] ... 还有 %d 个冲突目标未显示",
+                    len(target_conflicts) - MAX_CONFLICT_EXAMPLES)
+
+        # ===================================================================
+        # 第二遍：执行阶段 —— 对非冲突目标执行同步
+        # ===================================================================
+        counters = {
+            "success": 0,
+            "skip_ghost": pass1_skipped["skip_ghost"],
+            "skip_fp": pass1_skipped["skip_fp"],
+            "skip_missing": pass1_skipped["skip_missing"],
+            "skip_filtered": pass1_skipped["skip_filtered"],
+            "skip_exists_diff": 0,
+            "skip_target_conflict": 0,
+            "fail": 0,
+        }
+        log_interval = max(100, total_count // 100)
         batch_count = 0
         dedup_queue: list[tuple[str, str]] = []  # 延迟去重队列
 
@@ -228,10 +330,20 @@ class SyncService:
                     logging.warning("[A->B] 去重失败 %s: %s", b_path, e)
             dedup_queue.clear()
 
+        t_pass2 = time.time()
         try:
-            # 两种模式都使用 bulk_connection，区别在于提交策略
             with self.db.bulk_connection() as conn:
                 for idx, rec in enumerate(all_a_records, 1):
+                    target_path = rec_target_map[idx - 1]
+                    
+                    # Pass 1 中被跳过的记录（ghost/fp/missing/filtered）target_path 为 None
+                    if target_path is None:
+                        continue
+                    
+                    if target_path in target_conflicts:
+                        counters["skip_target_conflict"] += 1
+                        continue
+                    
                     result = self._sync_one_record(rec, valid_engine_paths, conn,
                                                    dedup_queue)
                     counters[result] = counters.get(result, 0) + 1
@@ -246,14 +358,16 @@ class SyncService:
 
                     if idx % log_interval == 0:
                         c = counters
+                        total_skip_2 = (
+                            c["skip_ghost"] + c["skip_fp"] + c["skip_missing"]
+                            + c["skip_filtered"] + c["skip_exists_diff"]
+                            + c["skip_target_conflict"])
                         logging.info(
                             "[初始化] A -> B 进度: %d/%d (%.0f%%) %.1fs | "
-                            "成功=%d 跳过=%d 失败=%d",
+                            "成功=%d 跳过=%d 冲突=%d 失败=%d",
                             idx, total_count, idx / total_count * 100,
                             time.time() - t0, c["success"],
-                            c["skip_ghost"] + c["skip_fp"] + c["skip_missing"]
-                            + c["skip_filtered"] + c["skip_exists_diff"],
-                            c["fail"])
+                            total_skip_2, c["skip_target_conflict"], c["fail"])
                 
                 # 提交剩余批次
                 if batch_count > 0:
@@ -264,15 +378,19 @@ class SyncService:
             self._cache_ghost = None
             self._cache_b_fp = None
 
+        t_pass2_elapsed = time.time() - t_pass2
         c = counters
         total_skip = (c["skip_ghost"] + c["skip_fp"] + c["skip_missing"]
-                      + c["skip_filtered"] + c["skip_exists_diff"])
+                      + c["skip_filtered"] + c["skip_exists_diff"]
+                      + c["skip_target_conflict"])
         logging.info(
             "[初始化] A -> B 全量同步完成 (%.1fs) | "
-            "成功=%d 跳过=%d(ghost=%d fp=%d 不存在=%d 过滤=%d 路径不同=%d) 失败=%d",
+            "成功=%d 跳过=%d(ghost=%d fp=%d 不存在=%d 过滤=%d "
+            "路径不同=%d 目标冲突=%d) 失败=%d",
             time.time() - t0, c["success"], total_skip,
             c["skip_ghost"], c["skip_fp"], c["skip_missing"],
-            c["skip_filtered"], c["skip_exists_diff"], c["fail"])
+            c["skip_filtered"], c["skip_exists_diff"],
+            c["skip_target_conflict"], c["fail"])
 
     def _sync_one_record(self, rec, valid_engine_paths, conn,
                          dedup_queue: list | None = None) -> str:

@@ -97,6 +97,7 @@ class TestExtractSeasonFromPath:
 
 
 # ============================================================
+
 # _extract_season_episode
 # ============================================================
 
@@ -107,6 +108,22 @@ class TestExtractSeasonEpisode:
         assert _extract_season_episode("S01E01.mkv") == (1, 1)
         assert _extract_season_episode("s02e13.mkv") == (2, 13)
         assert _extract_season_episode("S1E1.mkv") == (1, 1)
+
+    def test_large_episode_numbers_and_terminal_boundary(self):
+        assert _extract_season_episode("S02E043.mkv") == (2, 43)
+        assert _extract_season_episode("S02E049.mkv") == (2, 49)
+        assert _extract_season_episode("S18E760.mkv") == (18, 760)
+        assert _extract_season_episode("S21E1088.mp4") == (21, 1088)
+        assert _extract_season_episode("S01E9999.mkv") == (1, 9999)
+        assert _extract_season_episode("S01E10000.mkv") == (None, None)
+
+    def test_large_episode_numbers_in_x_format(self):
+        assert _extract_season_episode("02x43.mkv") == (2, 43)
+        assert _extract_season_episode("21x1088.mp4") == (21, 1088)
+
+    def test_large_episode_numbers_in_fallback_formats(self):
+        assert _extract_season_episode("Show S01 [9999].mkv") == (1, 9999)
+        assert _extract_season_episode("Show Season 01 第9999集.mkv") == (1, 9999)
 
     def test_x_format(self):
         assert _extract_season_episode("1x01.mkv") == (1, 1)
@@ -213,6 +230,13 @@ class TestSuggestRename:
 
     def test_from_sxxexx_stem(self):
         assert suggest_rename("/path/S1E1.mkv") == "S01E01.mkv"
+
+    def test_preserves_standard_large_episode_names_and_boundaries(self):
+        assert suggest_rename("/path/S01E01.mkv") == "S01E01.mkv"
+        assert suggest_rename("/path/S02E043.mp4") == "S02E043.mp4"
+        assert suggest_rename("/path/S21E1088.mkv") == "S21E1088.mkv"
+        assert suggest_rename("/path/S01E0001.mkv") == "S01E0001.mkv"
+        assert suggest_rename("/path/S01E10000.mkv") is None
 
     def test_from_x_format(self):
         assert suggest_rename("/path/1x01.mkv") == "S01E01.mkv"

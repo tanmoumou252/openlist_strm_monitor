@@ -119,8 +119,8 @@ def read_strm_webdav_path(file_path: str | Path) -> str | None:
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             return parse_strm_content(f.read())
-    except (FileNotFoundError, OSError, PermissionError):
-        # 如果文件不存在或无法读取，返回 None 而不是崩溃
+    except (FileNotFoundError, OSError, PermissionError, UnicodeDecodeError):
+        # 如果文件不存在、无法读取或包含非法字节，返回 None 而不是崩溃
         return None
 
 

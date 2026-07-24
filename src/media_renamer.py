@@ -15,9 +15,9 @@ SUBTITLE_EXTS = {".ass", ".ssa", ".srt"}
 
 SEASON_EPISODE_PATTERNS = [
     # S01E01, s01e01, S1E1 (最标准)
-    (re.compile(r"[Ss](\d{1,2})[Ee](\d{1,2})"), "S{season:02d}E{episode:02d}"),
+    (re.compile(r"[Ss](\d{1,2})[Ee](\d{1,4})(?!\d)"), "S{season:02d}E{episode:02d}"),
     # 1x01, 01x21
-    (re.compile(r"(\d{1,2})[xX](\d{1,2})"), "S{season:02d}E{episode:02d}"),
+    (re.compile(r"(\d{1,2})[xX](\d{1,4})(?!\d)"), "S{season:02d}E{episode:02d}"),
 ]
 
 # 中文数字映射
@@ -102,12 +102,12 @@ def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
                 # 在后面的括号内容中找集数
                 for j in range(i + 1, len(bracket_contents)):
                     later_content = bracket_contents[j]
-                    # 纯数字且是2-3位
-                    if re.match(r'^\d{2,3}$', later_content):
+                    # 纯数字且最多4位，且不能被更长数字部分匹配
+                    if re.match(r'^\d{1,4}(?!\d)$', later_content):
                         episode = int(later_content)
                         return season, episode
                     # 或者包含 "第X集"
-                    ep_match = re.search(r'第(\d{1,3})集', later_content)
+                    ep_match = re.search(r'第(\d{1,4})(?!\d)集', later_content)
                     if ep_match:
                         episode = int(ep_match.group(1))
                         return season, episode
@@ -118,13 +118,14 @@ def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
     if s_season_match:
         season = int(s_season_match.group(1))
         # 找集数：中括号内的数字、第X集、或紧跟的数字
-        episode_match = re.search(r"\[(\d{2,3})\](?!.*\[\d{2,3}\])", filename)
+        episode_match = re.search(
+            r"\[(\d{1,4})(?!\d)\](?!.*\[\d{1,4}(?!\d)\])", filename)
         if not episode_match:
             # 尝试匹配 "第X集" 格式
-            episode_match = re.search(r"第(\d{1,3})集", filename)
+            episode_match = re.search(r"第(\d{1,4})(?!\d)集", filename)
         if not episode_match:
             # 尝试匹配 - 01 - 或 _01_ 格式
-            episode_match = re.search(r"[-_\s](\d{2,3})[-_\s]", filename)
+            episode_match = re.search(r"[-_\s](\d{1,4})(?!\d)[-_\s]", filename)
         if episode_match:
             episode = int(episode_match.group(1))
             return season, episode
@@ -134,7 +135,8 @@ def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
     if season_match:
         season = int(season_match.group(1))
         episode_match = re.search(
-            r"\[(\d{2,3})\]|第(\d{1,3})集|[-_\s](\d{2,3})[-_\s]", filename)
+            r"\[(\d{1,4})(?!\d)\]|第(\d{1,4})(?!\d)集|[-_\s](\d{1,4})(?!\d)[-_\s]",
+            filename[season_match.end():])
         if episode_match:
             # 安全地获取匹配的集数，添加空值检查
             episode_str = next(
@@ -162,7 +164,8 @@ def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
     # 5. 尝试纯数字匹配（如 01.mp4, 第01集）
     if season is None and episode is None:
         # 匹配 [01], [001] 格式（前面有S1标记或Season标记的）
-        pure_ep_match = re.search(r"(?:\[|第)(\d{2,3})(?:\]|集)", filename)
+        pure_ep_match = re.search(
+            r"(?:\[|第)(\d{1,4})(?!\d)(?:\]|集)", filename)
         if pure_ep_match:
             season = 1
             episode = int(pure_ep_match.group(1))
@@ -280,7 +283,7 @@ def suggest_rename(src_path: str | Path) -> str | None:
     ext = path.suffix
 
     # 已经是标准格式？
-    if re.match(r"^[Ss]\d{2}[Ee]\d{2}$", filename):
+    if re.match(r"^[Ss]\d{2}[Ee]\d{2,4}$", filename):
         return filename + ext
 
     season, episode = _extract_season_episode(filename)

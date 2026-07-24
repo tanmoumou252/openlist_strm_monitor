@@ -256,6 +256,46 @@ class TestGhostProtection:
 # ===========================================================================
 
 
+class TestHandleANonStrm:
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = Path(self.tmp) / "a"
+        self.a_dir.mkdir()
+        config = Mock(spec=AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.paths = Mock(b_root=str(self.a_dir / "b"), c_root=str(self.a_dir / "c"))
+        config.behavior = Mock(ghost_protect_seconds=300)
+        config.strm_engine_paths = []
+        db = Mock(spec=Database)
+        db.init_subtitle_table = Mock()
+        with patch("app_service_core.RefreshService"), patch("app_service_core.SyncService"), patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, Mock())
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_binary_non_strm_is_skipped_before_decode(self):
+        image = self.a_dir / "cover.jpg"
+        image.write_bytes(b"\xff\xd8\xff\xe0")
+        with patch("app_service_core.read_strm_webdav_path") as read_strm:
+            self.app.handle_a_created_or_modified(str(image))
+        read_strm.assert_not_called()
+        self.app.db.upsert_a.assert_not_called()
+
+    def test_handle_a_created_or_modified_routes_subtitle_to_process(self):
+        """字幕文件进入 handle_a_created_or_modified 应路由到 process_subtitle_file"""
+        sub = self.a_dir / "movie.srt"
+        sub.write_text("content", encoding="utf-8")
+        with patch.object(self.app, "process_subtitle_file") as mock:
+            self.app.handle_a_created_or_modified(str(sub))
+        mock.assert_called_once()
+
+
+# ===========================================================================
+# TestBuildBPathFromA
+# ===========================================================================
+
+
 class TestBuildBPathFromA:
     def setup_method(self):
         self.tmp = tempfile.mkdtemp()
@@ -302,6 +342,47 @@ class TestBuildBPathFromA:
         """File outside any a_root raises ValueError."""
         with pytest.raises(ValueError, match="不属于任何A根目录"):
             self.app.build_b_path_from_a("/completely/different/path.strm")
+
+    def test_local_episode_name_is_not_overridden_by_webdav_basename(self):
+        """本地集数命名优先于 WebDAV basename 推导"""
+        a_file = self.a_dir / "Show Name" / "S20E10.strm"
+        a_file.parent.mkdir(parents=True, exist_ok=True)
+        a_file.write_text("/mount/show/episode.mp4", encoding="utf-8")
+
+        with patch.object(self.app, "_should_treat_as_movie", return_value=False), \
+             patch("app_service_core.suggest_rename", return_value="S20E10.strm"), \
+             patch("app_service_core._extract_season_episode", return_value=(20, 10)), \
+             patch("app_service_core.extract_season_from_path", return_value=None):
+            result = self.app.build_b_path_from_a(
+                str(a_file), "/番剧/Show/episode - 24 END.mkv")
+
+        assert result.name == "S20E10.strm"
+
+    def test_season_not_derived_from_webdav_path(self):
+        """season 只来自 A 区本地路径/文件名，不从 WebDAV 路径推导"""
+        # A 区本地路径无季信息，但 WebDAV 路径含 Season 5 目录
+        a_file = self.a_dir / "Show Name" / "S01E01.strm"
+        a_file.parent.mkdir(parents=True, exist_ok=True)
+        a_file.write_text("/mount/show/episode.mp4", encoding="utf-8")
+
+        # extract_season_from_path 对本地路径返回 None（本地无 Season 目录）
+        # 对 WebDAV 路径会返回 5（如果仍读取 webdav_path）
+        def _season_side_effect(path):
+            p = str(path)
+            if "Season 5" in p or "season 5" in p:
+                return 5
+            return None
+
+        with patch.object(self.app, "_should_treat_as_movie", return_value=False), \
+             patch("app_service_core.suggest_rename", return_value="S01E01.strm"), \
+             patch("app_service_core._extract_season_episode", return_value=(1, 1)), \
+             patch("app_service_core.extract_season_from_path", side_effect=_season_side_effect):
+            result = self.app.build_b_path_from_a(
+                str(a_file), "/番剧/Show/Season 5/episode.mkv")
+
+        # season 应来自本地 _extract_season_episode (1)，而非 WebDAV 的 Season 5
+        assert "Season 01" in str(result)
+        assert "Season 05" not in str(result)
 
     def test_anime_with_season_dir_adds_season_layer(self):
         """Anime with S01E01 in name gets Season XX folder inserted."""
@@ -1093,10 +1174,56 @@ class TestInitialScanB:
 
         self.db.delete_b_by_local.assert_called_once()
 
+    def test_reconcile_logs_phase_start_and_completion(self, caplog):
+        """B 区历史记录核对有明确的阶段开始和完成日志"""
+        import logging
+        # 设置 B 区磁盘文件和 DB 记录匹配
+        b_file = self.b_dir / "file.strm"
+        b_file.write_text("/mount/file.mp4", encoding="utf-8")
+        from utils import make_strm_fingerprint
+        fp = make_strm_fingerprint("/mount/file.mp4")
+        record = BRecord(
+            local_path=str(b_file),
+            webdav_path="/mount/file.mp4",
+            parent_webdav_path="/mount",
+            source_a_path=None,
+            fingerprint=fp,
+            status="valid",
+            updated_at=0,
+        )
+        self.db.get_all_b_records.return_value = [record]
 
-# ===========================================================================
-# TestCleanupBZombiesUnderFolder
-# ===========================================================================
+        with caplog.at_level(logging.INFO), \
+             patch.object(self.app, "_verify_b_path_lineage", return_value=True):
+            self.app.initial_scan_b()
+
+        assert any("B 区历史记录核对开始" in msg for msg in caplog.messages)
+        assert any("B 区历史记录核对完成" in msg for msg in caplog.messages)
+
+    def test_reconcile_pre_call_debug_logs(self, caplog):
+        """B 区历史核对中关键函数调用前有 DEBUG 日志包含路径"""
+        import logging
+        b_file = self.b_dir / "file.strm"
+        b_file.write_text("/mount/file.mp4", encoding="utf-8")
+        from utils import make_strm_fingerprint
+        fp = make_strm_fingerprint("/mount/file.mp4")
+        record = BRecord(
+            local_path=str(b_file),
+            webdav_path="/mount/file.mp4",
+            parent_webdav_path="/mount",
+            source_a_path=None,
+            fingerprint=fp,
+            status="valid",
+            updated_at=0,
+        )
+        self.db.get_all_b_records.return_value = [record]
+
+        with caplog.at_level(logging.DEBUG), \
+             patch.object(self.app, "_verify_b_path_lineage", return_value=True):
+            self.app.initial_scan_b()
+
+        # 验证调用前日志包含当前路径
+        assert any("lineage 校验" in msg and str(b_file) in msg for msg in caplog.messages)
 
 
 class TestCleanupBZombiesUnderFolder:
@@ -1463,6 +1590,11 @@ class TestBFileScore:
 
     def test_is_standard_media_name_1x1(self):
         assert self.app._is_standard_media_name("Show.1x1.strm") is True
+
+    def test_is_standard_media_name_large_episode_boundary(self):
+        assert self.app._is_standard_media_name("Show.S21E1088.strm") is True
+        assert self.app._is_standard_media_name("Show.S01E9999.strm") is True
+        assert self.app._is_standard_media_name("Show.S01E10000.strm") is False
 
     def test_is_standard_media_name_not_standard(self):
         assert self.app._is_standard_media_name("random_file.strm") is False

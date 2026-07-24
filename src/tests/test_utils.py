@@ -233,6 +233,12 @@ class TestReadStrmWebdavPath:
         result = read_strm_webdav_path(str(strm_file))
         assert result == "/some/webdav/path.mp4"
 
+    def test_malformed_strm_returns_none(self, tmp_path):
+        """畸形 STRM（二进制垃圾）应返回 None 而非抛出异常"""
+        path = tmp_path / "bad.strm"
+        path.write_bytes(b"\xff\xfe\x00")
+        assert read_strm_webdav_path(path) is None
+
 
 # ===========================================================================
 # TestFileUtils

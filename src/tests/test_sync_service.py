@@ -223,7 +223,11 @@ class TestSyncServiceScanAToBFullSync:
         self._setup_records(app, records, tmp_path)
         b_root = tmp_path / "b"
         b_root.mkdir()
-        app.build_b_path_from_a.return_value = b_root / "file1.strm"
+        # 两个源映射到不同 B 目标（非冲突场景）
+        def _build_side_effect(local_path, webdav_path=None):
+            name = Path(local_path).stem
+            return b_root / f"{name}.strm"
+        app.build_b_path_from_a.side_effect = _build_side_effect
 
         svc = SyncService(app)
         mock_conn = self._make_bulk_conn_mock()
@@ -250,11 +254,8 @@ class TestSyncServiceScanAToBFullSync:
         with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
             svc.scan_a_to_b_full_sync(valid_engine_paths=["/engine"])
 
-        # _sync_one_record is called for all records; filtering happens inside it
-        assert mock_sync.call_count == 2
-        # Verify valid_engine_paths is passed through
-        for call in mock_sync.call_args_list:
-            assert call[0][1] == ["/engine"]
+        # 两遍结构中，过滤在索引阶段完成，只有 1 条通过引擎路径过滤
+        assert mock_sync.call_count == 1
 
     def test_full_sync_skip_ghost_protected(self, tmp_path):
         app = _make_app(tmp_path)
@@ -270,7 +271,8 @@ class TestSyncServiceScanAToBFullSync:
         with patch.object(svc, "_sync_one_record", return_value="skip_ghost") as mock_sync:
             svc.scan_a_to_b_full_sync()
 
-        mock_sync.assert_called_once()
+        # 两遍结构中，ghost 检查在索引阶段完成，_sync_one_record 不被调用
+        mock_sync.assert_not_called()
 
     def test_full_sync_skip_missing_source(self, tmp_path):
         app = _make_app(tmp_path)
@@ -286,18 +288,30 @@ class TestSyncServiceScanAToBFullSync:
         with patch.object(svc, "_sync_one_record", return_value="skip_missing") as mock_sync:
             svc.scan_a_to_b_full_sync()
 
-        mock_sync.assert_called_once()
+        # 两遍结构中，文件存在性检查在索引阶段完成，_sync_one_record 不被调用
+        mock_sync.assert_not_called()
 
-    def _setup_bulk_records(self, app: Mock, count: int):
-        """Set up db mocks for *count* A records without writing files to disk.
+    def _setup_bulk_records(self, app: Mock, count: int, tmp_path: Path = None):
+        """Set up db mocks for *count* A records and write files to disk.
 
-        _sync_one_record is patched by the caller, so real files are not needed.
+        _sync_one_record is patched by the caller, so real STRM content
+        is not needed, but the files must exist for the index pass to pass.
         """
-        records = [_make_a_record(f"/a/f{i}.strm", f"/m/f{i}.mp4", "/m")
+        base_dir = tmp_path if tmp_path else Path("/a")
+        records = [_make_a_record(str(base_dir / f"f{i}.strm"), f"/m/f{i}.mp4", "/m")
                    for i in range(count)]
+        # Write files to disk so the index pass doesn't skip them
+        for rec in records:
+            p = Path(rec.local_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(rec.webdav_path, encoding="utf-8")
         app.db.get_all_a_records.return_value = records
         app.db.get_all_ghost_protected_paths.return_value = set()
         app.db.get_all_b_fingerprints.return_value = set()
+        # 每个记录映射到不同的 B 目标路径（避免全部冲突）
+        b_root = tmp_path / "b" if tmp_path else Path("/b")
+        b_root.mkdir(exist_ok=True)
+        app.build_b_path_from_a.side_effect = lambda local, webdav=None: b_root / Path(local).name
 
     def test_full_sync_with_bulk_mode_single_commit(self, tmp_path):
         """use_bulk=True with >BATCH_COMMIT_SIZE records: exactly 1 commit.
@@ -307,7 +321,7 @@ class TestSyncServiceScanAToBFullSync:
         """
         app = _make_app(tmp_path)
         N = 1001  # > BATCH_COMMIT_SIZE (1000)
-        self._setup_bulk_records(app, N)
+        self._setup_bulk_records(app, N, tmp_path)
 
         svc = SyncService(app)
         mock_conn = self._make_bulk_conn_mock()
@@ -329,7 +343,7 @@ class TestSyncServiceScanAToBFullSync:
         """
         app = _make_app(tmp_path)
         N = 1001  # > BATCH_COMMIT_SIZE (1000)
-        self._setup_bulk_records(app, N)
+        self._setup_bulk_records(app, N, tmp_path)
 
         svc = SyncService(app)
         mock_conn = self._make_bulk_conn_mock()
@@ -351,7 +365,7 @@ class TestSyncServiceScanAToBFullSync:
         """
         app = _make_app(tmp_path)
         N = 1000  # exactly BATCH_COMMIT_SIZE
-        self._setup_bulk_records(app, N)
+        self._setup_bulk_records(app, N, tmp_path)
 
         svc = SyncService(app)
         mock_conn = self._make_bulk_conn_mock()
@@ -368,7 +382,7 @@ class TestSyncServiceScanAToBFullSync:
         """use_bulk=True with <BATCH_COMMIT_SIZE records: still 1 commit."""
         app = _make_app(tmp_path)
         N = 999
-        self._setup_bulk_records(app, N)
+        self._setup_bulk_records(app, N, tmp_path)
 
         svc = SyncService(app)
         mock_conn = self._make_bulk_conn_mock()
@@ -384,7 +398,7 @@ class TestSyncServiceScanAToBFullSync:
         """use_bulk=False with <BATCH_COMMIT_SIZE records: 1 trailing commit only."""
         app = _make_app(tmp_path)
         N = 999
-        self._setup_bulk_records(app, N)
+        self._setup_bulk_records(app, N, tmp_path)
 
         svc = SyncService(app)
         mock_conn = self._make_bulk_conn_mock()
@@ -400,7 +414,8 @@ class TestSyncServiceScanAToBFullSync:
     def test_full_sync_caches_cleared_on_exception(self, tmp_path):
         """Caches are cleared even if an exception occurs."""
         app = _make_app(tmp_path)
-        records = [_make_a_record("/a/f.strm", "/m/f.mp4", "/m")]
+        a_root = app.a_roots[0]
+        records = [_make_a_record(str(a_root / "f.strm"), "/m/f.mp4", "/m")]
         self._setup_records(app, records, tmp_path)
 
         svc = SyncService(app)
@@ -426,7 +441,8 @@ class TestSyncServiceScanAToBFullSync:
         self._setup_records(app, records, tmp_path)
         b_root = tmp_path / "b"
         b_root.mkdir()
-        app.build_b_path_from_a.return_value = b_root / "file1.strm"
+        # 两个源映射到不同 B 目标
+        app.build_b_path_from_a.side_effect = lambda local, webdav=None: b_root / Path(local).name
 
         svc = SyncService(app)
         mock_conn = self._make_bulk_conn_mock()
@@ -461,6 +477,76 @@ class TestSyncServiceScanAToBFullSync:
             svc.scan_a_to_b_full_sync()
             # Lineage verification is skipped in bulk sync
             assert mock_lineage.call_count == 0
+
+    def test_full_sync_target_conflict_all_sources_skipped(self, tmp_path):
+        """两个 A 源映射到同一 B 目标但 WebDAV 不同 → 全部跳过，无文件拷贝"""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        records = [
+            _make_a_record(str(a_root / "ep10_a.strm"), "/show/ep10_ver1.mp4", "/show"),
+            _make_a_record(str(a_root / "ep10_b.strm"), "/show/ep10_ver2.mp4", "/show"),
+        ]
+        self._setup_records(app, records, tmp_path)
+        # 两个源计算出相同的 B 目标路径
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        app.build_b_path_from_a.return_value = b_root / "Season 20" / "S20E10.strm"
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
+            svc.scan_a_to_b_full_sync()
+
+        # 冲突目标全部在索引阶段被跳过，_sync_one_record 不被调用
+        mock_sync.assert_not_called()
+
+    def test_full_sync_target_conflict_same_webdav_not_conflict(self, tmp_path):
+        """两个 A 源映射到同一 B 目标且 WebDAV 相同 → 不是冲突，正常去重"""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        records = [
+            _make_a_record(str(a_root / "ep10_a.strm"), "/show/ep10.mp4", "/show"),
+            _make_a_record(str(a_root / "ep10_b.strm"), "/show/ep10.mp4", "/show"),
+        ]
+        self._setup_records(app, records, tmp_path)
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        app.build_b_path_from_a.return_value = b_root / "Season 20" / "S20E10.strm"
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
+            svc.scan_a_to_b_full_sync()
+
+        # 同 WebDAV 的两个源都通过索引阶段，由 _sync_one_record 去重
+        assert mock_sync.call_count == 2
+
+    def test_full_sync_no_network_during_index_phase(self, tmp_path):
+        """索引阶段不触发任何网络调用"""
+        import shutil
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        records = [
+            _make_a_record(str(a_root / "f1.strm"), "/m/f1.mp4", "/m"),
+        ]
+        self._setup_records(app, records, tmp_path)
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        app.build_b_path_from_a.return_value = b_root / "f1.strm"
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock()
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+
+        # 确保 admin_api（网络客户端）在扫描阶段未被调用
+        with patch.object(svc, "_sync_one_record", return_value="success"):
+            svc.scan_a_to_b_full_sync()
+        app.admin_api.check_exists.assert_not_called()
 
 
 # ===========================================================================

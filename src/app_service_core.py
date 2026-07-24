@@ -63,6 +63,9 @@ def ensure_base_dir_first():
 
 ensure_base_dir_first()
 
+# 慢操作阈值（秒），超过此阈值输出 WARNING 以便定位卡顿来源
+B_SCAN_SLOW_OPERATION_SECONDS = 3.0
+
 # autopep8: on
 # isort: on
 
@@ -459,9 +462,17 @@ class AppService:
         self.initial_scan_b()
         logging.info("[启动] B 区扫描耗时: %.1fs", time.time() - t_phase)
         
+        t_sub = time.time()
         self.sync_protected_roots_from_config()
+        logging.info("[启动] 同步保护根目录耗时: %.1fs", time.time() - t_sub)
+
+        t_sub = time.time()
         self.scan_removed_protected_roots()
+        logging.info("[启动] 扫描已移除保护根耗时: %.1fs", time.time() - t_sub)
+
+        t_sub = time.time()
         self.persist_current_roots_snapshot()
+        logging.info("[启动] 持久化根目录快照耗时: %.1fs", time.time() - t_sub)
         
         t_phase = time.time()
         self.initial_scan_a(use_bulk=True)
@@ -478,9 +489,13 @@ class AppService:
         else:
             logging.info("[启动] 跳过 A→B 全量同步（sync_on_startup=false）")
         
+        t_sub = time.time()
         self.start_watchers()
+        logging.info("[启动] Watcher 启动耗时: %.1fs", time.time() - t_sub)
         # 启动后立即扫描 A 区字幕文件（补偿 initial_scan_a 不处理字幕）
+        t_sub = time.time()
         self._scan_a_subtitles_on_startup()
+        logging.info("[启动] A 区字幕扫描耗时: %.1fs", time.time() - t_sub)
         self.refresh_service.start()
         logging.info("嗨嗨，应用启动成功咯！(总耗时 %.1fs)", time.time() - t_start)
 
@@ -548,9 +563,8 @@ class AppService:
             return self.b_root / rel
         suggested_name = suggest_rename(a_local)
         if suggested_name and webdav_path:
-            season = extract_season_from_path(webdav_path)
-            if season is None:
-                season = extract_season_from_path(a_local)
+            # season 只来自 A 区本地路径/文件名，不从 WebDAV 路径推导
+            season = extract_season_from_path(a_local)
             if season is None:
                 season, _ = _extract_season_episode(a_local.name)
             _, episode = _extract_season_episode(a_local.name)
@@ -1000,6 +1014,7 @@ class AppService:
 
     def _scan_b_disk(self) -> tuple[dict, dict] | None:
         """扫描 B 区磁盘文件，返回 (fingerprint_to_paths, path_to_data)"""
+        logging.info("[初始化] B 区磁盘扫描开始...")
         b_root = Path(self.config.paths.b_root)
         if not b_root.exists():
             logging.info("[初始化] B 区根目录不存在，跳过扫描")
@@ -1036,6 +1051,7 @@ class AppService:
 
     def _load_b_db_records(self) -> list | None:
         """加载 B 区数据库记录，失败返回 None"""
+        logging.info("[初始化] B 区数据库记录加载开始...")
         try:
             all_b_records = self.db.get_all_b_records()
             logging.info("[初始化] 成功读取 B 区历史数据库记录: %d 条", len(all_b_records))
@@ -1051,6 +1067,8 @@ class AppService:
         processed: set
     ) -> None:
         """对比历史 DB 记录与磁盘数据，处理越界/迁移/删除"""
+        t_start = time.time()
+        logging.info("[初始化] B 区历史记录核对开始 (%d 条)", len(db_records))
         disk_fingerprint_to_paths, disk_path_to_data = disk_data
 
         total_records = len(db_records)
@@ -1072,19 +1090,31 @@ class AppService:
                 last_log_time = current_time
             
             if not db_fingerprint:
+                logging.debug("[B区历史核对] 删除无指纹记录: %s", db_local_path)
                 self.db.delete_b_by_local(db_local_path)
                 continue
             
             # 历史 DB 记录在磁盘上存在且指纹匹配
             if db_local_path in disk_path_to_data and disk_path_to_data[db_local_path]["fp"] == db_fingerprint:
                 webdav_path = disk_path_to_data[db_local_path]["webdav"]
+                logging.debug("[B区历史核对] lineage 校验: %s", db_local_path)
+                t_op = time.time()
                 if not self._verify_b_path_lineage(db_local_path, webdav_path):
+                    op_elapsed = time.time() - t_op
+                    if op_elapsed > B_SCAN_SLOW_OPERATION_SECONDS:
+                        logging.warning("[B区历史核对] lineage 校验耗时 %.1fs: %s", op_elapsed, db_local_path)
                     logging.warning("[B区历史越界清理] 物理删除历史遗留越界文件: %s", db_local_path)
+                    logging.debug("[B区历史核对] 物理删除: %s", db_local_path)
                     safe_remove_file(db_local_path)
+                    logging.debug("[B区历史核对] DB删除: %s", db_local_path)
                     self.db.delete_b_by_local(db_local_path)
+                    logging.debug("[B区历史核对] 身份刷新 fp=%s", db_fingerprint)
                     self.refresh_identity_current_b_path(db_fingerprint)
                     processed.add(db_local_path)
                     continue
+                op_elapsed = time.time() - t_op
+                if op_elapsed > B_SCAN_SLOW_OPERATION_SECONDS:
+                    logging.warning("[B区历史核对] lineage 校验耗时 %.1fs: %s", op_elapsed, db_local_path)
                 processed.add(db_local_path)
                 continue
             
@@ -1095,21 +1125,34 @@ class AppService:
             
             for candidate_path in available_paths:
                 candidate_webdav = disk_path_to_data[candidate_path]["webdav"]
+                logging.debug("[B区历史核对] 候选路径 lineage 校验: %s", candidate_path)
+                t_op = time.time()
                 if self._verify_b_path_lineage(candidate_path, candidate_webdav):
                     valid_new_path = candidate_path
+                    op_elapsed = time.time() - t_op
+                    if op_elapsed > B_SCAN_SLOW_OPERATION_SECONDS:
+                        logging.warning("[B区历史核对] lineage 校验耗时 %.1fs: %s", op_elapsed, candidate_path)
                     break
                 else:
+                    op_elapsed = time.time() - t_op
+                    if op_elapsed > B_SCAN_SLOW_OPERATION_SECONDS:
+                        logging.warning("[B区历史核对] lineage 校验耗时 %.1fs: %s", op_elapsed, candidate_path)
                     logging.warning("[B区越界清理] 发现非法跨目录移动，物理删除: %s", candidate_path)
                     safe_remove_file(candidate_path)
                     processed.add(candidate_path)
             
             if valid_new_path:
+                logging.debug("[B区历史核对] 路径迁移: %s -> %s", db_local_path, valid_new_path)
                 self._handle_b_record_migration(db_local_path, valid_new_path, db_fingerprint)
                 processed.add(valid_new_path)
             else:
+                logging.debug("[B区历史核对] 无匹配磁盘路径，删除并刷新: %s", db_local_path)
                 self.db.delete_b_by_local(db_local_path)
                 self.refresh_identity_current_b_path(db_fingerprint)
                 logging.debug("[B区自同步] 删除失效数据库记录: %s", db_local_path)
+
+        logging.info("[初始化] B 区历史记录核对完成 (%d/%d 条, %.1fs)",
+                     processed_count, total_records, time.time() - t_start)
 
     def _handle_b_record_migration(self, old_path: str, new_path: str, fingerprint: str) -> None:
         """处理 B 区记录的路径迁移"""
@@ -1133,6 +1176,8 @@ class AppService:
 
     def _insert_new_b_records(self, disk_data: tuple[dict, dict], processed: set) -> None:
         """插入磁盘上新的 B 区记录"""
+        t_start = time.time()
+        logging.info("[初始化] B 区新增记录处理开始...")
         _, disk_path_to_data = disk_data
         new_insert_count = 0
         
@@ -1163,7 +1208,7 @@ class AppService:
                 if new_insert_count % 200 == 0:
                     logging.info("[初始化] B 区新增记录进度: %d 条", new_insert_count)
         
-        logging.info("[初始化] B 区新增 %d 条数据库记录", new_insert_count)
+        logging.info("[初始化] B 区新增记录处理完成: %d 条 (%.1fs)", new_insert_count, time.time() - t_start)
 
     def initial_scan_a(self, use_bulk: bool = False):
         return self.sync_service.initial_scan_a(use_bulk=use_bulk)
@@ -1679,13 +1724,13 @@ class AppService:
 
     def _is_standard_media_name(self, name: str) -> bool:
         name = name.lower()
-        if re.search(r"s\d{1,2}e\d{1,2}", name):
+        if re.search(r"s\d{1,2}e\d{1,4}(?!\d)", name):
             return True
-        if re.search(r"\d{1,2}x\d{1,2}", name):
+        if re.search(r"\d{1,2}x\d{1,4}(?!\d)", name):
             return True
-        if re.search(r".*- s\d{1,2}e\d{1,2} -", name):
+        if re.search(r".*- s\d{1,2}e\d{1,4}(?!\d) -", name):
             return True
-        if re.search(r"season \d{1,2}/episode \d{1,2}", name):
+        if re.search(r"season \d{1,2}/episode \d{1,4}(?!\d)", name):
             return True
         return False
 
