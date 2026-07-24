@@ -448,19 +448,40 @@ class TestLogIssuesSimulation:
     # ──────────────────────────────────────────────────────────────
 
     def test_collision_targets_detected(self):
-        """碰撞候选目标应在日志中被检测并记录（目标路径冲突 WARNING）。"""
+        """修复后：噪音标签剥离应消除 1920x1080 类碰撞，不再产生冲突。"""
         self._run_full_sync()
         log = self._read_log()
-        # 碰撞候选存在时，日志应含冲突检测输出
-        # （若 build_b_path_from_a 修复后不再碰撞，则此断言宽松放行）
-        has_conflict_log = ("目标路径冲突" in log) or ("目标冲突" in log)
+        
+        # 修复后，1920x1080 类噪音被剥离，不应产生目标路径冲突
+        # 若仍有其他原因导致的冲突，日志应记录
+        if "目标路径冲突" in log:
+            # 有冲突 → 验证不是 1920x1080 噪音导致的
+            assert "1920x1080" not in log, "修复后仍检测到 1920x1080 噪音导致的碰撞"
+        
         # 至少不应崩溃，且日志含索引阶段
         assert "索引阶段完成" in log
-        # 记录碰撞检测结果供排查
-        if self.manifest["collision_candidates"]:
-            # 有碰撞候选 → 期望日志反映冲突处理（检测或跳过）
-            # 宽松：只要同步正常完成即通过，冲突详情写入留存日志
-            assert "A -> B 全量同步完成" in log
+        assert "A -> B 全量同步完成" in log
+
+    def test_manual_review_list_generated(self):
+        """若存在冲突，应生成人工处理清单文件。"""
+        self._run_full_sync()
+        log = self._read_log()
+        
+        # 修复后，1920x1080 类碰撞应消失，不应生成清单文件
+        review_files = list(B_DIR.glob("_MANUAL_REVIEW_*.md"))
+        
+        if "目标路径冲突" in log:
+            # 有冲突 → 应生成清单文件
+            assert len(review_files) > 0, "检测到冲突但未生成人工处理清单"
+            # 验证清单文件内容
+            content = review_files[0].read_text(encoding="utf-8")
+            assert "# 人工处理清单" in content
+            assert "A 区路径" in content
+            assert "WebDAV 路径" in content
+            assert "目标路径" in content
+        else:
+            # 无冲突 → 不应生成清单文件
+            assert len(review_files) == 0, "无冲突但生成了人工处理清单"
 
     def test_no_wrong_override_in_b(self):
         """B 区每个 .strm 的 webdav 内容应与某个 A 源一致（无串改/错误覆盖）。"""

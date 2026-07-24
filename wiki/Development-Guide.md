@@ -130,6 +130,8 @@ python -m pytest src/tests/ -v
 - **simple 分词器加载与版本**：`src/tokenizers/simple/` 下的 `simple.dll` + `VERSION` + `README.md`，由 `database.py` 的 `_load_simple_tokenizer` 与 `tmdb_watchlist_db.py` 的 `_load_simple_into` 加载，版本可读性由 `test_simple_version_readable` 校验。
 - **孤儿行清理**：`test_fts_orphan_cleanup.py` 验证 FTS 索引与业务表的孤儿记录清理逻辑。
 - **新手引导端到端**：`test_onboarding_e2e.py` 覆盖新手引导全流程的端到端测试。
+- **噪音标签剥离**：`media_renamer.py` 的 `suggest_rename` 在提取季集号前，会先剥离文件名中的噪音标签（分辨率/编码/音频等），避免 `1920x1080` 被误解析为 `S20E1080`。剥离逻辑由 `_strip_noise_tags` 函数实现，使用 `NOISE_TAG_PATTERNS` 常量定义的正则模式。
+- **人工处理清单**：当 `scan_a_to_b_full_sync` 检测到目标路径冲突时，会在 B 区根目录生成 `_MANUAL_REVIEW_YYYYMMDD_HHMMSS.md` 清单文件，列出被跳过的 A 源路径、WebDAV 路径、目标路径和原因，供用户人工处理。
 
 ## 代码规范
 

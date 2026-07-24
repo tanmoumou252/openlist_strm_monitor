@@ -20,6 +20,22 @@ SEASON_EPISODE_PATTERNS = [
     (re.compile(r"(\d{1,2})[xX](\d{1,4})(?!\d)"), "S{season:02d}E{episode:02d}"),
 ]
 
+# ========== 噪音标签剥离（用于 suggest_rename 预处理） ==========
+NOISE_TAG_PATTERNS = [
+    # 分辨率（如 1920x1080, 1280x720, 3840x2160）
+    # 使用数字边界而非单词边界，因为 _ 是单词字符，\b 无法匹配 _1920 的边界
+    re.compile(r"(?<![0-9])1920x1080(?![0-9])", re.IGNORECASE),
+    re.compile(r"(?<![0-9])1280x720(?![0-9])", re.IGNORECASE),
+    re.compile(r"(?<![0-9])3840x2160(?![0-9])", re.IGNORECASE),
+    re.compile(r"(?<![0-9])2560x1440(?![0-9])", re.IGNORECASE),
+    # 常见媒体标签（括号/下划线/空格/点号包围，或位于字符串末尾）
+    re.compile(r"[\[\(\s._-](1080p|2160p|720p|4k|hdr|bd|blu-?ray|web-?dl|webrip|hdtv|x264|x265|hevc|avc|aac|flac|ddp?|atmos|remux|proper|repack|10bit|8bit)(?=[\]\)\s._-]|$)", re.IGNORECASE),
+    # 码率/采样率（如 320kbps, 48kHz）
+    re.compile(r"\b\d{2,4}(?:kbps|khz)\b", re.IGNORECASE),
+    # 年份（如 2020, 2024）
+    re.compile(r"[\[\(\s._-]((?:19|20)\d{2})(?=[\]\)\s._-]|$)"),
+]
+
 # 中文数字映射
 CN_NUMBERS = {
     "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
@@ -74,6 +90,20 @@ def extract_season_from_path(path: str | Path) -> int | None:
             return _cn_to_int(cn_match.group(1))
 
     return None
+
+
+def _strip_noise_tags(filename: str) -> str:
+    """剥离文件名中的噪音标签（分辨率/编码/音频等），返回清理后的文件名。
+    
+    用于 suggest_rename 提取季集号前预处理，避免 1920x1080 被误解析为 S20E1080。
+    剥离后保留原始空格/标点结构，不影响后续提取逻辑。
+    """
+    cleaned = filename
+    for pattern in NOISE_TAG_PATTERNS:
+        cleaned = pattern.sub(" ", cleaned)
+    # 合并多余空格
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 
 def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
@@ -286,7 +316,9 @@ def suggest_rename(src_path: str | Path) -> str | None:
     if re.match(r"^[Ss]\d{2}[Ee]\d{2,4}$", filename):
         return filename + ext
 
-    season, episode = _extract_season_episode(filename)
+    # 先剥离噪音标签（分辨率/编码/音频等），避免 1920x1080 被误解析为 S20E1080
+    cleaned_filename = _strip_noise_tags(filename)
+    season, episode = _extract_season_episode(cleaned_filename)
     if season is not None and episode is not None:
         # 返回完整格式 S01E01.ext
         new_name = f"S{season:02d}E{episode:02d}{ext}"

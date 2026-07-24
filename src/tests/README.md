@@ -234,6 +234,17 @@ python -m pytest src/tests/
 python -m pytest src/tests/test_log_issues_simulation.py -v
 ```
 
+### 噪音标签剥离修复
+
+`test_log_issues_simulation.py` 验证了 `suggest_rename` 的噪音标签剥离修复：
+- 修复前：`1920x1080` 被误解析为 `S20E1080`，导致 24 集/12 集全部映射到同一目标
+- 修复后：分辨率/编码/音频等噪音标签在提取前被剥离，避免误解析
+- 合法大集号（如 `S18E760`, `21x1088`）不受影响
+
+### 人工处理清单
+
+当 A→B 同步存在目标路径冲突时，程序会在 B 区根目录生成 `_MANUAL_REVIEW_*.md` 清单文件，列出被跳过的 A 源，供用户人工确认命名后手动处理。
+
 ## 相关文档
 
 - [API 文档](../../docs/)

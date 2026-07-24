@@ -179,6 +179,32 @@ class TestExtractSeasonEpisode:
         assert e is None
 
 
+class TestNoiseTagStripping:
+    """噪音标签剥离测试（验证 suggest_rename 的预处理）"""
+
+    def test_suggest_rename_with_noise_tags(self):
+        """含噪音标签的文件名应返回 None（无法提取）而非错误解析"""
+        # 1920x1080 噪音导致无法提取 → 返回 None
+        assert suggest_rename("Penguin Drum - 01 (BD 1920x1080 x.264 FLACx2).strm") is None
+        assert suggest_rename("Dynamis_One_..._01_Baha_1920x1080_AVC.strm") is None
+        # 合法命名不受影响
+        assert suggest_rename("ShowName S01E01.mkv") == "S01E01.mkv"
+        assert suggest_rename("ShowName S18E760.mkv") == "S18E760.mkv"
+        assert suggest_rename("ShowName 21x1088.mp4") == "S21E1088.mp4"
+
+    def test_strip_noise_tags_function(self):
+        """直接测试 _strip_noise_tags 函数"""
+        from media_renamer import _strip_noise_tags
+        # 分辨率应被剥离
+        assert "1920x1080" not in _strip_noise_tags("Penguin Drum - 01 (BD 1920x1080 x.264 FLACx2)")
+        assert "1080p" not in _strip_noise_tags("Show.Name.1080p.BluRay.x264")
+        # 编码标签应被剥离
+        assert "x264" not in _strip_noise_tags("Show.Name.1080p.BluRay.x264")
+        assert "FLAC" not in _strip_noise_tags("Show.Name.FLAC.1080p")
+        # 年份应被剥离
+        assert "2020" not in _strip_noise_tags("Show.Name.2020.1080p")
+
+
 # ============================================================
 # detect_media_type_from_path
 # ============================================================

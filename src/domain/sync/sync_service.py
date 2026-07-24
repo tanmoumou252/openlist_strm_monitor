@@ -392,6 +392,49 @@ class SyncService:
             c["skip_filtered"], c["skip_exists_diff"],
             c["skip_target_conflict"], c["fail"])
 
+        # 生成人工处理清单（冲突目标）
+        if target_conflicts:
+            self._write_manual_review_list(target_index, target_conflicts)
+
+    def _write_manual_review_list(self, target_index: dict, target_conflicts: set) -> None:
+        """将冲突跳过的 A 源清单写入 B 区根目录的清单文件。
+        
+        格式：Markdown 表格，含 A 源路径、WebDAV 路径、目标路径、原因。
+        文件名：`_MANUAL_REVIEW_YYYYMMDD_HHMMSS.md`
+        """
+        from pathlib import Path, PosixPath, WindowsPath
+        b_root = self.app.b_root
+        # 在测试场景中 self.app.b_root 可能是 Mock 对象，不生成清单
+        if not isinstance(b_root, (Path, PosixPath, WindowsPath)):
+            return
+        
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        list_path = b_root / f"_MANUAL_REVIEW_{ts}.md"
+        
+        lines = [
+            "# 人工处理清单",
+            "",
+            f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            "以下 A 区文件因目标路径冲突被跳过，需人工确认命名后手动复制到 B 区。",
+            "",
+            "| A 区路径 | WebDAV 路径 | 目标路径 | 原因 |",
+            "|----------|-------------|----------|------|",
+        ]
+        
+        for target_path in sorted(target_conflicts):
+            sources = target_index[target_path]
+            for local_path, webdav_path, fingerprint, idx in sources:
+                lines.append(f"| `{local_path}` | `{webdav_path}` | `{target_path}` | 目标路径冲突 |")
+        
+        try:
+            list_path.write_text("\n".join(lines), encoding="utf-8")
+            logging.info("[初始化] 人工处理清单已生成: %s (%d 个冲突目标)", 
+                         list_path, len(target_conflicts))
+        except Exception as e:
+            logging.warning("[初始化] 生成人工处理清单失败: %s", e)
+
     def _sync_one_record(self, rec, valid_engine_paths, conn,
                          dedup_queue: list | None = None) -> str:
         """处理单条 A 记录的 A→B 同步。返回状态字符串。
