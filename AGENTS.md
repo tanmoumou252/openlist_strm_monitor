@@ -64,7 +64,7 @@ This file provides guidance to AI coding assistants when working with code in th
 | **File watching** | `watchdog` library |
 | **HTTP client** | `requests` library |
 | **WebDAV XML** | `lxml` library |
-| **Testing** | pytest (37 test files under `src/tests/`); dev deps in `src/tests/requirements-dev.txt` |
+| **Testing** | pytest (35 test files under `src/tests/`); dev deps in `src/tests/requirements-dev.txt` |
 
 ## Directory Structure
 
@@ -103,7 +103,7 @@ openlist_strm_bridge/
 │   ├── domain/storage/
 │   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py
 │   ├── tokenizers/              # simple/ (cppjieba wrapper for Chinese search)
-│   └── tests/                   # 37 test files
+│   └── tests/                   # 35 test files
 ├── dist/                        # Built frontend (Vite output)
 │   └── assets/                  # Hashed JS/CSS/font files
 ├── wiki/                        # Documentation

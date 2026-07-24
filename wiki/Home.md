@@ -95,7 +95,7 @@ openlist_strm_bridge/
 │   ├── utils/error_translator.py # 错误信息翻译
 │   ├── utils/bootstrap.py       # 启动引导辅助
 │   ├── webui/                   # WebUI 服务端 + 前端源码
-│   ├── tests/                   # 测试（37 个测试文件）
+│   ├── tests/                   # 测试（35 个测试文件）
 │   └── tokenizers/              # simple 中文分词器（simple.dll 等资源）
 ├── dist/                        # 构建后的前端产物（Vite 输出）
 ├── docs/                        # API 文档、设计文档

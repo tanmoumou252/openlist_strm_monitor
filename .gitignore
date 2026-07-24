@@ -192,6 +192,9 @@ Superpower.md
 openlist_strm_monitor_debug.bat
 test_logs/
 src/tests/test_logs/
+# 日志问题模拟测试的生成目录（幂等生成/清理，不入库）
+src/tests/strm.test.A/
+src/tests/strm.test.B/
 .playwright-mcp/
 *.yml
 *.csv

@@ -1,6 +1,6 @@
 # 测试脚本说明
 
-本目录包含 `openlist_strm_bridge` 项目的全部测试文件，当前共 **33** 个 pytest 测试文件 + **4** 个独立手动脚本。
+本目录包含 `openlist_strm_bridge` 项目的全部测试文件，当前共 **35** 个 pytest 测试文件 + **4** 个独立手动脚本。
 
 所有测试均从**项目根目录**运行（`src/tests/conftest.py` 负责 `src/` 路径注入），推荐命令：
 
@@ -20,6 +20,7 @@ python -m pytest src/tests/ -v
 | `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试 |
 | `test_refresh_service.py` | 周期性 WebDAV 刷新服务测试 |
 | `test_bootstrap.py` | 启动路径工具（`ensure_base_dir_first`、`load_local_module`）测试 |
+| `test_log_issues_simulation.py` | 三类 `strm_bridge.log` 日志问题模拟验证（非 STRM 文件解码、B 区阶段日志、A→B 路径冲突检测与安全跳过） |
 
 ### 数据库 / FTS
 
@@ -210,6 +211,28 @@ python -m pytest src/tests/
 | `debug_console.py` | 调试控制台交互工具（数据库/区域状态检查） |
 | `verify_login_flow.py` | 登录流程手动验证脚本 |
 | `_test_helpers.py` | 测试共用辅助函数（被其他测试文件 import） |
+
+## 日志问题模拟测试（`test_log_issues_simulation.py`）
+
+该测试专门针对 `strm_bridge.log` 中出现的三类真实问题进行模拟与审核，运行机制与一般单元测试不同，需注意目录与日志的留存策略：
+
+| 目录 / 文件 | 用途 | 测试后处理 |
+|------|------|------|
+| `src/tests/strm.test.A/` | 模拟生成的源文件（~100 个 STRM / 图片 / 字幕 / 畸形文件，幂等刷新） | **保留**，下次复用 |
+| `src/tests/strm.test.B/` | 真实 `scan_a_to_b_full_sync` 复制出的目标文件，审核对象 | **删除**，保持 tests 文件夹干净 |
+| `<项目根>/test_logs/log_issues_sim_<时间戳>.log` | 本轮测试日志（含同步阶段标记、冲突 WARNING） | **保留**，供排查 |
+
+三类问题与验证方式：
+
+1. **非 STRM 文件进入 STRM 解码 → UnicodeDecodeError**：验证 `handle_a_created_or_modified` 对 `.jpg/.png/.nfo` 不触发 `read_strm_webdav_path`，二进制 JPEG 返回 None 不崩溃，且 B 区不含非 STRM 文件。
+2. **B 区同步长时间静默**：验证 `scan_a_to_b_full_sync` 日志含 `索引阶段完成` / `进度` / `全量同步完成` 等阶段标记，且相邻 INFO 日志无长间隔。
+3. **A→B 多源映射到同一 B 目标（路径碰撞）**：用真实 `suggest_rename` 误解析样例（如 `1920x1080` 被当作 `E1080`）复现碰撞，验证冲突被检测、安全跳过、B 区无错误覆盖。
+
+运行方式（仅该文件）：
+
+```bash
+python -m pytest src/tests/test_log_issues_simulation.py -v
+```
 
 ## 相关文档
 
