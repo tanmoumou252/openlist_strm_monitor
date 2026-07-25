@@ -17,7 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext as _nullcontext
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from config import AppConfig
@@ -569,10 +569,15 @@ class AppService:
                 season, _ = _extract_season_episode(a_local.name)
             _, episode = _extract_season_episode(a_local.name)
             if season is not None and episode is not None:
-                if suggested_name:
-                    standard_name = suggested_name
-                else:
-                    standard_name = f"S{season:02d}E{episode:02d}{Path(a_local).suffix}"
+                # 目标文件名保留 WebDAV 源文件 stem 的原始 padding，避免
+                # S04E01 与 S4E01 被标准化成同一个 B 区路径。
+                webdav_name = PurePosixPath(str(webdav_path).replace("\\", "/")).name
+                webdav_stem = Path(webdav_name).stem
+                standard_name = (
+                    f"{webdav_stem}{Path(a_local).suffix}"
+                    if webdav_stem
+                    else suggested_name or f"S{season:02d}E{episode:02d}{Path(a_local).suffix}"
+                )
                 rel_parts = list(rel.parts)
                 has_season_dir = False
                 season_dir_index = -1

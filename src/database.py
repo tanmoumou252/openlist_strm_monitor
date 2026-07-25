@@ -713,7 +713,7 @@ class Database:
             conn.commit()
 
     def get_a_by_local(self, local_path: str) -> ARecord | None:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files WHERE local_path = ?",
                 (local_path,),
@@ -722,7 +722,7 @@ class Database:
             return ARecord(*row) if row else None
 
     def get_b_by_local(self, local_path: str) -> BRecord | None:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
@@ -734,7 +734,7 @@ class Database:
             return BRecord(*row) if row else None
 
     def get_a_by_webdav(self, webdav_path: str) -> ARecord | None:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files WHERE webdav_path = ?",
                 (webdav_path,),
@@ -743,7 +743,7 @@ class Database:
             return ARecord(*row) if row else None
 
     def get_b_by_webdav(self, webdav_path: str) -> list[BRecord]:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
@@ -754,13 +754,13 @@ class Database:
             return [BRecord(*row) for row in cur.fetchall()]
 
     def get_all_a_records(self) -> list[ARecord]:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT local_path, webdav_path, parent_webdav_path, updated_at FROM a_strm_files")
             return [ARecord(*row) for row in cur.fetchall()]
 
     def get_all_b(self) -> list[BRecord]:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute("""
                 SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
                 FROM b_strm_files
@@ -774,7 +774,7 @@ class Database:
             return {row[0] for row in cur.fetchall()}
 
     def get_all_c(self) -> list[CRecord]:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute("""
                 SELECT local_path, webdav_path, original_b_path, ghost_root, moved_at
                 FROM c_ghost_files
@@ -812,7 +812,7 @@ class Database:
             return len(data)
 
     def get_known_folders(self) -> list[str]:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute("SELECT folder_path FROM known_folders")
             return [row[0] for row in cur.fetchall()]
 
@@ -856,7 +856,7 @@ class Database:
                 self.cleanup_expired_ghosts()
                 self._last_ghost_cleanup = now
         
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT expire_time FROM ghost_protection WHERE webdav_path = ?",
                 (webdav_path,),
@@ -899,13 +899,13 @@ class Database:
             conn.commit()
 
     def get_protected_roots(self) -> list[ProtectedRootRecord]:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT root_path, trash_path, active, updated_at FROM protected_roots")
             return [ProtectedRootRecord(r[0], r[1], bool(r[2]), r[3]) for r in cur.fetchall()]
 
     def get_protected_root_paths(self) -> list[str]:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute("SELECT root_path FROM protected_roots")
             return [row[0] for row in cur.fetchall()]
 
@@ -925,7 +925,7 @@ class Database:
             conn.commit()
 
     def get_protected_roots_snapshot_paths(self) -> list[str]:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT root_path FROM protected_roots_snapshot")
             return [row[0] for row in cur.fetchall()]
@@ -943,7 +943,7 @@ class Database:
             conn.commit()
 
     def get_control(self, key: str, default: str = "") -> str:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT control_value FROM sync_control WHERE control_key = ?",
                 (key,),
@@ -953,7 +953,7 @@ class Database:
 
     def get_b_under_root(self, webdav_root: str) -> list[BRecord]:
         pattern = escape_like(webdav_root.rstrip("/")) + "/%"
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
@@ -1007,7 +1007,7 @@ class Database:
             conn.commit()
 
     def get_identity_by_fingerprint(self, fingerprint: str) -> IdentityRecord | None:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT fingerprint, webdav_path, source_a_path, current_b_path, updated_at
@@ -1020,7 +1020,7 @@ class Database:
             return IdentityRecord(*row) if row else None
 
     def get_identity_by_webdav(self, webdav_path: str) -> IdentityRecord | None:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT fingerprint, webdav_path, source_a_path, current_b_path, updated_at
@@ -1185,7 +1185,7 @@ class Database:
             conn.commit()
 
     def get_a_local_path_by_webdav(self, webdav_path: str) -> str | None:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path
@@ -1200,7 +1200,7 @@ class Database:
             return row[0] if row else None
 
     def get_b_instances_by_fingerprint(self, fingerprint: str) -> list[BRecord]:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path,
@@ -1248,7 +1248,7 @@ class Database:
             conn.commit()
 
     def get_b_by_local_full(self, local_path: str) -> BRecord | None:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path,
@@ -1282,7 +1282,7 @@ class Database:
 
     def get_valid_b_instance_by_fingerprint(
             self, fingerprint: str) -> BRecord | None:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path,
@@ -1345,7 +1345,7 @@ class Database:
         """
         返回该 fingerprint 下所有 B 实例
         """
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT local_path, webdav_path, parent_webdav_path,
@@ -1374,7 +1374,7 @@ class Database:
 
     def b_fingerprint_exists(self, fingerprint: str) -> bool:
         """检查 B 区数据库中是否已存在该指纹"""
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT 1 FROM b_strm_files WHERE fingerprint = ? LIMIT 1", (fingerprint,))
             return cur.fetchone() is not None
@@ -1392,7 +1392,7 @@ class Database:
     def get_a_count_under_root(self, cloud_media_root: str) -> int:
         """统计 A 区某个剧集根路径下共有多少集"""
         pattern = escape_like(cloud_media_root.rstrip('/')) + '/%'
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT COUNT(*) FROM a_strm_files WHERE webdav_path LIKE ? ESCAPE '\\'",
                 (pattern,)
@@ -1403,7 +1403,7 @@ class Database:
     def has_other_b_instance(self, fingerprint: str,
                              exclude_local_path: str) -> bool:
         """检查是否存在同一指纹的其他 B 区实例（排除指定路径）。"""
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT 1 FROM b_strm_files WHERE fingerprint = ? AND local_path != ? LIMIT 1",
                 (fingerprint, exclude_local_path),
@@ -1437,7 +1437,7 @@ class Database:
 
     def get_media_boundary_by_fingerprint(
             self, fingerprint: str) -> BoundaryRecord | None:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
@@ -1452,7 +1452,7 @@ class Database:
     def get_media_boundaries_by_source_name(
         self, source_media_name: str, engine_entry_path: str
     ) -> list[BoundaryRecord]:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
@@ -1466,7 +1466,7 @@ class Database:
     def get_media_boundary_by_current_name(
         self, current_media_name: str, engine_entry_path: str
     ) -> BoundaryRecord | None:
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
@@ -1484,7 +1484,7 @@ class Database:
         self, source_media_name: str
     ) -> BoundaryRecord | None:
         """根据源媒体名查找边界映射（不限制引擎路径，取最新的）"""
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
@@ -1596,7 +1596,7 @@ class Database:
 
     def get_subtitle_by_local(self, local_path: str) -> SubtitleRecord | None:
         """根据本地路径查询字幕记录"""
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT id, local_path, target_path, fingerprint, season, episode, lang_code, status, created_at, updated_at FROM subtitles WHERE local_path = ?",
                 (local_path,)
@@ -1606,7 +1606,7 @@ class Database:
 
     def subtitle_exists(self, local_path: str) -> bool:
         """检查字幕是否已存在"""
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT 1 FROM subtitles WHERE local_path = ?",
                 (local_path,)
@@ -1615,7 +1615,7 @@ class Database:
 
     def get_subtitles_by_fingerprint(self, fingerprint: str) -> list[SubtitleRecord]:
         """根据指纹获取所有字幕"""
-        with self.rw_lock.read_locked(), self.connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT id, local_path, target_path, fingerprint, season, episode, lang_code, status, created_at, updated_at FROM subtitles WHERE fingerprint = ?",
                 (fingerprint,)

@@ -117,7 +117,7 @@ B 区文件变动（创建/修改/移动）
 
 **跨进程安全**：SQLite WAL 模式自身处理并发，多进程场景安全。
 
-**同进程多线程不安全**：启动同步期间禁止其他线程写 DB。WebUI 读不受影响，写操作等待 SQLite `busy_timeout`（30 秒）。
+**同进程多线程不安全**：启动同步期间禁止其他线程写 DB。WebUI 和 B 区 watcher 的纯读 getter 必须使用 `read_connection()`，不能通过写连接触发 `BEGIN IMMEDIATE`；否则即使查询本身是 SELECT，也可能在 bulk RESERVED 锁期间报 `database is locked`。写操作仍等待 SQLite `busy_timeout`。
 
 ### 血统校验跳过
 

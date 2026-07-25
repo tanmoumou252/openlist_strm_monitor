@@ -29,6 +29,9 @@ from .webdav_utils import (
     build_webdav_trash_path,
     _canonicalize_webdav_path_for_cloud,
 )
+from .encoding_utils import (
+    copy_subtitle_utf8,
+)
 
 __all__ = [
     # Bootstrap
@@ -56,4 +59,6 @@ __all__ = [
     "webdav_root_name",
     "build_webdav_trash_path",
     "_canonicalize_webdav_path_for_cloud",
+    # Encoding
+    "copy_subtitle_utf8",
 ]

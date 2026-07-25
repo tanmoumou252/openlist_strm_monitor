@@ -20,7 +20,7 @@ python -m pytest src/tests/ -v
 | `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试 |
 | `test_refresh_service.py` | 周期性 WebDAV 刷新服务测试 |
 | `test_bootstrap.py` | 启动路径工具（`ensure_base_dir_first`、`load_local_module`）测试 |
-| `test_log_issues_simulation.py` | 三类 `strm_bridge.log` 日志问题模拟验证（非 STRM 文件解码、B 区阶段日志、A→B 路径冲突检测与安全跳过） |
+| `test_log_issues_simulation.py` | 三类真实日志问题的沙盒实验与修复回归（SQLite 锁竞争、padding 路径碰撞、B 区血统清理健康度） |
 
 ### 数据库 / FTS
 
@@ -222,11 +222,13 @@ python -m pytest src/tests/
 | `src/tests/strm.test.B/` | 真实 `scan_a_to_b_full_sync` 复制出的目标文件，审核对象 | **删除**，保持 tests 文件夹干净 |
 | `<项目根>/test_logs/log_issues_sim_<时间戳>.log` | 本轮测试日志（含同步阶段标记、冲突 WARNING） | **保留**，供排查 |
 
-三类问题与验证方式：
+该文件是一个可重复的“沙盒找修复”实验场，而不是只验证 mock 调用的单元测试。每类问题都先用受控旧行为确认 baseline 能复现，再验证生产代码中的候选修复；生产修复完成后，测试中的 monkeypatch 只保留 baseline 控制组，真实路径继续作为回归保护。
 
-1. **非 STRM 文件进入 STRM 解码 → UnicodeDecodeError**：验证 `handle_a_created_or_modified` 对 `.jpg/.png/.nfo` 不触发 `read_strm_webdav_path`，二进制 JPEG 返回 None 不崩溃，且 B 区不含非 STRM 文件。
-2. **B 区同步长时间静默**：验证 `scan_a_to_b_full_sync` 日志含 `索引阶段完成` / `进度` / `全量同步完成` 等阶段标记，且相邻 INFO 日志无长间隔。
-3. **A→B 多源映射到同一 B 目标（路径碰撞）**：用真实 `suggest_rename` 误解析样例（如 `1920x1080` 被当作 `E1080`）复现碰撞，验证冲突被检测、安全跳过、B 区无错误覆盖。
+1. **`database is locked`**：在真实 SQLite WAL 数据库中用未提交的 bulk 写事务持有 RESERVED 锁。baseline 直接使用旧的写连接 getter，必须稳定抛出 `sqlite3.OperationalError`；修复后 31 个纯 SELECT getter 均使用 `read_connection()`，B watcher 查询不再抢写锁。
+2. **S04E01 / S4E01 路径碰撞**：baseline 使用旧 builder，两个不同 WebDAV 源会落到同一个 B 目标并生成 `_MANUAL_REVIEW_*.md`；修复后 B 区文件名保留 WebDAV basename 的原始 padding，两个源都进入 B，内容不串改。
+3. **B 区历史越界清理**：按 `_resolve_a_source` 的路径 A、路径 B 分别构造孤立记录和引擎边界不匹配记录，验证非法文件被物理清理且 DB 同步删除；无引擎配置时合法基础层级仍保留，正常 A→B 产物不被误删。
+
+综合夹具还保留非 STRM、真二进制 JPEG、字幕、畸形 STRM 和边缘命名样本，用于验证输入鲁棒性与文件统计覆盖。
 
 运行方式（仅该文件）：
 
@@ -234,16 +236,11 @@ python -m pytest src/tests/
 python -m pytest src/tests/test_log_issues_simulation.py -v
 ```
 
-### 噪音标签剥离修复
-
-`test_log_issues_simulation.py` 验证了 `suggest_rename` 的噪音标签剥离修复：
-- 修复前：`1920x1080` 被误解析为 `S20E1080`，导致 24 集/12 集全部映射到同一目标
-- 修复后：分辨率/编码/音频等噪音标签在提取前被剥离，避免误解析
-- 合法大集号（如 `S18E760`, `21x1088`）不受影响
+测试完成后，`src/tests/strm.test.A/` 和 `test_logs/` 保留，`src/tests/strm.test.B/`、临时数据库和 C 区删除。baseline 测试必须先能复现问题，生产代码迁移完成后整文件转绿才算修复有效。
 
 ### 人工处理清单
 
-当 A→B 同步存在目标路径冲突时，程序会在 B 区根目录生成 `_MANUAL_REVIEW_*.md` 清单文件，列出被跳过的 A 源，供用户人工确认命名后手动处理。
+路径碰撞 baseline 会在 B 区根目录生成 `_MANUAL_REVIEW_*.md`，用于证明旧逻辑确实跳过了冲突源。修复后的 padding 实验不应生成该清单。
 
 ## 相关文档
 

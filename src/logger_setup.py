@@ -26,6 +26,22 @@ class MaxLevelFilter(logging.Filter):
         return record.levelno <= self.max_level
 
 
+def _has_available_windows_drive(path: Path) -> bool:
+    """Return False only when an absolute Windows path uses a missing drive."""
+    if os.name != "nt" or not path.is_absolute():
+        return True
+    drive = path.drive
+    # UNC 路径（\\server\\share\\...）不是盘符路径，保持原有行为。
+    if len(drive) != 2 or drive[1] != ":":
+        return True
+    import ctypes
+    mask = ctypes.windll.kernel32.GetLogicalDrives()
+    if not mask:
+        return True
+    drive_index = ord(drive[0].upper()) - ord("A")
+    return 0 <= drive_index < 26 and bool(mask & (1 << drive_index))
+
+
 def setup_logging(
     *,
     level: str = "INFO",
@@ -45,13 +61,21 @@ def setup_logging(
 
     original_log_path = Path(log_file)
     final_log_path = original_log_path
-    
-    # Attempt to create parent directory for the original log file
-    try:
-        original_log_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        logging.warning(f"[日志] 无法创建日志目录 '{original_log_path.parent}'：{e}。将尝试使用临时日志文件。")
+
+    # 缺失 Windows 盘符时跳过 mkdir，直接回退临时目录，避免不可用盘符上阻塞。
+    if not _has_available_windows_drive(original_log_path):
+        logging.warning("[日志] 日志盘符不可用，将回退到临时日志文件: %s", original_log_path)
         final_log_path = Path(tempfile.gettempdir()) / original_log_path.name
+    else:
+        try:
+            original_log_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logging.warning(
+                "[日志] 无法创建日志目录 %s: %s。将使用临时日志文件。",
+                original_log_path.parent,
+                e,
+            )
+            final_log_path = Path(tempfile.gettempdir()) / original_log_path.name
 
     # Check write permissions for the chosen log path
     if not os.access(final_log_path.parent, os.W_OK):
@@ -59,7 +83,7 @@ def setup_logging(
         final_log_path = Path(tempfile.gettempdir()) / original_log_path.name
         # Ensure temp directory exists, though tempfile.gettempdir() should be safe
         final_log_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # If a fallback occurred, log it
     if final_log_path != original_log_path:
         logging.info(f"[日志] 实际日志文件路径已设置为：'{final_log_path}'")

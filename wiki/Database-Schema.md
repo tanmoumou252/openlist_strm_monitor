@@ -21,6 +21,13 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 
 只读连接额外设置：`PRAGMA query_only=ON;`
 
+### 连接管理策略
+
+- 只做 `SELECT` 的 getter 使用 `Database.read_connection()`，避免在 WAL 写事务期间执行 `BEGIN IMMEDIATE`。
+- `Database.connection()` 是写连接，会执行写能力探测，仅用于 INSERT、UPDATE、DELETE 或需要维护 FTS 的操作。
+- `Database.bulk_connection()` 绕过进程内读写锁，仅用于启动阶段的单线程批量写入；主动刷新使用分批提交，以缩短 RESERVED 锁持有时间。
+- 该区分尤其保护 B 区 watcher 的只读查询，避免 A→B bulk 同步期间出现 `database is locked`。
+
 ### 表结构
 
 #### `a_strm_files` — A 区 STRM 文件记录

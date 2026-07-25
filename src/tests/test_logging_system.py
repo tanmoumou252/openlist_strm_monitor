@@ -265,35 +265,68 @@ class TestLogRotation:
 class TestLogFallback:
     """日志回退路径测试"""
 
-    def test_fallback_to_temp_on_unwritable_path(self):
-        """测试不可写路径回退到临时目录"""
-        # 使用一个真正不可写的路径（Windows 上用不存在的盘符）
-        if os.name == 'nt':
-            unwritable_path = "Z:\\nonexistent\\path\\test.log"
-        else:
-            unwritable_path = "/proc/1/fd/0/test.log"
-        
+    def test_fallback_to_temp_on_unwritable_path(self, tmp_path):
+        """测试不可写路径回退到临时目录（父路径是普通文件，mkdir 立即失败）"""
+        blocking_parent = tmp_path / "not_a_directory"
+        blocking_parent.write_text("file blocks mkdir", encoding="utf-8")
+        unwritable_path = str(blocking_parent / "test.log")
+
         setup_logging(level="INFO", log_file=unwritable_path, max_size_mb=2, backup_count=5)
-        
+
         root_logger = logging.getLogger()
         file_handler = next(
             (h for h in root_logger.handlers if isinstance(h, logging.handlers.RotatingFileHandler)),
             None
         )
-        
+
         assert file_handler is not None
         # 验证日志文件在临时目录
         log_path = Path(file_handler.baseFilename)
-        assert str(log_path).startswith(tempfile.gettempdir())
-        
+        assert log_path.parent == Path(tempfile.gettempdir())
+
         # 验证实际能写入日志
         logger = logging.getLogger("test_fallback")
         logger.info("测试回退路径")
         file_handler.flush()
-        
+
         assert log_path.exists()
         content = log_path.read_text(encoding="utf-8")
         assert "测试回退路径" in content
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows drive preflight only")
+    def test_missing_windows_drive_falls_back_without_mkdir(self, monkeypatch):
+        """缺失盘符在 mkdir 前直接回退，且不对缺失盘符执行 mkdir"""
+        import string
+        import ctypes
+
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+        missing = next(
+            (
+                letter
+                for letter in string.ascii_uppercase
+                if not (mask & (1 << (ord(letter) - ord("A"))))
+            ),
+            None,
+        )
+        if missing is None:
+            pytest.skip("no missing drive letter available")
+
+        handler_path = f"{missing}:\\unreachable\\test.log"
+        original_mkdir = Path.mkdir
+        mkdir_calls = []
+
+        def record_mkdir(self, *args, **kwargs):
+            mkdir_calls.append(self)
+            return original_mkdir(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", record_mkdir)
+        setup_logging(level="INFO", log_file=handler_path, max_size_mb=2, backup_count=1)
+        file_handler = next(
+            h for h in logging.getLogger().handlers
+            if isinstance(h, logging.handlers.RotatingFileHandler)
+        )
+        assert Path(file_handler.baseFilename).parent == Path(tempfile.gettempdir())
+        assert all(not str(path).startswith(f"{missing}:") for path in mkdir_calls)
 
 
 class TestMaxLevelFilter:

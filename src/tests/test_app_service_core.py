@@ -343,8 +343,8 @@ class TestBuildBPathFromA:
         with pytest.raises(ValueError, match="不属于任何A根目录"):
             self.app.build_b_path_from_a("/completely/different/path.strm")
 
-    def test_local_episode_name_is_not_overridden_by_webdav_basename(self):
-        """本地集数命名优先于 WebDAV basename 推导"""
+    def test_webdav_basename_preserves_original_episode_padding(self):
+        """B 区文件名保留 WebDAV basename 的原始集数 padding"""
         a_file = self.a_dir / "Show Name" / "S20E10.strm"
         a_file.parent.mkdir(parents=True, exist_ok=True)
         a_file.write_text("/mount/show/episode.mp4", encoding="utf-8")
@@ -356,7 +356,7 @@ class TestBuildBPathFromA:
             result = self.app.build_b_path_from_a(
                 str(a_file), "/番剧/Show/episode - 24 END.mkv")
 
-        assert result.name == "S20E10.strm"
+        assert result.name == "episode - 24 END.strm"
 
     def test_season_not_derived_from_webdav_path(self):
         """season 只来自 A 区本地路径/文件名，不从 WebDAV 路径推导"""

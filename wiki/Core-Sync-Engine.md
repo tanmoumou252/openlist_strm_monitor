@@ -78,6 +78,12 @@ AppService.__init__()
 
 ## 同步管线：A → B
 
+### 数据库读路径与 bulk 写事务
+
+批量同步的 `bulk_connection()` 会在单事务模式下持续持有 SQLite 写事务。WAL 允许普通只读查询继续读取，但 `BEGIN IMMEDIATE` 仍会竞争 RESERVED 锁。因此，所有只做 SELECT 的数据库 getter（包括 B 区 watcher 使用的 `get_b_by_local_full`）必须使用 `read_connection()`，该连接设置 `PRAGMA query_only=ON`；只有 INSERT、UPDATE、DELETE 等写操作才使用 `connection()`。
+
+这条边界避免了 B 区 watcher 在 A→B 同步期间因只读查询误触发写锁探测而产生 `database is locked`。`bulk_connection()` 仍只允许用于启动阶段的单线程批量写入，主动刷新使用分批提交。
+
 ### 并发安全设计：为什么 `_sync_one_record` 不使用指纹锁
 
 `_sync_one_record` 在批量同步（`scan_a_to_b_full_sync`）中使用，**不使用** `get_fingerprint_lock`。这是经过代码验证的设计决策，而非遗漏。
