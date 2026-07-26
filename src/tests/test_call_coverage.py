@@ -575,8 +575,8 @@ class TestCheckExistsIntegration:
 
         assert result is True, "根目录应存在"
 
-    def test_check_exists_root_false_mocked(self, tmp_path):
-        """check_exists("/") 失败时应返回 False。"""
+    def test_check_exists_root_untrusted_returns_none(self, tmp_path):
+        """check_exists("/") 列表失败时应返回 None（不可信，非 False）。"""
         from webdav_client import OpenListAdminClient
 
         client = OpenListAdminClient(
@@ -590,7 +590,7 @@ class TestCheckExistsIntegration:
             mock_list.return_value = None
             result = client.check_exists("/")
 
-        assert result is False, "API 失败时根目录应返回 False"
+        assert result is None, "API 失败时根目录应返回 None（fail-closed）"
 
     def test_check_exists_caching(self, tmp_path):
         """check_exists 应缓存结果（TTL 内不重复请求）。"""

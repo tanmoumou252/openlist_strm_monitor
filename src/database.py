@@ -1359,7 +1359,7 @@ class Database:
 
     def get_all_b_records(self) -> list[BRecord]:
         """获取所有 B 区记录（用于启动时对比）"""
-        with self.read_connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute("""
                     SELECT local_path,
                            webdav_path,
@@ -1829,7 +1829,7 @@ class Database:
             SELECT 'strm_media_boundary', COUNT(*) FROM strm_media_boundary
         """
         result = {}
-        with self.read_connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             try:
                 for row in conn.execute(sql).fetchall():
                     result[row[0]] = row[1]
@@ -1840,7 +1840,7 @@ class Database:
     def get_b_status_counts(self) -> dict[str, int]:
         """获取 B 区各状态记录数"""
         result = {}
-        with self.read_connection() as conn:
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT status, COUNT(*) FROM b_strm_files GROUP BY status"
             )

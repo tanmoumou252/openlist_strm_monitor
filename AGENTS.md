@@ -222,7 +222,34 @@ The Vite config groups modules into chunks:
 - Uses OpenList API `/api/fs/list` to batch-clean A-zone redundant files (local exists but cloud deleted)
 - Optimizes traversal scope based on local records (only traverses parent dirs with records)
 - Concurrent pagination (5 threads) + client-side filtering (only keeps .strm files)
+- **fail-closed**: if the cloud directory listing is untrusted (returns None via `_parse_fs_list_content`), all local records under that parent directory are excluded from the redundancy diff (0 deletions, 0 ghost additions)
 - Performance: from 2 hours down to <10 seconds
+
+### API Response Validation (`_parse_fs_list_content`)
+- Shared response validator for `/api/fs/list` single-page responses (defined in `docs/openlist_api_fs_list_contract.md`)
+- Requires: `code ∈ {0,200}`, `data` is dict, `data.content` is list, `data.total` is int ≥ 0
+- Returns `(content, total)` on success, `None` on untrusted (fail-closed)
+- Called by both `_collect_cloud_files_concurrent` (A-zone) and `_collect_cloud_files_in_directory` (B-zone) to enforce unified validation criteria
+
+### `_collect_cloud_files_concurrent(cloud_path) -> set[str] | None`
+- A-zone concurrent paginated collector used by `cleanup_a_redundant_using_api`
+- Uses `per_page=100` (aligned with OpenAPI spec maximum), 5-thread pool, retry on failure
+- Returns authoritative set of `.strm` file paths on success; returns `None` if any page is untrusted (fail-closed)
+- Signature changed from `(cloud_path, file_set) -> None` to `(cloud_path) -> set[str] | None` to support fail-closed signaling
+- Page2+ loop is aligned with the first-page loop: non-dict `content` elements are skipped via `isinstance(item, dict)`, preventing `AttributeError` from escalating a recoverable dirty row into a whole-directory fail-closed.
+
+### `check_exists(path) -> bool | None` (Three-State Fail-Closed)
+- Return type widened from `bool` to **`bool | None`**; `None` means "untrusted" (API failure / non-JSON / unsafe payload / safety-valve exhausted).
+- `per_page=100` (was 1000) to match the OpenAPI max, preventing server-side truncation from masquerading as "not found".
+- Uses a shared `_parse_fs_list_page` guard (mirrors `_parse_fs_list_content`): rejects `data=None`, `content=None`, bool `total`, `code ∉ {0,200}`.
+- **Caller contract**: any destructive cleanup path MUST treat `None` as fail-closed. Concretely, "delete if missing" branches use `if check_exists(...) is False` (authoritative absence) and skip on `None`; keep-alive branches use `if check_exists(...) is True`. Never use `if not check_exists(...)` in a destructive path — that maps `None` (untrusted) to a deletion.
+- Applied call sites: B-zone redundant cleanup (`cleanup_b_redundant`), `cleanup_a_deleted_on_cloud`, `handle_a_created_or_modified` (two `check_exists` gates), `SyncService.copy_a_record_to_b`, and `main.py` root reachability (`if check_exists("/") is not True`).
+
+### `ensure_single_visible_instance` Quarantine Failure Recovery (B3-A / B3-B)
+- **B3-A**: When `quarantine_file` returns `None` (target collision / OSError / source missing), the instance's `status` is restored to `valid` via `mark_b_instance_status(dup, "valid")`. This prevents the "DB=`duplicate` / disk still `.strm`" fork where `ensure_single_visible_instance` could never retry (because its `valid_files` filter only collects `status='valid'` rows).
+- Same restore-to-`valid` applies when `move_b_record` fails but the physical rollback rename succeeds — the row is back at the original `.strm`, so status must match the disk.
+- **B3-B**: When `move_b_record` fails AND the rollback rename also fails (disk full / antivirus lock), the code attempts `move_b_record(old, quarantined)` + `status='duplicate'` to align DB `local_path` with the now-quarantined disk file, then `raise`s. The exception aborts the cleanup loop so the failure is never swallowed; the DB/disk fork is minimized to the unavoidable (the file is physically at `.duplicate`).
+- `mark_other_b_instances_duplicate` is called up-front (before the quarantine loop), so these recovery branches exist specifically to undo its premature `status='duplicate'` when the physical step fails.
 
 ### `scan_a_to_b_full_sync()` Dual Mode
 - New `use_bulk` parameter:

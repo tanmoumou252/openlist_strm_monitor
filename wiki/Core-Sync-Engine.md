@@ -276,7 +276,17 @@ def _worker(self) -> None:
 - **`_handle_b_zombie(path)`** — 处理 B 区僵尸文件（DB 记录存在但磁盘文件已消失）。
 - **`cleanup_a_deleted_on_cloud(webdav_path)`** — 清理云端已删除的 A 区残留记录。
 - **`handle_b_renamed_to_non_strm(src_path, dest_path)`** — B 区 `.strm` 被重命名为非 `.strm` 扩展名时的处理。
-- **`ensure_single_visible_instance(prefer_path)`** — 确保同一指纹仅一个 `valid` 实例可见，其余改为 `.duplicate`。
+- **`ensure_single_visible_instance(fingerprint, trigger_path, prefer_path=None)`** — 确保同一指纹仅一个 `valid` 实例可见，其余改为 `.duplicate`。失败语义采用 **B3-A / B3-B** 自愈策略（详见 `wiki/Safety-and-Security.md` §9），不静默继续，回滚二次失败仍抛出异常使清理中止。
+
+### API 响应校验与 fail-closed 清理链路
+
+以下方法共同构成了 `/api/fs/list` 响应的 fail-closed 校验框架，参考 `docs/openlist_api_fs_list_contract.md`。
+
+- **`_parse_fs_list_content(res) -> tuple[list, int] | None`** — 共享响应校验器，统一判别 `/api/fs/list` 单页响应是否"权威成功"。要求 `code ∈ {0,200}`、`data` 为 dict、`data.content` 为 list、`data.total` 为 int ≥ 0；任一条件不满足返回 `None`（不可信），调用方必须 fail-closed。
+- **`_collect_cloud_files_concurrent(cloud_path) -> set[str] | None`** — A 区冗余清理链路的并发分页收集器。使用 `per_page=100`、5 线程并发、带重试。返回权威完整 `.strm` 文件路径集合；首页或任一页不可信（`_parse_fs_list_content` 返回 None）则返回 `None`，调用方必须将该父目录的本地 A 记录整组排除出冗余差集。
+- **`_collect_cloud_files_in_directory(directory_path) -> set[str] | None`** — B 区僵尸清理链路的顺序分页收集器。使用 `per_page=100`、100 页安全阀。返回权威完整集合；不可信或安全阀耗尽则返回 `None`，`cleanup_b_zombies_under_folder` 对 `None` `continue` 跳过该父目录。
+- **`cleanup_a_redundant_using_api()`** — A 区冗余清理。按父目录分组本地 A 记录，对每个父目录调用 `_collect_cloud_files_concurrent`。仅将"可信父目录"（返回非 None）的本地记录纳入冗余差集；不可信父目录整组跳过并记 warning，0 删除、0 ghost 新增。
+- **`cleanup_b_zombies_under_folder(root_path)`** — B 区僵尸清理。按父目录分组，对每个父目录调用 `_collect_cloud_files_in_directory`。返回 `None` 则 `continue` 跳过（fail-closed）。
 
 ### 刷新服务
 

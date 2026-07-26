@@ -100,8 +100,8 @@ def main() -> None:
         error_type = admin_client.last_error_type or "unknown"
         logging.error("[AdminAPI] 登录失败: %s (类型: %s)", error_msg, error_type)
         sys.exit(2)
-    # 验证是否能列出根目录
-    if not admin_client.check_exists("/"):
+    # 验证是否能列出根目录（三态：仅 True 视为连通）
+    if admin_client.check_exists("/") is not True:
         logging.error("[AdminAPI] 连接验证失败")
         sys.exit(2)
     logging.info("[AdminAPI] 连接验证成功")

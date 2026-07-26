@@ -81,7 +81,8 @@ class OpenListAdminClient:
         self._fs_list_logged: set[str] = set()
         self._fs_list_logged_time: float = 0.0  # 上次清理时间
 
-        self._check_exists_cache: dict[str, tuple[float, bool]] = {}
+        # True/False=权威存在/不存在；None=列表不可信（fail-closed，不得当「不存在」）
+        self._check_exists_cache: dict[str, tuple[float, bool | None]] = {}
         self._check_exists_cache_ttl: int = 60  # 缓存 60 秒
 
         # 最近一次登录的错误详情（调用方可通过属性访问）
@@ -583,23 +584,55 @@ class OpenListAdminClient:
         return True
 
     # 7. 检查路径是否存在 (逻辑方法)
-    def check_exists(self, path: str) -> bool:
-        """检查文件或目录是否存在。
-        
-        支持大目录（>1000 项）的分页搜索。
+    @staticmethod
+    def _parse_fs_list_page(res: Any) -> tuple[list, int] | None:
+        """解析 /api/fs/list 单页响应（与 app_service_core fail-closed 契约对齐）。
+
+        权威成功 → (content, total)；不可信 → None。
+        拒绝 bool total（bool 是 int 子类）、content=None、data=None 等。
+        """
+        if not isinstance(res, dict):
+            return None
+        code = res.get("code")
+        if code not in (0, 200):
+            return None
+        data = res.get("data")
+        if not isinstance(data, dict):
+            return None
+        content = data.get("content")
+        if not isinstance(content, list):
+            return None
+        total = data.get("total")
+        if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+            return None
+        if not content and total > 0:
+            return None
+        return content, total
+
+    def check_exists(self, path: str) -> bool | None:
+        """检查文件或目录是否存在（三态）。
+
+        Returns:
+            True: 权威确认存在
+            False: 权威确认不存在（完整可信列表中未出现）
+            None: 响应不可信 / 请求失败 / 安全阀耗尽 —— 调用方不得当「不存在」去删除
+
+        分页 per_page=100（对齐 OpenAPI maximum 与 Issue7 列表契约）。
         """
         now = time.time()
-        # 检查缓存
-        if path in self._check_exists_cache:
-            cached_time, cached_result = self._check_exists_cache[path]
+        cache_key = path if path else "/"
+        if cache_key in self._check_exists_cache:
+            cached_time, cached_result = self._check_exists_cache[cache_key]
             if now - cached_time < self._check_exists_cache_ttl:
-                log.debug("[check_exists] 命中缓存: %s -> %s", path, cached_result)
+                log.debug("[check_exists] 命中缓存: %s -> %s", cache_key, cached_result)
                 return cached_result
 
-        result = False
+        result: bool | None = None
         if not path or path == "/":
             res = self.list_directory("/", per_page=1)
-            result = res is not None and res.get("code") in (0, 200)
+            parsed = self._parse_fs_list_page(res)
+            # 根目录：仅权威成功响应视为连通/存在；不可信或失败 → None
+            result = True if parsed is not None else None
         else:
             path = path.rstrip("/")
             parts = path.split("/")
@@ -608,48 +641,46 @@ class OpenListAdminClient:
 
             try:
                 page = 1
-                per_page = 1000
-                max_pages = 100  # 安全阀：防止异常响应导致死循环
-                
+                per_page = 100  # 对齐 docs maximum:100 / Issue7 契约
+                max_pages = 100  # 安全阀
+
                 while page <= max_pages:
-                    res = self.list_directory(parent_path, page=page, per_page=per_page)
-                    if not res or res.get("code") not in (0, 200):
-                        result = False
+                    res = self.list_directory(
+                        parent_path, page=page, per_page=per_page)
+                    parsed = self._parse_fs_list_page(res)
+                    if parsed is None:
+                        log.warning(
+                            "[check_exists] 父目录列表不可信，返回 None: path=%s page=%s",
+                            path, page)
+                        result = None
                         break
 
-                    data = res.get("data", {})
-                    content = data.get("content", []) if isinstance(data, dict) else []
-                    
-                    # 检查当前页是否包含目标
+                    content, total = parsed
                     for item in content:
                         if isinstance(item, dict) and item.get("name") == target_name:
                             result = True
                             break
-                    if result:
+                    if result is True:
                         break
-                    
-                    # 如果当前页不满，说明已无更多数据
+
+                    # 当前页未满 → 已穷尽权威列表
                     if len(content) < per_page:
                         result = False
                         break
-                    
-                    # 检查总数，如果已遍历完所有项
-                    try:
-                        total = int(data.get("total", 0))
-                        if page * per_page >= total:
-                            result = False
-                            break
-                    except (TypeError, ValueError):
-                        pass
-                    
+                    if page * per_page >= total:
+                        result = False
+                        break
                     page += 1
                 else:
-                    log.warning("check_exists: 分页搜索超过 %d 页，强制终止: %s", max_pages, path)
-                    result = False
+                    log.warning(
+                        "check_exists: 分页搜索超过 %d 页，视为不可信: %s",
+                        max_pages, path)
+                    result = None
             except Exception as e:
                 log.error("check_exists 异常: %s - %s", path, e)
-        
-        self._check_exists_cache[path] = (now, result)
+                result = None
+
+        self._check_exists_cache[cache_key] = (now, result)
         return result
 
     # 8. 获取兼容格式的内容列表 (逻辑方法)

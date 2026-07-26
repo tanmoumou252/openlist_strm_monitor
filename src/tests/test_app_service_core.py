@@ -1275,7 +1275,9 @@ class TestCleanupBZombiesUnderFolder:
         self.db.get_b_under_root.return_value = [record]
         # 新实现使用 list_directory 批量获取云端文件列表（而非逐条 check_exists）
         # 返回空列表表示云端没有该文件 → 判定为僵尸文件
-        self.admin_api.list_directory.return_value = {"code": 0, "data": {"content": []}}
+        self.admin_api.list_directory.return_value = {
+            "code": 0, "data": {"content": [], "total": 0}
+        }
         self.db.get_b_by_local_full.return_value = record
         self.db.delete_b_by_local = Mock()
         self.db.set_ghost_protection = Mock()
@@ -1678,6 +1680,42 @@ class TestEnsureSingleVisibleInstance:
         assert not dup_file.exists()
         self.db.mark_other_b_instances_duplicate.assert_called_once()
 
+    def test_rollback_failure_raises(self):
+        """回滚失败时：logging.error + 抛出异常使清理中止，不静默继续。"""
+        keep_file = self.b_dir / "show" / "Season 01" / "S01E01.strm"
+        dup_file = self.b_dir / "misc" / "random.strm"
+        keep_file.parent.mkdir(parents=True, exist_ok=True)
+        dup_file.parent.mkdir(parents=True, exist_ok=True)
+        keep_file.write_text("/mount/show/ep.mp4", encoding="utf-8")
+        dup_file.write_text("/mount/show/ep.mp4", encoding="utf-8")
+
+        keep_rec = Mock()
+        keep_rec.status = "valid"
+        keep_rec.local_path = str(keep_file)
+        dup_rec = Mock()
+        dup_rec.status = "valid"
+        dup_rec.local_path = str(dup_file)
+        self.db.get_all_b_by_fingerprint.return_value = [keep_rec, dup_rec]
+        self.db.mark_other_b_instances_duplicate.return_value = [str(dup_file)]
+        # move_b_record 返回 False 模拟 DB 迁移失败
+        self.db.move_b_record = Mock(return_value=False)
+
+        from unittest.mock import patch as _patch
+        original_rename = Path.rename
+
+        def mock_rename(self_path, target):
+            # 仅回滚 rename（quarantined 文件 rename 回原路径）失败
+            src_name = str(self_path.name)
+            if ".duplicate" in src_name:
+                raise OSError("模拟磁盘满：回滚失败")
+            return original_rename(self_path, target)
+
+        # quarantine_file 内部会调用 Path.rename 做 quarantine；让它正常，
+        # 仅在回滚 rename 时抛 OSError。
+        with _patch.object(Path, "rename", mock_rename):
+            with pytest.raises(OSError):
+                self.app.ensure_single_visible_instance("fp", str(keep_file))
+
 
 # ===========================================================================
 # TestRestoreBFileFromA
@@ -1972,6 +2010,34 @@ class TestCleanupARedundantUsingApi:
 
         self.db.delete_a_by_local.assert_called_once_with(str(a_file))
 
+    def test_untrusted_parent_records_excluded_from_diff(self):
+        """不可信父目录（首页返 None）下本地记录整组不参与冗余差集。"""
+        a_trusted = self.a_dir / "trusted.strm"
+        a_trusted.write_text("/dir_ok/trusted.strm", encoding="utf-8")
+        a_untrusted = self.a_dir / "untrusted.strm"
+        a_untrusted.write_text("/dir_bad/untrusted.strm", encoding="utf-8")
+        self.db.get_all_a_records.return_value = [
+            Mock(local_path=str(a_trusted), webdav_path="/dir_ok/trusted.strm",
+                 parent_webdav_path="/dir_ok"),
+            Mock(local_path=str(a_untrusted), webdav_path="/dir_bad/untrusted.strm",
+                 parent_webdav_path="/dir_bad"),
+        ]
+        # dir_ok：权威空目录 → trusted.strm 冗余
+        # dir_bad：首页 None → 不可信，整组排除
+        def mock_list(path, **kwargs):
+            if path == "/dir_ok":
+                return {"code": 200, "data": {"total": 0, "content": []}}
+            return None
+        self.admin_api.list_directory.side_effect = mock_list
+
+        self.app.cleanup_a_redundant_using_api()
+
+        # trusted 应被删（权威空目录）
+        self.db.delete_a_by_local.assert_any_call(str(a_trusted))
+        # untrusted 不应被删（不可信父目录整组排除）
+        self.db.delete_a_by_local_str = [c.args[0] for c in self.db.delete_a_by_local.call_args_list]
+        assert str(a_untrusted) not in self.db.delete_a_by_local_str
+
 
 # ===========================================================================
 # TestCollectCloudFilesConcurrent
@@ -2013,7 +2079,7 @@ class TestCollectCloudFilesConcurrent:
 
     def test_single_page_collection(self):
         """Directory with ≤100 files → single page request.
-        
+
         API 的 path 字段是存储系统原始路径（如 D:\\files\\xxx），
         但代码应从 cloud_path + name 重构 WebDAV 虚拟路径。
         """
@@ -2029,11 +2095,10 @@ class TestCollectCloudFilesConcurrent:
                 ],
             },
         }
-        file_set: set[str] = set()
-        self.app._collect_cloud_files_concurrent("/mount", file_set)
+        result = self.app._collect_cloud_files_concurrent("/mount")
 
         # 路径应从 cloud_path + name 重构，而非使用 API 的 path 字段
-        assert file_set == {"/mount/f1.strm", "/mount/f2.strm"}
+        assert result == {"/mount/f1.strm", "/mount/f2.strm"}
         self.admin_api.list_directory.assert_called_once()
 
     def test_multi_page_concurrent_collection(self):
@@ -2062,10 +2127,10 @@ class TestCollectCloudFilesConcurrent:
         }
         self.admin_api.list_directory.side_effect = [page1, page2]
 
-        file_set: set[str] = set()
-        self.app._collect_cloud_files_concurrent("/mount", file_set)
+        result = self.app._collect_cloud_files_concurrent("/mount")
 
-        assert len(file_set) == 150
+        assert result is not None
+        assert len(result) == 150
 
     def test_empty_directory(self):
         """Empty directory → no files collected."""
@@ -2073,10 +2138,10 @@ class TestCollectCloudFilesConcurrent:
             "code": 200,
             "data": {"total": 0, "content": []},
         }
-        file_set: set[str] = set()
-        self.app._collect_cloud_files_concurrent("/mount", file_set)
+        result = self.app._collect_cloud_files_concurrent("/mount")
 
-        assert len(file_set) == 0
+        assert result is not None
+        assert len(result) == 0
 
     def test_filters_non_strm_files(self):
         """Non-.strm files in cloud are filtered out."""
@@ -2094,18 +2159,16 @@ class TestCollectCloudFilesConcurrent:
                 ],
             },
         }
-        file_set: set[str] = set()
-        self.app._collect_cloud_files_concurrent("/mount", file_set)
+        result = self.app._collect_cloud_files_concurrent("/mount")
 
-        assert file_set == {"/mount/good.strm"}
+        assert result == {"/mount/good.strm"}
 
     def test_api_failure_returns_empty(self):
-        """API failure → returns empty, no exception."""
+        """API failure → returns None (不可信), no exception."""
         self.admin_api.list_directory.return_value = None
-        file_set: set[str] = set()
-        self.app._collect_cloud_files_concurrent("/mount", file_set)
+        result = self.app._collect_cloud_files_concurrent("/mount")
 
-        assert len(file_set) == 0
+        assert result is None
 
     def test_items_with_missing_name_are_skipped(self):
         """Items with no name field are skipped, not added to the set."""
@@ -2122,17 +2185,16 @@ class TestCollectCloudFilesConcurrent:
                 ],
             },
         }
-        file_set: set[str] = set()
-        self.app._collect_cloud_files_concurrent("/mount", file_set)
+        result = self.app._collect_cloud_files_concurrent("/mount")
 
-        assert file_set == {"/mount/good.strm"}
+        assert result == {"/mount/good.strm"}
 
     def test_path_reconstructed_from_cloud_path_plus_name(self):
         """Verify path is built from cloud_path + name, not from API path field.
-        
-        The API's path field returns a full system storage path like 
+
+        The API's path field returns a full system storage path like
         D:\\movies\\show\\file.strm, which is NOT a WebDAV virtual path.
-        The code must reconstruct the WebDAV path from the cloud_path 
+        The code must reconstruct the WebDAV path from the cloud_path
         (parent directory) and the item name.
         """
         self.admin_api.list_directory.return_value = {
@@ -2145,11 +2207,144 @@ class TestCollectCloudFilesConcurrent:
                 ],
             },
         }
-        file_set: set[str] = set()
-        self.app._collect_cloud_files_concurrent("/mount/show", file_set)
+        result = self.app._collect_cloud_files_concurrent("/mount/show")
 
         # Should be cloud_path + "/" + name, NOT item["path"]
-        assert file_set == {"/mount/show/episode.strm"}
+        assert result == {"/mount/show/episode.strm"}
+
+
+# ===========================================================================
+# TestParseFsListContent — /api/fs/list 响应契约校验（fail-closed）
+# ===========================================================================
+
+
+class TestParseFsListContent:
+    """Test _parse_fs_list_content contract validation (fail-closed).
+
+    直接单元测试 _parse_fs_list_content 的所有 guard 分支，与
+    test_log_issues_simulation.py::TestParseFsListContent 互为补充。
+    本类聚焦边界：bool 穿透、非 dict item 在 _collect 路径的健壮性、
+    content=[] total>0 矛盾。
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        config = Mock(spec=AppConfig)
+        config.a_folders = [self.tmp]
+        config.paths = Mock()
+        config.paths.b_root = self.tmp
+        config.paths.c_root = self.tmp
+        config.behavior = Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.strm_engine_paths = []
+        db = Mock(spec=Database)
+        db.init_subtitle_table = Mock()
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, Mock())
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_bool_total_rejected(self):
+        """bool 是 int 子类，必须被拒（True/False 不应被当作权威 total）。"""
+        # total=True + 非空 content：旧实现会错误返回 (content, True)
+        res = {"code": 200, "data": {"total": True, "content": [
+            {"name": "a.strm", "is_dir": False}]}}
+        assert self.app._parse_fs_list_content(res) is None
+        # total=False 同样应被拒
+        res2 = {"code": 200, "data": {"total": False, "content": []}}
+        assert self.app._parse_fs_list_content(res2) is None
+
+    def test_content_empty_total_positive_rejected(self):
+        """content=[] 但 total>0：自相矛盾，视为截断/畸形。"""
+        res = {"code": 0, "data": {"total": 5, "content": []}}
+        assert self.app._parse_fs_list_content(res) is None
+
+    def test_authoritative_empty_accepted(self):
+        """权威空目录：content=[] 且 total=0，应返回 ([], 0)。"""
+        res = {"code": 200, "data": {"total": 0, "content": []}}
+        assert self.app._parse_fs_list_content(res) == ([], 0)
+
+    def test_authoritative_success_accepted(self):
+        """权威成功：有文件，total 与 content 一致。"""
+        content = [{"name": "a.strm", "is_dir": False}]
+        res = {"code": 0, "data": {"total": 1, "content": content}}
+        assert self.app._parse_fs_list_content(res) == (content, 1)
+
+    def test_non_dict_item_in_collect_does_not_raise(self):
+        """_collect_cloud_files_concurrent 首页 content 含非 dict 元素时
+        不应抛 AttributeError（与串行路径一致，跳过非 dict item）。"""
+        self.app.admin_api.list_directory.return_value = {
+            "code": 200,
+            "data": {
+                "total": 2,
+                "content": [
+                    "not-a-dict",  # 非 dict 元素
+                    {"name": "good.strm", "is_dir": False},
+                ],
+            },
+        }
+        # 不应抛异常，且 good.strm 仍被收集
+        result = self.app._collect_cloud_files_concurrent("/mount")
+        assert result is not None
+        assert "/mount/good.strm" in result
+
+
+# ===========================================================================
+# TestNaturalSortKey — 区域详情 STRM 列表自然排序（修复字典序 bug）
+# ===========================================================================
+
+
+class TestNaturalSortKey:
+    """Test _natural_sort_key fixes the dictionary-order bug.
+
+    旧实现用纯字典序对 local_path 排序，缺前导零时出现
+    `1, 10, 2, 21` 错乱。自然排序把 basename 的连续数字按整数比较。
+    直接对 routes 模块的 _natural_sort_key 做纯函数测试。
+    """
+
+    def _key(self):
+        from webui.routes import _natural_sort_key
+        return _natural_sort_key
+
+    def test_episode_numbers_compared_as_integers(self):
+        """E1 < E2 < E10 < E21，而非字典序的 E1 < E10 < E2 < E21。"""
+        key = self._key()
+        paths = [
+            "/b/Show/Season 01/S01E21.strm",
+            "/b/Show/Season 01/S01E2.strm",
+            "/b/Show/Season 01/S01E10.strm",
+            "/b/Show/Season 01/S01E1.strm",
+        ]
+        sorted_paths = sorted(paths, key=key)
+        endings = [p.rsplit("/", 1)[-1] for p in sorted_paths]
+        assert endings == ["S01E1.strm", "S01E2.strm",
+                           "S01E10.strm", "S01E21.strm"]
+
+    def test_padded_zero_still_sorted_correctly(self):
+        """带前导零的文件名自然排序与字典序一致。"""
+        key = self._key()
+        paths = [
+            "/b/Show/Season 01/S01E10.strm",
+            "/b/Show/Season 01/S01E01.strm",
+            "/b/Show/Season 01/S01E02.strm",
+        ]
+        sorted_paths = sorted(paths, key=key)
+        endings = [p.rsplit("/", 1)[-1] for p in sorted_paths]
+        assert endings == ["S01E01.strm", "S01E02.strm", "S01E10.strm"]
+
+    def test_local_path_as_tiebreaker(self):
+        """basename 相同时，local_path 作为 tiebreaker 保持稳定。"""
+        key = self._key()
+        paths = [
+            "/b/ShowB/Season 01/S01E01.strm",
+            "/b/ShowA/Season 01/S01E01.strm",
+        ]
+        sorted_paths = sorted(paths, key=key)
+        # basename 相同，按完整路径字典序（tiebreaker）
+        assert sorted_paths[0].startswith("/b/ShowA")
 
 
 # ===========================================================================
@@ -2331,11 +2526,11 @@ class TestCleanupBZombiesBatchOptimization:
                 return {"code": 0, "data": {"content": [
                     {"name": "file1.strm", "is_dir": False},
                     # file2.strm 不在云端（僵尸文件）
-                ]}}
+                ], "total": 1}}
             elif path == "/cloud/dir2":
                 return {"code": 0, "data": {"content": [
                     {"name": "file3.strm", "is_dir": False},
-                ]}}
+                ], "total": 1}}
             return None
 
         # 使用 Mock 包装以便追踪调用次数

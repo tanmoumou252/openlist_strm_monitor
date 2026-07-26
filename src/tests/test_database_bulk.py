@@ -241,6 +241,60 @@ class TestGetAllBFingerprints:
 
 
 # ────────────────────────────────────────────────
+# 只读 getter 读锁一致性（Task 7，audit Important-2 + 二次审核 C-2）
+# ────────────────────────────────────────────────
+
+class TestReadonlyGettersReadLock:
+    """断言所有只读 getter 都在 `rw_lock.read_locked()` 保护下访问连接。
+
+    历史上 `get_all_b_records` / `get_table_counts` / `get_b_status_counts`
+    只用 `read_connection()` 而漏取读锁，与同模块 `b_fingerprint_exists` 等
+    惯用法不一致；并发写事务持写锁时段长时可能读到部分提交快照。
+    """
+
+    # 审计确认的全部使用 `read_connection()` 的只读 getter（不含 bulk 专用方法）。
+    READONLY_GETTERS = (
+        "get_a_by_local", "get_b_by_local", "get_a_by_webdav", "get_b_by_webdav",
+        "get_all_a_records", "get_all_b", "get_all_b_fingerprints", "get_all_c",
+        "get_known_folders", "is_ghost_protected",
+        "get_all_ghost_protected_paths", "get_protected_roots",
+        "get_protected_root_paths", "get_protected_roots_snapshot_paths",
+        "get_control", "get_b_under_root",
+        "get_identity_by_fingerprint", "get_identity_by_webdav",
+        "get_a_local_path_by_webdav", "get_b_instances_by_fingerprint",
+        "get_b_by_local_full", "get_valid_b_instance_by_fingerprint",
+        "get_all_b_by_fingerprint", "b_fingerprint_exists",
+        "get_a_count_under_root", "has_other_b_instance",
+        "get_media_boundary_by_fingerprint", "get_media_boundaries_by_source_name",
+        "get_media_boundary_by_current_name", "get_media_boundary_by_source_name_only",
+        "get_subtitle_by_local", "subtitle_exists", "get_subtitles_by_fingerprint",
+        # Task 7 重点：以下 3 个曾漏读锁
+        "get_all_b_records", "get_table_counts", "get_b_status_counts",
+    )
+
+    def test_all_readonly_getters_hold_read_lock(self):
+        import inspect
+        for name in self.READONLY_GETTERS:
+            method = getattr(Database, name)
+            source = inspect.getsource(method)
+            assert "rw_lock.read_locked()" in source, (
+                f"{name} 未持有 rw_lock.read_locked()"
+            )
+            assert "read_connection()" in source, (
+                f"{name} 未使用 read_connection()"
+            )
+
+    def test_target_three_methods_source_pattern(self):
+        """精确校验本 Task 修复的 3 个方法的 with 语句结构。"""
+        import inspect
+        for name in ("get_all_b_records", "get_table_counts", "get_b_status_counts"):
+            source = inspect.getsource(getattr(Database, name))
+            assert "with self.rw_lock.read_locked(), self.read_connection() as conn:" in source, (
+                f"{name} 应使用 `with self.rw_lock.read_locked(), self.read_connection() as conn:`"
+            )
+
+
+# ────────────────────────────────────────────────
 # 集成：bulk_connection + 批量方法配合
 # ────────────────────────────────────────────────
 

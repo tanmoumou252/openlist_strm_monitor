@@ -697,8 +697,16 @@ class SyncService:
                 except Exception as e:
                     logging.error("[A->B跳过失败] %s", e)
                     return False
-        # 如果 WebDAV 源文件已不存在，说明 A 区是冗余文件，清理掉
-        if not self.app.admin_api.check_exists(webdav_path):
+        # 如果 WebDAV 源文件已不存在，说明 A 区是冗余文件，清理掉。
+        # 三态：仅权威 False 才删；None=不可信 → fail-closed 跳过。
+        exists = self.app.admin_api.check_exists(webdav_path)
+        if exists is None:
+            logging.warning(
+                "[A->B跳过] WebDAV 存在性不可信，fail-closed 不清理: %s",
+                webdav_path,
+            )
+            return False
+        if exists is False:
             logging.warning(
                 "[A->B跳过] WebDAV源文件已不存在，跳过复制并清理A区: %s",
                 webdav_path,

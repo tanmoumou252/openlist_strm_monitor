@@ -2283,6 +2283,32 @@ _AREA_SORT_FIELDS: dict[str, set[str]] = {
 _AREA_SORT_ORDERS = {"asc", "desc"}
 
 
+def _natural_sort_key(path: str) -> tuple:
+    """自然排序键：对 basename 的连续数字按整数比较，避免字典序导致的
+    `1, 10, 2, 21` 错乱（缺前导零时）。最终以 `local_path` 作为 tiebreaker。
+
+    示例：
+        E1.strm  -> (1, ...)
+        E2.strm  -> (2, ...)
+        E10.strm -> (10, ...)
+        E21.strm -> (21, ...)
+    """
+    basename = Path(path).name if path else ""
+    # 切分 basename 为 (非数字, 数字) 段；非数字段一并参与字典序比较。
+    # 例如 "Show - S01E10.strm" → ('Show - S', 1, 'E', 10, '.strm')
+    parts: list = []
+    for i, tok in enumerate(re.split(r"(\d+)", basename)):
+        if i % 2 == 1:  # 数字段
+            try:
+                parts.append((0, int(tok)))  # 标记 0 表示数字，先于字符串段
+            except ValueError:
+                parts.append((1, tok))
+        else:
+            parts.append((1, tok))
+    parts.append((1, path))  # tiebreaker：完整路径
+    return tuple(parts)
+
+
 def _compute_common_local_root(local_paths: list[str]) -> str:
     """计算多个本地路径的公共目录前缀。
     
@@ -2411,8 +2437,11 @@ def handle_area_detail(handler, area, params) -> None:
     # 每季内部独立排序（不跨季混合）
     rev = sort_order.upper() == "DESC"
     if sort_field == "local_path":
+        # 自然排序：对 basename 的连续数字按整数比较，避免字典序导致的
+        # `1, 10, 2, 21` 错乱（缺前导零时）。`local_path` 作为 tiebreaker。
         for recs in seasons_map.values():
-            recs.sort(key=lambda r: r.get("local_path", "") or "", reverse=rev)
+            recs.sort(key=lambda r: _natural_sort_key(r.get("local_path", "") or ""),
+                     reverse=rev)
     elif sort_field == "updated_at" or sort_field == "moved_at":
         sort_key = "updated_at" if sort_field == "updated_at" else "moved_at"
         for recs in seasons_map.values():

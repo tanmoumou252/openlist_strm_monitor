@@ -70,6 +70,9 @@ vX.X.X 版本对启动流程进行了重大优化：
 **关键技术**：
 - `initial_scan_a()` 批量索引 A 区 STRM 文件（多线程 4 线程并发读取，每 100 条或每 2 秒输出进度日志 + records/s 性能基准）
 - `cleanup_a_redundant_using_api()` 使用 OpenList API 批量清理冗余（并发分页 + 客户端过滤）
+- A 区冗余清理采用 **fail-closed** 策略：若某父目录的云端文件列表不可信（网络异常、响应畸形、分页不完整），该目录下的本地 A 记录整组不参与冗余差集，确保不会误删。
+- `OpenListAdminClient.check_exists()` 采用 **三态** 语义（`True` / `False` / `None`）：不可信响应（`data=None`、`content=None`、bool `total`、非 0/200 code、安全阀耗尽）返回 `None` 而非 `False`。所有「不存在则删」的清理调用方仅当 `check_exists() is False`（权威不存在）才执行删除；`None` 视为不可信而跳过清理，避免假阴性误删。
+- `ensure_single_visible_instance()` 在 quarantine 失败或 DB 迁移回滚成功后，把重复实例的 status 恢复为 `valid`（B3-A），避免「DB=duplicate / 磁盘仍为原 .strm」分叉导致 ensure 永不重试的死锁；DB 迁移回滚也失败时尝试把 DB local_path 对齐到 quarantined 路径（B3-B），再 raise 暴露极端态。
 - `scan_a_to_b_full_sync()` 双模式同步（单事务 / 分批提交）
 - 预加载 ghost 保护和 B 区指纹到内存缓存
 - 跳过启动时的 per-file HTTP `check_exists` 和血统校验
@@ -233,6 +236,18 @@ python src/webui/server.py
 ```
 
 启动后访问 `http://127.0.0.1:8579` 即可使用 WebUI 管理面板。
+
+### 3. 运行测试
+
+```bash
+# 全套测试
+python -m pytest src/tests/ -v
+
+# 日志风险模拟专项测试（Issue1–Issue8，55+ 个测试）
+python -m pytest src/tests/test_log_issues_simulation.py -v
+```
+
+日志风险模拟测试（`test_log_issues_simulation.py`）针对 `strm_bridge.log` 中出现的八类真实问题进行沙盒实验，生成 100+ 虚拟 strm/图片/字幕文件于 `src/tests/strm.test.A/`（幂等保留），经真实 `AppService` 同步到 `src/tests/strm.test.B/`（测试后清理），日志留存于 `test_logs/`。
 
 ---
 

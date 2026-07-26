@@ -28,6 +28,10 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 - `Database.bulk_connection()` 绕过进程内读写锁，仅用于启动阶段的单线程批量写入；主动刷新使用分批提交，以缩短 RESERVED 锁持有时间。
 - 该区分尤其保护 B 区 watcher 的只读查询，避免 A→B bulk 同步期间出现 `database is locked`。
 
+### 只读 getter 读锁一致性（Task 7 修复）
+
+所有只读 getter（含 `get_all_b_records`、`get_table_counts`、`get_b_status_counts`）除使用 `read_connection()` 外，还必须包裹 `rw_lock.read_locked()`，与 `b_fingerprint_exists` 等同模块只读 getter 惯用法一致。这避免并发写事务持写锁时段读到部分提交快照（详见 `src/tests/test_database_bulk.py::TestReadonlyGettersReadLock` 结构性回归）。
+
 ### 表结构
 
 #### `a_strm_files` — A 区 STRM 文件记录

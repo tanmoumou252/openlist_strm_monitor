@@ -80,6 +80,12 @@ class BAreaEventHandler(FileSystemEventHandler):
 - **电影**：字幕与 STRM 同目录
 - **番剧**：字幕放入 `Season XX/` 子目录，标准化命名如 `S01E01.forced.zho.简体.ass`
 
+**B 区 zombie 清理（fail-closed）**：
+`cleanup_b_zombies_under_folder` 按 WebDAV 父目录分组，通过 `list_directory()` 批量获取云端文件并与本地记录比对。当某父目录的 `/api/fs/list` 响应不可信（网络异常、非成功 code、`data`/`content`/`total` 畸形、分页安全阀耗尽等）时，`_collect_cloud_files_in_directory` 返回 `None`，该父目录被整组跳过，不删除任何本地文件/DB 行。判别契约见 `docs/openlist_api_fs_list_contract.md`。
+
+**B 区 STRM 列表排序**：
+WebUI 详情页 `/api/area/{area}/detail` 按季分组后，每季内的 STRM 文件按 basename 做自然排序（连续数字按整数比较，`local_path` 作为 tiebreaker），避免缺前导零时出现 `1, 10, 2, 21` 错乱。排序键函数 `_natural_sort_key`（`webui/routes.py`）。
+
 ## C 区 — 幽灵收容区
 
 **用途**：收容因云盘根目录大改版或挂载点删除而失效的路径。保留历史痕迹，不污染媒体库。

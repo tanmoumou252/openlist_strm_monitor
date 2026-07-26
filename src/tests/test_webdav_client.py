@@ -824,11 +824,12 @@ class TestAdminCheckExists:
         assert client.check_exists("/") is True
 
     def test_root_not_exists(self, tmp_path):
+        """根目录列表失败 → None（不可信），不得当 False。"""
         client = _make_admin_client(tmp_path)
         client.token = "jwt"
         client.session.request.return_value = None
 
-        assert client.check_exists("/") is False
+        assert client.check_exists("/") is None
 
     def test_file_found_in_listing(self, tmp_path):
         client = _make_admin_client(tmp_path)
@@ -853,16 +854,52 @@ class TestAdminCheckExists:
 
         assert client.check_exists("") is True
 
-    def test_data_field_null_returns_false(self, tmp_path):
-        """非根路径 list_directory 返回 data: null → check_exists 返回 False。
-
-        覆盖 webdav_client.py:616-617：data 为 None 时 isinstance(data, dict)
-        守卫使 content 为 []，分页循环判定 len(content) < per_page → result=False。
-        """
+    def test_data_field_null_returns_none(self, tmp_path):
+        """非根路径 data: null → 不可信 None（fail-closed，不得当不存在）。"""
         client = _make_admin_client(tmp_path)
         client.token = "jwt"
         with patch.object(client, "list_directory", return_value={"code": 200, "data": None}):
-            assert client.check_exists("/dir/target.txt") is False
+            assert client.check_exists("/dir/target.txt") is None
+
+    def test_content_none_returns_none(self, tmp_path):
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        with patch.object(
+            client, "list_directory",
+            return_value={"code": 200, "data": {"content": None, "total": 1}},
+        ):
+            assert client.check_exists("/dir/target.txt") is None
+
+    def test_bool_total_returns_none(self, tmp_path):
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        with patch.object(
+            client, "list_directory",
+            return_value={
+                "code": 200,
+                "data": {"content": [{"name": "x"}], "total": True},
+            },
+        ):
+            assert client.check_exists("/dir/target.txt") is None
+
+    def test_uses_per_page_100(self, tmp_path):
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        with patch.object(
+            client, "list_directory",
+            return_value={"code": 200, "data": {"content": [], "total": 0}},
+        ) as mock_list:
+            client.check_exists("/dir/target.txt")
+            mock_list.assert_called()
+            kwargs = mock_list.call_args
+            # path 为位置或关键字；per_page 必须为 100
+            assert kwargs.kwargs.get("per_page") == 100 or (
+                len(kwargs.args) >= 1 and kwargs.kwargs.get("per_page", 100) == 100
+            )
+            # 更稳妥：检查 call 参数
+            _, call_kwargs = mock_list.call_args
+            if "per_page" in call_kwargs:
+                assert call_kwargs["per_page"] == 100
 
 
 class TestAdminListContents:

@@ -134,6 +134,7 @@ B 区文件变动（创建/修改/移动）
 - 客户端过滤：只保留 `.strm` 文件，忽略字幕、nfo、图片等
 - 并发分页：5 个并发，避免阻塞 API
 - Ghost 保护：删除的文件设置 ghost 保护，防止回灌
+- **fail-closed 策略**：若某父目录的云端文件列表不可信（`_parse_fs_list_content` 返回 None），该目录下的本地 A 记录**整组不参与冗余差集**，0 删除、0 ghost 新增，仅记录 warning 日志
 
 ### 三层防御机制（并发安全）
 
@@ -227,6 +228,7 @@ B 区扫描时检查每个 STRM 文件：
 - 按父目录分组，使用 `list_directory()` 一次性获取目录下所有文件
 - 在内存中进行集合比对，大幅减少 API 调用次数
 - 性能对比：N 条记录 × 1 次 `check_exists()` = N 次 API 调用 → M 个父目录 × 1 次 `list_directory()` = M 次 API 调用
+- **fail-closed 策略**：若云端列表不可信（`_parse_fs_list_content` 返回 None 或 100 页安全阀耗尽），跳过该父目录的清理，不删除任何本地文件
 
 ### 三层验证清理
 
@@ -243,6 +245,65 @@ B 区扫描时检查每个 STRM 文件：
 以下安全机制在其他章节中未详细介绍：
 
 - **三重防误删**（`handle_b_deleted`）：`_restoring_markers`（恢复操作标记）→ `_engine_internal_markers`（引擎内部删除标记）→ `has_other_b_instance` + `_check_fingerprint_exists_in_b`（同指纹其他实例检查）。三重全不通过才执行云端删除。
-- **`ensure_single_visible_instance(prefer_path)`** — 同一指纹仅一个实例保持 `valid` 状态，其余强制改为 `.duplicate`。
+- **`ensure_single_visible_instance(fingerprint, trigger_path, prefer_path=None)`** — 同一指纹仅一个实例保持 `valid` 状态，其余强制改为 `.duplicate`。回滚失败时抛出异常使清理中止。
 - **`get_webdav_lock(namespace)`** — 命名空间隔离的 WebDAV 操作锁，防止不同引擎/路径的并发冲突。
 - **DB 建表幂等性** — `_create_schema` 使用 `CREATE TABLE IF NOT EXISTS` 幂等语句，可安全重复调用，不存在回滚机制。
+
+## 9. 假 duplicate 自愈（B3-A / B3-B）
+
+`ensure_single_visible_instance` 在 `mark_other_b_instances_duplicate` 后逐个物理隔离重复实例。物理隔离与 DB 迁移任一环节失败时，必须撤销先前留下的「假 duplicate」状态，避免出现「DB=duplicate 但磁盘仍是 `.strm`」的死锁（该状态下 `ensure_single_visible_instance` 永远不会再处理它，媒体库会长期看到多份可见 `.strm`）。
+
+### B3-A：物理隔离失败 → 恢复 `valid`
+
+`quarantine_file` 返回 `None`（同秒碰撞、目标占用、磁盘满、权限不足）或 `move_b_record` 失败但物理回滚成功时，对该路径调用 `mark_b_instance_status(path, "valid")`，撤销 `mark_other_b_instances_duplicate` 留下的 `duplicate` 标记。下次 `ensure_single_visible_instance` 仍能看到它并重试隔离。
+
+### B3-B：物理回滚也失败 → DB 对齐 quarantined 再 raise
+
+`quarantine_file` 成功（文件已改名为 `.duplicate`）但 `move_b_record` 失败、且把 quarantined 文件 `rename` 回原路径**也失败**（磁盘满/锁文件）时：
+1. 尝试 `move_b_record(原路径, quarantined 路径)` + `mark_b_instance_status(quarantined, "duplicate")`，使 DB `local_path` 对齐磁盘实际位置；
+2. 抛出 `OSError` 使本次清理中止，不静默继续。
+
+该路径属极端态（要求磁盘满/锁文件叠加），代码故意 `raise` 暴露问题，不吞异常。
+
+### 历史「假 duplicate」修复
+
+历史运行中已写入的「status=duplicate 但 local_path 仍以 `.strm` 结尾且文件存在」记录不会被生产代码自动扫描修复。运维可使用 `src/tools/repair_false_duplicates.py`：
+- 默认 **dry-run**，仅打印候选记录；
+- 加 `--apply` 把这些记录恢复为 `valid`，再调用 `ensure_single_visible_instance` 重新隔离。
+
+工具不嵌入完整引擎，不连生产 OpenList，仅修本地 DB + 物理文件状态。
+
+## 10. `check_exists` 三态与清理调用方 fail-closed
+
+`OpenListAdminClient.check_exists` 历史上返回 `bool`：网络失败 / 安全阀耗尽 / 响应不可信统一返回 `False`，被半破坏性清理路径当作「云端确定不存在」而误删本地文件。现改为 **三态** `bool | None`：
+
+| 返回值 | 语义 | 触发条件 |
+|---|---|---|
+| `True` | 权威存在 | 列表中找到目标，或根目录 `code ∈ {0,200}` |
+| `False` | 权威不存在 | 权威穷尽分页后仍未找到 |
+| `None` | **不可信**（fail-closed） | 网络失败、`code ∉ {0,200}`、`data=None`、`content=None`、`total` 为 bool/非 int/负、100 页安全阀耗尽 |
+
+实现要点：
+- `per_page=100`（原 `1000`，与服务端 `maximum:100` 对齐，避免首页截断-提前结束）
+- 共享 `_parse_fs_list_page` 守卫，与 `_parse_fs_list_content` 同判据
+- 缓存类型改为 `bool | None`，不可信结果同样缓存（偏保守）
+
+### 清理调用方的判别规则
+
+所有「以 `check_exists` 结果决定是否删本地/DB/ghost」的调用点统一语义：
+
+```python
+exists = self.admin_api.check_exists(webdav_path)
+if exists is True:      # 权威存在 → 保活/跳过清理
+    continue / skip
+if exists is None:      # 不可信 → fail-closed，不删
+    continue / skip
+# 仅 exists is False：权威不存在 → 执行清理
+```
+
+涉及位置（按方法名定位）：
+- B 区冗余清理：`if check_exists(...): continue` 保活分支（`None` 不进保活也不删，等价 fail-closed）
+- `cleanup_a_deleted_on_cloud`：仅 `is False` 才删 A
+- `handle_a_created_or_modified`（两处：即时清理、A→B 跳过）
+- `SyncService.copy_a_record_to_b` 的 WebDAV 不存在清理分支
+- `main.py` 根目录探测：`check_exists("/") is not True` 即视为连接失败退出（`None` 也退出，避免误判根目录消失）

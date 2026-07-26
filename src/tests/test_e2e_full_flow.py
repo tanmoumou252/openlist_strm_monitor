@@ -77,6 +77,9 @@ def _make_mock_db(tmp_path: Path) -> MagicMock:
     }
     db.get_db_file_size.return_value = 0
     db.get_subtitle_by_local.return_value = None
+    db.get_b_under_root.return_value = []
+    db.get_all_a_records.return_value = []
+    db.get_all_b_records.return_value = []
     mock_conn = MagicMock()
     mock_conn.execute.return_value.fetchone.return_value = (0,)
     mock_conn_ctx = MagicMock()
@@ -433,6 +436,32 @@ class TestAreaSearchE2E:
         # 详情页返回 seasons 分组，total 为记录数
         assert resp.get("total") == 1, f"详情页 LIKE 应命中 1 条，实际 {resp.get('total')}"
         assert resp.get("seasons") is not None and len(resp.get("seasons")) >= 1
+
+    def test_area_detail_natural_sort_within_season(self, real_webui_server):
+        """详情页季内文件应自然排序，缺前导零时不得出现 1,10,2,21 错乱。"""
+        server, base, token, db = real_webui_server
+        # 文件名缺前导零：E1, E2, E10, E21 —— 字典序会排成 1,10,2,21
+        self._seed(db, [
+            (f"/a/番剧/SortBug/Season 01/E{ep}.strm",
+             f"/webdav/番剧/SortBug/E{ep}.mp4",
+             "/webdav/番剧/SortBug")
+            for ep in (10, 1, 21, 2, 3)
+        ])
+
+        media = urllib.parse.quote("SortBug")
+        status, _, resp = _http_get(
+            base, f"/api/area/a/detail?media={media}&sort=local_path", token)
+        assert status == 200
+        seasons = resp.get("seasons") or []
+        # 汇总所有季的记录顺序（按 API 返回）
+        ordered_paths = [r["local_path"] for s in seasons for r in s.get("records", [])]
+        assert len(ordered_paths) == 5
+        # 提取集号断言自然序：1,2,3,10,21（不是字典序的 1,10,2,21,3）
+        import re as _re
+        eps = [int(_m.group(1)) for p in ordered_paths
+               if (_m := _re.search(r"E(\d+)\.strm", p))]
+        assert eps == sorted(eps), f"季内非自然序: {eps}"
+        assert eps == [1, 2, 3, 10, 21], f"自然排序错乱: {eps}"
 
 
 class TestPaginationAndSearch:

@@ -1220,12 +1220,15 @@ class AppService:
 
     def cleanup_a_redundant_using_api(self) -> None:
         """使用 OpenList API 批量清理 A 区冗余文件。
-        
+
         性能优化策略（混合方案）：
         1. 基于本地记录优化遍历范围：只遍历本地 A 区记录的父目录
         2. 并发分页：使用线程池并发请求多个页面（5 个并发）
         3. 客户端过滤：只保留 .strm 文件，忽略字幕、nfo、图片等
-        
+
+        fail-closed：若某父目录的云端列表不可信（返回 None），
+        该父目录下的本地 A 记录整组不参与冗余差集。
+
         性能对比：
         - 旧方案：5万次 check_exists × 150ms = 7500秒（2小时）
         - 新方案：500次 /api/fs/list × 100ms / 5并发 = 10秒
@@ -1242,16 +1245,35 @@ class AppService:
         parent_dirs = {rec.parent_webdav_path for rec in a_records}
         logging.info("[初始化] 需要检查 %d 个云端目录", len(parent_dirs))
 
+        # 按父目录分组 A 记录
+        parent_to_records: dict[str, list] = {}
+        for rec in a_records:
+            parent_to_records.setdefault(rec.parent_webdav_path, []).append(rec)
+
+        # 收集可信父目录的云端文件路径；不可信父目录整组跳过
         cloud_webdav_paths: set[str] = set()
+        trusted_parents: set[str] = set()
         for parent_dir in parent_dirs:
             try:
-                self._collect_cloud_files_concurrent(parent_dir, cloud_webdav_paths)
+                result = self._collect_cloud_files_concurrent(parent_dir)
+                if result is not None:
+                    cloud_webdav_paths.update(result)
+                    trusted_parents.add(parent_dir)
+                else:
+                    logging.warning(
+                        "[初始化] 云端目录 %s 不可信，该目录下本地记录整组排除",
+                        parent_dir)
             except Exception as e:
                 logging.warning(
                     "[初始化] 获取云端文件列表失败: %s, 错误: %s",
                     parent_dir, e)
 
-        local_webdav_paths = {rec.webdav_path for rec in a_records}
+        # 只把可信父目录下的本地记录纳入冗余差集
+        trusted_a_records = [
+            rec for rec in a_records
+            if rec.parent_webdav_path in trusted_parents
+        ]
+        local_webdav_paths = {rec.webdav_path for rec in trusted_a_records}
         redundant_paths = local_webdav_paths - cloud_webdav_paths
 
         if not redundant_paths:
@@ -1261,7 +1283,7 @@ class AppService:
         logging.info("[初始化] 发现 %d 个冗余文件，开始清理...", len(redundant_paths))
 
         cleaned = 0
-        for rec in a_records:
+        for rec in trusted_a_records:
             if rec.webdav_path in redundant_paths:
                 try:
                     safe_remove_file(rec.local_path)
@@ -1285,32 +1307,67 @@ class AppService:
             "[初始化] A 区冗余清理完成，清理 %d 个文件 (%.1fs)",
             cleaned, time.time() - t0)
 
+    def _parse_fs_list_content(self, res) -> tuple[list, int] | None:
+        """解析 /api/fs/list 单页响应，按项目级契约校验（fail-closed）。
+
+        仅当响应满足"权威成功"（code ∈ {0,200}、data 为 dict、
+        data.content 为 list、data.total 为 int ≥ 0）时返回 (content, total)；
+        否则返回 None 表示不可信，调用方必须对该父目录 fail-closed。
+
+        参考 docs/openlist_api_fs_list_contract.md §2-§3。
+        """
+        if not res or not isinstance(res, dict):
+            return None
+        code = res.get("code")
+        if code not in (0, 200):
+            return None
+        data = res.get("data")
+        if not isinstance(data, dict):
+            return None
+        content = data.get("content")
+        if not isinstance(content, list):
+            return None
+        total = data.get("total")
+        # bool 是 int 的子类，JSON 中 total 不应为 bool；显式排除避免 True/False 被当作 1/0
+        if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+            return None
+        # content=[] 但 total>0：自相矛盾，视为响应被截断/畸形
+        if not content and total > 0:
+            return None
+        return content, total
+
     def _collect_cloud_files_concurrent(
-            self, cloud_path: str, file_set: set[str]) -> None:
+            self, cloud_path: str) -> set[str] | None:
         """使用并发请求收集云端 .strm 文件。
-        
+
+        返回权威完整的 .strm 文件路径集合；若响应不可信则返回 None
+        （fail-closed），调用方必须整组排除该父目录的本地记录。
+
         优化策略：
         1. 先获取第一页，获取 total
         2. 计算需要的页数
         3. 并发请求所有页面（5 个并发，带重试机制）
         4. 客户端过滤：只保留 .strm 文件
-        
-        Args:
-            cloud_path: 云端目录路径
-            file_set: 用于收集文件路径的集合（会修改）
+
+        参考 docs/openlist_api_fs_list_contract.md §4.1（per_page=100）。
         """
+        file_set: set[str] = set()
         first_page = self.admin_api.list_directory(
             path=cloud_path, page=1, per_page=100)
 
         if not first_page:
             logging.warning("[初始化] 获取云端目录首页失败: %s", cloud_path)
-            return
+            return None
 
-        data = first_page.get("data", {})
-        total = data.get("total", 0)
-        content = data.get("content", [])
+        parsed = self._parse_fs_list_content(first_page)
+        if parsed is None:
+            logging.warning("[初始化] 云端目录首页响应不可信: %s", cloud_path)
+            return None
+        content, total = parsed
 
         for item in content:
+            if not isinstance(item, dict):
+                continue
             name = item.get("name")
             if not name:
                 continue
@@ -1322,7 +1379,7 @@ class AppService:
 
         total_pages = (total + 99) // 100
         if total_pages <= 1:
-            return
+            return file_set
 
         def fetch_page_with_retry(page_num: int, max_retries: int = 3):
             """带重试的页面获取"""
@@ -1358,16 +1415,23 @@ class AppService:
                     if not result:
                         failed_pages.append(page_num)
                         continue
-                    data = result.get("data", {})
-                    content = data.get("content", [])
+                    parsed = self._parse_fs_list_content(result)
+                    if parsed is None:
+                        logging.warning(
+                            "[初始化] 云端目录 %s 第 %d 页响应不可信，整组排除",
+                            cloud_path, page_num)
+                        return None
+                    content, _total = parsed
                     for item in content:
+                        # 与首页一致：非 dict 元素跳过，避免 AttributeError
+                        # 把可恢复脏数据升级为整目录 fail-closed。
+                        if not isinstance(item, dict):
+                            continue
                         name = item.get("name")
                         if not name:
                             continue
                         if (not item.get("is_dir")
                                 and name.lower().endswith(".strm")):
-                            # API 返回的 "path" 是存储系统原始路径，
-                            # 应从 cloud_path + name 重构 WebDAV 虚拟路径
                             file_set.add(cloud_path + "/" + name)
                 except Exception as e:
                     logging.warning(
@@ -1376,8 +1440,11 @@ class AppService:
 
             if failed_pages:
                 logging.warning(
-                    "[初始化] 云端目录 %s 有 %d 个页面获取失败: %s",
+                    "[初始化] 云端目录 %s 有 %d 个页面获取失败，整组排除: %s",
                     cloud_path, len(failed_pages), failed_pages)
+                return None
+
+        return file_set
 
     def _scan_a_subtitles_on_startup(self) -> None:
         """启动后扫描 A 区字幕文件（补偿 initial_scan_a 不处理字幕）"""
@@ -1449,9 +1516,15 @@ class AppService:
                 if alt_source:
                     source_exists = True
             if not source_exists:
-                if self.admin_api.check_exists(webdav_path):
+                exists = self.admin_api.check_exists(webdav_path)
+                if exists is True:
                     logging.debug(
                         "[冗余清理跳过] A区源文件暂不可用但WebDAV存在，跳过清理: %s", webdav_path)
+                    continue
+                if exists is None:
+                    logging.warning(
+                        "[冗余清理跳过] WebDAV 存在性不可信，fail-closed 跳过: %s",
+                        webdav_path)
                     continue
             if not source_exists:
                 local = Path(local_path)
@@ -1490,7 +1563,13 @@ class AppService:
                     local_path,
                     webdav_path)
                 continue
-            if self.admin_api.check_exists(webdav_path):
+            exists = self.admin_api.check_exists(webdav_path)
+            if exists is not False:
+                # True=仍存在；None=不可信 —— 均不得删除
+                if exists is None:
+                    logging.warning(
+                        "[冗余清理跳过] WebDAV 存在性不可信，fail-closed 跳过: %s",
+                        webdav_path)
                 continue
             safe_remove_file(local_path)
             self.db.delete_b_by_local(local_path)
@@ -1531,7 +1610,13 @@ class AppService:
             # 只处理属于当前 engine_path 范围的记录
             if not webdav_path.startswith(prefix) and webdav_path != engine_path:
                 continue
-            if not self.admin_api.check_exists(webdav_path):
+            exists = self.admin_api.check_exists(webdav_path)
+            if exists is None:
+                logging.warning(
+                    "[A区清理] WebDAV 存在性不可信，fail-closed 跳过: %s",
+                    webdav_path)
+                continue
+            if exists is False:
                 logging.info(
                     "[A区清理] 云端已删除，移除本地 STRM: %s (WebDAV: %s)",
                     local_path,
@@ -1593,7 +1678,13 @@ class AppService:
         # 按 fingerprint 串行化，避免并发创建 B 实例的 TOCTOU 竞争（P1-4）
         fp_lock = self.get_fingerprint_lock(fingerprint)
         with fp_lock:
-            if not self.admin_api.check_exists(webdav_path):
+            exists = self.admin_api.check_exists(webdav_path)
+            if exists is None:
+                logging.warning(
+                    "[A区即时清理] WebDAV 存在性不可信，fail-closed 跳过删除: %s",
+                    local)
+                return
+            if exists is False:
                 logging.warning("[A区即时清理] WebDAV 已不存在，删除本地冗余 STRM: %s", local)
                 safe_remove_file(str(local))
                 self.db.delete_a_by_local(str(local))
@@ -1651,7 +1742,13 @@ class AppService:
                     self.ensure_single_visible_instance(fingerprint, str(b_local))
                     return
             if old_identity and current_b_path is None:
-                if not self.admin_api.check_exists(webdav_path):
+                exists = self.admin_api.check_exists(webdav_path)
+                if exists is None:
+                    logging.warning(
+                        "[A->B跳过] WebDAV 存在性不可信，fail-closed 不清理: %s",
+                        webdav_path)
+                    return
+                if exists is False:
                     logging.warning(
                         "[A->B跳过] WebDAV源文件已不存在，跳过复制并清理A区: %s",
                         webdav_path)
@@ -1822,13 +1919,41 @@ class AppService:
                         # 保持 DB local_path 与文件系统一致，避免两者分叉。
                         try:
                             Path(quarantined).rename(dup)
+                            # B3-A: mark_other 已把 status 标为 duplicate，
+                            # 物理已回滚到原 .strm → 恢复 valid，避免假 duplicate 死锁。
+                            self.db.mark_b_instance_status(str(dup), "valid")
+                            logging.warning(
+                                "[B区重复] DB迁移失败，已回滚物理改名: %s", dup)
                         except OSError as revert_err:
+                            # B3-B: 物理已在 quarantined，回滚失败 → 把 DB
+                            # local_path 对齐到磁盘实际路径，避免「DB 指旧路径 /
+                            # 磁盘在 .duplicate」分叉。
+                            try:
+                                aligned = self.db.move_b_record(
+                                    str(dup), str(quarantined))
+                                if aligned:
+                                    self.db.mark_b_instance_status(
+                                        str(quarantined), "duplicate")
+                                    logging.error(
+                                        "[B区重复] 回滚失败，已将 DB 对齐到隔离路径: %s -> %s",
+                                        dup, quarantined)
+                                else:
+                                    logging.error(
+                                        "[B区重复] 回滚失败且 DB 对齐隔离路径也失败: %s -> %s",
+                                        dup, quarantined)
+                            except Exception as align_err:  # noqa: BLE001
+                                logging.error(
+                                    "[B区重复] 回滚失败后 DB 对齐异常: %s -> %s: %s",
+                                    dup, quarantined, align_err)
                             logging.error(
                                 "[B区重复] DB迁移失败且回滚物理改名失败: %s -> %s: %s",
                                 dup, quarantined, revert_err)
-                        logging.warning(
-                            "[B区重复] DB迁移失败，已回滚物理改名: %s", dup)
+                            raise
                 else:
+                    # B3-A: 物理隔离失败时撤销 mark_other 留下的假 duplicate，
+                    # 恢复 status=valid，避免「DB=duplicate / 磁盘仍为 .strm」
+                    # 导致 ensure 永不重试的死锁。
+                    self.db.mark_b_instance_status(str(dup), "valid")
                     logging.warning("[B区重复] 重复实例隔离失败: %s", dup)
             finally:
                 # 延迟清除标记，确保 watchdog 事件已被处理
@@ -2454,40 +2579,48 @@ class AppService:
             logging.warning("[B区僵尸清理] 完成清理，共处理 %s 个文件", removed_count)
     
     def _collect_cloud_files_in_directory(self, directory_path: str) -> set[str] | None:
-        """获取指定目录下的所有文件的完整 WebDAV 路径集合
-        
+        """获取指定目录下的所有文件的完整 WebDAV 路径集合。
+
+        返回权威完整集合；若响应不可信则返回 None（fail-closed）。
+
+        参考 docs/openlist_api_fs_list_contract.md §4（per_page=100）。
+
         Args:
             directory_path: 目录的 WebDAV 路径
-            
+
         Returns:
-            set[str]: 文件路径集合（如 {"/path/to/file1.strm", "/path/to/file2.strm"}）
-            None: API 调用失败时返回
+            set[str] | None: 文件路径集合或 None（不可信）
         """
         import posixpath
         result = set()
         page = 1
-        per_page = 1000
-        
+        per_page = 100  # 对齐 docs maximum:100
+
         while page <= 100:  # 安全阀
-            res = self.admin_api.list_directory(directory_path, page=page, per_page=per_page)
-            if not res or res.get("code") not in (0, 200):
+            res = self.admin_api.list_directory(
+                directory_path, page=page, per_page=per_page)
+            parsed = self._parse_fs_list_content(res)
+            if parsed is None:
                 return None
-            
-            data = res.get("data", {})
-            content = data.get("content", []) if isinstance(data, dict) else []
-            
+            content, _total = parsed
+
             for item in content:
                 if isinstance(item, dict) and not item.get("is_dir", False):
                     file_name = item.get("name", "")
                     if file_name:
-                        # 使用 posixpath.join 处理根目录边界（避免 "//xxx.strm"）
                         full_path = posixpath.join(directory_path, file_name)
                         result.add(full_path)
-            
+
             if len(content) < per_page:
                 break
             page += 1
-        
+
+        # 安全阀耗尽：fail-closed（不返回部分集）
+        if page > 100:
+            logging.warning(
+                "[B区僵尸清理] 安全阀耗尽(%s)，视为不可信", directory_path)
+            return None
+
         return result
 
     def refresh_identity_current_b_path(self, fingerprint: str) -> None:

@@ -20,7 +20,7 @@ python -m pytest src/tests/ -v
 | `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试 |
 | `test_refresh_service.py` | 周期性 WebDAV 刷新服务测试 |
 | `test_bootstrap.py` | 启动路径工具（`ensure_base_dir_first`、`load_local_module`）测试 |
-| `test_log_issues_simulation.py` | 三类真实日志问题的沙盒实验与修复回归（SQLite 锁竞争、padding 路径碰撞、B 区血统清理健康度） |
+| `test_log_issues_simulation.py` | 八类真实日志问题的沙盒实验与修复回归（SQLite 锁竞争、padding 路径碰撞、B 区血统清理健康度、B 区事件洪泛、重复实例隔离、字幕路由、WebDAV 假阴性、Unicode 路径） |
 
 ### 数据库 / FTS
 
@@ -214,7 +214,7 @@ python -m pytest src/tests/
 
 ## 日志问题模拟测试（`test_log_issues_simulation.py`）
 
-该测试专门针对 `strm_bridge.log` 中出现的三类真实问题进行模拟与审核，运行机制与一般单元测试不同，需注意目录与日志的留存策略：
+该测试专门针对 `strm_bridge.log` 中出现的**八类**真实问题进行模拟与审核，运行机制与一般单元测试不同，需注意目录与日志的留存策略：
 
 | 目录 / 文件 | 用途 | 测试后处理 |
 |------|------|------|
@@ -224,9 +224,15 @@ python -m pytest src/tests/
 
 该文件是一个可重复的“沙盒找修复”实验场，而不是只验证 mock 调用的单元测试。每类问题都先用受控旧行为确认 baseline 能复现，再验证生产代码中的候选修复；生产修复完成后，测试中的 monkeypatch 只保留 baseline 控制组，真实路径继续作为回归保护。
 
-1. **`database is locked`**：在真实 SQLite WAL 数据库中用未提交的 bulk 写事务持有 RESERVED 锁。baseline 直接使用旧的写连接 getter，必须稳定抛出 `sqlite3.OperationalError`；修复后 31 个纯 SELECT getter 均使用 `read_connection()`，B watcher 查询不再抢写锁。
+1. **`database is locked`**：在真实 SQLite WAL 数据库中用未提交的 bulk 写事务持有 RESERVED 锁。baseline 直接使用旧的写连接 getter，必须稳定抛出 `sqlite3.OperationalError`；修复后的只读 getter 使用 `read_connection()` 并持有 `rw_lock.read_locked()` 读锁，
+由 `test_database_bulk.py::TestReadonlyGettersReadLock` 结构性检查覆盖，B watcher 查询不再抢写锁。
 2. **S04E01 / S4E01 路径碰撞**：baseline 使用旧 builder，两个不同 WebDAV 源会落到同一个 B 目标并生成 `_MANUAL_REVIEW_*.md`；修复后 B 区文件名保留 WebDAV basename 的原始 padding，两个源都进入 B，内容不串改。
 3. **B 区历史越界清理**：按 `_resolve_a_source` 的路径 A、路径 B 分别构造孤立记录和引擎边界不匹配记录，验证非法文件被物理清理且 DB 同步删除；无引擎配置时合法基础层级仍保留，正常 A→B 产物不被误删。
+4. **B 区事件洪泛与锁竞争**：用真实 `BAreaEventHandler` + 手动 watchdog 事件对象触发生产入口，通过可追踪调度器收集后台线程异常并重抛主线程，验证完整事件流不丢 B 记录、不触发 `database is locked`。
+5. **同 fingerprint 多实例隔离**：构造 2-3 个同 fingerprint 的 B 实例，验证 `ensure_single_visible_instance` 最终恰好保留一个 `status='valid'` 实例；验证回滚失败时抛异常使清理中止。
+6. **字幕路由与多语言**：安装真实 `SubtitleHandler`，验证番剧字幕进入 `Season XX`、中文季名规范化、电影字幕保留目录结构、同集多语言不互相覆盖。
+7. **WebDAV 假阴性 fail-closed**：参数化覆盖 `_parse_fs_list_content` 的 22 个不可信响应向量和 A/B 区集成测试，验证不可信父目录整组排除。
+8. **Unicode 路径身份与冲突**：验证 NFC/NFD 规范化、斜杠规范化、URL 编码解码、大小写敏感、全角/连续空格不误合并。
 
 综合夹具还保留非 STRM、真二进制 JPEG、字幕、畸形 STRM 和边缘命名样本，用于验证输入鲁棒性与文件统计覆盖。
 
