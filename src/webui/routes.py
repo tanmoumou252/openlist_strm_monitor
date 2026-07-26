@@ -1014,6 +1014,60 @@ def _validate_strm_engines(value: str) -> bool:
     return True
 
 
+def _validate_a_b_mappings(value: str) -> bool:
+    """校验 openlist.a_b_mappings 写入值。
+
+    合法形态：JSON 数组，元素为 {"a_root": str(非空), "b_root": str(非空), "label": str(可选)}。
+    空数组 [] 合法（表示无引擎配置）。
+    """
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(parsed, list):
+        return False
+    for m in parsed:
+        if not isinstance(m, dict):
+            return False
+        a_root = m.get("a_root")
+        b_root = m.get("b_root")
+        if not isinstance(a_root, str) or not a_root:
+            return False
+        if not isinstance(b_root, str) or not b_root:
+            return False
+        label = m.get("label")
+        if label is not None and not isinstance(label, str):
+            return False
+    return True
+
+
+def _validate_a_b_mappings(value: str) -> bool:
+    """校验 openlist.a_b_mappings 写入值。
+
+    合法形态：JSON 数组，元素为 {"a_root": str(非空), "b_root": str(非空), "label": str(可选)}。
+    空数组 [] 合法（表示无引擎配置）。
+    """
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(parsed, list):
+        return False
+    for m in parsed:
+        if not isinstance(m, dict):
+            return False
+        a_root = m.get("a_root")
+        b_root = m.get("b_root")
+        if not isinstance(a_root, str) or not a_root:
+            return False
+        if not isinstance(b_root, str) or not b_root:
+            return False
+        label = m.get("label")
+        if label is not None and not isinstance(label, str):
+            return False
+    return True
+
+
 def _handle_webui_config_post(handler, webui_server, scope: str,
                                body: bytes) -> None:
     """处理 POST /api/webui/config/{scope} — 批量写入配置。"""
@@ -1054,6 +1108,24 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
             # 校验通过：回写规整后的合法 JSON 字符串，确保后续通用写循环
             # （str(val)）存入 DB 的是合法 JSON，而非原生对象被 str() 出来的 repr。
             data["strm_engines"] = _se_value
+        
+        # a_b_mappings 写入前护栏
+        if scope == "openlist" and "a_b_mappings" in data:
+            _raw_abm = data["a_b_mappings"]
+            if isinstance(_raw_abm, str):
+                _abm_value = _raw_abm
+            elif _raw_abm is None:
+                _abm_value = ""
+            else:
+                _abm_value = json.dumps(_raw_abm, ensure_ascii=False)
+            if not _validate_a_b_mappings(_abm_value):
+                handler._send_json(
+                    {"success": False,
+                     "error": "A↔B 映射配置(a_b_mappings)格式不正确：每个映射必须包含非空的 a_root 和 b_root 字段。"},
+                    400)
+                return
+            data["a_b_mappings"] = _abm_value
+        
         # ui scope 白名单过滤：拒绝未声明的 key，避免 LAN 内任意 key 污染配置表
         if scope == "ui":
             rejected = [k for k in data if k not in _UI_CONFIG_ALLOWED_KEYS]
@@ -1430,6 +1502,7 @@ def _handle_openlist_paths(handler, webui_server) -> None:
     
     # 从 DB 读取用户配置的 strm_engines
     a_folders = []
+    a_b_mappings = []
     try:
         db_openlist_cfg = _wdb.get_all_config("openlist") if _wdb else {}
         strm_engines_json = db_openlist_cfg.get("strm_engines", "[]")
@@ -1443,12 +1516,17 @@ def _handle_openlist_paths(handler, webui_server) -> None:
                     local_path = strm_map[mount_path].local_path
                     if local_path and local_path not in a_folders:
                         a_folders.append(local_path)
+        
+        # 读取 a_b_mappings
+        a_b_mappings_json = db_openlist_cfg.get("a_b_mappings", "[]")
+        a_b_mappings = json.loads(a_b_mappings_json) if a_b_mappings_json else []
     except Exception as e:
         logging.debug("[OpenList] 从用户配置获取 a_folders 失败: %s", e)
     
     handler._send_json({
         "success": True,
         "a_folders": a_folders,
+        "a_b_mappings": a_b_mappings,
         "b_root": cfg.paths.b_root,
         "c_root": cfg.paths.c_root,
     })
@@ -2108,18 +2186,54 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
             # 查询总数
             total = conn.execute(total_sql, params_list).fetchone()[0]
             
-            # 查询媒体分组
-            media_rows = conn.execute(media_groups_sql, params_list + [page_size, offset]).fetchall()
-            
-            media_items = []
-            for row in media_rows:
-                media_items.append({
-                    "name": row["media_name"] or "未分类",
-                    "kind": row["kind"],
-                    "count": row["file_count"],
-                    "season": "",  # 季信息需要 Python 后处理
-                    "latest_ts": row["latest_ts"] or 0,
-                })
+            # 查询媒体分组（先查询所有符合条件的记录，再在 Python 中自然排序）
+            # 为了支持自然排序，我们需要先获取完整结果集
+            if sort_key == "name":
+                # 查询所有记录（不分页），然后在 Python 中自然排序
+                all_media_sql = f"""
+                    SELECT 
+                        {_KIND_SQL} AS kind,
+                        {_MEDIA_NAME_SQL} AS media_name,
+                        COUNT(*) AS file_count,
+                        MAX({time_field}) AS latest_ts
+                    FROM {table}
+                    WHERE 1=1 {base_where} {kind_where}
+                    GROUP BY kind, media_name
+                """
+                all_media_rows = conn.execute(all_media_sql, params_list).fetchall()
+                
+                media_items = []
+                for row in all_media_rows:
+                    media_items.append({
+                        "name": row["media_name"] or "未分类",
+                        "kind": row["kind"],
+                        "count": row["file_count"],
+                        "season": "",
+                        "latest_ts": row["latest_ts"] or 0,
+                    })
+                
+                # 自然排序
+                media_items.sort(
+                    key=lambda item: _natural_sort_key(item["name"]),
+                    reverse=(sort_order == "desc")
+                )
+                
+                # 分页
+                total = len(media_items)
+                media_items = media_items[offset:offset + page_size]
+            else:
+                # 其他排序键使用 SQL 排序
+                media_rows = conn.execute(media_groups_sql, params_list + [page_size, offset]).fetchall()
+                
+                media_items = []
+                for row in media_rows:
+                    media_items.append({
+                        "name": row["media_name"] or "未分类",
+                        "kind": row["kind"],
+                        "count": row["file_count"],
+                        "season": "",
+                        "latest_ts": row["latest_ts"] or 0,
+                    })
             
             return {
                 "total": total,
@@ -3014,6 +3128,10 @@ def handle_config_api(handler) -> None:
         "b_root": b_root,
         "c_root": c_root,
         "a_folders": a_folders,
+        "a_b_mappings": [
+            {"a_root": m.a_root, "b_root": m.b_root, "label": m.label}
+            for m in cfg.a_b_mappings
+        ],
         "strm_engine_paths": strm_engine_paths,
         "refresh_paths": refresh_paths_val,
         # WebDAV

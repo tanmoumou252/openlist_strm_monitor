@@ -138,6 +138,7 @@ class TestAppServicePathValidation:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [self.a_dir]
+        config.a_b_mappings = []  # 新增：多 A↔多 B 映射
         config.paths = Mock()
         config.paths.b_root = self.b_dir
         config.paths.c_root = self.c_dir
@@ -197,6 +198,16 @@ class TestGhostProtection:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [a_dir]
+        # 新增：多 A↔多 B 映射 - 需要包含测试用的 A 根目录
+        from config import ABMapping
+        config.a_b_mappings = [
+            ABMapping(
+                mapping_id="test1",
+                a_root=a_dir,
+                b_root=os.path.join(self.tmp, "b"),
+                label="测试映射"
+            )
+        ]
         config.paths = Mock()
         config.paths.b_root = os.path.join(self.tmp, "b")
         config.paths.c_root = os.path.join(self.tmp, "c")
@@ -206,6 +217,12 @@ class TestGhostProtection:
 
         db = Mock(spec=Database)
         db.init_subtitle_table = Mock()
+        db.is_ghost_protected = Mock(return_value=False)
+        db.upsert_a = Mock()
+        db.save_known_folder = Mock()
+        db.upsert_identity = Mock()
+        db.get_identity_by_fingerprint = Mock(return_value=None)
+        db.get_a_by_webdav = Mock(return_value=None)
 
         with patch("app_service_core.RefreshService"), \
              patch("app_service_core.SyncService"), \
@@ -223,12 +240,6 @@ class TestGhostProtection:
         Path(a_file).write_text(webdav_path, encoding="utf-8")
         self.app.admin_api.check_exists.return_value = True
 
-        # When ghost-protected, we expect the db to be checked
-        self.app.db.upsert_a = Mock()
-        self.app.db.save_known_folder = Mock()
-        self.app.db.upsert_identity = Mock()
-        self.app.db.get_identity_by_fingerprint = Mock(return_value=None)
-
         with patch.object(self.app, "build_b_path_from_a") as mock_build:
             self.app.handle_a_created_or_modified(a_file)
             # Ghost protection should block the A->B copy entirely
@@ -241,10 +252,6 @@ class TestGhostProtection:
         a_file = os.path.join(self.a_dir, "file.strm")
         Path(a_file).write_text(webdav_path, encoding="utf-8")
         self.app.admin_api.check_exists.return_value = True
-        self.app.db.upsert_a = Mock()
-        self.app.db.save_known_folder = Mock()
-        self.app.db.upsert_identity = Mock()
-        self.app.db.get_identity_by_fingerprint = Mock(return_value=None)
         self.app.db.get_valid_b_instance_by_fingerprint = Mock(return_value=None)
 
         self.app.handle_a_created_or_modified(a_file)
@@ -263,6 +270,16 @@ class TestHandleANonStrm:
         self.a_dir.mkdir()
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        # 新增：多 A↔多 B 映射 - 需要包含测试用的 A 根目录
+        from config import ABMapping
+        config.a_b_mappings = [
+            ABMapping(
+                mapping_id="test1",
+                a_root=str(self.a_dir),
+                b_root=str(self.a_dir / "b"),
+                label="测试映射"
+            )
+        ]
         config.paths = Mock(b_root=str(self.a_dir / "b"), c_root=str(self.a_dir / "c"))
         config.behavior = Mock(ghost_protect_seconds=300)
         config.strm_engine_paths = []
@@ -307,6 +324,7 @@ class TestBuildBPathFromA:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [Mock(a_root=str(self.a_dir), b_root=str(self.b_dir))]  # 新增：多 A↔多 B 映射
         config.paths = Mock()
         config.paths.b_root = str(self.b_dir)
         config.paths.c_root = str(self.c_dir)
@@ -431,6 +449,16 @@ class TestPerformWebdavAction:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        # 新增：多 A↔多 B 映射
+        from config import ABMapping
+        config.a_b_mappings = [
+            ABMapping(
+                mapping_id="test1",
+                a_root=str(self.a_dir),
+                b_root=str(self.b_dir),
+                label="测试映射"
+            )
+        ]
         config.paths = Mock()
         config.paths.b_root = str(self.b_dir)
         config.paths.c_root = str(self.c_dir)

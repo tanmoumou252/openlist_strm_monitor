@@ -384,9 +384,13 @@ class Database:
                     source_a_path TEXT,
                     fingerprint TEXT,
                     status TEXT DEFAULT 'valid',
-                    updated_at REAL NOT NULL
+                    updated_at REAL NOT NULL,
+                    mapping_id TEXT NOT NULL DEFAULT ''
                 )
                 """)
+
+            # 迁移：为旧数据库添加 mapping_id 列
+            self._ensure_column(cur, "b_strm_files", "mapping_id", "TEXT NOT NULL DEFAULT ''")
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS strm_identity (
@@ -459,11 +463,27 @@ class Database:
                 )
                 """)
 
+            # 映射级身份投影表：每个 mapping_id + fingerprint 组合记录当前 visible B 路径
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS b_identity_projection (
+                    fingerprint TEXT NOT NULL,
+                    mapping_id TEXT NOT NULL,
+                    current_b_path TEXT,
+                    status TEXT DEFAULT 'valid',
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (fingerprint, mapping_id)
+                )
+                """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_b_id_proj_mapping ON b_identity_projection(mapping_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_b_id_proj_fp ON b_identity_projection(fingerprint)")
+
             # 创建索引
             cur.execute("CREATE INDEX IF NOT EXISTS idx_a_strm_webdav_path ON a_strm_files(webdav_path)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_b_strm_webdav_path ON b_strm_files(webdav_path)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_b_strm_fingerprint ON b_strm_files(fingerprint)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_b_strm_status ON b_strm_files(status)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_b_strm_mapping_id ON b_strm_files(mapping_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_b_strm_mapping_fp ON b_strm_files(mapping_id, fingerprint)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_identity_webdav_path ON strm_identity(webdav_path)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_identity_current_b_path ON strm_identity(current_b_path)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_boundary_source_name ON strm_media_boundary(source_media_name)")
@@ -1065,6 +1085,68 @@ class Database:
             conn.execute(
                 "DELETE FROM strm_identity WHERE fingerprint = ?",
                 (fingerprint,),
+            )
+            conn.commit()
+
+    # ===== b_identity_projection 映射级身份投影表 =====
+
+    def upsert_identity_projection(
+        self,
+        fingerprint: str,
+        mapping_id: str,
+        current_b_path: str | None,
+        status: str = "valid",
+    ) -> None:
+        """更新映射级身份投影记录"""
+        now = time.time()
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO b_identity_projection(
+                    fingerprint, mapping_id, current_b_path, status, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (fingerprint, mapping_id, current_b_path, status, now),
+            )
+            conn.commit()
+
+    def get_identity_projection(
+        self, fingerprint: str, mapping_id: str
+    ) -> tuple[str | None, str] | None:
+        """获取映射级身份投影记录，返回 (current_b_path, status)"""
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT current_b_path, status
+                FROM b_identity_projection
+                WHERE fingerprint = ? AND mapping_id = ?
+                """,
+                (fingerprint, mapping_id),
+            )
+            row = cur.fetchone()
+            return (row[0], row[1]) if row else None
+
+    def get_all_identity_projections_for_fingerprint(
+        self, fingerprint: str
+    ) -> list[tuple[str, str | None, str]]:
+        """获取指定 fingerprint 在所有映射下的投影记录，返回 [(mapping_id, current_b_path, status), ...]"""
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT mapping_id, current_b_path, status
+                FROM b_identity_projection
+                WHERE fingerprint = ?
+                """,
+                (fingerprint,),
+            )
+            return [(row[0], row[1], row[2]) for row in cur.fetchall()]
+
+    def delete_identity_projection(self, fingerprint: str, mapping_id: str) -> None:
+        """删除映射级身份投影记录"""
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            conn.execute(
+                "DELETE FROM b_identity_projection WHERE fingerprint = ? AND mapping_id = ?",
+                (fingerprint, mapping_id),
             )
             conn.commit()
 

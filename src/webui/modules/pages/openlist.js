@@ -177,7 +177,6 @@ export async function _renderOpenListConfig(cfg) {
       ${olField('ol-webdav-user', '用户名', openlistCfg.webdav_user || '', 'admin')}
       ${olField('ol-webdav-password', '密码', openlistCfg.webdav_password || '', '输入密码', 'password')}
       ${olField('ol-webdav-totp-secret', '2FA 密钥', openlistCfg.webdav_totp_secret || '', '留空则不使用 2FA', 'password')}
-      ${olField('ol-b-root', 'B 区根目录', openlistCfg.b_root || cfg.b_root || '', '请填写 B 区根目录的绝对路径')}
       ${olField('ol-c-root', 'C 区根目录', openlistCfg.c_root || cfg.c_root || '', '请填写 C 区根目录的绝对路径')}
     </div>
     <div class="openlist-top-actions">
@@ -260,10 +259,28 @@ export async function _renderOpenListConfig(cfg) {
       aFolders.push(engData.local_path);
     }
   });
-  html += `<div class="config-section"><h3>${icon('folder')} A 区文件夹 (只读)</h3>
-    <p style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px);margin:0 0 8px">从已配置的 STRM 引擎自动获取 (SaveStrmLocalPath)，不可手动修改</p>
-    <div class="a-folders-display" id="a-folders-display">
-      ${aFolders.length ? aFolders.map(f => `<span class="a-folder-chip">${esc(f)}</span>`).join('') : '<span style="color:var(--text-muted)">暂无数据（请先配置 STRM 引擎）</span>'}
+  html += `<div class="config-section"><h3>${icon('folder')} A↔B 目录映射</h3>
+    <p style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px);margin:0 0 8px">A 区路径从引擎自动获取（只读），每行右侧填写对应的 B 区根目录</p>
+    <div class="ab-mappings-display" id="ab-mappings-display">
+      ${aFolders.length ? aFolders.map((f, i) => {
+        // 从已保存的 a_b_mappings 回填 B 根
+        let savedBRoot = '';
+        if (openlistCfg.a_b_mappings) {
+          try {
+            const mappings = JSON.parse(openlistCfg.a_b_mappings);
+            const match = mappings.find(m => m.a_root === f);
+            if (match) savedBRoot = match.b_root || '';
+          } catch (e) {}
+        }
+        return `
+        <div class="ab-mapping-row">
+          <span class="a-folder-chip">${esc(f)}</span>
+          <input type="text" class="b-root-input" 
+                 data-a-root="${esc(f)}"
+                 value="${esc(savedBRoot)}"
+                 placeholder="B 区根目录（如 D:\\emby\\strm）">
+        </div>`;
+      }).join('') : '<span style="color:var(--text-muted)">暂无数据（请先配置 STRM 引擎）</span>'}
     </div>
   </div>`;
 
@@ -517,31 +534,53 @@ const data = await api('/api/restart-webui', { method: 'POST' });
       showToast('请填写必填项：OpenList 地址', 'error');
       return;
     }
-    const bRoot = document.getElementById('ol-b-root')?.value.trim();
     const cRoot = document.getElementById('ol-c-root')?.value.trim();
-    if (!bRoot || !cRoot) {
-      const miss = [];
-      if (!bRoot) miss.push('B 区根目录');
-      if (!cRoot) miss.push('C 区根目录');
-      showToast(`提示：${miss.join('、')} 未填写，可先保存连接信息，稍后再配置路径`, 'info');
-      // 不 return，继续保存（后端支持空 b/c）
+    if (!cRoot) {
+      showToast('提示：C 区根目录 未填写，可先保存连接信息，稍后再配置路径', 'info');
+      // 不 return，继续保存（后端支持空 c_root）
     }
+    // 收集 A↔B 映射
+    const configuredEngines = (OpenListState.strmEngines || [])
+      .filter(e => e && typeof e.engine === 'string' && e.engine.trim())
+      .map(e => ({ engine: e.engine, monitored_paths: Array.isArray(e.monitored_paths) ? e.monitored_paths : [] }));
+
+    const aFolders = [];
+    configuredEngines.forEach(eng => {
+      const engData = OpenListState.availableEngines.find(e => e.mount_path === eng.engine);
+      if (engData && engData.local_path && !aFolders.includes(engData.local_path)) {
+        aFolders.push(engData.local_path);
+      }
+    });
+
+    // 校验：每个 A 文件夹必须有对应 B 根（空则报错阻止保存）
+    const abMappings = [];
+    const missingB = [];
+    document.querySelectorAll('.ab-mapping-row').forEach(row => {
+      const aRoot = row.querySelector('.a-folder-chip')?.textContent?.trim() || '';
+      const bRoot = row.querySelector('.b-root-input')?.value?.trim() || '';
+      if (aRoot && bRoot) {
+        abMappings.push({ a_root: aRoot, b_root: bRoot, label: '' });
+      } else if (aRoot && !bRoot) {
+        missingB.push(aRoot);
+      }
+    });
+    if (missingB.length) {
+      showToast(`以下 A 区缺少 B 根映射: ${missingB.join('、')}`, 'error');
+      return;  // 阻止保存
+    }
+
     btn.disabled = true;
     btn.innerHTML = '保存中...';
     try {
-      // 过滤空引擎条目（UI 初始化会留一个空行供用户填写，保存时剔除）
-      const cleanedEngines = (OpenListState.strmEngines || [])
-        .filter(e => e && typeof e.engine === 'string' && e.engine.trim())
-        .map(e => ({ engine: e.engine, monitored_paths: Array.isArray(e.monitored_paths) ? e.monitored_paths : [] }));
       const body = {
         webdav_host: document.getElementById('ol-webdav-host')?.value || '',
         webdav_user: document.getElementById('ol-webdav-user')?.value || '',
         webdav_password: document.getElementById('ol-webdav-password')?.value || '',
         webdav_totp_secret: document.getElementById('ol-webdav-totp-secret')?.value || '',
-        b_root: document.getElementById('ol-b-root')?.value || '',
         c_root: document.getElementById('ol-c-root')?.value || '',
         refresh_paths: JSON.stringify(OpenListState.refreshPaths || []),
         strm_engines: JSON.stringify(cleanedEngines),
+        a_b_mappings: JSON.stringify(abMappings),  // ← 新增，替代 b_root
         refresh_enabled: document.querySelector('#ol-refresh-enabled button[data-value="on"].active') ? 'true' : 'false',
         refresh_interval_minutes: document.getElementById('ol-refresh-interval')?.value || '10',
         refresh_depth: document.getElementById('ol-refresh-depth')?.value || '5',
@@ -562,12 +601,12 @@ const data = await api('/api/webui/config/openlist', {
 	        body,
 	      });
 if (data.success) {
-	        showToast('OpenList 配置已保存并热更新', 'success');
-	        const savedHost = document.getElementById('ol-webdav-host')?.value || '';
-	        OpenListState.configured = !!savedHost.trim();
-	        _updateApiStatusDot();
-	        await _checkApiStatus();
-	        _refreshAFolders();
+        showToast('OpenList 配置已保存并热更新', 'success');
+        const savedHost = document.getElementById('ol-webdav-host')?.value || '';
+        OpenListState.configured = !!savedHost.trim();
+        _updateApiStatusDot();
+        await _checkApiStatus();
+        _refreshABMappings();
       } else {
         showToast('保存失败: ' + (data.error || '未知错误'), 'error');
       }
@@ -580,8 +619,8 @@ if (data.success) {
   });
 }
 
-function _refreshAFolders() {
-	  const container = document.getElementById('a-folders-display');
+function _refreshABMappings() {
+	  const container = document.getElementById('ab-mappings-display');
 	  if (!container) return;
 	  const configuredEngines = OpenListState.strmEngines.filter(e => e.engine);
 	  const aFolders = [];
@@ -591,8 +630,17 @@ function _refreshAFolders() {
 	      aFolders.push(engData.local_path);
 	    }
 	  });
+	  // 从已保存的 a_b_mappings 回填 B 根
+	  const savedMap = {};
+	  (OpenListState.abMappings || []).forEach(m => { savedMap[m.a_root] = m.b_root; });
 	  container.innerHTML = aFolders.length
-	    ? aFolders.map(f => `<span class="a-folder-chip">${esc(f)}</span>`).join('')
+	    ? aFolders.map(f => `
+	      <div class="ab-mapping-row">
+	        <span class="a-folder-chip">${esc(f)}</span>
+	        <input type="text" class="b-root-input" data-a-root="${esc(f)}"
+	               value="${esc(savedMap[f] || '')}"
+	               placeholder="B 区根目录（如 D:\\emby\\strm）">
+	      </div>`).join('')
 	    : '<span style="color:var(--text-muted)">暂无数据（请先配置 STRM 引擎）</span>';
 	}
 

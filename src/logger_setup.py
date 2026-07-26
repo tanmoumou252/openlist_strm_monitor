@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import tempfile
+import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -142,3 +143,10 @@ def setup_logging(
         max_size_mb,
         backup_count,
     )
+    
+    # 启动分隔标记：区分不同运行周期的日志
+    logging.info("")
+    logging.info("=" * 70)
+    logging.info(" 🚀 strm_bridge 启动 — %s", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    logging.info(" ═══════════════════ 以上为上一次日志 ═══════════════════")
+    logging.info("")

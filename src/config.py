@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import logging
 import os
 import json
+import hashlib
 from pathlib import Path
 
 try:
@@ -20,6 +21,23 @@ except ImportError:
 from utils.bootstrap import ensure_base_dir_first
 
 ensure_base_dir_first()
+
+
+@dataclass(slots=True)
+class ABMapping:
+    """A 区根目录到 B 区根目录的映射关系"""
+    mapping_id: str       # 稳定短标识（A 根规范化路径 SHA1 前 8 位），B 根变更不改变 mapping_id
+    a_root: str           # A 根路径，只读，从引擎 API 自动获取
+    b_root: str           # B 根路径，用户在 UI 填写
+    label: str = ""       # 可读标签，用于 C 区子目录和 WebUI 显示
+
+    @staticmethod
+    def generate_mapping_id(a_root: str) -> str:
+        """由 A 根规范化路径生成稳定 mapping_id"""
+        normalized = str(Path(a_root).resolve())
+        if os.name == "nt":
+            normalized = normalized.lower()
+        return hashlib.sha1(normalized.encode()).hexdigest()[:8]
 
 
 def read_line_list(
@@ -185,6 +203,8 @@ class AppConfig:
     webui: WebUIConfig = field(default_factory=WebUIConfig)
     tmdb: TmdbConfig = field(default_factory=TmdbConfig)
     a_folders: list[str] = field(default_factory=list)
+    # 多 A↔多 B 根映射（每个 A 根绑定唯一 B 根）
+    a_b_mappings: list[ABMapping] = field(default_factory=list)
     # STRM 存储映射 mount_path -> StrmStorageMapping
     strm_storage_map: dict[str, StrmStorageMapping] = field(
         default_factory=dict)
@@ -326,6 +346,27 @@ class AppConfig:
                     a_folders.append(mapping.local_path)
             self.a_folders = a_folders
 
+            # 读取 a_b_mappings（新配置）
+            if "a_b_mappings" in db_cfg:
+                try:
+                    mappings_data = json.loads(db_cfg["a_b_mappings"])
+                    self.a_b_mappings = [
+                        ABMapping(
+                            mapping_id=m.get("mapping_id", ""),
+                            a_root=m.get("a_root", ""),
+                            b_root=m.get("b_root", ""),
+                            label=m.get("label", "")
+                        )
+                        for m in mappings_data
+                        if m.get("a_root") and m.get("b_root")
+                    ]
+                except (json.JSONDecodeError, TypeError) as e:
+                    logging.warning("[Config] 解析 a_b_mappings 失败: %s", e)
+                    self.a_b_mappings = []
+            
+            # 旧配置自动迁移：若 a_b_mappings 为空但有旧 a_folders + b_root，自动迁移
+            self._migrate_legacy_to_ab_mappings()
+
             logging.info("[Config] 已从 DB 加载 OpenList 配置 (%d 项)", len(db_cfg))
         except Exception as e:
             logging.warning("[Config] 从 DB 加载 OpenList 配置失败: %s", e)
@@ -337,6 +378,22 @@ class AppConfig:
         if isinstance(value, str):
             return value.lower() in ("true", "1", "yes")
         return bool(value)
+
+    def _migrate_legacy_to_ab_mappings(self) -> None:
+        """旧配置自动迁移：若 a_b_mappings 为空但有旧 a_folders + b_root，自动迁移"""
+        if self.a_b_mappings:
+            return
+        if not self.a_folders or not self.paths.b_root:
+            return
+        self.a_b_mappings = [
+            ABMapping(
+                mapping_id="",  # 由后端根据 A 根生成
+                a_root=str(Path(a).resolve()),
+                b_root=str(Path(self.paths.b_root).resolve()),
+                label=f"映射#{i+1}"
+            )
+            for i, a in enumerate(self.a_folders)
+        ]
 
     @classmethod
     def from_file(cls, toml_path: str) -> "AppConfig":

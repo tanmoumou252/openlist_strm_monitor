@@ -513,6 +513,24 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 
   .config-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid color-mix(in srgb,var(--border-color) 10%,transparent)}
 
+/* ===== A↔B 映射行样式 ===== */
+.ab-mapping-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+.ab-mapping-row .b-root-input {
+  flex: 1;
+}
+.ab-mapping-row .a-folder-chip {
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 300px;
+}
+
 /* ===== Segmented Switch (分段开关) =====
 /* ⚠️ 开关风格为最终定型方案（2026-07）：
    基类 .segmented-switch 仅承担布局（inline-flex/gap/padding/border/white-space）与

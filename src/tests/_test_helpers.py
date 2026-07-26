@@ -49,6 +49,7 @@ def build_mock_app(
         b_root = tmp_path / "b_root"
         b_root.mkdir(parents=True, exist_ok=True)
         app.b_root = b_root
+        app.get_b_root_for_a = lambda _path: b_root
         app.db.get_subtitle_by_local.return_value = None
 
     # SyncService 配置

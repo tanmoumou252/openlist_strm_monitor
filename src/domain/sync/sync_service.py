@@ -403,7 +403,12 @@ class SyncService:
         文件名：`_MANUAL_REVIEW_YYYYMMDD_HHMMSS.md`
         """
         from pathlib import Path, PosixPath, WindowsPath
-        b_root = self.app.b_root
+        # 使用第一个冲突目标路径对应的 B 根
+        first_target = next(iter(target_conflicts)) if target_conflicts else None
+        if first_target:
+            b_root = self.app.get_b_root_for_path(first_target)
+        else:
+            b_root = self.app.b_root  # 兼容回退
         # 在测试场景中 self.app.b_root 可能是 Mock 对象，不生成清单
         if not isinstance(b_root, (Path, PosixPath, WindowsPath)):
             return

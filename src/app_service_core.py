@@ -208,9 +208,35 @@ class AppService:
         # 向后兼容别名（外部只读访问场景）
         self.cleanup_lock = self._cleanup_lock
         self.pending_cleanups = self._pending_cleanups
-        self.a_roots = [Path(p).resolve() for p in config.a_folders]
-        self.b_root = Path(config.paths.b_root).resolve()
-        self.c_root = Path(config.paths.c_root).resolve()
+        
+# 多 A↔多 B 映射
+        a_b_mappings = getattr(config, 'a_b_mappings', [])
+        if not isinstance(a_b_mappings, list):
+            a_b_mappings = []
+        self.a_b_mappings: list[ABMapping] = a_b_mappings
+        # 向后兼容：若 a_b_mappings 为空但有旧 a_folders + b_root，自动构建映射
+        a_folders = getattr(config, 'a_folders', [])
+        if not isinstance(a_folders, list):
+            a_folders = []
+        b_root = getattr(config.paths, 'b_root', None) if getattr(config, 'paths', None) else None
+        if not self.a_b_mappings and a_folders and b_root:
+            from config import ABMapping
+            self.a_b_mappings = [
+                ABMapping(
+                    mapping_id="",
+                    a_root=str(Path(a).resolve()),
+                    b_root=str(Path(b_root).resolve()),
+                    label=f"映射#{i+1}"
+                )
+                for i, a in enumerate(a_folders)
+            ]
+        self.a_roots = [Path(m.a_root).resolve() for m in self.a_b_mappings]
+        self._a_to_b_map: dict[str, Path] = {
+            str(Path(m.a_root).resolve()): Path(m.b_root).resolve()
+            for m in self.a_b_mappings
+        }
+        # C 根单一全局，不建立 _a_to_c_map
+        
         self.engine_configs: list[dict] = []
         self._restoring_markers: set[str] = set()
         # 代际计数器：与 _engine_internal_generation 相同模式（M1修复）
@@ -233,6 +259,15 @@ class AppService:
         self._refresh_lock = threading.Lock()
         self.sync_service = SyncService(self)
         self.subtitle_handler = SubtitleHandler(self)
+
+    # 兼容属性：旧代码访问 self.b_root / self.c_root 时自动回退
+    @property
+    def b_root(self) -> Path:
+        return next(iter(self._a_to_b_map.values())) if self._a_to_b_map else Path()
+
+    @property
+    def c_root(self) -> Path:
+        return Path(self.config.paths.c_root).resolve() if self.config.paths.c_root else Path()
 
     def _mark_engine_internal(self, fingerprint: str) -> None:
         """标记 fingerprint 为引擎内部删除（B-7）。
@@ -514,7 +549,8 @@ class AppService:
         for a_root in self.a_roots:
             if not a_root.exists():
                 logging.warning("[A区路径不存在] %s", a_root)
-        self.b_root.mkdir(parents=True, exist_ok=True)
+        for b_root in self._a_to_b_map.values():
+            b_root.mkdir(parents=True, exist_ok=True)
         self.c_root.mkdir(parents=True, exist_ok=True)
 
     def start_watchers(self) -> None:
@@ -529,15 +565,16 @@ class AppService:
                 logging.info("[监控启动] A区: %s", a_root)
             else:
                 logging.warning("[监控跳过] A区不存在: %s", a_root)
+        for b_root in self._a_to_b_map.values():
+            b_root.mkdir(parents=True, exist_ok=True)
+            self.observer.schedule(
+                BAreaEventHandler(self), str(b_root), recursive=True)
+            logging.info("[监控启动] B区: %s", b_root)
+        self.c_root.mkdir(parents=True, exist_ok=True)
         self.observer.schedule(
-            BAreaEventHandler(self), str(
-                self.b_root), recursive=True)
-        self.observer.schedule(
-            CAreaEventHandler(self), str(
-                self.c_root), recursive=True)
-        self.observer.start()
-        logging.info("[监控启动] B区: %s", self.b_root)
+            CAreaEventHandler(self), str(self.c_root), recursive=True)
         logging.info("[监控启动] C区: %s", self.c_root)
+        self.observer.start()
         if active_a == 0:
             logging.warning("[提示] 没有可用的 A 区监控目录，程序将依赖后续目录出现或主动刷新")
 
@@ -551,6 +588,28 @@ class AppService:
                 continue
         return None
 
+    def get_b_root_for_a(self, a_local_path: str | Path) -> Path:
+        """根据 A 区路径获取对应的 B 区根目录"""
+        a_root = self.get_a_root_for_path(a_local_path)
+        if a_root is None:
+            raise ValueError(f"文件不属于任何A根目录: {a_local_path}")
+        a_root_norm = str(Path(a_root).resolve())
+        b_root = self._a_to_b_map.get(a_root_norm)
+        if b_root is None:
+            raise ValueError(f"A根 {a_root} 没有对应的B根映射")
+        return b_root
+
+    def get_b_root_for_path(self, b_local_path: str | Path) -> Path | None:
+        """根据 B 区路径反查所属的 B 区根目录"""
+        target = Path(b_local_path).resolve()
+        for b_root in self._a_to_b_map.values():
+            try:
+                target.relative_to(b_root)
+                return b_root
+            except ValueError:
+                continue
+        return None
+
     def build_b_path_from_a(self, a_local_path: str | Path,
                             webdav_path: str | None = None) -> Path:
         a_local = Path(a_local_path).resolve()
@@ -559,8 +618,9 @@ class AppService:
             raise ValueError(f"文件不属于任何A根目录: {a_local}")
         rel = a_local.relative_to(a_root)
         is_movie = self._should_treat_as_movie(a_local, webdav_path)
+        b_root = self.get_b_root_for_a(a_local)
         if is_movie:
-            return self.b_root / rel
+            return b_root / rel
         suggested_name = suggest_rename(a_local)
         if suggested_name and webdav_path:
             # season 只来自 A 区本地路径/文件名，不从 WebDAV 路径推导
@@ -598,8 +658,8 @@ class AppService:
                 else:
                     new_rel = Path(*rel_parts[:-1]) / \
                         f"Season {season:02d}" / standard_name
-                return self.b_root / new_rel
-        return self.b_root / rel
+                return b_root / new_rel
+        return b_root / rel
 
     def update_engine_configs(self):
         logging.info("[引擎配置] 正在向服务器请求 STRM 存储配置...")
@@ -716,7 +776,7 @@ class AppService:
         # 8. 同步阶段边界记录
         if is_sync_phase and cloud_show_name and physical_media_folder_name != cloud_show_name:
             self._handle_sync_phase_boundary(
-                fingerprint, cloud_show_name, physical_media_folder_name)
+                fingerprint, cloud_show_name, physical_media_folder_name, b_local_path)
             return True
 
         # 9. 单集/批量检测
@@ -749,9 +809,13 @@ class AppService:
         if not a_root:
             logging.debug("[血统校验失败] A区源不在任何根目录下: %s", a_local_path)
             return None
+        b_root = self.get_b_root_for_path(b_local_path)
+        if b_root is None:
+            logging.debug("[血统校验失败] B区路径不在任何B根目录下: %s", b_local_path)
+            return None
         try:
             a_rel = a_local_path.relative_to(a_root)
-            b_rel = b_local.relative_to(self.b_root)
+            b_rel = b_local.relative_to(b_root)
         except ValueError:
             logging.debug("[血统校验失败] 路径超出根目录")
             return None
@@ -877,7 +941,7 @@ class AppService:
                     return True
 
             boundary_by_current = self.db.get_media_boundary_by_current_name(
-                physical_media_folder_name, str(self.b_root))
+                physical_media_folder_name, str(self.get_b_root_for_path(b_local_path) or Path()))
             if boundary_by_current:
                 mapped_source = boundary_by_current.source_media_name
                 mapped_current = boundary_by_current.current_media_name
@@ -898,15 +962,16 @@ class AppService:
 
     def _handle_sync_phase_boundary(
             self, fingerprint: str, cloud_show_name: str,
-            physical_media_folder_name: str) -> None:
+            physical_media_folder_name: str, b_local_path: str) -> None:
         """处理同步阶段的边界映射记录。"""
+        b_root = self.get_b_root_for_path(b_local_path) or Path()
         existing = self.db.get_media_boundary_by_fingerprint(fingerprint)
         if not existing:
             self.db.upsert_media_boundary(
                 fingerprint=fingerprint,
                 source_media_name=cloud_show_name,
                 current_media_name=physical_media_folder_name,
-                engine_entry_path=str(self.b_root))
+                engine_entry_path=str(b_root))
             logging.info(
                 "[边界映射] 记录新映射: %s -> %s",
                 cloud_show_name,
@@ -916,7 +981,7 @@ class AppService:
                 fingerprint=fingerprint,
                 source_media_name=existing.source_media_name,
                 current_media_name=physical_media_folder_name,
-                engine_entry_path=str(self.b_root))
+                engine_entry_path=str(b_root))
             logging.info(
                 "[边界映射] 更新映射: %s -> %s",
                 existing.source_media_name,
@@ -933,10 +998,11 @@ class AppService:
             if total_a_episodes <= 1:
                 return True
 
-            physical_media_root_dir = self.b_root
+            b_root = self.get_b_root_for_path(b_local_path) or self.b_root
+            physical_media_root_dir = b_root
             for i, part in enumerate(b_parts):
                 if part == physical_media_folder_name:
-                    physical_media_root_dir = self.b_root / Path(*b_parts[:i + 1])
+                    physical_media_root_dir = b_root / Path(*b_parts[:i + 1])
                     break
 
             local_matches = 0
@@ -1020,39 +1086,43 @@ class AppService:
     def _scan_b_disk(self) -> tuple[dict, dict] | None:
         """扫描 B 区磁盘文件，返回 (fingerprint_to_paths, path_to_data)"""
         logging.info("[初始化] B 区磁盘扫描开始...")
-        b_root = Path(self.config.paths.b_root)
-        if not b_root.exists():
-            logging.info("[初始化] B 区根目录不存在，跳过扫描")
-            return None
+        all_fingerprint_to_paths: dict[str, set[str]] = {}
+        all_path_to_data: dict[str, dict] = {}
         
-        t0 = time.time()
-        disk_fingerprint_to_paths: dict[str, set[str]] = {}
-        disk_path_to_data: dict[str, dict] = {}
-        scanned_count = 0
+        for b_root in self._a_to_b_map.values():
+            if not b_root.exists():
+                logging.info("[初始化] B 区根目录不存在，跳过: %s", b_root)
+                continue
+            
+            t0 = time.time()
+            scanned_count = 0
+            
+            for strm_file in b_root.rglob("*.strm"):
+                try:
+                    scanned_count += 1
+                    webdav_path = read_strm_webdav_path(strm_file)
+                    if webdav_path:
+                        fingerprint = make_strm_fingerprint(webdav_path)
+                        path_str = str(strm_file)
+                        if fingerprint not in all_fingerprint_to_paths:
+                            all_fingerprint_to_paths[fingerprint] = set()
+                        all_fingerprint_to_paths[fingerprint].add(path_str)
+                        all_path_to_data[path_str] = {
+                            "webdav": webdav_path, "fp": fingerprint}
+                    
+                    # 每 500 个文件输出进度
+                    if scanned_count % 500 == 0:
+                        logging.info("[初始化] B 区扫描进度: %d 个文件 (%.1fs)", 
+                                   scanned_count, time.time() - t0)
+                except Exception as e:
+                    logging.warning("[初始化] 读取 B 区文件失败: %s (%s)", strm_file, e)
+            
+            logging.info("[初始化] B 区根目录 %s 扫描完毕，共发现 %d 个 STRM 文件 (%.1fs)", 
+                        b_root, scanned_count, time.time() - t0)
         
-        for strm_file in b_root.rglob("*.strm"):
-            try:
-                scanned_count += 1
-                webdav_path = read_strm_webdav_path(strm_file)
-                if webdav_path:
-                    fingerprint = make_strm_fingerprint(webdav_path)
-                    path_str = str(strm_file)
-                    if fingerprint not in disk_fingerprint_to_paths:
-                        disk_fingerprint_to_paths[fingerprint] = set()
-                    disk_fingerprint_to_paths[fingerprint].add(path_str)
-                    disk_path_to_data[path_str] = {
-                        "webdav": webdav_path, "fp": fingerprint}
-                
-                # 每 500 个文件输出进度
-                if scanned_count % 500 == 0:
-                    logging.info("[初始化] B 区扫描进度: %d 个文件 (%.1fs)", 
-                               scanned_count, time.time() - t0)
-            except Exception as e:
-                logging.warning("[初始化] 读取 B 区文件失败: %s (%s)", strm_file, e)
-        
-        logging.info("[初始化] B 区磁盘扫描完毕，共发现 %d 个 STRM 文件 (%.1fs)", 
-                    scanned_count, time.time() - t0)
-        return disk_fingerprint_to_paths, disk_path_to_data
+        total_scanned = sum(len(v) for v in all_fingerprint_to_paths.values())
+        logging.info("[初始化] B 区磁盘扫描完毕，共发现 %d 个 STRM 文件", total_scanned)
+        return all_fingerprint_to_paths, all_path_to_data
 
     def _load_b_db_records(self) -> list | None:
         """加载 B 区数据库记录，失败返回 None"""
@@ -1469,26 +1539,27 @@ class AppService:
         return self.sync_service.scan_a_to_b_full_sync(valid_engine_paths, use_bulk)
 
     def cleanup_b_redundant(self) -> None:
-        b_root = Path(self.config.paths.b_root)
-        if not b_root.exists():
-            return
-        redundant_keywords = ["duplicate", "quarantined", "invalid"]
-        for keyword in redundant_keywords:
-            for file_path in b_root.rglob(f"*.{keyword}"):
-                try:
-                    safe_remove_file(file_path)
-                    self.db.delete_b_by_local(str(file_path))
-                    logging.info("[冗余清理] 已删除冗余文件: %s", file_path)
-                except OSError as e:
-                    logging.warning("[冗余清理] 删除冗余文件失败: %s (%s)", file_path, e)
-            for file_path in b_root.rglob(f"*.{keyword}.*"):
-                try:
-                    safe_remove_file(file_path)
-                    self.db.delete_b_by_local(str(file_path))
-                    logging.info("[冗余清理] 已删除带时间戳的冗余文件: %s", file_path)
-                except OSError as e:
-                    logging.warning(
-                        "[冗余清理] 删除带时间戳冗余文件失败: %s (%s)", file_path, e)
+        # 遍历所有 B 根目录
+        for b_root in self._a_to_b_map.values():
+            if not b_root.exists():
+                continue
+            redundant_keywords = ["duplicate", "quarantined", "invalid"]
+            for keyword in redundant_keywords:
+                for file_path in b_root.rglob(f"*.{keyword}"):
+                    try:
+                        safe_remove_file(file_path)
+                        self.db.delete_b_by_local(str(file_path))
+                        logging.info("[冗余清理] 已删除冗余文件: %s", file_path)
+                    except OSError as e:
+                        logging.warning("[冗余清理] 删除冗余文件失败: %s (%s)", file_path, e)
+                for file_path in b_root.rglob(f"*.{keyword}.*"):
+                    try:
+                        safe_remove_file(file_path)
+                        self.db.delete_b_by_local(str(file_path))
+                        logging.info("[冗余清理] 已删除带时间戳的冗余文件: %s", file_path)
+                    except OSError as e:
+                        logging.warning(
+                            "[冗余清理] 删除带时间戳冗余文件失败: %s (%s)", file_path, e)
         try:
             all_b_records = self.db.get_all_b_records()
         except Exception as e:
@@ -1534,7 +1605,10 @@ class AppService:
                         self.refresh_identity_current_b_path(fingerprint)
                     continue
                 try:
-                    rel = local.resolve().relative_to(self.b_root)
+                    b_root = self.get_b_root_for_path(local_path)
+                    if b_root is None:
+                        b_root = self.b_root  # 兼容回退
+                    rel = local.resolve().relative_to(b_root)
                 except ValueError:
                     rel = Path(local.name)
                 target = self.c_root / rel
@@ -1593,7 +1667,8 @@ class AppService:
         for a_root in self.a_roots:
             if a_root.exists():
                 remove_empty_dirs(a_root)
-        remove_empty_dirs(self.b_root)
+        for b_root in self._a_to_b_map.values():
+            remove_empty_dirs(b_root)
         remove_empty_dirs(self.c_root)
 
     def cleanup_a_deleted_on_cloud(self, engine_path: str) -> None:
@@ -1840,8 +1915,11 @@ class AppService:
         p = Path(path)
         name = p.name.lower()
         is_standard = self._is_standard_media_name(name)
+        b_root = self.get_b_root_for_path(p)
+        if b_root is None:
+            b_root = self.b_root  # 兼容回退
         try:
-            b_rel_parts = p.relative_to(self.b_root).parts
+            b_rel_parts = p.relative_to(b_root).parts
         except ValueError:
             b_rel_parts = p.parts
         webdav_parts = []
@@ -2499,7 +2577,10 @@ class AppService:
                 self.db.delete_b_by_local(local_path)
                 continue
             try:
-                rel = local.resolve().relative_to(self.b_root)
+                b_root = self.get_b_root_for_path(local_path)
+                if b_root is None:
+                    b_root = self.b_root  # 兼容回退
+                rel = local.resolve().relative_to(b_root)
             except ValueError:
                 rel = Path(local.name)
             target = self.c_root / rel
@@ -2651,8 +2732,11 @@ class AppService:
             self, local: Path, webdav_path: str, fingerprint: str) -> None:
         if not webdav_path or not fingerprint or not local.exists():
             return
+        b_root = self.get_b_root_for_path(local)
+        if b_root is None:
+            return
         try:
-            local_rel = local.resolve().relative_to(self.b_root)
+            local_rel = local.resolve().relative_to(b_root)
             physical_media_folder_name = None
             for i, part in enumerate(local_rel.parts):
                 if re.match(r"(?i)^season\s*\d+$", part):
@@ -2682,7 +2766,7 @@ class AppService:
             fingerprint=fingerprint,
             source_media_name=cloud_show_name,
             current_media_name=physical_media_folder_name,
-            engine_entry_path=str(self.b_root),
+            engine_entry_path=str(b_root),
         )
         logging.info(
             "[边界映射] 记录媒体映射: %s -> %s",
