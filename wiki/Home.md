@@ -93,9 +93,10 @@ openlist_strm_bridge/
 │   ├── utils/file_utils.py      # 文件 I/O 操作
 │   ├── utils/webdav_utils.py    # WebDAV 路径工具
 │   ├── utils/error_translator.py # 错误信息翻译
+│   ├── utils/encoding_utils.py  # 编码规范化（NFC/NFD、URL、全角/连续空格）
 │   ├── utils/bootstrap.py       # 启动引导辅助
 │   ├── webui/                   # WebUI 服务端 + 前端源码
-│   ├── tests/                   # 测试（35 个测试文件）
+│   ├── tests/                   # 测试（40 个测试文件，pytest 收集 36 个）
 │   └── tokenizers/              # simple 中文分词器（simple.dll 等资源）
 ├── dist/                        # 构建后的前端产物（Vite 输出）
 ├── docs/                        # API 文档、设计文档

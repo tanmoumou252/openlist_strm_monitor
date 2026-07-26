@@ -58,13 +58,13 @@ This file provides guidance to AI coding assistants when working with code in th
 |-------|-----------|
 | **Language** | Python 3.11+ (backend), JavaScript (frontend) |
 | **Frontend build** | Vite 8.x, vanilla JS (no React/Vue), MD3/Fluent2 dual theme |
-| **Backend HTTP** | Python stdlib `http.server` (`ThreadingHTTPServer`, 多线程) |
+| **Backend HTTP** | Python stdlib `http.server` (`ThreadingHTTPServer`, multithreaded) |
 | **Database** | SQLite (WAL mode, two files) + FTS5 with `simple` extension for Chinese search |
 | **Search/Tokenizer** | `simple` tokenizer (wangfenjin/simple, cppjieba wrapper, v0.7.1) loaded from `src/tokenizers/simple/simple.dll`; hard dependency for Chinese search |
 | **File watching** | `watchdog` library |
 | **HTTP client** | `requests` library |
 | **WebDAV XML** | `lxml` library |
-| **Testing** | pytest (35 test files under `src/tests/`); dev deps in `src/tests/requirements-dev.txt` |
+| **Testing** | pytest (40 test files under `src/tests/` of which 4 are standalone manual scripts excluded by `conftest.py`'s `collect_ignore_glob`; 36 actually collected); dev deps in `src/tests/requirements-dev.txt` |
 
 ## Directory Structure
 
@@ -100,10 +100,10 @@ openlist_strm_bridge/
 │   │       └── components/      # dialog.js, toast.js
 │   ├── domain/media/            # subtitle_handler.py
 │   ├── domain/sync/             # sync_service.py
-│   ├── domain/storage/
-│   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py
+│   ├── domain/storage/          # Placeholder (reserved, currently only __init__.py)
+│   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py, encoding_utils.py
 │   ├── tokenizers/              # simple/ (cppjieba wrapper for Chinese search)
-│   └── tests/                   # 35 test files
+│   └── tests/                   # 40 test files (36 collected by pytest; 4 manual scripts excluded)
 ├── dist/                        # Built frontend (Vite output)
 │   └── assets/                  # Hashed JS/CSS/font files
 ├── wiki/                        # Documentation
@@ -210,12 +210,12 @@ The Vite config groups modules into chunks:
 ### `initial_scan_a()` Behavior Change
 - Changed from per-file `handle_a_created_or_modified()` calls to pure batch DB indexing
 - No longer processes subtitles per-file or triggers A→B copy during scan
-- **双模式写入**（详见 Bulk Connection Mode 章节）：
-  - `use_bulk=True`（启动时）：使用 `bulk_connection` + `_upsert_a_batch_bulk()`，延迟 FTS 重建
-  - `use_bulk=False`（刷新时）：使用 `upsert_a_batch()`，逐批维护 FTS
-- **多线程读取**：使用 `ThreadPoolExecutor(max_workers=4)` 并发读取 .strm 文件
-- **批量大小**：`BATCH_SIZE = 1000`（每 1000 条批量写入一次）
-- **日志优化**：每 100 条或每 2 秒输出进度日志 + records/s 性能基准（解决日志冻结问题）
+- **Dual-mode writes** (see the Bulk Connection Mode section):
+  - `use_bulk=True` (startup): uses `bulk_connection` + `_upsert_a_batch_bulk()`, defers FTS rebuild
+  - `use_bulk=False` (refresh): uses `upsert_a_batch()`, maintains FTS per batch
+- **Multithreaded reads**: uses `ThreadPoolExecutor(max_workers=4)` to read `.strm` files concurrently
+- **Batch size**: `BATCH_SIZE = 1000` (one batched write per 1000 records)
+- **Log throttling**: emits a progress log every 100 records or every 2 seconds with a records/s benchmark (resolves log-freeze issue)
 - Only does DB indexing, no WebDAV checks
 
 ### `cleanup_a_redundant_using_api()` New Method

@@ -1,6 +1,6 @@
 # 测试脚本说明
 
-本目录包含 `openlist_strm_bridge` 项目的全部测试文件，当前共 **35** 个 pytest 测试文件 + **4** 个独立手动脚本。
+本目录包含 `openlist_strm_bridge` 项目的全部测试文件，当前共 **40** 个 `test_*.py`（其中 **36** 个被 pytest 收集，**4** 个独立手动脚本由 `conftest.py` 的 `collect_ignore_glob` 排除）+ 若干辅助工具脚本。
 
 所有测试均从**项目根目录**运行（`src/tests/conftest.py` 负责 `src/` 路径注入），推荐命令：
 
@@ -46,6 +46,7 @@ python -m pytest src/tests/ -v
 | 文件 | 说明 |
 |------|------|
 | `test_utils.py` | 通用工具函数测试 |
+| `test_encoding_utils.py` | 编码规范化工具（NFC/NFD、斜杠、URL、全角/连续空格归一）测试 |
 | `test_media_renamer.py` | 媒体重命名与季/集号提取测试 |
 | `test_subtitle_handler.py` | 字幕同步与规范化测试 |
 | `test_subtitle_multi_bug_repro.py` | 番剧多字幕场景 NameError 回归测试 |

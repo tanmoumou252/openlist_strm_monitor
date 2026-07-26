@@ -26,10 +26,10 @@ pip install -r requirements.txt
 
 ### 启动方式
 
-1. **系统 Python** — 双击批处理脚本或运行 `python src/webui/server.py`
-2. **启动选择** — 批处理脚本提供选择菜单：
-   - 选项 1：自动启动主程序（AppService）
-   - 选项 2：仅启动 WebUI（默认）
+1. **嵌入式 Python** — 双击 `嵌入式启动.bat`（推荐，自带 Python 环境，自动检测 pip 与依赖后直接启动 WebUI）
+2. **系统 Python** — 双击 `环境变量启动.bat`，或直接运行 `python src/webui/server.py`
+
+两种批处理脚本均**直接启动 WebUI**（`src/webui/server.py`），启动后通过 WebUI 内的交互菜单选择是否同时拉起同步引擎（AppService）；批处理本身不提供选项菜单。
 
 ## 配置文件
 
