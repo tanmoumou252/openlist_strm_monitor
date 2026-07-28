@@ -44,13 +44,11 @@ def build_mock_app(
     app.config.refresh_paths = refresh_paths or []
     app.config.strm_engine_paths = strm_engine_paths or []
 
-    # SubtitleHandler 配置
+    # SubtitleHandler 配置（仅准备目录；mapping mock 放在函数末尾，避免被后续覆盖）
     if setup_b_root and tmp_path is not None:
         b_root = tmp_path / "b_root"
         b_root.mkdir(parents=True, exist_ok=True)
         app.b_root = b_root
-        app.get_b_root_for_a = lambda _path: b_root
-        app.db.get_subtitle_by_local.return_value = None
 
     # SyncService 配置
     if tmp_path is not None:
@@ -66,6 +64,10 @@ def build_mock_app(
     app.admin_api = app_cls()
     app.db = app_cls()
 
+    # 默认 DB 查询返回空列表(防止后台线程对 Mock 对象迭代导致 TypeError)
+    app.db.get_b_under_root.return_value = []
+    app.db.get_all_b_by_fingerprint.return_value = []
+
     # SyncService 特定方法
     app.build_b_path_from_a = app_cls()
     app._verify_b_path_lineage = app_cls(return_value=True)
@@ -74,5 +76,17 @@ def build_mock_app(
     # get_fingerprint_lock 必须返回真正的 Lock 对象，支持上下文管理器协议（P1-4）
     app.get_fingerprint_lock = lambda _fp: Lock()
     app.get_a_root_for_path = app_cls()
+
+    # 默认映射相关方法返回 None（fail-closed 行为）
+    app.get_mapping_for_a = app_cls(return_value=None)
+    app.get_mapping_for_b = app_cls(return_value=None)
+    app.a_b_mappings = []
+
+    # setup_b_root 使用 canonical mapping tuple；放在默认 fail-closed 设置之后，避免被覆盖。
+    if setup_b_root and tmp_path is not None:
+        b_root = tmp_path / "b_root"
+        a_root = tmp_path / "a"
+        app.get_mapping_for_a = lambda _p, _ar=a_root, _br=b_root: ("test-mapping", _ar, _br)
+        app.get_mapping_for_b = lambda _p, _ar=a_root, _br=b_root: ("test-mapping", _br, _ar)
 
     return app

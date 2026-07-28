@@ -207,7 +207,7 @@ class TmdbClient:
         1. access_token — Bearer Token
         2. api_key — 查询参数 ?api_key=xxx
         3. 两者都为空 — 返回 None
-        
+
         重试策略：
         - 429 速率限制：使用 Retry-After 头或指数退避
         - 网络错误：指数退避重试
@@ -266,7 +266,7 @@ class TmdbClient:
                 # 429 速率限制：重试
                 if e.code == 429 and attempt < retries - 1:
                     retry_after = float(e.headers.get("Retry-After", backoff * (2 ** attempt)))
-                    logging.warning("[TMDB] 速率限制，等待 %.1f 秒后重试 (%d/%d)", 
+                    logging.warning("[TMDB] 速率限制，等待 %.1f 秒后重试 (%d/%d)",
                                    retry_after, attempt + 1, retries)
                     time.sleep(retry_after)
                     continue
@@ -284,7 +284,7 @@ class TmdbClient:
                 # 最终失败
                 logging.error("[TMDB] 请求失败 %s: %s", endpoint, e)
                 return None
-        
+
         return None
 
     # ----------------------------------------------------------

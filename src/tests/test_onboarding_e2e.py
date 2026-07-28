@@ -89,14 +89,14 @@ def _make_mock_db(tmp_path: Path) -> MagicMock:
     }
     db.get_db_file_size.return_value = 0
     db.get_subtitle_by_local.return_value = None
-    
+
     mock_conn = MagicMock()
     mock_conn.execute.return_value.fetchone.return_value = (0,)
     mock_conn_ctx = MagicMock()
     mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
     mock_conn_ctx.__exit__ = MagicMock(return_value=False)
     db.read_connection.return_value = mock_conn_ctx
-    
+
     return db
 
 
@@ -205,13 +205,13 @@ class TestOnboardingFlow:
     def test_complete_step_view_ab(self, webui_server):
         """标记 view_ab 步骤完成"""
         server, base, session_token = webui_server
-        
+
         # 标记步骤完成
-        status, _, resp = _http_post(base, "/api/onboarding/complete-step", 
+        status, _, resp = _http_post(base, "/api/onboarding/complete-step",
                                      {"step": "view_ab"}, session_token)
         assert status == 200
         assert resp.get("ok") is True
-        
+
         # 验证状态更新
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert resp["view_ab_completed"] is True
@@ -221,38 +221,38 @@ class TestOnboardingFlow:
     def test_complete_step_tmdb_refresh(self, webui_server):
         """标记 tmdb_refresh 步骤完成"""
         server, base, session_token = webui_server
-        
-        status, _, resp = _http_post(base, "/api/onboarding/complete-step", 
+
+        status, _, resp = _http_post(base, "/api/onboarding/complete-step",
                                      {"step": "tmdb_refresh"}, session_token)
         assert status == 200
         assert resp.get("ok") is True
-        
+
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert resp["tmdb_refresh_completed"] is True
 
     def test_complete_step_tmdb_match(self, webui_server):
         """标记 tmdb_match 步骤完成"""
         server, base, session_token = webui_server
-        
-        status, _, resp = _http_post(base, "/api/onboarding/complete-step", 
+
+        status, _, resp = _http_post(base, "/api/onboarding/complete-step",
                                      {"step": "tmdb_match"}, session_token)
         assert status == 200
         assert resp.get("ok") is True
-        
+
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert resp["tmdb_match_completed"] is True
 
     def test_complete_all_steps(self, webui_server):
         """完成所有新增步骤"""
         server, base, session_token = webui_server
-        
+
         # 依次完成 3 个步骤
         for step in ["view_ab", "tmdb_refresh", "tmdb_match"]:
-            status, _, resp = _http_post(base, "/api/onboarding/complete-step", 
+            status, _, resp = _http_post(base, "/api/onboarding/complete-step",
                                          {"step": step}, session_token)
             assert status == 200
             assert resp.get("ok") is True
-        
+
         # 验证所有步骤都已完成
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert resp["view_ab_completed"] is True
@@ -262,8 +262,8 @@ class TestOnboardingFlow:
     def test_invalid_step_rejected(self, webui_server):
         """无效步骤名应返回 400"""
         server, base, session_token = webui_server
-        
-        status, _, resp = _http_post(base, "/api/onboarding/complete-step", 
+
+        status, _, resp = _http_post(base, "/api/onboarding/complete-step",
                                      {"step": "invalid_step"}, session_token)
         assert status == 400
         assert "invalid step" in resp.get("error", "").lower()
@@ -271,8 +271,8 @@ class TestOnboardingFlow:
     def test_missing_step_parameter(self, webui_server):
         """缺少 step 参数应返回 400"""
         server, base, session_token = webui_server
-        
-        status, _, resp = _http_post(base, "/api/onboarding/complete-step", 
+
+        status, _, resp = _http_post(base, "/api/onboarding/complete-step",
                                      {}, session_token)
         assert status == 400
 
@@ -287,11 +287,11 @@ class TestStartupPreflight:
     def test_preflight_openlist_unconfigured(self, webui_server):
         """OpenList 未配置时预检失败"""
         server, base, session_token = webui_server
-        
+
         status, _, resp = _http_post(base, "/api/config/validate", {}, session_token)
         assert status == 200
         assert resp["ok"] is False
-        
+
         # 检查检查结果
         checks = resp.get("checks", [])
         openlist_config_check = next((c for c in checks if c["name"] == "openlist_config"), None)
@@ -301,21 +301,21 @@ class TestStartupPreflight:
     def test_preflight_openlist_configured_but_offline(self, webui_server):
         """OpenList 已配置但不可达时预检通过（仅警告）"""
         server, base, session_token = webui_server
-        
+
         # 配置 OpenList 但使用不可达地址
         server._config.webdav.host = "http://192.0.2.1:5244"  # TEST-NET-1
-        
+
         # 使用 mock 避免真实网络调用
         with patch("webdav_client.OpenListAdminClient") as mock_client:
             mock_client.return_value.login.return_value = False
             mock_client.return_value.last_error_type = "network_error"
-            
+
             status, _, resp = _http_post(base, "/api/config/validate", {}, session_token)
-        
+
         assert status == 200
         # 根据实现，openlist_online 失败时降级为 warning，不阻塞
         assert resp["ok"] is True
-        
+
         checks = resp.get("checks", [])
         openlist_online_check = next((c for c in checks if c["name"] == "openlist_online"), None)
         assert openlist_online_check is not None
@@ -325,14 +325,14 @@ class TestStartupPreflight:
     def test_preflight_tmdb_unconfigured_warning(self, webui_server):
         """TMDB 未配置时预检通过（警告级别）"""
         server, base, session_token = webui_server
-        
+
         # 配置 OpenList 使预检通过
         server._config.webdav.host = "http://localhost:5244"
-        
+
         status, _, resp = _http_post(base, "/api/config/validate", {}, session_token)
         assert status == 200
         assert resp["ok"] is True
-        
+
         checks = resp.get("checks", [])
         tmdb_check = next((c for c in checks if c["name"] == "tmdb_config"), None)
         assert tmdb_check is not None
@@ -349,32 +349,32 @@ class TestCompleteJourney:
     def test_full_onboarding_journey(self, webui_server):
         """完整引导旅程：登录 → 查看引导 → 完成步骤 → 完成引导"""
         server, base, session_token = webui_server
-        
+
         # 1. 登录（已在 fixture 中完成）
         assert session_token is not None
-        
+
         # 2. 查看引导状态
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert status == 200
         assert resp["onboarding_completed"] is False
-        
+
         # 3. 完成所有新增步骤
         for step in ["view_ab", "tmdb_refresh", "tmdb_match"]:
-            status, _, resp = _http_post(base, "/api/onboarding/complete-step", 
+            status, _, resp = _http_post(base, "/api/onboarding/complete-step",
                                          {"step": step}, session_token)
             assert status == 200
-        
+
         # 4. 验证所有步骤完成
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert resp["view_ab_completed"] is True
         assert resp["tmdb_refresh_completed"] is True
         assert resp["tmdb_match_completed"] is True
-        
+
         # 5. 完成引导（设置 onboarding_completed）
-        status, _, resp = _http_post(base, "/api/webui/config/ui", 
+        status, _, resp = _http_post(base, "/api/webui/config/ui",
                                      {"onboarding_completed": "1"}, session_token)
         assert status == 200
-        
+
         # 6. 验证引导已完成
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert resp["onboarding_completed"] is True
@@ -440,14 +440,14 @@ class TestConfigurationLinkage:
     def test_openlist_configured_updates_status(self, webui_server):
         """配置 OpenList 后 openlist_configured 变为 True"""
         server, base, session_token = webui_server
-        
+
         # 初始状态
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert resp["openlist_configured"] is False
-        
+
         # 配置 OpenList
         server._config.webdav.host = "http://localhost:5244"
-        
+
         # 验证状态更新
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert resp["openlist_configured"] is True
@@ -455,13 +455,13 @@ class TestConfigurationLinkage:
     def test_tmdb_configured_updates_status(self, webui_server):
         """配置 TMDB 后 tmdb_configured 变为 True"""
         server, base, session_token = webui_server
-        
+
         # 初始状态
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert resp["tmdb_configured"] is False
-        
+
         # 模拟 TMDB 已配置（通过 mock watchlist_db）
-        with patch.object(server._watchlist_db, 'get_all_config', 
+        with patch.object(server._watchlist_db, 'get_all_config',
                          return_value={"access_token": "test_token"}):
             status, _, resp = _http_get(base, "/api/config/status", session_token)
             assert resp["tmdb_configured"] is True
@@ -469,14 +469,14 @@ class TestConfigurationLinkage:
     def test_main_running_updates_status(self, webui_server):
         """主程序运行后 main_running 变为 True"""
         server, base, session_token = webui_server
-        
+
         # 初始状态
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert resp["main_running"] is False
-        
+
         # 模拟主程序运行
         server._app_running = True
-        
+
         # 验证状态更新
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert resp["main_running"] is True

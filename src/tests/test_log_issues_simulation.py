@@ -33,7 +33,7 @@ if _SRC_DIR not in sys.path:
     sys.path.append(_SRC_DIR)
 
 from app_service_core import AppService  # noqa: E402
-from config import AppConfig  # noqa: E402
+from config import ABMapping, AppConfig  # noqa: E402
 from database import Database  # noqa: E402
 from domain.media.subtitle_handler import SubtitleHandler as RealSubtitleHandler  # noqa: E402
 from media_renamer import _extract_season_episode  # noqa: E402
@@ -436,6 +436,9 @@ class SimulationBase:
         self.config.strm_engine_paths = []
         self.config.refresh = Mock(enabled=False)
         self.config.refresh_paths = []
+        self.config.a_b_mappings = [
+            ABMapping(mapping_id="test_m1", a_root=str(A_DIR), b_root=str(B_DIR)),
+        ]
 
         self.admin_api = Mock()
         self.admin_api.check_exists.return_value = True
@@ -475,6 +478,7 @@ class SimulationBase:
         self.db.upsert_b(
             str(local_path), webdav_path, "/cloud/mount", None,
             fingerprint=make_strm_fingerprint(webdav_path), status="valid",
+            mapping_id="test_m1",
         )
 
 
@@ -597,17 +601,17 @@ class TestNewIssue1_DBLockContention(SimulationBase):
                 lambda: self.db.get_identity_by_fingerprint(make_strm_fingerprint(webdav)),
                 lambda: self.db.get_identity_by_webdav(webdav),
                 lambda: self.db.get_a_local_path_by_webdav(webdav),
-                lambda: self.db.get_b_instances_by_fingerprint(make_strm_fingerprint(webdav)),
+                lambda: self.db.get_b_instances_by_fingerprint(make_strm_fingerprint(webdav), "test_mapping"),
                 lambda: self.db.get_b_by_local_full(str(target)),
-                lambda: self.db.get_valid_b_instance_by_fingerprint(make_strm_fingerprint(webdav)),
-                lambda: self.db.get_all_b_by_fingerprint(make_strm_fingerprint(webdav)),
-                lambda: self.db.b_fingerprint_exists(make_strm_fingerprint(webdav)),
+                lambda: self.db.get_valid_b_instance_by_fingerprint(make_strm_fingerprint(webdav), "test_mapping"),
+                lambda: self.db.get_all_b_by_fingerprint(make_strm_fingerprint(webdav), "test_mapping"),
+                lambda: self.db.b_fingerprint_exists(make_strm_fingerprint(webdav), "test_mapping"),
                 lambda: self.db.get_a_count_under_root("/cloud/mount"),
-                lambda: self.db.has_other_b_instance(make_strm_fingerprint(webdav), "missing"),
-                lambda: self.db.get_media_boundary_by_fingerprint("missing"),
-                lambda: self.db.get_media_boundaries_by_source_name("missing", str(B_DIR)),
-                lambda: self.db.get_media_boundary_by_current_name("missing", str(B_DIR)),
-                lambda: self.db.get_media_boundary_by_source_name_only("missing"),
+                lambda: self.db.has_other_b_instance("test_mapping", make_strm_fingerprint(webdav), "missing"),
+                lambda: self.db.get_media_boundary_by_fingerprint("test_mapping", "missing"),
+                lambda: self.db.get_media_boundaries_by_source_name("test_mapping", "missing", str(B_DIR)),
+                lambda: self.db.get_media_boundary_by_current_name("test_mapping", "missing", str(B_DIR)),
+                lambda: self.db.get_media_boundary_by_source_name_only("test_mapping", "missing"),
                 lambda: self.db.get_subtitle_by_local("missing"),
                 lambda: self.db.subtitle_exists("missing"),
                 lambda: self.db.get_subtitles_by_fingerprint("missing"),
@@ -667,7 +671,7 @@ class TestNewIssue2_PathCollisionPadding(SimulationBase):
         assert a_root is not None
         rel = a_local.relative_to(a_root)
         if self.app._should_treat_as_movie(a_local, webdav_path):
-            return self.app.b_root / rel
+            return Path(B_DIR) / rel
         suggested_name = __import__("media_renamer").suggest_rename(a_local)
         if suggested_name and webdav_path:
             season = __import__("media_renamer").extract_season_from_path(a_local)
@@ -681,10 +685,10 @@ class TestNewIssue2_PathCollisionPadding(SimulationBase):
                      if re.match(r"(?i)^season\s*\d+$", part)),
                     len(rel_parts) - 1,
                 )
-                return self.app.b_root / Path(
+                return Path(B_DIR) / Path(
                     *rel_parts[:season_index], f"Season {season:02d}", suggested_name,
                 )
-        return self.app.b_root / rel
+        return Path(B_DIR) / rel
 
     def _padding_sources(self):
         return [path for _group, paths in self.manifest["collision_candidates"] for path in paths]
@@ -735,6 +739,15 @@ class TestNewIssue2_PathCollisionPadding(SimulationBase):
 class TestNewIssue3_BZoneHealthCheck(SimulationBase):
     """问题3：验证越界清理后 DB/磁盘一致且合法文件保留。"""
 
+    def setup_method(self):
+        super().setup_method()
+        self.config.a_b_mappings = [
+            ABMapping(mapping_id="test_mapping", a_root=str(A_DIR), b_root=str(B_DIR)),
+        ]
+        self.app.a_b_mappings = self.config.a_b_mappings
+        self.app.a_roots = [A_DIR.resolve()]
+        self.app._a_to_b_map = {str(A_DIR.resolve()): B_DIR.resolve()}
+
     def _create_b_file(self, relative: str, webdav: str) -> Path:
         path = B_DIR / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -744,7 +757,8 @@ class TestNewIssue3_BZoneHealthCheck(SimulationBase):
     def test_out_of_bounds_no_a_record_deleted(self):
         path = self._create_b_file("orphan/no-source.strm", "/cloud/orphan/no-source.mkv")
         self.db.upsert_b(str(path), "/cloud/orphan/no-source.mkv", "/cloud/orphan", None,
-                         make_strm_fingerprint("/cloud/orphan/no-source.mkv"))
+                         mapping_id="test_m1",
+                         fingerprint=make_strm_fingerprint("/cloud/orphan/no-source.mkv"))
         self.app.initial_scan_b()
         assert not path.exists()
         assert self.db.get_b_by_local_full(str(path)) is None
@@ -753,7 +767,8 @@ class TestNewIssue3_BZoneHealthCheck(SimulationBase):
         path = self._create_b_file("orphan/missing-source.strm", "/cloud/orphan/missing-source.mkv")
         source = self.tmp / "gone" / "source.strm"
         self.db.upsert_b(str(path), "/cloud/orphan/missing-source.mkv", "/cloud/orphan", str(source),
-                         make_strm_fingerprint("/cloud/orphan/missing-source.mkv"))
+                         mapping_id="test_m1",
+                         fingerprint=make_strm_fingerprint("/cloud/orphan/missing-source.mkv"))
         self.db.upsert_identity(
             make_strm_fingerprint("/cloud/orphan/missing-source.mkv"),
             "/cloud/orphan/missing-source.mkv", str(source), str(path),
@@ -769,7 +784,8 @@ class TestNewIssue3_BZoneHealthCheck(SimulationBase):
         source.write_text("/cloud/orphan/gone-root.mkv", encoding="utf-8")
         self.db.upsert_a(str(source), "/cloud/orphan/gone-root.mkv", "/cloud/orphan")
         self.db.upsert_b(str(path), "/cloud/orphan/gone-root.mkv", "/cloud/orphan", str(source),
-                         make_strm_fingerprint("/cloud/orphan/gone-root.mkv"))
+                         mapping_id="test_m1",
+                         fingerprint=make_strm_fingerprint("/cloud/orphan/gone-root.mkv"))
         self.app.initial_scan_b()
         assert not path.exists()
         assert self.db.get_b_by_local_full(str(path)) is None
@@ -781,7 +797,9 @@ class TestNewIssue3_BZoneHealthCheck(SimulationBase):
         path = self._create_b_file("flat/S01E01.strm", webdav)
         fp = make_strm_fingerprint(webdav)
         self.db.upsert_a(str(a_source), webdav, "/cloud/mount/anime/ShowA")
-        self.db.upsert_b(str(path), webdav, "/cloud/mount/anime/ShowA", str(a_source), fp)
+        self.db.upsert_b(str(path), webdav, "/cloud/mount/anime/ShowA", str(a_source),
+                         mapping_id="test_m1",
+                         fingerprint=fp)
         self.app.engine_configs = []
         self.app.initial_scan_b()
         assert path.exists()
@@ -794,7 +812,9 @@ class TestNewIssue3_BZoneHealthCheck(SimulationBase):
         path = self._create_b_file("S01E01.strm", webdav)
         fp = make_strm_fingerprint(webdav)
         self.db.upsert_a(str(a_source), webdav, "/cloud/mount/anime/ShowA")
-        self.db.upsert_b(str(path), webdav, "/cloud/mount/anime/ShowA", str(a_source), fp)
+        self.db.upsert_b(str(path), webdav, "/cloud/mount/anime/ShowA", str(a_source),
+                         mapping_id="test_m1",
+                         fingerprint=fp)
         self.app.engine_configs = [{
             "a_root_norm": str(A_DIR.resolve()),
             "mount_path": "/engine",
@@ -815,7 +835,8 @@ class TestNewIssue3_BZoneHealthCheck(SimulationBase):
     def test_b_records_match_disk_after_cleanup(self):
         orphan = self._create_b_file("orphan/extra.strm", "/cloud/orphan/extra.mkv")
         self.db.upsert_b(str(orphan), "/cloud/orphan/extra.mkv", "/cloud/orphan", None,
-                         make_strm_fingerprint("/cloud/orphan/extra.mkv"))
+                         mapping_id="test_m1",
+                         fingerprint=make_strm_fingerprint("/cloud/orphan/extra.mkv"))
         self._run_full_sync(use_bulk=False)
         self.app.initial_scan_b()
         disk_paths = {str(path.resolve()) for path in B_DIR.rglob("*.strm")}
@@ -981,6 +1002,7 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
             self.db.upsert_b(
                 str(p), webdav, "/cloud/mount/dup_show", None,
                 fingerprint=make_strm_fingerprint(webdav), status="valid",
+                mapping_id="test_m1",
             )
             files.append(p)
             paths.append(str(p.resolve()))
@@ -1001,10 +1023,10 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
         files, paths = self._seed_three_instances(webdav)
         fp = make_strm_fingerprint(webdav)
 
-        self.app.ensure_single_visible_instance(fp, paths[0], prefer_path=paths[0])
+        self.app.ensure_single_visible_instance(fp, paths[0], prefer_path=paths[0], mapping_id="test_m1")
 
         # 验证：恰好一个 status='valid' 且物理存在
-        all_inst = self.db.get_all_b_by_fingerprint(fp)
+        all_inst = self.db.get_all_b_by_fingerprint(fp, "test_m1")
         valid = [r for r in all_inst if r.status == "valid" and Path(r.local_path).exists()]
         assert len(valid) == 1
 
@@ -1019,13 +1041,13 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
         files, paths = self._seed_three_instances(webdav)
         fp = make_strm_fingerprint(webdav)
 
-        self.app.ensure_single_visible_instance(fp, paths[0], prefer_path=paths[0])
+        self.app.ensure_single_visible_instance(fp, paths[0], prefer_path=paths[0], mapping_id="test_m1")
         count_after_first = len(list(B_DIR.rglob("*.strm")))
-        all_inst_first = self.db.get_all_b_by_fingerprint(fp)
+        all_inst_first = self.db.get_all_b_by_fingerprint(fp, "test_m1")
 
-        self.app.ensure_single_visible_instance(fp, paths[0], prefer_path=paths[0])
+        self.app.ensure_single_visible_instance(fp, paths[0], prefer_path=paths[0], mapping_id="test_m1")
         count_after_second = len(list(B_DIR.rglob("*.strm")))
-        all_inst_second = self.db.get_all_b_by_fingerprint(fp)
+        all_inst_second = self.db.get_all_b_by_fingerprint(fp, "test_m1")
 
         # 文件数量不增长
         assert count_after_second == count_after_first
@@ -1049,10 +1071,10 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
             return original_move(old, new)
 
         with patch.object(self.db, "move_b_record", side_effect=mock_move):
-            self.app.ensure_single_visible_instance(fp, paths[0], prefer_path=paths[0])
+            self.app.ensure_single_visible_instance(fp, paths[0], prefer_path=paths[0], mapping_id="test_m1")
 
         # 验证：move_b_record 失败时物理回滚，原文件恢复
-        all_inst = self.db.get_all_b_by_fingerprint(fp)
+        all_inst = self.db.get_all_b_by_fingerprint(fp, "test_m1")
         for r in all_inst:
             if r.status == "duplicate":
                 assert Path(r.local_path).exists(), (
@@ -1095,7 +1117,7 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
                 # 修复后：回滚失败时应抛出异常使清理中止，不静默继续
                 with pytest.raises(OSError, match="模拟磁盘满"):
                     self.app.ensure_single_visible_instance(
-                        fp, paths[0], prefer_path=paths[0])
+                        fp, paths[0], prefer_path=paths[0], mapping_id="test_m1")
 
         log = self._read_log()
         # 必须有明确的 error 日志
@@ -1132,11 +1154,11 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
             return real_fn(path, suffix=suffix)
 
         with patch("app_service_core.quarantine_file", side_effect=controlled_quarantine):
-            self.app.ensure_single_visible_instance(fp, keep_path, prefer_path=keep_path)
+            self.app.ensure_single_visible_instance(fp, keep_path, prefer_path=keep_path, mapping_id="test_m1")
 
         assert quarantine_call[0] >= 2, "应至少尝试隔离两个重复实例"
 
-        all_inst = self.db.get_all_b_by_fingerprint(fp)
+        all_inst = self.db.get_all_b_by_fingerprint(fp, "test_m1")
         by_path = {r.local_path: r for r in all_inst}
 
         # keep：仍 valid 且文件存在
@@ -1168,7 +1190,7 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
         # 可自愈：第二次 ensure 应再次尝试隔离（status 已恢复 valid）
         quarantine_call[0] = 0
         with patch("app_service_core.quarantine_file", side_effect=controlled_quarantine):
-            self.app.ensure_single_visible_instance(fp, keep_path, prefer_path=keep_path)
+            self.app.ensure_single_visible_instance(fp, keep_path, prefer_path=keep_path, mapping_id="test_m1")
         assert quarantine_call[0] >= 1, "恢复 valid 后应可再次进入隔离流程"
 
     def test_same_second_quarantine_timestamp_collision(self):
@@ -1237,7 +1259,7 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
         for p in paths:
             assert Path(p).exists(), f"回滚后原路径应存在: {p}"
 
-        all_inst = self.db.get_all_b_by_fingerprint(fp)
+        all_inst = self.db.get_all_b_by_fingerprint(fp, "test_m1")
         for r in all_inst:
             if r.local_path in paths:
                 assert r.status == "valid", (
@@ -1618,7 +1640,7 @@ class TestNewIssue7_WebDAVFalseNegative(SimulationBase):
         self.db.upsert_b(
             str(b_file), "/cloud/zombie/S01E01.mp4", "/cloud/zombie", None,
             fingerprint=make_strm_fingerprint("/cloud/zombie/S01E01.mp4"),
-            status="valid",
+            status="valid", mapping_id="test_m1",
         )
 
         self.admin_api.list_directory.return_value = {
@@ -1642,7 +1664,7 @@ class TestNewIssue7_WebDAVFalseNegative(SimulationBase):
         self.db.upsert_b(
             str(b_file), "/cloud/valve/S01E01.mp4", "/cloud/valve", None,
             fingerprint=make_strm_fingerprint("/cloud/valve/S01E01.mp4"),
-            status="valid",
+            status="valid", mapping_id="test_m1",
         )
 
         # 构造 100 个满页（每页100条）+ 第101页触发安全阀
@@ -1679,7 +1701,7 @@ class TestNewIssue7_WebDAVFalseNegative(SimulationBase):
         self.db.upsert_b(
             str(b_file), "/cloud/code_err/S01E01.mp4", "/cloud/code_err", None,
             fingerprint=make_strm_fingerprint("/cloud/code_err/S01E01.mp4"),
-            status="valid",
+            status="valid", mapping_id="test_m1",
         )
 
         self.admin_api.list_directory.return_value = {
@@ -1701,7 +1723,7 @@ class TestNewIssue7_WebDAVFalseNegative(SimulationBase):
         self.db.upsert_b(
             str(b_file), "/cloud/no_data/S01E01.mp4", "/cloud/no_data", None,
             fingerprint=make_strm_fingerprint("/cloud/no_data/S01E01.mp4"),
-            status="valid",
+            status="valid", mapping_id="test_m1",
         )
         self.admin_api.list_directory.return_value = {
             "code": 200,
@@ -1719,7 +1741,7 @@ class TestNewIssue7_WebDAVFalseNegative(SimulationBase):
         self.db.upsert_b(
             str(b_file), "/cloud/bad_data/S01E01.mp4", "/cloud/bad_data", None,
             fingerprint=make_strm_fingerprint("/cloud/bad_data/S01E01.mp4"),
-            status="valid",
+            status="valid", mapping_id="test_m1",
         )
         self.admin_api.list_directory.return_value = {
             "code": 200,
@@ -1738,7 +1760,7 @@ class TestNewIssue7_WebDAVFalseNegative(SimulationBase):
         self.db.upsert_b(
             str(b_file), "/cloud/neg/S01E01.mp4", "/cloud/neg", None,
             fingerprint=make_strm_fingerprint("/cloud/neg/S01E01.mp4"),
-            status="valid",
+            status="valid", mapping_id="test_m1",
         )
         self.admin_api.list_directory.return_value = {
             "code": 200,
@@ -1965,12 +1987,12 @@ class TestNewIssue8_UnicodePaths(SimulationBase):
         ]
         assert len(b_fullwidth_matches) >= 1, "全角路径 STRM 应同步到 B 区"
 
-        # 每个 A 源的 webdav_path 在 B 区应有唯一实例
+# 每个 A 源的 webdav_path 在 B 区应有唯一实例
         for b_path in b_fullwidth_matches:
             webdav = read_strm_webdav_path(b_path)
             if webdav:
                 instances = self.db.get_b_instances_by_fingerprint(
-                    make_strm_fingerprint(webdav))
+                    make_strm_fingerprint(webdav), "test_m1")
                 assert len(instances) == 1, (
                     f"每个指纹应只有一个有效 B 实例: {webdav} 有 {len(instances)}"
                 )

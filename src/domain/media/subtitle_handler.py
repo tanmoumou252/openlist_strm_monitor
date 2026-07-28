@@ -119,7 +119,12 @@ class SubtitleHandler:
 
         # 构建目标路径：保持同目录结构
         rel_parent = sub_file.relative_to(a_root).parent
-        b_target_dir = self.app.get_b_root_for_a(sub_file) / rel_parent
+        mapping = self.app.get_mapping_for_a(sub_file)
+        if mapping is None:
+            logging.warning("[字幕跳过] 无法唯一解析 A/B 映射: %s", sub_file)
+            return
+        _, _, b_root = mapping
+        b_target_dir = b_root / rel_parent
         b_target_dir.mkdir(parents=True, exist_ok=True)
 
         # 语言信息
@@ -213,17 +218,20 @@ class SubtitleHandler:
             if re.match(r"^第[一二三四五六七八九十\d]+季$", part):
                 cn_season_index = i
 
+        mapping = self.app.get_mapping_for_a(sub_file)
+        if mapping is None:
+            logging.warning("[字幕跳过] 无法唯一解析 A/B 映射: %s", sub_file)
+            return
+        _, _, b_root = mapping
         if has_season_dir:
-            b_target_dir = self.app.get_b_root_for_a(sub_file) / rel.parent
+            b_target_dir = b_root / rel.parent
         elif cn_season_index >= 0:
-            b_target_dir = self.app.get_b_root_for_a(sub_file) / \
-                Path(*rel_parts[:cn_season_index]) / f"Season {season:02d}"
+            b_target_dir = b_root / Path(*rel_parts[:cn_season_index]) / f"Season {season:02d}"
         else:
             if len(rel_parts) >= 2:
-                b_target_dir = self.app.get_b_root_for_a(sub_file) / \
-                    Path(*rel_parts[:-1]) / f"Season {season:02d}"
+                b_target_dir = b_root / Path(*rel_parts[:-1]) / f"Season {season:02d}"
             else:
-                b_target_dir = self.app.get_b_root_for_a(sub_file) / rel.parent
+                b_target_dir = b_root / rel.parent
 
         b_target_dir.mkdir(parents=True, exist_ok=True)
 

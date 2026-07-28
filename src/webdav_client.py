@@ -136,7 +136,7 @@ class OpenListAdminClient:
 
     def login(self, force: bool = False) -> bool:
         """登录获取 JWT。force=True 会无视缓存强制联网登录。
-        
+
         返回: bool（True 成功，False 失败）
         错误详情通过属性访问:
           - self.last_error_type: "wrong_password", "wrong_2fa", "account_not_found",
@@ -173,7 +173,7 @@ class OpenListAdminClient:
         try:
             # 登录是唯一不走 _do_request 的方法，避免死循环
             res = self.session.post(url, json=payload, timeout=10)
-            
+
             # 检查 HTTP 状态码
             if res.status_code != 200:
                 # 尝试解析错误消息
@@ -190,7 +190,7 @@ class OpenListAdminClient:
                     self.last_error_message = f"HTTP {res.status_code}"
                     self.last_error_type = "unknown"
                     return False
-            
+
             # HTTP 200，检查业务响应
             data = res.json()
             # 诊断日志：记录实际响应内容
@@ -219,7 +219,7 @@ class OpenListAdminClient:
                 self.last_error_message = error_msg or "无法提取 token"
                 self.last_error_type = error_type
                 return False
-            
+
             self._save_token_to_cache(token)
             self.last_error_message = None
             self.last_error_type = None
@@ -244,10 +244,10 @@ class OpenListAdminClient:
             self.last_error_message = str(e)
             self.last_error_type = "unknown"
             return False
-    
+
     def _parse_login_error(self, message: str) -> str:
         """解析 OpenList 登录错误消息，返回错误类型。
-        
+
         常见错误消息:
         - "username or password is wrong" → wrong_password
         - "otp code is wrong" → wrong_2fa
@@ -304,7 +304,7 @@ class OpenListAdminClient:
                 if now - self._fs_list_logged_time > 600:  # 10 minutes
                     self._fs_list_logged.clear()
                     self._fs_list_logged_time = now
-                
+
                 if _fs_path not in self._fs_list_logged:
                     self._fs_list_logged.add(_fs_path)
                     log.debug("[STRM] 扫描 %s", _fs_path)
@@ -424,23 +424,23 @@ class OpenListAdminClient:
 
     def get_strm_storages_full_info(self) -> list[dict[str, Any]]:
         """获取所有 STRM 类型存储的完整信息。
-        
+
         list 接口返回的 addition 是精简版，不含 SaveStrmLocalPath。
         此方法先 list 筛选 STRM 存储，再对每个调用 get_storage_info 拿完整 addition。
-        
+
         返回格式与 get_storage_info 返回的 data 一致，包含完整 addition。
         如果获取失败返回空列表。
         """
         storages = self.list_storages()
         if not storages or not isinstance(storages, dict):
             return []
-        
+
         data_field = storages.get("data") or {}
         if not isinstance(data_field, dict):
             return []
         content = data_field.get("content", [])
         strm_storages = [s for s in content if s.get("driver", "").lower() == "strm"]
-        
+
         result = []
         for storage in strm_storages:
             storage_id = storage.get("id")
@@ -456,7 +456,7 @@ class OpenListAdminClient:
             else:
                 log.warning("get_strm_storages_full_info: 获取存储 %s 详情失败", storage_id)
                 result.append(storage)
-        
+
         return result
 
     # 2. 获取存储详情 (Admin API) - 【补全】
@@ -491,7 +491,7 @@ class OpenListAdminClient:
     # 4. 创建目录 (FS API)
     def mkdir(self, path: str) -> bool:
         """创建目录。
-        
+
         Returns:
             True: 目录创建成功，或目录已存在（幂等）。
             False: 请求失败或真正的创建失败。
@@ -686,7 +686,7 @@ class OpenListAdminClient:
     # 8. 获取兼容格式的内容列表 (逻辑方法)
     def list_contents(self, path: str) -> dict[str, list[dict[str, Any]]] | None:
         """列出目录内容，返回兼容格式。
-        
+
         Returns:
             dict: {"folders": [...], "files": [...]} 成功时返回。
             None: 目录不存在或请求失败时返回。

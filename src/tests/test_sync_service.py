@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from domain.sync.sync_service import SyncService
 from database import ARecord
+from config import ABMapping
 from _test_helpers import build_mock_app
 
 
@@ -205,6 +206,9 @@ class TestSyncServiceScanAToBFullSync:
         app.db.b_fingerprint_exists.return_value = False
         app.db.get_all_ghost_protected_paths.return_value = set()
         app.db.get_all_b_fingerprints.return_value = set()
+        # Set up mapping resolution (scan_a_to_b_full_sync now calls get_mapping_for_a)
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
+        app.a_b_mappings = [ABMapping(mapping_id="test_m1", a_root="/a_root", b_root="/b_root")]
 
     def _make_bulk_conn_mock(self):
         """Create a mock connection that supports context manager protocol."""
@@ -308,6 +312,9 @@ class TestSyncServiceScanAToBFullSync:
         app.db.get_all_a_records.return_value = records
         app.db.get_all_ghost_protected_paths.return_value = set()
         app.db.get_all_b_fingerprints.return_value = set()
+        # Set up mapping resolution (scan_a_to_b_full_sync now calls get_mapping_for_a)
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
+        app.a_b_mappings = [ABMapping(mapping_id="test_m1", a_root="/a_root", b_root="/b_root")]
         # 每个记录映射到不同的 B 目标路径（避免全部冲突）
         b_root = tmp_path / "b" if tmp_path else Path("/b")
         b_root.mkdir(exist_ok=True)
@@ -448,7 +455,7 @@ class TestSyncServiceScanAToBFullSync:
         mock_conn = self._make_bulk_conn_mock()
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
-        
+
         # Patch _bulk_upsert_b to verify it's called
         with patch.object(svc, "_bulk_upsert_b") as mock_bulk_upsert:
             svc.scan_a_to_b_full_sync()
@@ -471,7 +478,7 @@ class TestSyncServiceScanAToBFullSync:
         mock_conn = self._make_bulk_conn_mock()
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
-        
+
         # _verify_b_path_lineage should NOT be called during bulk sync
         with patch.object(app, "_verify_b_path_lineage") as mock_lineage:
             svc.scan_a_to_b_full_sync()
@@ -565,6 +572,7 @@ class TestCopyARecordToBIfNeeded:
     def test_skip_when_fingerprint_exists_in_b(self, tmp_path):
         app = _make_app(tmp_path)
         app.db.is_ghost_protected.return_value = False
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
         app.db.b_fingerprint_exists.return_value = True
         svc = SyncService(app)
         result = svc.copy_a_record_to_b_if_needed("/a/f.strm", "/m/f.mp4", "/m")
@@ -573,11 +581,12 @@ class TestCopyARecordToBIfNeeded:
     def test_delegates_to_copy_a_record_to_b(self, tmp_path):
         app = _make_app(tmp_path)
         app.db.is_ghost_protected.return_value = False
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
         app.db.b_fingerprint_exists.return_value = False
         svc = SyncService(app)
         with patch.object(svc, "copy_a_record_to_b", return_value=True) as mock_copy:
             result = svc.copy_a_record_to_b_if_needed("/a/f.strm", "/m/f.mp4", "/m")
-        mock_copy.assert_called_once_with("/a/f.strm", "/m/f.mp4", "/m")
+        mock_copy.assert_called_once_with("/a/f.strm", "/m/f.mp4", "/m", mapping_id="test_m1")
         assert result is True
 
 
@@ -595,6 +604,7 @@ class TestCopyARecordToB:
         app.admin_api.check_exists.return_value = True
         app.db.upsert_b = Mock()
         app.db.upsert_identity = Mock()
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), "/mount/file.mp4", "/mount")
@@ -610,6 +620,7 @@ class TestCopyARecordToB:
         b_file = tmp_path / "b" / "file.strm"
         app.build_b_path_from_a.return_value = b_file
         app._verify_b_path_lineage.return_value = False
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), "/mount/file.mp4", "/mount")
@@ -632,6 +643,7 @@ class TestCopyARecordToB:
         app._verify_b_path_lineage.return_value = True
         app.db.upsert_b = Mock()
         app.db.upsert_identity = Mock()
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), webdav_path, "/mount")
@@ -653,6 +665,7 @@ class TestCopyARecordToB:
         app.admin_api.check_exists.return_value = False
         app.db.delete_a_by_local = Mock()
         app.db.set_ghost_protection = Mock()
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), webdav_path, "/mount")
@@ -674,6 +687,7 @@ class TestCopyARecordToB:
         app.build_b_path_from_a.return_value = b_file
         app._verify_b_path_lineage.return_value = True
         app.admin_api.check_exists.return_value = True
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         with patch("shutil.copyfile", side_effect=OSError("disk full")):
@@ -695,6 +709,7 @@ class TestCopyARecordToB:
         app._verify_b_path_lineage.return_value = True
         app.admin_api.check_exists.return_value = True
         app.db.upsert_b.side_effect = Exception("db failure")
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), webdav_path, "/mount")
@@ -718,6 +733,7 @@ class TestCopyARecordToB:
         app.build_b_path_from_a.return_value = b_file
         app._verify_b_path_lineage.return_value = True
         app.admin_api.check_exists.return_value = True
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), webdav_path, "/mount")
@@ -731,6 +747,7 @@ class TestCopyARecordToB:
         a_file = a_root / "file.strm"
         a_file.write_text("/mount/file.mp4", encoding="utf-8")
         app.build_b_path_from_a.side_effect = ValueError("not under any root")
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), "/mount/file.mp4", "/mount")
@@ -799,17 +816,18 @@ class TestSyncServiceSyncOneRecord:
         a_root = app.a_roots[0]
         a_file = a_root / "file.strm"
         a_file.write_text("/m/file.mp4", encoding="utf-8")
+        app.get_mapping_for_a.return_value = ("test_m1", a_root, tmp_path / "b")
 
         svc = SyncService(app)
         svc._cache_ghost = set()
-        # Pre-populate with a known fingerprint
+        # Pre-populate with a known (mapping_id, fingerprint) compound key
         from utils import make_strm_fingerprint
         fp = make_strm_fingerprint("/m/file.mp4")
-        svc._cache_b_fp = {fp}
+        svc._cache_b_fp = {("test_m1", fp)}
 
         rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
         conn = Mock()
-        result = svc._sync_one_record(rec, None, conn)
+        result = svc._sync_one_record(rec, None, conn, mapping_id="test_m1")
 
         assert result == "skip_fp"
 
@@ -831,6 +849,7 @@ class TestSyncServiceSyncOneRecord:
         b_root = tmp_path / "b"
         b_root.mkdir()
         app.build_b_path_from_a.return_value = b_root / "file.strm"
+        app.get_mapping_for_a.return_value = ("test_m1", a_root, b_root)
 
         svc = SyncService(app)
         svc._cache_ghost = set()
@@ -838,14 +857,14 @@ class TestSyncServiceSyncOneRecord:
 
         conn = self._make_db_conn_mock()
         rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
-        result = svc._sync_one_record(rec, None, conn)
+        result = svc._sync_one_record(rec, None, conn, mapping_id="test_m1")
 
         assert result == "success"
         assert (b_root / "file.strm").exists()
         # _cache_b_fp should contain the computed fingerprint
         from utils import make_strm_fingerprint
         fp = make_strm_fingerprint("/m/file.mp4")
-        assert fp in svc._cache_b_fp
+        assert ("test_m1", fp) in svc._cache_b_fp
         # DB upserts should have been called on conn
         assert conn.execute.call_count > 0
 
@@ -862,6 +881,7 @@ class TestSyncServiceSyncOneRecord:
         b_file = b_root / "file.strm"
         b_file.write_text(webdav, encoding="utf-8")
         app.build_b_path_from_a.return_value = b_file
+        app.get_mapping_for_a.return_value = ("test_m1", a_root, b_root)
 
         svc = SyncService(app)
         svc._cache_ghost = set()
@@ -870,13 +890,13 @@ class TestSyncServiceSyncOneRecord:
         conn = self._make_db_conn_mock()
 
         rec = _make_a_record(str(a_file), webdav, "/m")
-        result = svc._sync_one_record(rec, None, conn)
+        result = svc._sync_one_record(rec, None, conn, mapping_id="test_m1")
 
         assert result == "success"
         # The computed fingerprint should be in cache
         from utils import make_strm_fingerprint
         fp = make_strm_fingerprint(webdav)
-        assert fp in svc._cache_b_fp
+        assert ("test_m1", fp) in svc._cache_b_fp
         # No new file copy should have happened
         conn.execute.assert_called()
 
@@ -971,6 +991,7 @@ class TestSyncServiceBulkUpsertHelpers:
             parent_webdav_path="/m",
             source_a_path="/a/file.strm",
             fingerprint="abc123",
+            mapping_id="test_m1",
         )
 
         # Should have: 1 SELECT old rowid, 0 DELETE old FTS, 1 INSERT base,
@@ -996,6 +1017,7 @@ class TestSyncServiceBulkUpsertHelpers:
             parent_webdav_path="/m",
             source_a_path="/a/file.strm",
             fingerprint="abc123",
+            mapping_id="test_m1",
         )
 
         calls = conn.execute.call_args_list

@@ -94,6 +94,7 @@ class BRecord:
     fingerprint: str | None
     status: str
     updated_at: float
+    mapping_id: str = ""  # Mapping ID for multi-A↔multi-B isolation
 
 
 @dataclass(frozen=True)
@@ -119,11 +120,25 @@ class CRecord:
 @dataclass(frozen=True)
 class BoundaryRecord:
     """媒体边界映射记录"""
+    mapping_id: str
     fingerprint: str
     source_media_name: str
     current_media_name: str
     engine_entry_path: str
     updated_at: float
+
+
+@dataclass(frozen=True)
+class BLineageSnapshotRecord:
+    mapping_id: str
+    local_path: str
+    file_size: int
+    mtime_ns: int
+    fingerprint: str | None
+    mapping_version: str
+    lineage_version: int
+    validation_state: str
+    verified_at: float
 
 
 @dataclass(frozen=True)
@@ -332,38 +347,24 @@ class Database:
         finally:
             conn.close()
 
-    def _ensure_column(
-        self,
-        cur: sqlite3.Cursor,
-        table_name: str,
-        column_name: str,
-        column_def: str,
-    ) -> None:
-        cur.execute(f"PRAGMA table_info({table_name})")
-        columns = {row[1] for row in cur.fetchall()}
-
-        if column_name not in columns:
-            cur.execute(
-                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
-
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
         self.rw_lock = ReadWriteLock()
         self._last_ghost_cleanup = 0.0
         self._ghost_cleanup_lock = threading.Lock()
-        self._fts_tokenizer = 'unicode61'  # 默认降级值，simple 加载成功后更新为 'simple'
-        self._simple_version: str | None = None  # simple 分词器版本（加载成功后填充，见 _load_simple_tokenizer）
+        self._fts_tokenizer = 'unicode61'  # 默认降级值,simple 加载成功后更新为 'simple'
+        self._simple_version: str | None = None  # simple 分词器版本(加载成功后填充,见 _load_simple_tokenizer)
 
         # ===== 修复：确保数据库文件可写 =====
         self._ensure_db_writable()
         # ====================================
         logging.info("[DB] 开始初始化数据库表结构")
         self._create_schema()
-        self.init_subtitle_table()  # 字幕表单独初始化（避免 _create_schema 重复定义）
+        self.init_subtitle_table()  # 字幕表单独初始化(避免 _create_schema 重复定义)
         logging.info("[DB] 数据库核心表与索引核对并创建完成！")
 
     def _create_schema(self) -> None:
-        """创建核心数据库表结构和索引（幂等操作，可安全重复调用）。"""
+        """创建核心数据库表结构和索引(幂等操作,可安全重复调用)。"""
         with self.rw_lock.write_locked(), self.connection() as conn:
             cur = conn.cursor()
 
@@ -389,8 +390,12 @@ class Database:
                 )
                 """)
 
-            # 迁移：为旧数据库添加 mapping_id 列
-            self._ensure_column(cur, "b_strm_files", "mapping_id", "TEXT NOT NULL DEFAULT ''")
+            # 旧数据库迁移：新列必须在建索引和查询前存在。
+            existing_b_columns = {
+                row[1] for row in cur.execute("PRAGMA table_info(b_strm_files)").fetchall()
+            }
+            if existing_b_columns and "mapping_id" not in existing_b_columns:
+                cur.execute("ALTER TABLE b_strm_files ADD COLUMN mapping_id TEXT NOT NULL DEFAULT ''")
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS strm_identity (
@@ -455,11 +460,13 @@ class Database:
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS strm_media_boundary (
-                    fingerprint TEXT PRIMARY KEY,
+                    mapping_id TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
                     source_media_name TEXT NOT NULL,
                     current_media_name TEXT NOT NULL,
                     engine_entry_path TEXT NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (mapping_id, fingerprint)
                 )
                 """)
 
@@ -476,6 +483,23 @@ class Database:
                 """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_b_id_proj_mapping ON b_identity_projection(mapping_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_b_id_proj_fp ON b_identity_projection(fingerprint)")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS b_lineage_snapshot (
+                    mapping_id TEXT NOT NULL,
+                    local_path TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    mtime_ns INTEGER NOT NULL,
+                    fingerprint TEXT,
+                    mapping_version TEXT NOT NULL,
+                    lineage_version INTEGER NOT NULL,
+                    validation_state TEXT NOT NULL,
+                    verified_at REAL NOT NULL,
+                    PRIMARY KEY (mapping_id, local_path)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_b_lineage_snapshot_path ON b_lineage_snapshot(local_path)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_b_lineage_snapshot_version ON b_lineage_snapshot(mapping_id, mapping_version, lineage_version)")
 
             # 创建索引
             cur.execute("CREATE INDEX IF NOT EXISTS idx_a_strm_webdav_path ON a_strm_files(webdav_path)")
@@ -503,7 +527,7 @@ class Database:
                     tokenize='{tok}'
                 )
             """)
-            
+
             cur.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS b_strm_files_fts USING fts5(
                     local_path,
@@ -511,7 +535,7 @@ class Database:
                     tokenize='{tok}'
                 )
             """)
-            
+
             cur.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS c_ghost_files_fts USING fts5(
                     local_path,
@@ -608,12 +632,15 @@ class Database:
         webdav_path: str,
         parent_webdav_path: str,
         source_a_path: str | None,
+        mapping_id: str,
         fingerprint: str | None = None,
         status: str = "valid",
     ) -> None:
+        if not mapping_id:
+            raise ValueError("upsert_b: mapping_id must be a non-empty string")
         now = time.time()
         with self.rw_lock.write_locked(), self.connection() as conn:
-            # 先获取旧 rowid（如果存在），删除旧 FTS 行（避免 REPLACE 改变 rowid 后残留孤儿）
+            # 先获取旧 rowid(如果存在),删除旧 FTS 行(避免 REPLACE 改变 rowid 后残留孤儿)
             old_row = conn.execute(
                 "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
             ).fetchone()
@@ -628,9 +655,10 @@ class Database:
                     source_a_path,
                     fingerprint,
                     status,
-                    updated_at
+                    updated_at,
+                    mapping_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     local_path,
@@ -640,14 +668,15 @@ class Database:
                     fingerprint,
                     status,
                     now,
+                    mapping_id,
                 ),
             )
-            # 获取新 rowid，插入新 FTS 行
+            # 获取新 rowid,插入新 FTS 行
             new_row = conn.execute(
                 "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
             ).fetchone()
             if new_row:
-                # 先删除该 rowid 上可能残留的孤儿 FTS 行（防止 constraint failed）
+                # 先删除该 rowid 上可能残留的孤儿 FTS 行(防止 constraint failed)
                 conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (new_row[0],))
                 conn.execute(
                     "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
@@ -706,6 +735,57 @@ class Database:
                 )
             conn.commit()
 
+    def get_b_lineage_snapshot(self, mapping_id: str, local_path: str) -> BLineageSnapshotRecord | None:
+        mapping_id = self._require_mapping_id(mapping_id)
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
+            row = conn.execute(
+                """SELECT mapping_id, local_path, file_size, mtime_ns, fingerprint,
+                          mapping_version, lineage_version, validation_state, verified_at
+                   FROM b_lineage_snapshot WHERE mapping_id = ? AND local_path = ?""",
+                (mapping_id, local_path),
+            ).fetchone()
+            return BLineageSnapshotRecord(*row) if row else None
+
+    def upsert_b_lineage_snapshot(
+            self, mapping_id: str, local_path: str, file_size: int, mtime_ns: int,
+            fingerprint: str | None, mapping_version: str, lineage_version: int,
+            validation_state: str, verified_at: float | None = None) -> None:
+        mapping_id = self._require_mapping_id(mapping_id)
+        if not mapping_version or validation_state != "valid":
+            raise ValueError("only valid snapshots with mapping_version may be stored")
+        now = time.time() if verified_at is None else verified_at
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            conn.execute(
+                """INSERT INTO b_lineage_snapshot(
+                    mapping_id, local_path, file_size, mtime_ns, fingerprint,
+                    mapping_version, lineage_version, validation_state, verified_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(mapping_id, local_path) DO UPDATE SET
+                    file_size=excluded.file_size, mtime_ns=excluded.mtime_ns,
+                    fingerprint=excluded.fingerprint, mapping_version=excluded.mapping_version,
+                    lineage_version=excluded.lineage_version,
+                    validation_state=excluded.validation_state,
+                    verified_at=excluded.verified_at""",
+                (mapping_id, local_path, file_size, mtime_ns, fingerprint,
+                 mapping_version, lineage_version, validation_state, now),
+            )
+            conn.commit()
+
+    def invalidate_b_lineage_snapshots(
+            self, mapping_id: str | None = None, local_path: str | None = None) -> None:
+        clauses = []
+        params: list[str] = []
+        if mapping_id:
+            clauses.append("mapping_id = ?")
+            params.append(self._require_mapping_id(mapping_id))
+        if local_path:
+            clauses.append("local_path = ?")
+            params.append(local_path)
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            conn.execute("DELETE FROM b_lineage_snapshot" + where, params)
+            conn.commit()
+
     def delete_b_by_local(self, local_path: str) -> None:
         with self.rw_lock.write_locked(), self.connection() as conn:
             row = conn.execute(
@@ -745,7 +825,7 @@ class Database:
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
-                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
+                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id
                 FROM b_strm_files WHERE local_path = ?
                 """,
                 (local_path,),
@@ -766,7 +846,7 @@ class Database:
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
-                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
+                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id
                 FROM b_strm_files WHERE webdav_path = ?
                 """,
                 (webdav_path,),
@@ -782,15 +862,19 @@ class Database:
     def get_all_b(self) -> list[BRecord]:
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute("""
-                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
+                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id
                 FROM b_strm_files
                 """)
             return [BRecord(*row) for row in cur.fetchall()]
 
-    def get_all_b_fingerprints(self) -> set[str]:
+    def get_all_b_fingerprints(self, mapping_id: str) -> set[str]:
+        """获取指定 mapping 下的所有非空指纹。"""
+        mapping_id = self._require_mapping_id(mapping_id)
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
-                "SELECT DISTINCT fingerprint FROM b_strm_files WHERE fingerprint IS NOT NULL")
+                "SELECT DISTINCT fingerprint FROM b_strm_files WHERE fingerprint IS NOT NULL AND mapping_id = ?",
+                (mapping_id,),
+            )
             return {row[0] for row in cur.fetchall()}
 
     def get_all_c(self) -> list[CRecord]:
@@ -866,7 +950,7 @@ class Database:
 
     def is_ghost_protected(self, webdav_path: str) -> bool:
         """检查路径是否受幽灵保护。
-        
+
         优化：每 60 秒最多执行一次过期清理，避免热路径中的频繁 DELETE 查询。
         """
         now = time.time()
@@ -875,7 +959,7 @@ class Database:
             if now - self._last_ghost_cleanup > 60:
                 self.cleanup_expired_ghosts()
                 self._last_ghost_cleanup = now
-        
+
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT expire_time FROM ghost_protection WHERE webdav_path = ?",
@@ -976,7 +1060,7 @@ class Database:
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
-                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at
+                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id
                 FROM b_strm_files
                 WHERE webdav_path LIKE ? ESCAPE '\\'
                 """,
@@ -1169,6 +1253,7 @@ class Database:
                            parent_webdav_path,
                            source_a_path,
                            fingerprint,
+                           mapping_id,
                            status
                     FROM b_strm_files
                     WHERE local_path = ?
@@ -1180,7 +1265,7 @@ class Database:
                     conn.rollback()
                     return False
 
-                webdav_path, parent_webdav_path, source_a_path, fingerprint, status = row
+                webdav_path, parent_webdav_path, source_a_path, fingerprint, mapping_id, status = row
                 now = time.time()
                 new_status = status or "valid"
 
@@ -1213,9 +1298,10 @@ class Database:
                         source_a_path,
                         fingerprint,
                         status,
-                        updated_at
+                        updated_at,
+                        mapping_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         new_local_path,
@@ -1225,6 +1311,7 @@ class Database:
                         fingerprint,
                         new_status,
                         now,
+                        mapping_id,
                     ),
                 )
                 # 删除旧记录
@@ -1281,7 +1368,8 @@ class Database:
             row = cur.fetchone()
             return row[0] if row else None
 
-    def get_b_instances_by_fingerprint(self, fingerprint: str) -> list[BRecord]:
+    def get_b_instances_by_fingerprint(self, fingerprint: str, mapping_id: str) -> list[BRecord]:
+        """返回指定 mapping 下该 fingerprint 的所有 B 实例。"""
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
@@ -1291,11 +1379,12 @@ class Database:
                        source_a_path,
                        fingerprint,
                        status,
-                       updated_at
+                       updated_at,
+                       mapping_id
                 FROM b_strm_files
-                WHERE fingerprint = ?
+                WHERE fingerprint = ? AND mapping_id = ?
                 """,
-                (fingerprint,),
+                (fingerprint, mapping_id),
             )
             return [BRecord(*row) for row in cur.fetchall()]
 
@@ -1339,7 +1428,8 @@ class Database:
                        source_a_path,
                        fingerprint,
                        status,
-                       updated_at
+                       updated_at,
+                       mapping_id
                 FROM b_strm_files
                 WHERE local_path = ?
                 """,
@@ -1362,25 +1452,45 @@ class Database:
             )
             conn.commit()
 
+    @staticmethod
+    def _require_mapping_id(mapping_id: str) -> str:
+        if not isinstance(mapping_id, str) or not mapping_id.strip():
+            raise ValueError("mapping_id must be a non-empty string")
+        return mapping_id.strip()
+
+    @classmethod
+    def _b_fp_where(cls, fingerprint: str, mapping_id: str) -> tuple[str, tuple]:
+        """构建按 fingerprint + mapping_id 过滤的 WHERE 子句和参数元组。
+
+        返回 (where_clause, params)：
+        - ("fingerprint = ? AND mapping_id = ?", (fingerprint, mapping_id))
+
+        用于统一 4 个查询方法(get_valid_b_instance_by_fingerprint、
+        mark_other_b_instances_duplicate、get_all_b_by_fingerprint、
+        b_fingerprint_exists)的过滤逻辑,避免重复代码漂移。
+        """
+        mapping_id = cls._require_mapping_id(mapping_id)
+        return "fingerprint = ? AND mapping_id = ?", (fingerprint, mapping_id)
+
     def get_valid_b_instance_by_fingerprint(
-            self, fingerprint: str) -> BRecord | None:
+            self, fingerprint: str, mapping_id: str) -> BRecord | None:
+        """
+        根据指纹获取指定 mapping 下的有效 B 实例。
+        """
+        where_fp, params = self._b_fp_where(fingerprint, mapping_id)
+        where_parts = [where_fp, "status = 'valid'"]
+
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
-                """
-                SELECT local_path,
-                       webdav_path,
-                       parent_webdav_path,
-                       source_a_path,
-                       fingerprint,
-                       status,
-                       updated_at
+                f"""
+                SELECT local_path, webdav_path, parent_webdav_path,
+                       source_a_path, fingerprint, status, updated_at, mapping_id
                 FROM b_strm_files
-                WHERE fingerprint = ?
-                  AND status = 'valid'
+                WHERE {' AND '.join(where_parts)}
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
-                (fingerprint,),
+                params,
             )
             row = cur.fetchone()
             return BRecord(*row) if row else None
@@ -1389,58 +1499,61 @@ class Database:
         self,
         fingerprint: str,
         keep_local_path: str,
+        mapping_id: str,
     ) -> list[str]:
         """
-        将同 fingerprint 下除 keep_local_path 外的 valid 实例标记为 duplicate。
+        将同 fingerprint + mapping_id 下除 keep_local_path 外的 valid 实例标记为 duplicate。
         返回被标记的 local_path 列表。
         """
         now = time.time()
+        where_fp, fp_params = self._b_fp_where(fingerprint, mapping_id)
+
         with self.rw_lock.write_locked(), self.connection() as conn:
-            cur = conn.execute(
-                """
+            select_sql = f"""
                 SELECT local_path
                 FROM b_strm_files
-                WHERE fingerprint = ?
+                WHERE {where_fp}
                   AND local_path != ?
                   AND status = 'valid'
-                """,
-                (fingerprint, keep_local_path),
-            )
+            """
+            select_params = fp_params + (keep_local_path,)
+            cur = conn.execute(select_sql, select_params)
             rows = [row[0] for row in cur.fetchall()]
 
-            conn.execute(
-                """
+            update_sql = f"""
                 UPDATE b_strm_files
                 SET status = 'duplicate',
                     updated_at = ?
-                WHERE fingerprint = ?
+                WHERE {where_fp}
                   AND local_path != ?
                   AND status = 'valid'
-                """,
-                (now, fingerprint, keep_local_path),
-            )
+            """
+            update_params = (now,) + fp_params + (keep_local_path,)
+            conn.execute(update_sql, update_params)
             conn.commit()
 
             return rows
 
-    def get_all_b_by_fingerprint(self, fingerprint: str) -> list[BRecord]:
+    def get_all_b_by_fingerprint(self, fingerprint: str, mapping_id: str) -> list[BRecord]:
         """
-        返回该 fingerprint 下所有 B 实例
+        返回指定 mapping 下该 fingerprint 的所有 B 实例。
         """
+        where, params = self._b_fp_where(fingerprint, mapping_id)
+
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
-                """
+                f"""
                 SELECT local_path, webdav_path, parent_webdav_path,
-                       source_a_path, fingerprint, status, updated_at
+                       source_a_path, fingerprint, status, updated_at, mapping_id
                 FROM b_strm_files
-                WHERE fingerprint = ?
+                WHERE {where}
                 """,
-                (fingerprint,),
+                params,
             )
             return [BRecord(*row) for row in cur.fetchall()]
 
     def get_all_b_records(self) -> list[BRecord]:
-        """获取所有 B 区记录（用于启动时对比）"""
+        """获取所有 B 区记录(用于启动时对比)"""
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute("""
                     SELECT local_path,
@@ -1449,16 +1562,19 @@ class Database:
                            source_a_path,
                            fingerprint,
                            status,
-                           updated_at
+                           updated_at,
+                           mapping_id
                     FROM b_strm_files
                 """)
             return [BRecord(*row) for row in cur.fetchall()]
 
-    def b_fingerprint_exists(self, fingerprint: str) -> bool:
-        """检查 B 区数据库中是否已存在该指纹"""
+    def b_fingerprint_exists(self, fingerprint: str, mapping_id: str) -> bool:
+        """检查指定 mapping 下 B 区数据库中是否已存在该指纹。"""
+        where, params = self._b_fp_where(fingerprint, mapping_id)
+
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
-                "SELECT 1 FROM b_strm_files WHERE fingerprint = ? LIMIT 1", (fingerprint,))
+                f"SELECT 1 FROM b_strm_files WHERE {where} LIMIT 1", params)
             return cur.fetchone() is not None
 
     def update_b_local_path(self, old_path: str, new_path: str) -> bool:
@@ -1482,100 +1598,111 @@ class Database:
             row = cur.fetchone()
             return row[0] if row else 0
 
-    def has_other_b_instance(self, fingerprint: str,
-                             exclude_local_path: str) -> bool:
-        """检查是否存在同一指纹的其他 B 区实例（排除指定路径）。"""
+    def has_other_b_instance(
+        self, mapping_id: str, fingerprint: str, exclude_local_path: str
+    ) -> bool:
+        """检查是否存在同一 mapping + fingerprint 的其他 B 区实例（排除指定路径）。
+
+        Args:
+            mapping_id: 映射ID（必填，禁止全局查询）
+            fingerprint: 要检查的指纹
+            exclude_local_path: 排除的本地路径
+        """
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
-                "SELECT 1 FROM b_strm_files WHERE fingerprint = ? AND local_path != ? LIMIT 1",
-                (fingerprint, exclude_local_path),
+                "SELECT 1 FROM b_strm_files WHERE fingerprint = ? AND local_path != ? AND mapping_id = ? LIMIT 1",
+                (fingerprint, exclude_local_path, mapping_id),
             )
             return cur.fetchone() is not None
 
     def upsert_media_boundary(
         self,
+        mapping_id: str,
         fingerprint: str,
         source_media_name: str,
         current_media_name: str,
         engine_entry_path: str,
     ) -> None:
+        if not mapping_id:
+            raise ValueError("upsert_media_boundary: mapping_id must be a non-empty string")
         now = time.time()
         with self.rw_lock.write_locked(), self.connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO strm_media_boundary(
+                    mapping_id,
                     fingerprint,
                     source_media_name,
                     current_media_name,
                     engine_entry_path,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (fingerprint, source_media_name,
+                (mapping_id, fingerprint, source_media_name,
                  current_media_name, engine_entry_path, now),
             )
             conn.commit()
 
     def get_media_boundary_by_fingerprint(
-            self, fingerprint: str) -> BoundaryRecord | None:
+            self, mapping_id: str, fingerprint: str) -> BoundaryRecord | None:
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
-                SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
+                SELECT mapping_id, fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
                 FROM strm_media_boundary
-                WHERE fingerprint = ?
+                WHERE mapping_id = ? AND fingerprint = ?
                 """,
-                (fingerprint,),
+                (mapping_id, fingerprint),
             )
             row = cur.fetchone()
             return BoundaryRecord(*row) if row else None
 
     def get_media_boundaries_by_source_name(
-        self, source_media_name: str, engine_entry_path: str
+        self, mapping_id: str, source_media_name: str, engine_entry_path: str
     ) -> list[BoundaryRecord]:
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
-                SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
+                SELECT mapping_id, fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
                 FROM strm_media_boundary
-                WHERE source_media_name = ? AND engine_entry_path = ?
+                WHERE mapping_id = ? AND source_media_name = ? AND engine_entry_path = ?
                 """,
-                (source_media_name, engine_entry_path),
+                (mapping_id, source_media_name, engine_entry_path),
             )
             return [BoundaryRecord(*row) for row in cur.fetchall()]
 
     def get_media_boundary_by_current_name(
-        self, current_media_name: str, engine_entry_path: str
+        self, mapping_id: str, current_media_name: str, engine_entry_path: str
     ) -> BoundaryRecord | None:
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
-                SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
+                SELECT mapping_id, fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
                 FROM strm_media_boundary
-                WHERE current_media_name = ? AND engine_entry_path = ?
+                WHERE mapping_id = ? AND current_media_name = ? AND engine_entry_path = ?
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
-                (current_media_name, engine_entry_path),
+                (mapping_id, current_media_name, engine_entry_path),
             )
             row = cur.fetchone()
             return BoundaryRecord(*row) if row else None
 
     def get_media_boundary_by_source_name_only(
-        self, source_media_name: str
+        self, mapping_id: str, source_media_name: str
     ) -> BoundaryRecord | None:
         """根据源媒体名查找边界映射（不限制引擎路径，取最新的）"""
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
-                SELECT fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
+                SELECT mapping_id, fingerprint, source_media_name, current_media_name, engine_entry_path, updated_at
                 FROM strm_media_boundary
-                WHERE source_media_name = ?
+                WHERE mapping_id = ? AND source_media_name = ?
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
-                (source_media_name,),
+                (mapping_id, source_media_name),
             )
             row = cur.fetchone()
             return BoundaryRecord(*row) if row else None
@@ -1773,12 +1900,12 @@ class Database:
 
     def rebuild_fts_table(self, main_table: str, fts_table: str) -> None:
         """一次性重建 FTS 表（用于批量操作后）。
-        
+
         性能优化：
         - 清空 FTS 表
         - 从主表批量插入所有记录
         - 使用单个事务
-        
+
         Args:
             main_table: 主表名（如 "a_strm_files"）
             fts_table: FTS 表名（如 "a_strm_files_fts"）
@@ -1795,13 +1922,29 @@ class Database:
     def upsert_b_batch(self, records: list[tuple]) -> int:
         """
         批量 upsert B 区记录。
-        records: [(local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status), ...]
+        records: [(local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, mapping_id, status), ...]
         返回成功行数。
         """
         if not records:
             return 0
         now = time.time()
-        data = [(*r, now) for r in records]
+        data = []
+        for r in records:
+            if len(r) != 7:
+                raise ValueError(f"upsert_b_batch: unexpected record length {len(r)}, expected 7 (local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, mapping_id, status)")
+            local_path, webdav_path, parent, source, fp, mapping_id_val, status = r
+            if not mapping_id_val:
+                raise ValueError("upsert_b_batch: mapping_id must be a non-empty string in each record")
+            data.append((
+                local_path,
+                webdav_path,
+                parent,
+                source,
+                fp,
+                mapping_id_val,
+                status,
+                now,
+            ))
         with self.rw_lock.write_locked(), self.connection() as conn:
             # INSERT OR REPLACE 会改变已存在行的 rowid，先记录旧 rowid 以清理其 FTS 行，
             # 避免旧 FTS 行成为孤儿（防止孤儿 / rowid 复用冲突）
@@ -1816,9 +1959,9 @@ class Database:
                 """
                 INSERT OR REPLACE INTO b_strm_files(
                     local_path, webdav_path, parent_webdav_path,
-                    source_a_path, fingerprint, status, updated_at
+                    source_a_path, fingerprint, status, updated_at, mapping_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 data,
             )
@@ -1889,7 +2032,7 @@ class Database:
 
     def get_table_counts(self) -> dict[str, int]:
         """获取各表记录数，使用单次查询优化性能。
-        
+
         使用 UNION ALL 将多个 COUNT 查询合并为单次查询，
         减少数据库连接开销和查询次数。
         """

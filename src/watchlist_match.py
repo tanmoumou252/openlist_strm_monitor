@@ -6,7 +6,7 @@ TMDB 待看列表收录状态匹配逻辑（共享模块）。
   - 将 TMDB 待看条目与 B 区候选进行匹配评分
   - 执行收录状态刷新并回写 tmdb_watchlist.db
 
-被 webui.py 和 standalone_webui.py 共同引用，避免循环依赖。  
+被 webui.py 和 standalone_webui.py 共同引用，避免循环依赖。
 """
 
 from __future__ import annotations

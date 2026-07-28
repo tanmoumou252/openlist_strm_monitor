@@ -219,10 +219,10 @@ def _bg_sync_refresh(server) -> None:
             raise RuntimeError("watchlist_db 未初始化")
         if not server._tmdb_client:
             raise RuntimeError("tmdb_client 未初始化")
-        
+
         server._watchlist_db.sync(server._tmdb_client, force=True)
         logging.info("[TMDB] 后台同步完成")
-        
+
         if _wdb:
             _wdb.log_tmdb_operation("sync", "success", "后台同步完成")
     except Exception as e:
@@ -436,7 +436,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
             writer.writerow([status_label, item.get("id", ""), media_type,
                              title, orig, date, f"{rating:.1f}"])
         csv_data = buf.getvalue().encode("utf-8-sig")
-        
+
         # 直接返回 CSV 数据作为浏览器下载
         handler.send_response(200)
         handler.send_header("Content-Type", "text/csv; charset=utf-8")
@@ -461,7 +461,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                     "_media_type") == "movie"]
             else:
                 items = tmdb_client.fetch_all_watchlist_movies()
-            
+
             # 如果有搜索查询，使用 FTS5 过滤
             if search_query:
                 _wdb = getattr(webui_server, '_watchlist_db', None)
@@ -479,11 +479,11 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                         logging.warning("[TMDB] FTS5 搜索失败，回退到内存过滤: %s", fts_err)
                         # 回退到内存过滤
                         search_lower = search_query.lower()
-                        items = [i for i in items if 
+                        items = [i for i in items if
                                 search_lower in (i.get("title") or "").lower() or
                                 search_lower in (i.get("original_title") or "").lower() or
                                 search_lower in (i.get("overview") or "").lower()]
-            
+
             # 附加 _status 映射字段和 _is_manual 标记
             for item in items:
                 item["_status"] = _STATUS_MAP.get(
@@ -503,7 +503,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 logging.error("[TMDB] 获取电影待看列表失败: %s", e)
                 handler._send_json({"error": "获取待看列表失败", "detail": str(e)}, 500)
                 return True
-            
+
             # 如果有搜索查询，使用 FTS5 过滤
             if search_query:
                 _wdb = getattr(webui_server, '_watchlist_db', None)
@@ -520,11 +520,11 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                     except Exception as fts_err:
                         logging.warning("[TMDB] FTS5 搜索失败，回退到内存过滤: %s", fts_err)
                         search_lower = search_query.lower()
-                        items = [i for i in items if 
+                        items = [i for i in items if
                                 search_lower in (i.get("title") or "").lower() or
                                 search_lower in (i.get("original_title") or "").lower() or
                                 search_lower in (i.get("overview") or "").lower()]
-            
+
             handler._send_json({
                 "account_id": tmdb_client.account_id,
                 "media_type": "movie",
@@ -543,7 +543,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 items = [i for i in all_items if i.get("_media_type") == "tv"]
             else:
                 items = tmdb_client.fetch_all_watchlist_tv()
-            
+
             # 如果有搜索查询，使用 FTS5 过滤
             if search_query:
                 _wdb = getattr(webui_server, '_watchlist_db', None)
@@ -560,11 +560,11 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                     except Exception as fts_err:
                         logging.warning("[TMDB] FTS5 搜索失败，回退到内存过滤: %s", fts_err)
                         search_lower = search_query.lower()
-                        items = [i for i in items if 
+                        items = [i for i in items if
                                 search_lower in (i.get("name") or "").lower() or
                                 search_lower in (i.get("original_name") or "").lower() or
                                 search_lower in (i.get("overview") or "").lower()]
-            
+
             # 附加 _status 映射字段和 _is_manual 标记
             for item in items:
                 item["_status"] = _STATUS_MAP.get(
@@ -584,7 +584,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 logging.error("[TMDB] 获取剧集待看列表失败: %s", e)
                 handler._send_json({"error": "获取待看列表失败", "detail": str(e)}, 500)
                 return True
-            
+
             # 如果有搜索查询，使用 FTS5 过滤
             if search_query:
                 _wdb = getattr(webui_server, '_watchlist_db', None)
@@ -601,11 +601,11 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                     except Exception as fts_err:
                         logging.warning("[TMDB] FTS5 搜索失败，回退到内存过滤: %s", fts_err)
                         search_lower = search_query.lower()
-                        items = [i for i in items if 
+                        items = [i for i in items if
                                 search_lower in (i.get("name") or "").lower() or
                                 search_lower in (i.get("original_name") or "").lower() or
                                 search_lower in (i.get("overview") or "").lower()]
-            
+
             handler._send_json({
                 "account_id": tmdb_client.account_id,
                 "media_type": "tv",
@@ -780,12 +780,12 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         if not query:
             handler._send_json({"error": "query is required"}, 400)
             return True
-        
+
         try:
             # 同时搜索电影和电视剧
             movies = tmdb_client.search_movie(query, page=1)
             tv_shows = tmdb_client.search_tv(query, page=1)
-            
+
             handler._send_json({
                 "query": query,
                 "movies": movies[:10],  # 限制返回数量
@@ -921,15 +921,15 @@ def _handler_reinit_tmdb(webui_server, tmdb_cfg) -> None:
     else:
         proxy_cfg = getattr(tmdb_cfg, "proxy", None)
         proxy = proxy_cfg.http if proxy_cfg and proxy_cfg.enabled and proxy_cfg.http else None
-    
+
     # 获取项目根目录（用于 config.toml 兜底）
     project_root = (getattr(webui_server, '_project_root', None)
                     or Path(__file__).resolve().parent.parent.parent)
-    
+
     # 获取 api_key，为空时从 config.toml 兜底
     api_key = getattr(tmdb_cfg, "api_key", "") or ""
 
-    
+
     try:
         webui_server._tmdb_client = create_tmdb_client(
             access_token=getattr(tmdb_cfg, "access_token", "") or "",
@@ -1041,32 +1041,6 @@ def _validate_a_b_mappings(value: str) -> bool:
     return True
 
 
-def _validate_a_b_mappings(value: str) -> bool:
-    """校验 openlist.a_b_mappings 写入值。
-
-    合法形态：JSON 数组，元素为 {"a_root": str(非空), "b_root": str(非空), "label": str(可选)}。
-    空数组 [] 合法（表示无引擎配置）。
-    """
-    try:
-        parsed = json.loads(value)
-    except (json.JSONDecodeError, TypeError):
-        return False
-    if not isinstance(parsed, list):
-        return False
-    for m in parsed:
-        if not isinstance(m, dict):
-            return False
-        a_root = m.get("a_root")
-        b_root = m.get("b_root")
-        if not isinstance(a_root, str) or not a_root:
-            return False
-        if not isinstance(b_root, str) or not b_root:
-            return False
-        label = m.get("label")
-        if label is not None and not isinstance(label, str):
-            return False
-    return True
-
 
 def _handle_webui_config_post(handler, webui_server, scope: str,
                                body: bytes) -> None:
@@ -1108,7 +1082,7 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
             # 校验通过：回写规整后的合法 JSON 字符串，确保后续通用写循环
             # （str(val)）存入 DB 的是合法 JSON，而非原生对象被 str() 出来的 repr。
             data["strm_engines"] = _se_value
-        
+
         # a_b_mappings 写入前护栏
         if scope == "openlist" and "a_b_mappings" in data:
             _raw_abm = data["a_b_mappings"]
@@ -1125,7 +1099,7 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
                     400)
                 return
             data["a_b_mappings"] = _abm_value
-        
+
         # ui scope 白名单过滤：拒绝未声明的 key，避免 LAN 内任意 key 污染配置表
         if scope == "ui":
             rejected = [k for k in data if k not in _UI_CONFIG_ALLOWED_KEYS]
@@ -1154,7 +1128,7 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
             # 记录 OpenList 配置保存日志
             try:
                 _wdb.log_tmdb_operation(
-                    "openlist_config_save", "success", 
+                    "openlist_config_save", "success",
                     f"OpenList 配置已保存 ({len(data)} 项配置)",
                     detail=json.dumps({"keys": list(data.keys())})
                 )
@@ -1224,14 +1198,14 @@ def _hot_reload_openlist_config(webui_server) -> None:
         new_user = cfg.webdav.user
         new_password = cfg.webdav.password
         new_totp = cfg.webdav.totp_secret
-        
-        if (old_host != new_host or old_user != new_user or 
+
+        if (old_host != new_host or old_user != new_user or
             old_password != new_password or old_totp != new_totp):
             _reinit_admin_client(webui_server)
             logging.info("[HotReload] WebDAV 连接已更新，OpenListAdminClient 已重新初始化")
         else:
             logging.info("[HotReload] OpenList 配置已热更新（WebDAV 连接未变）")
-        
+
         # 无论 WebDAV 配置是否变更，只要有 strm_engines 变化就重加载存储映射
         new_client = getattr(webui_server, '_admin_client', None)
         try:
@@ -1274,17 +1248,17 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
         data = json.loads(body)
     except (json.JSONDecodeError, Exception):
         data = {}
-    
+
     cfg = webui_server._config
     host = data.get("host", cfg.webdav.host)
     user = data.get("user", cfg.webdav.user)
     password = data.get("password", cfg.webdav.password)
     totp_secret = data.get("totp_secret", cfg.webdav.totp_secret)
-    
+
     if not host:
         handler._send_json({"success": False, "error": "WebDAV 地址不能为空"}, 400)
         return
-    
+
     try:
         from webdav_client import OpenListAdminClient
         client = OpenListAdminClient(host, user, password, totp_secret=totp_secret)
@@ -1298,7 +1272,7 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
         else:
             error_type = client.last_error_type or "unknown"
             error_message = client.last_error_message or ""
-            
+
             # 根据错误类型返回不同的错误消息
             error_messages = {
                 "wrong_password": "密码错误，请检查用户名和密码",
@@ -1310,7 +1284,7 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
                 "unknown": "登录失败，请检查配置",
             }
             display_message = error_messages.get(error_type, error_messages["unknown"])
-            
+
             handler._send_json({
                 "success": False,
                 "error": display_message,
@@ -1396,20 +1370,20 @@ def _handle_openlist_strm_engines(handler, webui_server) -> None:
                 if p not in existing_paths:
                     engines[idx]["paths"].append(p)
                     existing_paths.add(p)
-    
+
     handler._send_json({"success": True, "engines": engines})
 
 
 def _handle_openlist_monitored_paths(handler, webui_server, params) -> None:
     """处理 GET /api/openlist/monitored-paths?engine=/strm — 获取监控目录。
-    
+
     优先从 cfg.strm_storage_map 读取，如果为空则从 OpenList API 动态获取。
     """
     engine = params.get("engine", [""])[0]
     if not engine:
         handler._send_json({"success": False, "error": "engine 参数必填"}, 400)
         return
-    
+
     cfg = webui_server._config
     strm_map = cfg.strm_storage_map
     paths = []
@@ -1493,13 +1467,13 @@ def _handle_openlist_ping(handler, webui_server) -> None:
 
 def _handle_openlist_paths(handler, webui_server) -> None:
     """处理 GET /api/openlist/paths — 路径自动获取。
-    
+
     只返回用户配置的 STRM 引擎对应的 a_folders，不返回所有可用引擎。
     """
     cfg = webui_server._config
     _wdb = getattr(webui_server, '_watchlist_db', None)
     strm_map = cfg.strm_storage_map
-    
+
     # 从 DB 读取用户配置的 strm_engines
     a_folders = []
     a_b_mappings = []
@@ -1507,7 +1481,7 @@ def _handle_openlist_paths(handler, webui_server) -> None:
         db_openlist_cfg = _wdb.get_all_config("openlist") if _wdb else {}
         strm_engines_json = db_openlist_cfg.get("strm_engines", "[]")
         strm_engines = json.loads(strm_engines_json) if strm_engines_json else []
-        
+
         # 从用户配置的引擎中提取 local_path
         for eng in strm_engines:
             if eng.get("engine"):
@@ -1516,13 +1490,13 @@ def _handle_openlist_paths(handler, webui_server) -> None:
                     local_path = strm_map[mount_path].local_path
                     if local_path and local_path not in a_folders:
                         a_folders.append(local_path)
-        
+
         # 读取 a_b_mappings
         a_b_mappings_json = db_openlist_cfg.get("a_b_mappings", "[]")
         a_b_mappings = json.loads(a_b_mappings_json) if a_b_mappings_json else []
     except Exception as e:
         logging.debug("[OpenList] 从用户配置获取 a_folders 失败: %s", e)
-    
+
     handler._send_json({
         "success": True,
         "a_folders": a_folders,
@@ -1806,16 +1780,16 @@ def _db_get_db_file_size(db) -> int:
     return 0
 
 
-def _get_records_paginated(handler, area: str, page: int = 1, 
+def _get_records_paginated(handler, area: str, page: int = 1,
                            page_size: int = 100, search: str = "") -> dict:
     """获取指定区域的分页记录（SQL 级别分页）。
-    
+
     返回 {total, page, page_size, records}
     """
     db = handler.webui._db
     offset = (page - 1) * page_size
     search_params: tuple[str, ...] = ()
-    
+
     try:
         if area == "a":
             count_sql = "SELECT COUNT(*) FROM a_strm_files"
@@ -1828,7 +1802,7 @@ def _get_records_paginated(handler, area: str, page: int = 1,
             else:
                 search_params = ()
             query_sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
-            
+
         elif area == "b":
             count_sql = "SELECT COUNT(*) FROM b_strm_files"
             query_sql = "SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at FROM b_strm_files"
@@ -1840,7 +1814,7 @@ def _get_records_paginated(handler, area: str, page: int = 1,
             else:
                 search_params = ()
             query_sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
-            
+
         elif area == "c":
             count_sql = "SELECT COUNT(*) FROM c_ghost_files"
             query_sql = "SELECT local_path, webdav_path, original_b_path, ghost_root, moved_at FROM c_ghost_files"
@@ -1854,15 +1828,15 @@ def _get_records_paginated(handler, area: str, page: int = 1,
             query_sql += " ORDER BY moved_at DESC LIMIT ? OFFSET ?"
         else:
             return {"total": 0, "page": page, "page_size": page_size, "records": []}
-        
+
         with db.read_connection() as conn:
             conn.row_factory = sqlite3.Row
             total = conn.execute(count_sql, search_params).fetchone()[0]
             rows = conn.execute(query_sql, search_params + (page_size, offset)).fetchall()
-        
+
         # sqlite3.Row supports both index and named access; convert to dicts
         records = [dict(r) for r in rows]
-        
+
         return {
             "total": total,
             "page": page,
@@ -1906,7 +1880,7 @@ def handle_dashboard(handler) -> None:
 
 def handle_records_api(handler, params) -> None:
     """处理 GET /api/records?area=a&page=1&page_size=100&search=xxx
-    
+
     SQL 级分页的记录查询接口。
     返回 {total, page, page_size, records}
     """
@@ -1917,8 +1891,8 @@ def handle_records_api(handler, params) -> None:
     page = _safe_int(params.get("page", ["1"])[0], 1)
     page_size = min(_safe_int(params.get("page_size", ["100"])[0], 100), 500)
     search = params.get("search", [""])[0].strip()
-    
-    result = _get_records_paginated(handler, area, page=page, 
+
+    result = _get_records_paginated(handler, area, page=page,
                                      page_size=page_size, search=search)
     handler._send_json(result)
 
@@ -1927,9 +1901,9 @@ def handle_records_api(handler, params) -> None:
 # 根据路径中的分类目录判断（番剧/电影/其他）
 # 使用模块级常量避免重复定义
 _KIND_SQL = """
-    CASE 
-        WHEN webdav_path LIKE '%/电影/%' OR webdav_path LIKE '%/movies/%' OR webdav_path LIKE '%/movie/%' 
-             OR local_path LIKE '%/电影/%' OR local_path LIKE '%\\电影\\%' 
+    CASE
+        WHEN webdav_path LIKE '%/电影/%' OR webdav_path LIKE '%/movies/%' OR webdav_path LIKE '%/movie/%'
+             OR local_path LIKE '%/电影/%' OR local_path LIKE '%\\电影\\%'
              OR local_path LIKE '%/movies/%' OR local_path LIKE '%/movie/%'
         THEN '电影'
         WHEN webdav_path LIKE '%/番剧/%' OR webdav_path LIKE '%/anime/%' OR webdav_path LIKE '%/动漫/%' OR webdav_path LIKE '%/动画/%'
@@ -1942,9 +1916,9 @@ _KIND_SQL = """
 
 # 提取媒体名称：找到分类目录后的第一级目录名
 _MEDIA_NAME_SQL = f"""
-    CASE 
+    CASE
         WHEN {_KIND_SQL} = '番剧' THEN
-            CASE 
+            CASE
                 WHEN INSTR(REPLACE(webdav_path, '\\', '/'), '/番剧/') > 0 THEN
                     SUBSTR(
                         SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/番剧/') + 4),
@@ -1960,7 +1934,7 @@ _MEDIA_NAME_SQL = f"""
                 ELSE '未分类'
             END
         WHEN {_KIND_SQL} = '电影' THEN
-            CASE 
+            CASE
                 WHEN INSTR(REPLACE(webdav_path, '\\', '/'), '/电影/') > 0 THEN
                     SUBSTR(
                         SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/电影/') + 4),
@@ -1976,7 +1950,7 @@ _MEDIA_NAME_SQL = f"""
                 ELSE '未分类'
             END
         ELSE
-            CASE 
+            CASE
                 WHEN INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), 2), '/') > 0 THEN
                     SUBSTR(REPLACE(webdav_path, '\\', '/'), 2, INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), 2), '/') - 1)
                 ELSE REPLACE(webdav_path, '\\', '/')
@@ -2082,25 +2056,25 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
         handler._send_json({"error": "服务器内部错误"}, 500)
 
 
-def _get_media_groups_paginated(handler, area: str, kind_filter: str, 
+def _get_media_groups_paginated(handler, area: str, kind_filter: str,
                                  q: str, sort_key: str, sort_order: str,
                                  page: int, page_size: int) -> dict:
     """SQL 级分页的媒体分组查询。
-    
+
     返回 {total, page, page_size, media_items, kind_counts}
     """
     db = handler.webui._db
-    
+
     # 确定表名和时间字段（使用白名单映射）
     if area not in _AREA_TABLE_MAP:
-        return {"total": 0, "page": page, "page_size": page_size, 
+        return {"total": 0, "page": page, "page_size": page_size,
                 "media_items": [], "kind_counts": {}}
     table, time_field = _AREA_TABLE_MAP[area]
-    
+
     # 构建基础查询条件
     base_where = ""
     params_list = []
-    
+
     if q:
         # 列表页搜索：使用 FTS5 全文搜索（simple 分词器支持中文），通过 rowid 关联主表。
         # 这里是用户主动输入关键词的模糊搜索场景，数据量大，适合 FTS5。
@@ -2111,15 +2085,15 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
         escaped_query = _escape_fts5_query(q)
         base_where = f" AND rowid IN (SELECT rowid FROM {fts_table} WHERE {fts_table} MATCH ?)"
         params_list.append(escaped_query)
-    
+
     # kind_counts 使用独立参数（只含搜索 q，不含 kind 筛选），
     # 确保统计始终显示所有类型的真实数量不受当前筛选影响
     kind_params = list(params_list)  # 仅复制搜索参数
-    
+
     # 查询 kind_counts（分类统计）— 必须放在 kind 筛选之前，排除 kind_where
     kind_counts_sql = f"""
-        SELECT 
-            CASE 
+        SELECT
+            CASE
                 WHEN {_KIND_SQL} = '番剧' THEN 'anime'
                 WHEN {_KIND_SQL} = '电影' THEN 'movie'
                 ELSE 'other'
@@ -2129,17 +2103,17 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
         WHERE 1=1 {base_where}
         GROUP BY kind_category
     """
-    
+
     # 筛选 kind（仅作用于分页列表，不影响 kind_counts）
     kind_where = ""
     if kind_filter != "all" and kind_filter in _KIND_FILTER_MAP:
         kind_value = _KIND_FILTER_MAP[kind_filter]
         kind_where = f" AND {_KIND_SQL} = ?"
         params_list.append(kind_value)
-    
+
     # 查询媒体分组（分页）
     offset = (page - 1) * page_size
-    
+
     # 排序校验
     if sort_order not in _AREA_SORT_ORDERS:
         sort_order = "asc"
@@ -2153,9 +2127,9 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
         order_clause += "kind " + ("DESC" if sort_order == "desc" else "ASC")
     else:  # name
         order_clause += "media_name " + ("DESC" if sort_order == "desc" else "ASC")
-    
+
     media_groups_sql = f"""
-        SELECT 
+        SELECT
             {_KIND_SQL} AS kind,
             {_MEDIA_NAME_SQL} AS media_name,
             COUNT(*) AS file_count,
@@ -2166,14 +2140,14 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
         {order_clause}
         LIMIT ? OFFSET ?
     """
-    
+
     # 总数查询
     total_sql = f"""
         SELECT COUNT(DISTINCT ({_KIND_SQL} || '|' || {_MEDIA_NAME_SQL})) AS total
         FROM {table}
         WHERE 1=1 {base_where} {kind_where}
     """
-    
+
     try:
         with db.read_connection() as conn:
             conn.row_factory = sqlite3.Row
@@ -2182,16 +2156,16 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
             kind_counts = {}
             for row in kind_counts_rows:
                 kind_counts[row[0]] = row[1]
-            
+
             # 查询总数
             total = conn.execute(total_sql, params_list).fetchone()[0]
-            
+
             # 查询媒体分组（先查询所有符合条件的记录，再在 Python 中自然排序）
             # 为了支持自然排序，我们需要先获取完整结果集
             if sort_key == "name":
                 # 查询所有记录（不分页），然后在 Python 中自然排序
                 all_media_sql = f"""
-                    SELECT 
+                    SELECT
                         {_KIND_SQL} AS kind,
                         {_MEDIA_NAME_SQL} AS media_name,
                         COUNT(*) AS file_count,
@@ -2201,7 +2175,7 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
                     GROUP BY kind, media_name
                 """
                 all_media_rows = conn.execute(all_media_sql, params_list).fetchall()
-                
+
                 media_items = []
                 for row in all_media_rows:
                     media_items.append({
@@ -2211,20 +2185,20 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
                         "season": "",
                         "latest_ts": row["latest_ts"] or 0,
                     })
-                
+
                 # 自然排序
                 media_items.sort(
                     key=lambda item: _natural_sort_key(item["name"]),
                     reverse=(sort_order == "desc")
                 )
-                
+
                 # 分页
                 total = len(media_items)
                 media_items = media_items[offset:offset + page_size]
             else:
                 # 其他排序键使用 SQL 排序
                 media_rows = conn.execute(media_groups_sql, params_list + [page_size, offset]).fetchall()
-                
+
                 media_items = []
                 for row in media_rows:
                     media_items.append({
@@ -2234,7 +2208,7 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
                         "season": "",
                         "latest_ts": row["latest_ts"] or 0,
                     })
-            
+
             return {
                 "total": total,
                 "page": page,
@@ -2258,11 +2232,11 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
                     like_kind_where = f" AND {_KIND_SQL} = ?"
                     like_params.append(kind_value)
                     like_kind_params.append(kind_value)
-                
+
                 # 重新构建 SQL 语句（使用 LIKE 条件）
                 like_kind_counts_sql = f"""
-                    SELECT 
-                        CASE 
+                    SELECT
+                        CASE
                             WHEN {_KIND_SQL} = '番剧' THEN 'anime'
                             WHEN {_KIND_SQL} = '电影' THEN 'movie'
                             ELSE 'other'
@@ -2278,7 +2252,7 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
                     WHERE 1=1 {like_base_where} {like_kind_where}
                 """
                 like_media_groups_sql = f"""
-                    SELECT 
+                    SELECT
                         {_KIND_SQL} AS kind,
                         {_MEDIA_NAME_SQL} AS media_name,
                         COUNT(*) AS file_count,
@@ -2289,7 +2263,7 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
                     {order_clause}
                     LIMIT ? OFFSET ?
                 """
-                
+
                 with db.read_connection() as conn:
                     conn.row_factory = sqlite3.Row
                     kind_counts_rows = conn.execute(like_kind_counts_sql, like_kind_params).fetchall()
@@ -2316,7 +2290,7 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
                 }
             except Exception as e2:
                 logging.error("SQL 分页查询 LIKE 回退失败: %s", e2)
-        return {"total": 0, "page": page, "page_size": page_size, 
+        return {"total": 0, "page": page, "page_size": page_size,
                 "media_items": [], "kind_counts": {}}
 
 
@@ -2343,12 +2317,12 @@ def handle_area(handler, area, params) -> None:
     result = _get_media_groups_paginated(
         handler, area, kind_filter, q, sort_key, sort_order, page, page_size
     )
-    
+
     # 补充季信息（需要 Python 后处理）
     # 获取当前页的媒体名称列表，查询对应的季信息
     if result["media_items"]:
         db = handler.webui._db
-        
+
         # 确定表名
         if area == "a":
             table = "a_strm_files"
@@ -2356,7 +2330,7 @@ def handle_area(handler, area, params) -> None:
             table = "b_strm_files"
         else:
             table = "c_ghost_files"
-        
+
         # 查询每个媒体的季信息
         for item in result["media_items"]:
             media_name = item["name"]
@@ -2372,10 +2346,10 @@ def handle_area(handler, area, params) -> None:
                         item["season"] = season
             except Exception:
                 pass
-    
+
     total = result["total"]
     total_pages = max(1, ceil(total / page_size)) if total > 0 else 1
-    
+
     handler._send_json({
         "area": area,
         "kind_label": kind_label_map.get(kind_filter, kind_filter),
@@ -2425,13 +2399,13 @@ def _natural_sort_key(path: str) -> tuple:
 
 def _compute_common_local_root(local_paths: list[str]) -> str:
     """计算多个本地路径的公共目录前缀。
-    
+
     用于路径归属校验，确保删除操作只影响同一媒体目录下的文件。
     返回带分隔符结尾的目录路径，便于 startswith 检查。
     """
     if not local_paths:
         return ""
-    
+
     # 使用 os.path.commonpath 计算公共路径
     try:
         import os
@@ -2450,7 +2424,7 @@ def _compute_common_local_root(local_paths: list[str]) -> str:
 
 def _escape_fts5_query(query: str) -> str:
     """清理 FTS5 查询字符串，移除可能被解释为运算符的字符。
-    
+
     策略：移除 FTS5 特殊运算符字符（* - + " ^ ~），保留括号等可能出现在
     文件名中的字符（替换为空格）。避免逐个反斜杠转义在不同上下文的行为不一致问题。
     """
@@ -2856,14 +2830,14 @@ def _parse_api_files(list_result: dict, parent_path: str) -> list[dict]:
 
 def _read_log_file_tail(log_file: Path | str, lines_req: int) -> list[str]:
     """读取日志文件的最后 N 行。
-    
+
     优化：仅读取文件末尾的字节，避免大文件全量读取。
     估算每行平均 300 字节（考虑多字节中文字符），读取 lines_req * 300 字节。
     """
     log_file = Path(log_file)
     if not log_file.exists():
         return []
-    
+
     try:
         # 优化：仅读取文件末尾的字节，避免大文件全量读取阻塞 HTTP 线程
         # 估算每行平均 300 字节（考虑多字节中文字符），读取 lines_req * 300 字节足够
@@ -2922,7 +2896,7 @@ def handle_download_log_api(handler, params: dict) -> None:
         fallback = getattr(handler.webui, '_log_file', None)
         if fallback:
             log_file_path = Path(fallback)
-    
+
     if not log_file_path or not log_file_path.exists():
         handler._send_json({"error": "Log file not found"}, 404)
         return
@@ -3013,7 +2987,7 @@ def handle_config_api(handler) -> None:
     try:
         strm_engines_json = db_openlist_cfg.get("strm_engines", "[]")
         strm_engines = json.loads(strm_engines_json) if strm_engines_json else []
-        
+
         # 从用户配置的引擎中提取 local_path
         for eng in strm_engines:
             if eng.get("engine"):
@@ -3157,7 +3131,7 @@ def _handle_main_status(handler, webui_server) -> bool:
     if not webui_server:
         handler._send_json({"running": False, "uptime": None})
         return True
-    
+
     status = webui_server.get_main_status()
     handler._send_json(status)
     return True
@@ -3168,7 +3142,7 @@ def _handle_main_start(handler, webui_server, body: bytes) -> bool:
     if not webui_server:
         handler._send_json({"success": False, "message": "WebUI 服务器未初始化"}, 500)
         return True
-    
+
     result = webui_server.start_main()
     status_code = 200 if result.get("success") else 500
     handler._send_json(result, status_code)
@@ -3180,7 +3154,7 @@ def _handle_main_stop(handler, webui_server) -> bool:
     if not webui_server:
         handler._send_json({"success": False, "message": "WebUI 服务器未初始化"}, 500)
         return True
-    
+
     result = webui_server.stop_main()
     status_code = 200 if result.get("success") else 500
     handler._send_json(result, status_code)
@@ -3394,13 +3368,13 @@ def _handle_onboarding_complete_step(handler, webui_server, body: bytes) -> None
         data = json.loads(body) if body else {}
     except (ValueError, json.JSONDecodeError):
         data = {}
-    
+
     step = data.get("step", "")
-    
+
     if step not in ("view_ab", "tmdb_refresh", "tmdb_match"):
         handler._send_json({"error": "invalid step"}, 400)
         return
-    
+
     _wdb = getattr(webui_server, '_watchlist_db', None)
     if _wdb:
         try:
@@ -3409,6 +3383,6 @@ def _handle_onboarding_complete_step(handler, webui_server, body: bytes) -> None
             logging.error("[Onboarding] 标记步骤完成失败: %s", e)
             handler._send_json({"error": str(e)}, 500)
             return
-    
+
     handler._send_json({"ok": True})
 

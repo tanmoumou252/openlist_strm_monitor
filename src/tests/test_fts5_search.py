@@ -54,7 +54,7 @@ class TestFTS5Tokenizer:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             db = Database(db_path)
-            
+
             # 获取连接并验证分词器已加载
             with db.connection() as conn:
                 # 尝试创建 FTS5 表，如果分词器未加载会失败
@@ -69,7 +69,7 @@ class TestFTS5Tokenizer:
                 except Exception as e:
                     success = False
                     print(f"FTS5 创建失败: {e}")
-                
+
                 assert success, "simple 分词器加载失败"
 
 
@@ -81,14 +81,14 @@ class TestFTS5Table:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             db = Database(db_path)
-            
+
             # 验证 FTS5 表已创建
             with db.read_connection() as conn:
                 cursor = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_fts'"
                 )
                 tables = [row[0] for row in cursor.fetchall()]
-                
+
                 assert "a_strm_files_fts" in tables
                 assert "b_strm_files_fts" in tables
                 assert "c_ghost_files_fts" in tables
@@ -98,14 +98,14 @@ class TestFTS5Table:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             db = Database(db_path)
-            
+
             # 插入测试数据
             db.upsert_a(
                 local_path="/test/黑暗骑士/黑暗骑士.strm",
                 webdav_path="/test/黑暗骑士/黑暗骑士.strm",
                 parent_webdav_path="/test/黑暗骑士"
             )
-            
+
             # 验证 FTS5 表中有数据
             with db.read_connection() as conn:
                 cursor = conn.execute(
@@ -123,7 +123,7 @@ class TestChineseSearch:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             db = Database(db_path)
-            
+
             # 插入多条测试数据
             test_data = [
                 ("/test/黑暗骑士/黑暗骑士.strm", "/test/黑暗骑士"),
@@ -131,14 +131,14 @@ class TestChineseSearch:
                 ("/test/黎明前的黑暗/黎明前的黑暗.strm", "/test/黎明前的黑暗"),
                 ("/test/蝙蝠侠/蝙蝠侠.strm", "/test/蝙蝠侠"),
             ]
-            
+
             for local_path, parent_path in test_data:
                 db.upsert_a(
                     local_path=local_path,
                     webdav_path=local_path,
                     parent_webdav_path=parent_path
                 )
-            
+
             # 搜索"黑暗"
             with db.read_connection() as conn:
                 cursor = conn.execute("""
@@ -148,9 +148,9 @@ class TestChineseSearch:
                         WHERE a_strm_files_fts MATCH ?
                     )
                 """, ("黑暗",))
-                
+
                 results = [row[0] for row in cursor.fetchall()]
-                
+
                 # 应该匹配 3 条记录
                 assert len(results) == 3, f"应匹配 3 条记录，实际匹配 {len(results)} 条"
                 assert all("黑暗" in path for path in results)
@@ -210,21 +210,21 @@ class TestChineseSearch:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             db = Database(db_path)
-            
+
             # 插入混合语言数据
             test_data = [
                 "/test/Movie电影/Movie电影.strm",
                 "/test/Anime动画/Anime动画.strm",
                 "/test/Test测试/Test测试.strm",
             ]
-            
+
             for local_path in test_data:
                 db.upsert_a(
                     local_path=local_path,
                     webdav_path=local_path,
                     parent_webdav_path=Path(local_path).parent.as_posix()
                 )
-            
+
             # 搜索"Movie"
             with db.read_connection() as conn:
                 cursor = conn.execute("""
@@ -234,9 +234,9 @@ class TestChineseSearch:
                         WHERE a_strm_files_fts MATCH ?
                     )
                 """, ("Movie",))
-                
+
                 results = [row[0] for row in cursor.fetchall()]
-                
+
                 assert len(results) == 1
                 assert "Movie电影" in results[0]
 
@@ -245,14 +245,14 @@ class TestChineseSearch:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             db = Database(db_path)
-            
+
             # 插入数据
             db.upsert_a(
                 local_path="/test/黑暗骑士/黑暗骑士.strm",
                 webdav_path="/test/黑暗骑士/黑暗骑士.strm",
                 parent_webdav_path="/test/黑暗骑士"
             )
-            
+
             # 搜索"骑士"（部分匹配）
             with db.read_connection() as conn:
                 cursor = conn.execute("""
@@ -262,9 +262,9 @@ class TestChineseSearch:
                         WHERE a_strm_files_fts MATCH ?
                     )
                 """, ("骑士",))
-                
+
                 results = [row[0] for row in cursor.fetchall()]
-                
+
                 assert len(results) == 1
                 assert "黑暗骑士" in results[0]
 
@@ -277,7 +277,7 @@ class TestFTS5Delete:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             db = Database(db_path)
-            
+
             # 插入数据
             local_path = "/test/黑暗骑士/黑暗骑士.strm"
             db.upsert_a(
@@ -285,16 +285,16 @@ class TestFTS5Delete:
                 webdav_path=local_path,
                 parent_webdav_path="/test/黑暗骑士"
             )
-            
+
             # 验证 FTS5 表中有数据
             with db.read_connection() as conn:
                 cursor = conn.execute("SELECT COUNT(*) FROM a_strm_files_fts")
                 count_before = cursor.fetchone()[0]
                 assert count_before == 1
-            
+
             # 删除数据
             db.delete_a_by_local(local_path)
-            
+
             # 验证 FTS5 表中数据已删除
             with db.read_connection() as conn:
                 cursor = conn.execute("SELECT COUNT(*) FROM a_strm_files_fts")
@@ -306,7 +306,7 @@ class TestFTS5Delete:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             db = Database(db_path)
-            
+
             local_path = "/test/电影/电影.strm"
             db.upsert_b(
                 local_path=local_path,
@@ -314,15 +314,16 @@ class TestFTS5Delete:
                 parent_webdav_path="/test/电影",
                 source_a_path="/test/电影",
                 fingerprint="fp1",
+                mapping_id="test_mapping",
                 status="valid"
             )
-            
+
             with db.read_connection() as conn:
                 count_before = conn.execute("SELECT COUNT(*) FROM b_strm_files_fts").fetchone()[0]
                 assert count_before == 1
-            
+
             db.delete_b_by_local(local_path)
-            
+
             with db.read_connection() as conn:
                 count_after = conn.execute("SELECT COUNT(*) FROM b_strm_files_fts").fetchone()[0]
                 assert count_after == 0
@@ -332,7 +333,7 @@ class TestFTS5Delete:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             db = Database(db_path)
-            
+
             local_path = "/test/幽灵/幽灵.strm"
             db.upsert_c(
                 local_path=local_path,
@@ -340,13 +341,13 @@ class TestFTS5Delete:
                 original_b_path="/test/幽灵",
                 ghost_root="/ghost"
             )
-            
+
             with db.read_connection() as conn:
                 count_before = conn.execute("SELECT COUNT(*) FROM c_ghost_files_fts").fetchone()[0]
                 assert count_before == 1
-            
+
             db.delete_c_by_local(local_path)
-            
+
             with db.read_connection() as conn:
                 count_after = conn.execute("SELECT COUNT(*) FROM c_ghost_files_fts").fetchone()[0]
                 assert count_after == 0
@@ -360,23 +361,23 @@ class TestFTS5UpsertNoOrphan:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             db = Database(db_path)
-            
+
             local_path = "/test/黑暗骑士/黑暗骑士.strm"
-            
+
             # 第一次插入
             db.upsert_a(
                 local_path=local_path,
                 webdav_path=local_path,
                 parent_webdav_path="/test/黑暗骑士"
             )
-            
+
             # 第二次 upsert（触发 REPLACE）
             db.upsert_a(
                 local_path=local_path,
                 webdav_path=local_path + "_v2",
                 parent_webdav_path="/test/黑暗骑士"
             )
-            
+
             # 验证主表和 FTS 表行数一致
             with db.read_connection() as conn:
                 main_count = conn.execute("SELECT COUNT(*) FROM a_strm_files").fetchone()[0]
@@ -393,29 +394,29 @@ class TestFTS5Rebuild:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             db = Database(db_path)
-            
+
             # 插入数据
             db.upsert_a(
                 local_path="/test/电影/电影.strm",
                 webdav_path="/test/电影/电影.strm",
                 parent_webdav_path="/test/电影"
             )
-            
+
             # 手动插入孤儿记录到 FTS 表
             with db.connection() as conn:
                 conn.execute(
                     "INSERT INTO a_strm_files_fts(rowid, local_path, webdav_path) VALUES(9999, '/orphan', '/orphan')"
                 )
                 conn.commit()
-            
+
             # 验证孤儿存在
             with db.read_connection() as conn:
                 fts_count_before = conn.execute("SELECT COUNT(*) FROM a_strm_files_fts").fetchone()[0]
                 assert fts_count_before == 2  # 1 正常 + 1 孤儿
-            
+
             # 重新初始化数据库（触发 _rebuild_fts_if_stale）
             db2 = Database(db_path)
-            
+
             # 验证孤儿已清理
             with db2.read_connection() as conn:
                 main_count = conn.execute("SELECT COUNT(*) FROM a_strm_files").fetchone()[0]
@@ -431,19 +432,19 @@ class TestFTS5Fallback:
         """测试 simple.dll 缺失时降级到 unicode61"""
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
-            
+
             # monkeypatch _load_simple_tokenizer，使其直接返回 False（模拟加载失败）
             from database import Database
             original_load = Database._load_simple_tokenizer
-            
+
             def mock_load(self, conn):
                 return False
-            
+
             Database._load_simple_tokenizer = mock_load
-            
+
             try:
                 db = Database(db_path)
-                
+
                 # 验证 FTS 表使用 unicode61 创建
                 with db.read_connection() as conn:
                     cursor = conn.execute(
@@ -552,14 +553,14 @@ class TestFTS5Fallback:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             db = Database(db_path)
-            
+
             # 插入含特殊字符的数据
             db.upsert_a(
                 local_path="/test/Movie-2024/Movie-2024.strm",
                 webdav_path="/test/Movie-2024/Movie-2024.strm",
                 parent_webdav_path="/test/Movie-2024"
             )
-            
+
             # 搜索含特殊字符（- 在 FTS5 中是特殊字符）
             # 这里测试 routes.py 的回退逻辑，需要模拟 WebUI 环境
             # 简化测试：直接验证 LIKE 查询可用

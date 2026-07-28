@@ -50,6 +50,7 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `local_path` | TEXT PRIMARY KEY | B 区本地绝对路径 |
+| `mapping_id` | TEXT NOT NULL | 所属 A/B mapping，不能为空 |
 | `webdav_path` | TEXT NOT NULL | 规范化后的 WebDAV 路径 |
 | `parent_webdav_path` | TEXT NOT NULL | 父级 WebDAV 目录 |
 | `source_a_path` | TEXT | 对应的 A 区源路径 |
@@ -57,7 +58,7 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 | `status` | TEXT DEFAULT 'valid' | 状态：valid/duplicate/quarantined/invalid/ghost |
 | `updated_at` | REAL NOT NULL | 更新时间戳 |
 
-**索引**：`idx_b_strm_webdav_path`、`idx_b_strm_fingerprint`、`idx_b_strm_status`、`idx_b_strm_updated_at`
+**索引**：`idx_b_strm_webdav_path`、`idx_b_strm_fingerprint`、`idx_b_strm_status`、`idx_b_strm_mapping_id`、`idx_b_strm_mapping_fp`、`idx_b_strm_updated_at`。指纹去重和 projection 查询均限定 mapping。
 
 #### `strm_identity` — 身份指纹全局表
 
@@ -128,13 +129,22 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `fingerprint` | TEXT PRIMARY KEY | SHA-256 指纹 |
+| `mapping_id` | TEXT NOT NULL | 所属 mapping |
+| `fingerprint` | TEXT NOT NULL | SHA-256 指纹 |
 | `source_media_name` | TEXT NOT NULL | 原始云端媒体名 |
 | `current_media_name` | TEXT NOT NULL | 当前本地文件夹名 |
 | `engine_entry_path` | TEXT NOT NULL | 对应的引擎入口路径 |
 | `updated_at` | REAL NOT NULL | 时间戳 |
 
-**索引**：`idx_boundary_source_name`、`idx_boundary_current_name`
+**主键**：`(mapping_id, fingerprint)`。**索引**：`idx_boundary_source_name`、`idx_boundary_current_name`。不同 mapping 的同名边界互不覆盖。
+
+#### `b_identity_projection` — mapping 级当前可见身份
+
+主键为 `(fingerprint, mapping_id)`，记录每个 mapping 当前 visible B 路径；不能使用全局 fingerprint 删除其他 mapping 的 projection。
+
+#### `b_lineage_snapshot` — B 区 lineage 增量快照
+
+主键为 `(mapping_id, local_path)`，保存 `file_size`、`mtime_ns`、`fingerprint`、`mapping_version`、`lineage_version`、`validation_state` 和 `verified_at`。只有 state=`valid` 且版本、元数据和指纹全部匹配时才能复用；损坏或异常必须回退完整核对。
 
 #### FTS5 全文搜索虚拟表
 

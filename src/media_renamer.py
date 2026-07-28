@@ -94,7 +94,7 @@ def extract_season_from_path(path: str | Path) -> int | None:
 
 def _strip_noise_tags(filename: str) -> str:
     """剥离文件名中的噪音标签（分辨率/编码/音频等），返回清理后的文件名。
-    
+
     用于 suggest_rename 提取季集号前预处理，避免 1920x1080 被误解析为 S20E1080。
     剥离后保留原始空格/标点结构，不影响后续提取逻辑。
     """

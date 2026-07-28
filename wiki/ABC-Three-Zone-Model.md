@@ -48,7 +48,7 @@ class AAreaEventHandler(FileSystemEventHandler):
 
 **用途**：Emby/Jellyfin 实际扫描的目录。用户可以自由重命名、整理、删除文件。程序将用户操作翻译为云端 API 指令。
 
-**路径**：通过 `config.toml` → `[paths] b_root` 或 WebUI 配置页设置。
+**路径**：生产同步采用显式 `a_b_mappings`，每个 mapping 以唯一 `mapping_id` 绑定一个 A 根和一个 B 根；旧的 `[paths] b_root` 不再自动推导生产 mapping。相同相对路径在不同 mapping 中彼此隔离。
 
 **Watchdog 处理器**：`BAreaEventHandler`（位于 `area_watchers.py`）
 
@@ -90,7 +90,7 @@ WebUI 详情页 `/api/area/{area}/detail` 按季分组后，每季内的 STRM �
 
 **用途**：收容因云盘根目录大改版或挂载点删除而失效的路径。保留历史痕迹，不污染媒体库。
 
-**路径**：通过 `config.toml` → `[paths] c_root` 或 WebUI 配置页设置。
+**路径**：通过全局 `c_root` 设置；B→C 迁移统一写入 `C/<mapping_id>/<relative>`。mapping 无法唯一解析、路径越界或 mapping_id 为空时保留 B 来源，不使用 basename fallback。
 
 **Watchdog 处理器**：`CAreaEventHandler` — 仅记录日志，不触发任何自动操作。
 
@@ -127,9 +127,9 @@ WebUI 详情页 `/api/area/{area}/detail` 按季分组后，每季内的 STRM �
 ### A → C（幽灵迁移）
 ```
 1. 启动时根目录对比发现引擎路径缺失
-2. 该引擎的所有 B 区文件迁移到 C 区
-3. 创建 c_ghost_files 记录
-4. strm_identity 更新为幽灵状态
+2. 解析每个 B 文件的唯一 mapping，并生成 `C/<mapping_id>/<relative>` 目标
+3. 目标不存在时移动文件；目标存在时必须先证明同源，异源或未知身份保留来源
+4. `upsert_c` 成功后才删除 BRecord，并刷新 mapping-scoped identity projection
 ```
 
 ## 启动时区域验证

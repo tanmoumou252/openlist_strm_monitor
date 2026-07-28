@@ -102,7 +102,11 @@ B 区文件变动（创建/修改/移动）
 
 幽灵保护是**短期**机制（秒级），防止回灌竞态。C 区迁移是**长期**机制（永久），用于引擎根目录被移除时。
 
-## 2.5 批量同步的安全机制
+## 2.5 Mapping 与 C 区 fail-closed
+
+生产路径必须通过唯一 `mapping_id` 解析 A/B 归属。mapping 缺失、重复、路径越界或身份未知时，不移动、不覆盖、不删除、不写入误导性 C/DB 记录，也不调用云端破坏性操作。B→C 目标固定为 `C/<mapping_id>/<relative>`；目标碰撞只有明确同源时允许幂等清理，异源或未知身份保留来源。`.duplicate`、`.quarantined`、`.invalid` 文件同样必须先完成身份确认。
+
+## 2.6 批量同步的安全机制
 
 ### `bulk_connection()` 的安全约束
 
@@ -120,6 +124,8 @@ B 区文件变动（创建/修改/移动）
 **同进程多线程不安全**：启动同步期间禁止其他线程写 DB。WebUI 和 B 区 watcher 的纯读 getter 必须使用 `read_connection()`，不能通过写连接触发 `BEGIN IMMEDIATE`；否则即使查询本身是 SELECT，也可能在 bulk RESERVED 锁期间报 `database is locked`。写操作仍等待 SQLite `busy_timeout`。
 
 ### 血统校验跳过
+
+生产 snapshot 只允许在 mapping/version/lineage/state/size/mtime/fingerprint 全部匹配时复用；它不是只扫描变化文件的替代品。snapshot 缺失、损坏、读取异常、stat 异常或文件在核对期间变化时，必须回退完整 lineage。
 
 启动同步跳过 `_verify_b_path_lineage`，原因：
 - 首次运行：B 区为空，血统校验始终通过

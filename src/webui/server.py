@@ -344,7 +344,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
                 if hmac.compare_digest(token.encode('utf-8'), stored_token.encode('utf-8')):
                     matched_token = stored_token
                     break
-            
+
             if matched_token and now < webui._sessions[matched_token]:
                 # 滑动过期：刷新 7 天
                 webui._sessions[matched_token] = now + 604800
@@ -1052,6 +1052,9 @@ class WebUIServer:
 
             if not self._config:
                 return {"success": False, "message": "配置未加载"}
+            configured_mappings = getattr(self._config, "a_b_mappings", [])
+            if not configured_mappings:
+                return {"success": False, "status": "not_configured", "message": "未配置 A/B mapping"}
 
             try:
                 from app_service import AppService

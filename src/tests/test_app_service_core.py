@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app_service_core import AppService, StrmStorageManager, StrmStorageInfo
 from database import Database, BRecord
-from config import AppConfig
+from config import AppConfig, ABMapping
 
 
 # ===========================================================================
@@ -533,6 +533,8 @@ class TestHandleBDeleted:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [ABMapping(
+            mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
         config.paths = Mock()
         config.paths.b_root = str(self.b_dir)
         config.paths.c_root = str(self.c_dir)
@@ -565,6 +567,7 @@ class TestHandleBDeleted:
             fingerprint="fp_abc",
             status="valid",
             updated_at=0,
+            mapping_id="test_m1",
         )
 
     def test_delete_no_db_record_noop(self):
@@ -718,6 +721,8 @@ class TestMigrateBUnderRootToC:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [ABMapping(
+            mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
         config.paths = Mock()
         config.paths.b_root = str(self.b_dir)
         config.paths.c_root = str(self.c_dir)
@@ -751,6 +756,7 @@ class TestMigrateBUnderRootToC:
             fingerprint=None,
             status="valid",
             updated_at=0,
+            mapping_id="test_m1",
         )
         self.db.get_b_under_root.return_value = [record]
         self.db.upsert_c = Mock()
@@ -775,6 +781,7 @@ class TestMigrateBUnderRootToC:
             fingerprint=None,
             status="valid",
             updated_at=0,
+            mapping_id="test_m1",
         )
         self.db.get_b_under_root.return_value = [record]
         self.db.delete_b_by_local = Mock()
@@ -802,6 +809,8 @@ class TestCleanupBRedundant:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [ABMapping(
+            mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
         config.paths = Mock()
         config.paths.b_root = str(self.b_dir)
         config.paths.c_root = str(self.c_dir)
@@ -822,20 +831,20 @@ class TestCleanupBRedundant:
     def teardown_method(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_cleanup_removes_keyword_suffixed_files(self):
-        """Files with .duplicate/.quarantined/.invalid extensions are deleted."""
+    def test_cleanup_keeps_unknown_keyword_suffixed_files(self):
+        """后缀文件身份未知时必须保留，不能按文件名直接删除。"""
         bad1 = self.b_dir / "old.strm.duplicate"
         bad2 = self.b_dir / "old.strm.invalid"
         bad1.write_text("x")
         bad2.write_text("x")
 
-        # No regular b records so it ends early
         self.db.get_all_b_records.return_value = []
+        self.db.get_b_by_local_full.return_value = None
 
         self.app.cleanup_b_redundant()
 
-        assert not bad1.exists()
-        assert not bad2.exists()
+        assert bad1.exists()
+        assert bad2.exists()
 
     def test_cleanup_skips_ghost_protected_records(self):
         """Ghost-protected records are not migrated or deleted."""
@@ -852,6 +861,7 @@ class TestCleanupBRedundant:
             fingerprint="fp_x",
             status="valid",
             updated_at=0,
+            mapping_id="test_m1",
         )
         self.db.get_all_b_records.return_value = [record]
         self.db.is_ghost_protected.return_value = True
@@ -874,6 +884,7 @@ class TestCleanupBRedundant:
             fingerprint="fp_gone",
             status="valid",
             updated_at=0,
+            mapping_id="test_m1",
         )
         self.db.get_all_b_records.return_value = [record]
         self.db.is_ghost_protected.return_value = False
@@ -908,6 +919,7 @@ class TestCleanupBRedundant:
             fingerprint="fp_src",
             status="valid",
             updated_at=0,
+            mapping_id="test_m1",
         )
         self.db.get_all_b_records.return_value = [record]
         self.db.is_ghost_protected.return_value = False
@@ -940,12 +952,14 @@ class TestVerifyBPathLineage:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [ABMapping(
+            mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
         config.paths = Mock()
         config.paths.b_root = str(self.b_dir)
         config.paths.c_root = str(self.c_dir)
         config.behavior = Mock()
         config.behavior.ghost_protect_seconds = 300
-        config.strm_engine_paths = ["/engine"]
+        config.strm_engine_paths = []
 
         db = Mock(spec=Database)
         db.init_subtitle_table = Mock()
@@ -1041,6 +1055,7 @@ class TestVerifyBPathLineage:
         ]
         from database import BoundaryRecord
         self.db.get_media_boundary_by_fingerprint.return_value = BoundaryRecord(
+            mapping_id="test_m1",
             fingerprint="fp",
             source_media_name="show",
             current_media_name="different_show",
@@ -1108,6 +1123,8 @@ class TestInitialScanB:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [ABMapping(
+            mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
         config.paths = Mock()
         config.paths.b_root = str(self.b_dir)
         config.paths.c_root = str(self.c_dir)
@@ -1151,6 +1168,7 @@ class TestInitialScanB:
             fingerprint=fp,
             status="valid",
             updated_at=0,
+            mapping_id="test_m1",
         )
         self.db.get_all_b_by_fingerprint.return_value = [new_record]
         # ensure_single_visible_instance 会用 mark_other_b_instances_duplicate 的返回值迭代
@@ -1176,6 +1194,7 @@ class TestInitialScanB:
             fingerprint=fp,
             status="valid",
             updated_at=0,
+            mapping_id="test_m1",
         )
         self.db.get_all_b_records.return_value = [record]
 
@@ -1195,6 +1214,7 @@ class TestInitialScanB:
             fingerprint=None,
             status="valid",
             updated_at=0,
+            mapping_id="test_m1",
         )
         self.db.get_all_b_records.return_value = [record]
 
@@ -1218,6 +1238,7 @@ class TestInitialScanB:
             fingerprint=fp,
             status="valid",
             updated_at=0,
+            mapping_id="test_m1",
         )
         self.db.get_all_b_records.return_value = [record]
 
@@ -1243,6 +1264,7 @@ class TestInitialScanB:
             fingerprint=fp,
             status="valid",
             updated_at=0,
+            mapping_id="test_m1",
         )
         self.db.get_all_b_records.return_value = [record]
 
@@ -1267,6 +1289,8 @@ class TestCleanupBZombiesUnderFolder:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [ABMapping(
+            mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
         config.paths = Mock()
         config.paths.b_root = str(self.b_dir)
         config.paths.c_root = str(self.c_dir)
@@ -1287,6 +1311,26 @@ class TestCleanupBZombiesUnderFolder:
     def teardown_method(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def test_cleanup_skips_when_db_returns_non_iterable(self):
+        """Background cleanup must not raise when DB returns an iterable-unfriendly value.
+
+        Regression guard: a background timer was calling
+        cleanup_b_zombies_under_folder and iterating directly over whatever
+        ``get_b_under_root()`` returned.  When an unconfigured mock or a
+        regression produced a plain ``Mock`` object instead of a list, the
+        background thread raised ``TypeError: 'Mock' object is not iterable``,
+        surfacing as a Pytest Unhandled Thread Exception warning in the full
+        test run.
+
+        Fail-closed behavior is preserved: the cleanup simply skips rather than
+        exposing destructive or half-baked operations to the A/B/C pipeline.
+        """
+        self.db.get_b_under_root.return_value = Mock(name="unexpected_db_value")
+
+        self.app.cleanup_b_zombies_under_folder("/mount")
+
+        self.admin_api.list_directory.assert_not_called()
+
     def test_cleanup_zombies_webdav_not_exists(self):
         """WebDAV doesn't exist → zombie file is cleaned up (batch API optimization)."""
         b_file = self.b_dir / "zombie.strm"
@@ -1299,6 +1343,7 @@ class TestCleanupBZombiesUnderFolder:
             fingerprint="fp_zombie",
             status="valid",
             updated_at=0,
+            mapping_id="test_m1",
         )
         self.db.get_b_under_root.return_value = [record]
         # 新实现使用 list_directory 批量获取云端文件列表（而非逐条 check_exists）
@@ -1330,6 +1375,7 @@ class TestCleanupBZombiesUnderFolder:
             fingerprint="fp_alive",
             status="valid",
             updated_at=0,
+            mapping_id="test_m1",
         )
         self.db.get_b_under_root.return_value = [record]
         # 新实现使用 list_directory 批量获取云端文件列表
@@ -1363,6 +1409,8 @@ class TestHandleACreatedOrModified:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [ABMapping(
+            mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
         config.paths = Mock()
         config.paths.b_root = str(self.b_dir)
         config.paths.c_root = str(self.c_dir)
@@ -1376,8 +1424,8 @@ class TestHandleACreatedOrModified:
         self.admin_api = Mock()
 
         with patch("app_service_core.RefreshService"), \
-             patch("app_service_core.SyncService"), \
-             patch("app_service_core.SubtitleHandler"):
+              patch("app_service_core.SyncService"), \
+              patch("app_service_core.SubtitleHandler"):
             self.app = AppService(config, db, self.admin_api)
 
     def teardown_method(self):
@@ -1648,6 +1696,8 @@ class TestEnsureSingleVisibleInstance:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [ABMapping(
+            mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
         config.paths = Mock()
         config.paths.b_root = str(self.b_dir)
         config.paths.c_root = str(self.c_dir)
@@ -1763,6 +1813,8 @@ class TestRestoreBFileFromA:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [ABMapping(
+            mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
         config.paths = Mock()
         config.paths.b_root = str(self.b_dir)
         config.paths.c_root = str(self.c_dir)
@@ -1775,8 +1827,8 @@ class TestRestoreBFileFromA:
         self.db = db
 
         with patch("app_service_core.RefreshService"), \
-             patch("app_service_core.SyncService"), \
-             patch("app_service_core.SubtitleHandler"):
+              patch("app_service_core.SyncService"), \
+              patch("app_service_core.SubtitleHandler"):
             self.app = AppService(config, db, Mock())
 
     def teardown_method(self):
@@ -1969,7 +2021,7 @@ class TestCleanupARedundantUsingApi:
 
     def test_no_redundant_files(self):
         """All local files exist in cloud → no deletion.
-        
+
         API 的 path 字段是存储系统路径，代码从 cloud_path + name 构建
         WebDAV 路径来与 rec.webdav_path 比较。
         """
@@ -2393,6 +2445,8 @@ class TestScanASubtitlesOnStartup:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [ABMapping(
+            mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
         config.paths = Mock()
         config.paths.b_root = str(self.b_dir)
         config.paths.c_root = str(self.c_dir)
@@ -2433,7 +2487,7 @@ class TestScanASubtitlesOnStartup:
 
 class TestStartCallsCleanupARedundant:
     """Verify start() does NOT call cleanup_a_redundant_using_api or cleanup_b_redundant.
-    
+
     冗余清理已改为局部触发（WebUI 手动刷新 / B 区删除事件），不再在启动时执行全盘清理。
     """
 
@@ -2611,6 +2665,8 @@ class TestHandleBDeletedTriggersCleanup:
 
         config = Mock(spec=AppConfig)
         config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [ABMapping(
+            mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
         config.paths = Mock()
         config.paths.b_root = str(self.b_dir)
         config.paths.c_root = str(self.c_dir)
@@ -2620,7 +2676,7 @@ class TestHandleBDeletedTriggersCleanup:
         db = Mock(spec=Database)
         db.get_b_by_local_full.return_value = BRecord(
             "/b/file1.strm", "/cloud/dir1/file1.strm", "/cloud/dir1",
-            "/a/file1.strm", "fp1", "valid", "2024-01-01"
+            "/a/file1.strm", "fp1", "valid", "2024-01-01", "test_m1"
         )
         db.has_other_b_instance.return_value = False
         self.db = db

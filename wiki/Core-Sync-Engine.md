@@ -47,7 +47,7 @@ AppService.__init__()
 
 2. **从 OpenList API 加载引擎配置** — 使用 `StrmStorageManager` 获取所有 `driver=strm` 的存储节点，解析 `addition` JSON 字段提取 `SaveStrmLocalPath`、`paths`、`SaveLocalMode`。仅过滤用户配置的引擎，构建映射：`引擎挂载点 → A 区本地路径 → 监控云端路径`
 
-3. **B 区物理磁盘逆向自同步**（`initial_scan_b()`，拆分为 4 个子函数）：
+3. **B 区物理磁盘逆向自同步**（`initial_scan_b()`，拆分为 4 个子函数）：默认扫描全部 B 根的文件元数据；只有 `b_lineage_snapshot` 的 mapping/version/lineage/state/size/mtime/fingerprint 全部匹配时才跳过完整血统校验，快照异常自动回退。`force_full=True` 只强制完整校验，不能绕过配置 fail-safe。
    - `_scan_b_disk()` — 遍历 B 区磁盘，计算每个 `.strm` 的指纹
    - `_load_b_db_records()` — 加载数据库 `b_strm_files` 表记录
    - `_reconcile_b_historical_records()` — 对比历史 DB 记录与磁盘数据
@@ -76,6 +76,12 @@ AppService.__init__()
 
 > 注：`stop()` **不关闭数据库连接**，**不设置 `_running` 标志**。数据库生命周期由 `Database` 类独立管理。
 
+## B→C 安全迁移
+
+`get_c_path_for_b()` 是唯一 C 目标生成入口，要求唯一 mapping、非空 `mapping_id` 和 B 路径位于对应 B 根内，目标格式为 `C/<mapping_id>/<relative>`。目标已存在时只允许明确同源的幂等清理；异源、未知身份、移动失败或 C 记录写入失败均保留来源，不使用 basename fallback。
+
+`.duplicate`、`.quarantined`、`.invalid` 及时间戳变体不能仅凭后缀删除，必须先解析后缀自身或候选原始 `.strm` 的 mapping 与 WebDAV 身份，并证明同源。
+
 ## 同步管线：A → B
 
 ### 数据库读路径与 bulk 写事务
@@ -87,6 +93,8 @@ AppService.__init__()
 ### 并发安全设计：为什么 `_sync_one_record` 不使用指纹锁
 
 `_sync_one_record` 在批量同步（`scan_a_to_b_full_sync`）中使用，**不使用** `get_fingerprint_lock`。这是经过代码验证的设计决策，而非遗漏。
+
+B 区启动核对现支持生产 `b_lineage_snapshot` 快速路径，但仍扫描所有 B 根元数据；snapshot 只减少 STRM 内容读取、完整 lineage 和重复 DB 查询。首轮、版本不匹配、stat/DB 异常或并发修改均回退完整核对。`force_full=True` 可强制审计且不能绕过 fail-safe。
 
 **现有三层防御**：
 

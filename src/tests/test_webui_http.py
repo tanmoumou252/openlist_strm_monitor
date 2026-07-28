@@ -100,7 +100,7 @@ def _make_mock_db(tmp_path: Path) -> MagicMock:
     }
     db.get_db_file_size.return_value = 0
     db.get_subtitle_by_local.return_value = None
-    
+
     # read_connection 需要返回一个上下文管理器
     mock_conn = MagicMock()
     mock_conn.execute.return_value.fetchone.return_value = (0,)
@@ -108,7 +108,7 @@ def _make_mock_db(tmp_path: Path) -> MagicMock:
     mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
     mock_conn_ctx.__exit__ = MagicMock(return_value=False)
     db.read_connection.return_value = mock_conn_ctx
-    
+
     return db
 
 
@@ -1094,32 +1094,32 @@ class TestAreaRefreshAPI:
         mock_app_service = MagicMock()
         mock_app_service._refresh_lock = threading.Lock()
         server._app_service = mock_app_service
-        
+
         # 测试包含 .. 的路径
         body = {"media": "../etc/passwd"}
         status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         assert status == 400
         assert "媒体名包含非法字符" in resp.get("error", "")
-        
+
         # 测试以 / 开头的路径
         body = {"media": "/etc/passwd"}
         status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         assert status == 400
         assert "媒体名包含非法字符" in resp.get("error", "")
-        
+
         # 测试以 \ 开头的路径
         body = {"media": "\\etc\\passwd"}
         status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         assert status == 400
         assert "媒体名包含非法字符" in resp.get("error", "")
-    
+
     def test_area_refresh_dangerous_characters_rejected(self, webui_server):
         """危险字符应返回 400"""
         server, base, session_token = webui_server
         mock_app_service = MagicMock()
         mock_app_service._refresh_lock = threading.Lock()
         server._app_service = mock_app_service
-        
+
         # 测试各种危险字符
         dangerous_inputs = [
             "test\x00name",        # null byte
@@ -1132,21 +1132,21 @@ class TestAreaRefreshAPI:
             "test|name",           # pipe
             "C:\\Windows\\System", # Windows absolute path with drive letter
         ]
-        
+
         for dangerous_input in dangerous_inputs:
             body = {"media": dangerous_input}
             status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
             assert status == 400, f"Expected 400 for input {repr(dangerous_input)}, got {status}"
             assert "媒体名包含非法字符" in resp.get("error", ""), \
                 f"Expected '媒体名包含非法字符' error for {repr(dangerous_input)}, got {resp.get('error')}"
-    
+
     def test_area_refresh_media_name_length_limit(self, webui_server):
         """超长媒体名应返回 400"""
         server, base, session_token = webui_server
         mock_app_service = MagicMock()
         mock_app_service._refresh_lock = threading.Lock()
         server._app_service = mock_app_service
-        
+
         # 测试超过 255 字符的媒体名
         long_name = "a" * 256
         body = {"media": long_name}
@@ -1157,14 +1157,14 @@ class TestAreaRefreshAPI:
     def test_refresh_is_non_destructive(self, webui_server):
         """刷新不再因删除数超阈值要求确认，而是直接完成非破坏性 A→B 同步"""
         server, base, session_token = webui_server
-        
+
         # Mock database 返回 15 条 A 区记录（旧逻辑下会超过阈值要求确认）
         mock_db = MagicMock()
         mock_records = [
             {"local_path": f"/a/zone/file{i}.strm", "webdav_path": f"/webdav/file{i}.strm", "parent_webdav_path": "/webdav"}
             for i in range(1, 16)
         ]
-        
+
         # Mock read_connection context manager
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
@@ -1174,7 +1174,7 @@ class TestAreaRefreshAPI:
         mock_conn.__exit__ = MagicMock(return_value=None)
         mock_conn.row_factory = None
         mock_db.read_connection.return_value = mock_conn
-        
+
         mock_app_service = MagicMock()
         mock_app_service._refresh_lock = threading.Lock()
         mock_app_service.db = mock_db
@@ -1183,19 +1183,19 @@ class TestAreaRefreshAPI:
         mock_app_service._cloud_path_to_engine_paths.return_value = ["/strm/webdav"]
         mock_app_service.copy_a_record_to_b_if_needed.return_value = True
         server._app_service = mock_app_service
-        
+
         # Mock OpenList Admin API 返回空列表
         mock_admin_api = MagicMock()
         mock_admin_api.list_directory.return_value = {"code": 0, "data": {"content": []}}
         mock_app_service.admin_api = mock_admin_api
-        
+
         # patch Path.exists 返回 True，使记录计入 synced 而非 skipped
         with patch("webui.routes.Path") as mock_path:
             mock_path.return_value.exists.return_value = True
             mock_path.return_value.is_absolute.return_value = False
             body = {"media": "test_movie"}
             status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
-        
+
         # 验证非破坏性同步：不再要求确认，直接完成
         assert status == 200, f"Expected 200, got {status}. Response: {resp}"
         assert resp.get("ok") is True, f"Expected ok=True, got {resp}"
@@ -1207,14 +1207,14 @@ class TestAreaRefreshAPI:
     def test_refresh_calls_copy_per_record(self, webui_server):
         """刷新逐条调用 copy_a_record_to_b_if_needed，不删除文件、不调用 delete_a_by_local"""
         server, base, session_token = webui_server
-        
+
         # Mock database
         mock_db = MagicMock()
         mock_records = [
             {"local_path": f"/a/zone/file{i}.strm", "webdav_path": f"/webdav/file{i}.strm", "parent_webdav_path": "/webdav"}
             for i in range(1, 16)
         ]
-        
+
         # Mock read_connection context manager
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
@@ -1224,7 +1224,7 @@ class TestAreaRefreshAPI:
         mock_conn.__exit__ = MagicMock(return_value=None)
         mock_conn.row_factory = None
         mock_db.read_connection.return_value = mock_conn
-        
+
         mock_app_service = MagicMock()
         mock_app_service._refresh_lock = threading.Lock()
         mock_app_service.db = mock_db
@@ -1233,19 +1233,19 @@ class TestAreaRefreshAPI:
         mock_app_service._cloud_path_to_engine_paths.return_value = ["/strm/webdav"]
         mock_app_service.copy_a_record_to_b_if_needed.return_value = True
         server._app_service = mock_app_service
-        
+
         # Mock OpenList Admin API 返回空列表
         mock_admin_api = MagicMock()
         mock_admin_api.list_directory.return_value = {"code": 0, "data": {"content": []}}
         mock_app_service.admin_api = mock_admin_api
-        
+
         # patch Path.exists 返回 True，使记录计入 synced
         with patch("webui.routes.Path") as mock_path:
             mock_path.return_value.exists.return_value = True
             mock_path.return_value.is_absolute.return_value = False
             body = {"media": "test_movie"}
             status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
-        
+
         # 验证逐条同步、非破坏性
         assert status == 200, f"Expected 200, got {status}. Response: {resp}"
         assert resp.get("ok") is True, f"Expected ok=True, got {resp}"
@@ -1258,13 +1258,13 @@ class TestAreaRefreshAPI:
     def test_refresh_timeout(self, webui_server):
         """刷新不再有超时逻辑，响应中不应出现 timeout 字段"""
         server, base, session_token = webui_server
-        
+
         # Mock database 返回 1 条记录
         mock_db = MagicMock()
         mock_records = [
             {"local_path": "/a/zone/file1.strm", "webdav_path": "/webdav/file1.strm", "parent_webdav_path": "/webdav"}
         ]
-        
+
         # Mock read_connection context manager
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
@@ -1274,7 +1274,7 @@ class TestAreaRefreshAPI:
         mock_conn.__exit__ = MagicMock(return_value=None)
         mock_conn.row_factory = None
         mock_db.read_connection.return_value = mock_conn
-        
+
         mock_app_service = MagicMock()
         mock_app_service._refresh_lock = threading.Lock()
         mock_app_service.db = mock_db
@@ -1282,19 +1282,19 @@ class TestAreaRefreshAPI:
         mock_app_service._cloud_path_to_engine_paths.return_value = ["/strm/webdav"]
         mock_app_service.copy_a_record_to_b_if_needed.return_value = True
         server._app_service = mock_app_service
-        
+
         # Mock OpenList Admin API 返回空列表
         mock_admin_api = MagicMock()
         mock_admin_api.list_directory.return_value = {"code": 0, "data": {"content": []}}
         mock_app_service.admin_api = mock_admin_api
-        
+
         # patch Path.exists 返回 True
         with patch("webui.routes.Path") as mock_path:
             mock_path.return_value.exists.return_value = True
             mock_path.return_value.is_absolute.return_value = False
             body = {"media": "test_movie"}
             status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
-        
+
         # 验证无超时字段（超时逻辑已移除，防止被误加回）
         assert status == 200, f"Expected 200, got {status}. Response: {resp}"
         assert resp.get("ok") is True, f"Expected ok=True, got {resp}"

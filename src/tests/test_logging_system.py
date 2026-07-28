@@ -34,21 +34,21 @@ class TestTmdbOperationLog:
         """测试 TMDB 日志写入后能正确查询"""
         db_path = str(tmp_path / "test_tmdb.db")
         db = TmdbWatchlistDb(db_path)
-        
+
         # 写入测试日志
         db.log_tmdb_operation("sync", "info", "测试同步操作", detail='{"count": 10}')
         db.log_tmdb_operation("match", "success", "测试匹配操作")
         db.log_tmdb_operation("error_test", "error", "测试错误操作")
-        
+
         # 查询日志
         logs = db.get_tmdb_logs(limit=10)
-        
+
         assert len(logs) == 3
         # 验证时间倒序
         assert logs[0]["op"] == "error_test"
         assert logs[1]["op"] == "match"
         assert logs[2]["op"] == "sync"
-        
+
         # 验证字段完整性
         assert logs[0]["level"] == "error"
         assert logs[0]["msg"] == "测试错误操作"
@@ -58,10 +58,10 @@ class TestTmdbOperationLog:
         """测试 7 天前的日志自动清理"""
         db_path = str(tmp_path / "test_tmdb.db")
         db = TmdbWatchlistDb(db_path)
-        
+
         # 写入当前日志
         db.log_tmdb_operation("recent", "info", "最近的日志")
-        
+
         # 手动插入一条 8 天前的日志
         eight_days_ago = time.time() - 8 * 86400
         with db._conn() as conn:
@@ -70,10 +70,10 @@ class TestTmdbOperationLog:
                 (eight_days_ago, "old", "info", "8天前的日志", None)
             )
             conn.commit()
-        
+
         # 查询应触发清理
         logs = db.get_tmdb_logs(limit=10)
-        
+
         # 应该只有 1 条（旧的被清理）
         assert len(logs) == 1
         assert logs[0]["op"] == "recent"
@@ -82,14 +82,14 @@ class TestTmdbOperationLog:
         """测试日志行数限制清理机制（新增功能）"""
         db_path = str(tmp_path / "test_tmdb.db")
         db = TmdbWatchlistDb(db_path)
-        
+
         # 写入 1500 条日志（超过默认的 1000 条限制）
         for i in range(1500):
             db.log_tmdb_operation(f"op_{i}", "info", f"日志 {i}")
-        
+
         # 查询应触发行数清理
         logs = db.get_tmdb_logs(limit=2000)
-        
+
         # 应该只保留最新的 1000 条
         assert len(logs) == 1000
         # 验证保留的是最新的（op_1499 到 op_500）
@@ -100,13 +100,13 @@ class TestTmdbOperationLog:
         """测试日志行数限制可配置"""
         db_path = str(tmp_path / "test_tmdb.db")
         db = TmdbWatchlistDb(db_path, tmdb_log_max_rows=500)
-        
+
         # 写入 800 条日志
         for i in range(800):
             db.log_tmdb_operation(f"op_{i}", "info", f"日志 {i}")
-        
+
         logs = db.get_tmdb_logs(limit=2000)
-        
+
         # 应该只保留最新的 500 条
         assert len(logs) == 500
 
@@ -117,19 +117,19 @@ class TestMainLogReading:
     def test_read_log_with_multibyte_characters(self, tmp_path):
         """测试读取包含多字节字符的日志文件"""
         log_file = tmp_path / "test.log"
-        
+
         # 写入包含大量中文的日志
         lines = []
         for i in range(100):
             line = f"2026-07-12 09:30:{i:02d} [INFO] [TMDB] 电影同步完成 ({i} 项) - 这是一段很长的中文日志内容用于测试多字节字符"
             lines.append(line)
-        
+
         log_file.write_text("\n".join(lines), encoding="utf-8")
-        
+
         # 模拟读取最后 50 行
         from webui.routes import _read_log_file_tail
         result = _read_log_file_tail(str(log_file), 50)
-        
+
         assert len(result) == 50
         # 验证读取的是最后 50 行（索引 50-99）
         assert "电影同步完成 (99 项)" in result[-1]
@@ -145,7 +145,7 @@ class TestMainLogReading:
         """测试读取空日志文件"""
         log_file = tmp_path / "empty.log"
         log_file.write_text("", encoding="utf-8")
-        
+
         from webui.routes import _read_log_file_tail
         result = _read_log_file_tail(str(log_file), 100)
         assert result == []
@@ -155,10 +155,10 @@ class TestMainLogReading:
         log_file = tmp_path / "small.log"
         lines = [f"Line {i}" for i in range(10)]
         log_file.write_text("\n".join(lines), encoding="utf-8")
-        
+
         from webui.routes import _read_log_file_tail
         result = _read_log_file_tail(str(log_file), 100)
-        
+
         assert len(result) == 10
 
 
@@ -168,19 +168,19 @@ class TestLogHotReload:
     def test_setup_logging_clears_old_handlers(self, tmp_path):
         """测试 setup_logging 会清理旧的 handler"""
         log_file = tmp_path / "test1.log"
-        
+
         # 第一次初始化
         setup_logging(level="INFO", log_file=str(log_file), max_size_mb=2, backup_count=5)
         root_logger = logging.getLogger()
         initial_handler_count = len(root_logger.handlers)
-        
+
         # 第二次初始化（模拟热更新）
         log_file2 = tmp_path / "test2.log"
         setup_logging(level="DEBUG", log_file=str(log_file2), max_size_mb=5, backup_count=10)
-        
+
         # handler 数量应该保持一致（旧的被清理）
         assert len(root_logger.handlers) == initial_handler_count
-        
+
         # 验证新配置生效
         file_handler = next(
             (h for h in root_logger.handlers if isinstance(h, logging.handlers.RotatingFileHandler)),
@@ -193,20 +193,20 @@ class TestLogHotReload:
     def test_setup_logging_changes_log_level(self, tmp_path):
         """测试热更新能改变日志级别"""
         log_file = tmp_path / "test.log"
-        
+
         # 初始化为 INFO
         setup_logging(level="INFO", log_file=str(log_file), max_size_mb=2, backup_count=5)
         root_logger = logging.getLogger()
-        
+
         file_handler = next(
             (h for h in root_logger.handlers if isinstance(h, logging.handlers.RotatingFileHandler)),
             None
         )
         assert file_handler.level == logging.INFO
-        
+
         # 热更新为 DEBUG
         setup_logging(level="DEBUG", log_file=str(log_file), max_size_mb=2, backup_count=5)
-        
+
         # 重新获取 handler（因为 setup_logging 会清理并重建 handlers）
         file_handler = next(
             (h for h in root_logger.handlers if isinstance(h, logging.handlers.RotatingFileHandler)),
@@ -221,21 +221,21 @@ class TestLogRotation:
     def test_log_rotation_creates_backup(self, tmp_path):
         """测试日志文件达到大小限制后创建备份"""
         log_file = tmp_path / "test.log"
-        
+
         # 设置很小的轮转大小（1KB）
         setup_logging(level="INFO", log_file=str(log_file), max_size_mb=0.001, backup_count=3)
-        
+
         # 写入超过 1KB 的日志
         logger = logging.getLogger("test_rotation")
         for i in range(100):
             logger.info(f"这是一条测试日志消息 {i} " * 10)
-        
+
         # 刷新 handler
         for handler in logging.getLogger().handlers:
             if isinstance(handler, logging.handlers.RotatingFileHandler):
                 handler.flush()
                 handler.close()
-        
+
         # 验证备份文件存在
         backup_files = list(tmp_path.glob("test.log.*"))
         assert len(backup_files) > 0
@@ -243,20 +243,20 @@ class TestLogRotation:
     def test_log_rotation_respects_backup_count(self, tmp_path):
         """测试日志轮转遵守备份数量限制"""
         log_file = tmp_path / "test.log"
-        
+
         # 设置备份数量为 2
         setup_logging(level="INFO", log_file=str(log_file), max_size_mb=0.001, backup_count=2)
-        
+
         logger = logging.getLogger("test_rotation_count")
         # 写入大量日志触发多次轮转
         for i in range(500):
             logger.info(f"测试日志 {i} " * 20)
-        
+
         for handler in logging.getLogger().handlers:
             if isinstance(handler, logging.handlers.RotatingFileHandler):
                 handler.flush()
                 handler.close()
-        
+
         # 验证备份文件数量不超过 2
         backup_files = list(tmp_path.glob("test.log.*"))
         assert len(backup_files) <= 2
@@ -335,25 +335,25 @@ class TestMaxLevelFilter:
     def test_filter_allows_messages_up_to_max_level(self):
         """测试过滤器允许小于等于最大级别的消息"""
         filter_obj = MaxLevelFilter(logging.WARNING)
-        
+
         # DEBUG < WARNING，应该通过
         debug_record = logging.LogRecord(
             "test", logging.DEBUG, "", 0, "debug msg", (), None
         )
         assert filter_obj.filter(debug_record) is True
-        
+
         # INFO < WARNING，应该通过
         info_record = logging.LogRecord(
             "test", logging.INFO, "", 0, "info msg", (), None
         )
         assert filter_obj.filter(info_record) is True
-        
+
         # WARNING == WARNING，应该通过
         warning_record = logging.LogRecord(
             "test", logging.WARNING, "", 0, "warning msg", (), None
         )
         assert filter_obj.filter(warning_record) is True
-        
+
         # ERROR > WARNING，应该被过滤
         error_record = logging.LogRecord(
             "test", logging.ERROR, "", 0, "error msg", (), None
@@ -368,14 +368,14 @@ class TestLogFormat:
         """测试日志格式包含时间戳和级别"""
         log_file = tmp_path / "test.log"
         setup_logging(level="INFO", log_file=str(log_file), max_size_mb=2, backup_count=5)
-        
+
         logger = logging.getLogger("test_format")
         logger.info("测试消息")
-        
+
         for handler in logging.getLogger().handlers:
             if isinstance(handler, logging.handlers.RotatingFileHandler):
                 handler.flush()
-        
+
         content = log_file.read_text(encoding="utf-8")
         # 验证格式：时间戳 [级别] 消息
         assert "2026-" in content or "2025-" in content  # 时间戳

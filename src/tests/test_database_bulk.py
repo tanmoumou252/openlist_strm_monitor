@@ -27,6 +27,26 @@ def db():
 
 
 # ────────────────────────────────────────────────
+# lineage snapshot
+# ────────────────────────────────────────────────
+
+class TestLineageSnapshot:
+    def test_snapshot_round_trip_is_mapping_scoped(self, db: Database):
+        db.upsert_b_lineage_snapshot(
+            "m1", "C:/b/show.strm", 12, 34, "fp", "version", 1, "valid", 1.5)
+        row = db.get_b_lineage_snapshot("m1", "C:/b/show.strm")
+        assert row is not None
+        assert row.mapping_id == "m1"
+        assert row.file_size == 12
+        assert db.get_b_lineage_snapshot("m2", "C:/b/show.strm") is None
+
+    def test_invalid_snapshot_is_rejected(self, db: Database):
+        with pytest.raises(ValueError):
+            db.upsert_b_lineage_snapshot(
+                "m1", "C:/b/show.strm", 12, 34, "fp", "version", 1, "unknown")
+
+
+# ────────────────────────────────────────────────
 # bulk_connection
 # ────────────────────────────────────────────────
 
@@ -203,16 +223,16 @@ class TestGetAllGhostProtectedPaths:
 
 class TestGetAllBFingerprints:
 
-    def _insert_b_record(self, db: Database, local_path: str, fingerprint: str | None):
+    def _insert_b_record(self, db: Database, local_path: str, fingerprint: str | None, mapping_id: str = "test_mapping"):
         """辅助：插入一条 b_strm_files 记录。"""
         now = time.time()
         with db.rw_lock.write_locked(), db.connection() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO b_strm_files(
                     local_path, webdav_path, parent_webdav_path,
-                    source_a_path, fingerprint, status, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (local_path, f"/webdav/{local_path}", "/webdav/", "/a/path", fingerprint, "valid", now),
+                    source_a_path, fingerprint, status, updated_at, mapping_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (local_path, f"/webdav/{local_path}", "/webdav/", "/a/path", fingerprint, "valid", now, mapping_id),
             )
             conn.commit()
 
@@ -221,23 +241,23 @@ class TestGetAllBFingerprints:
         self._insert_b_record(db, "/b/a.strm", "fp-1")
         self._insert_b_record(db, "/b/b.strm", "fp-1")  # 重复
         self._insert_b_record(db, "/b/c.strm", "fp-2")
-        result = db.get_all_b_fingerprints()
+        result = db.get_all_b_fingerprints("test_mapping")
         assert result == {"fp-1", "fp-2"}
 
     def test_excludes_null_fingerprints(self, db: Database):
         """fingerprint 为 NULL 的记录不返回。"""
         self._insert_b_record(db, "/b/null.strm", None)
         self._insert_b_record(db, "/b/valid.strm", "fp-x")
-        result = db.get_all_b_fingerprints()
+        result = db.get_all_b_fingerprints("test_mapping")
         assert result == {"fp-x"}
 
     def test_empty_when_no_b_records(self, db: Database):
         """b_strm_files 为空时返回空集合。"""
-        assert db.get_all_b_fingerprints() == set()
+        assert db.get_all_b_fingerprints("test_mapping") == set()
 
     def test_returns_set_type(self, db: Database):
         """返回类型是 set。"""
-        assert isinstance(db.get_all_b_fingerprints(), set)
+        assert isinstance(db.get_all_b_fingerprints("test_mapping"), set)
 
 
 # ────────────────────────────────────────────────

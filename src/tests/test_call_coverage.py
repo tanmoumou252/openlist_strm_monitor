@@ -130,8 +130,7 @@ class TestMigrateConfigToDb:
         assert wdb.get_config("openlist", "webdav_password") == cfg.webdav.password
         assert wdb.get_config("openlist", "webdav_totp_secret") == cfg.webdav.totp_secret
 
-        # 验证路径配置
-        assert wdb.get_config("openlist", "b_root") == cfg.paths.b_root
+        # 验证路径配置(c_root 仍保留;b_root 已废弃不再持久化到 DB)
         assert wdb.get_config("openlist", "c_root") == cfg.paths.c_root
 
         # 验证行为配置

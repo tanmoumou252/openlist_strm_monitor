@@ -47,6 +47,34 @@ def remove_empty_dirs(root_folder: str | Path) -> None:
     root_folder = Path(root_folder)
     if not root_folder.exists():
         return
+    for directory in sorted(root_folder.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if not directory.is_dir():
+            continue
+        try:
+            next(directory.iterdir())
+        except StopIteration:
+            directory.rmdir()
+        except OSError:
+            continue
+
+
+def normalize_path(path: str | Path) -> str:
+    """规范化路径：解析为绝对路径，去除尾随斜杠，Windows 下小写。
+
+    Args:
+        path: 输入路径
+
+    Returns:
+        规范化后的路径字符串
+    """
+    p = Path(path).resolve()
+    result = str(p)
+    if os.name == "nt":
+        result = result.lower()
+    # 去除尾随斜杠（除了根目录）
+    if len(result) > 3 and result.endswith('/'):
+        result = result[:-1]
+    return result
 
     for current_root, dirs, files in os.walk(root_folder, topdown=False):
         current = Path(current_root)

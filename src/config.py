@@ -9,6 +9,14 @@ import json
 import hashlib
 from pathlib import Path
 
+
+def normalize_local_root(path: str | Path) -> Path:
+    """返回用于 mapping 归属判断的规范化本地根路径。"""
+    # 保留 resolved 的实际大小写用于文件系统和 DB 路径；Windows 大小写
+    # 等价性由 Path/比较方处理，mapping_id 单独使用 normcase。
+    return Path(path).expanduser().resolve()
+
+
 try:
     import tomllib
 except ImportError:
@@ -23,6 +31,27 @@ from utils.bootstrap import ensure_base_dir_first
 ensure_base_dir_first()
 
 
+LINEAGE_VERSION = 1
+
+
+def mapping_version(a_b_mappings: list["ABMapping"], c_root: str | Path) -> str:
+    """根据规范化 mapping 集合和全局 C 根生成稳定版本摘要。"""
+    payload = [
+        {
+            "mapping_id": str(m.mapping_id).strip(),
+            "a_root": str(normalize_local_root(m.a_root)),
+            "b_root": str(normalize_local_root(m.b_root)),
+        }
+        for m in a_b_mappings
+    ]
+    payload.sort(key=lambda item: item["mapping_id"])
+    canonical = json.dumps(
+        {"mappings": payload, "c_root": str(normalize_local_root(c_root))},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @dataclass(slots=True)
 class ABMapping:
     """A 区根目录到 B 区根目录的映射关系"""
@@ -34,9 +63,7 @@ class ABMapping:
     @staticmethod
     def generate_mapping_id(a_root: str) -> str:
         """由 A 根规范化路径生成稳定 mapping_id"""
-        normalized = str(Path(a_root).resolve())
-        if os.name == "nt":
-            normalized = normalized.lower()
+        normalized = str(normalize_local_root(a_root))
         return hashlib.sha1(normalized.encode()).hexdigest()[:8]
 
 
@@ -224,7 +251,7 @@ class AppConfig:
 
     def update_from_db(self, watchlist_db) -> None:
         """从 DB 的 webui_config 表加载 OpenList 配置覆盖。
-        
+
         优先级：DB > config.toml
         使用映射表简化重复代码，避免大量 if-statement。
         """
@@ -234,7 +261,7 @@ class AppConfig:
             db_cfg = watchlist_db.get_all_config("openlist")
             if not db_cfg:
                 return
-            
+
             # 配置映射：(DB key, 目标对象, 属性名, 转换函数)
             config_mappings = [
                 # WebDAV 配置
@@ -242,11 +269,11 @@ class AppConfig:
                 ("webdav_user", self.webdav, "user", str),
                 ("webdav_password", self.webdav, "password", str),
                 ("webdav_totp_secret", self.webdav, "totp_secret", str),
-                
+
                 # 路径配置
                 ("b_root", self.paths, "b_root", str),
                 ("c_root", self.paths, "c_root", str),
-                
+
                 # 行为配置
                 ("behavior_action", self.behavior, "action", str),
                 ("behavior_trash_dir_name", self.behavior, "trash_dir_name", str),
@@ -265,7 +292,7 @@ class AppConfig:
                 # 日志保存路径（DB 往返的关键键，勿删；留空时回退 strm_bridge.log）
                 ("log_file", self.log, "file", str),
             ]
-            
+
             # 应用简单配置
             for db_key, target, attr, converter in config_mappings:
                 if db_key in db_cfg:
@@ -288,7 +315,7 @@ class AppConfig:
                 self.local.b_dir = db_cfg["b_root"]
             if "c_root" in db_cfg:
                 self.local.c_dir = db_cfg["c_root"]
-            
+
             # 刷新配置（需要特殊处理：分钟转秒）
             refresh_cfg = self.refresh
             if "refresh_enabled" in db_cfg:
@@ -303,7 +330,7 @@ class AppConfig:
                     refresh_cfg.depth = int(db_cfg["refresh_depth"])
                 except (ValueError, TypeError) as e:
                     logging.warning("[Config] 转换 refresh_depth 失败: %s", e)
-            
+
             # OpenList 初始化标志
             if "engines_initialized" in db_cfg:
                 self.engines_initialized = self._to_bool(db_cfg["engines_initialized"])
@@ -322,7 +349,7 @@ class AppConfig:
                 except (json.JSONDecodeError, TypeError) as e:
                     logging.warning("[Config] 解析 strm_engines 失败: %s", e)
                     self.openlist_strm_engines = []
-            
+
             if "refresh_paths" in db_cfg:
                 try:
                     self.openlist_refresh_paths = json.loads(db_cfg["refresh_paths"])
@@ -330,7 +357,7 @@ class AppConfig:
                 except (json.JSONDecodeError, TypeError) as e:
                     logging.warning("[Config] 解析 refresh_paths 失败: %s", e)
                     self.openlist_refresh_paths = []
-            
+
             # 从 strm_storage_map 派生 a_folders（仅限用户配置的引擎，
             # 与 load_strm_storage_from_api 的派生逻辑保持一致）
             configured_engines = set(
@@ -363,14 +390,11 @@ class AppConfig:
                 except (json.JSONDecodeError, TypeError) as e:
                     logging.warning("[Config] 解析 a_b_mappings 失败: %s", e)
                     self.a_b_mappings = []
-            
-            # 旧配置自动迁移：若 a_b_mappings 为空但有旧 a_folders + b_root，自动迁移
-            self._migrate_legacy_to_ab_mappings()
 
             logging.info("[Config] 已从 DB 加载 OpenList 配置 (%d 项)", len(db_cfg))
         except Exception as e:
             logging.warning("[Config] 从 DB 加载 OpenList 配置失败: %s", e)
-    
+
     def _to_bool(self, value) -> bool:
         """转换为布尔值（支持字符串和布尔类型）"""
         if isinstance(value, bool):
@@ -379,26 +403,10 @@ class AppConfig:
             return value.lower() in ("true", "1", "yes")
         return bool(value)
 
-    def _migrate_legacy_to_ab_mappings(self) -> None:
-        """旧配置自动迁移：若 a_b_mappings 为空但有旧 a_folders + b_root，自动迁移"""
-        if self.a_b_mappings:
-            return
-        if not self.a_folders or not self.paths.b_root:
-            return
-        self.a_b_mappings = [
-            ABMapping(
-                mapping_id="",  # 由后端根据 A 根生成
-                a_root=str(Path(a).resolve()),
-                b_root=str(Path(self.paths.b_root).resolve()),
-                label=f"映射#{i+1}"
-            )
-            for i, a in enumerate(self.a_folders)
-        ]
-
     @classmethod
     def from_file(cls, toml_path: str) -> "AppConfig":
         """从 config.toml 文件加载配置（纯文件解析，无网络调用）。
-        
+
         STRM 存储映射需要后续调用 load_strm_storage_from_api() 显式加载。
         """
         with open(toml_path, "rb") as f:
@@ -496,13 +504,13 @@ class AppConfig:
         instance.paths = paths
         instance.webui = webui
         instance.tmdb = tmdb
-        
+
         # 初始化为空，后续由 load_strm_storage_from_api() 填充
         instance.a_folders = []
         instance.strm_storage_map = {}
         instance.openlist_strm_engines = []
         instance.openlist_refresh_paths = []
-        
+
         return instance
 
     def load_strm_storage_from_api(self, admin_client=None) -> None:
@@ -629,33 +637,32 @@ class AppConfig:
 
 def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
     """将 config.toml 和 txt 文件中的配置迁移到 DB。
-    
+
     检查 migration scope 的 config_toml_migrated key：
     - 如果已迁移，返回 False
     - 如果未迁移，从 config 读取旧配置写入 DB openlist scope，返回 True
     """
     if not watchlist_db:
         return False
-    
+
     # 检查是否已迁移
     migrated = watchlist_db.get_config("migration", "config_toml_migrated", "")
     if migrated == "true":
         logging.debug("[Migration] OpenList 配置已迁移，跳过")
         return False
-    
+
     logging.info("[Migration] 首次启动，正在将 config.toml 配置迁移到 DB...")
-    
+
     try:
         # WebDAV 配置
         watchlist_db.set_config("openlist", "webdav_host", config.webdav.host)
         watchlist_db.set_config("openlist", "webdav_user", config.webdav.user)
         watchlist_db.set_config("openlist", "webdav_password", config.webdav.password)
         watchlist_db.set_config("openlist", "webdav_totp_secret", config.webdav.totp_secret)
-        
+
         # 路径配置
-        watchlist_db.set_config("openlist", "b_root", config.paths.b_root)
         watchlist_db.set_config("openlist", "c_root", config.paths.c_root)
-        
+
         # 刷新路径（JSON 数组）
         # 运行时 refresh_paths 已不再从 txt 文件加载（改为 WebUI/DB 配置）。
         # 但为兼容首次升级、尚未迁移的旧用户，迁移阶段仍尝试读取遗留的
@@ -672,7 +679,7 @@ def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
             )
         watchlist_db.set_config("openlist", "refresh_paths",
                                 json.dumps(legacy_refresh_paths, ensure_ascii=False))
-        
+
         # STRM 引擎配置
         # ⚠️ a 区来源仅以 "用户在 WebUI 手动添加并保存的引擎" 为唯一真相来源
         # （DB 键 openlist.strm_engines，由 WebUI POST 写入）。
@@ -688,7 +695,7 @@ def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
         # 让 load_strm_storage_from_api 走"用户已保存（可能为空）"分支而非"首次运行"
         # 分支，避免后续误注入全部 OpenList 引擎。
         watchlist_db.set_config("openlist", "engines_initialized", "true")
-        
+
         # 刷新配置
         watchlist_db.set_config("openlist", "refresh_enabled",
                                 str(config.refresh.enabled).lower())
@@ -698,7 +705,7 @@ def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
                                 str(config.refresh.depth))
         watchlist_db.set_config("openlist", "refresh_log_level",
                                 config.refresh.log_level)
-        
+
         # 行为配置
         watchlist_db.set_config("openlist", "behavior_action", config.behavior.action)
         watchlist_db.set_config("openlist", "behavior_trash_dir_name", config.behavior.trash_dir_name)
@@ -710,17 +717,17 @@ def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
                                 str(config.behavior.sync_on_startup).lower())
         watchlist_db.set_config("openlist", "behavior_sync_on_startup_wait",
                                 str(config.behavior.sync_on_startup_wait))
-        
+
         # 日志配置
         watchlist_db.set_config("openlist", "log_level", config.log.level)
         watchlist_db.set_config("openlist", "log_max_size_mb", str(config.log.max_size_mb))
         watchlist_db.set_config("openlist", "log_backup_count", str(config.log.backup_count))
         # 日志保存路径：迁移写入 DB，保证后续 update_from_db 能读回（勿删此键）
         watchlist_db.set_config("openlist", "log_file", config.log.file)
-        
+
         # 标记已迁移
         watchlist_db.set_config("migration", "config_toml_migrated", "true")
-        
+
         logging.info("[Migration] OpenList 配置已迁移到 DB (20 个键 + 1 个迁移标记)")
         return True
     except Exception as e:

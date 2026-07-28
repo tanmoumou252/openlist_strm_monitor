@@ -9,7 +9,7 @@
 启动方式：
   - 仅启动主程序：python src/main.py
   - 启动 WebUI（含交互菜单）：python src/webui/server.py
-  
+
 WebUI 入口文件：src/webui/server.py 的 main() 函数
 """
 
@@ -57,7 +57,7 @@ def main() -> None:
         print("\nWebUI 入口文件: src/webui/server.py")
         print("="*60 + "\n")
         sys.exit(1)
-    
+
     # 配置文件在项目根目录
     config = AppConfig.from_file(os.path.join(PROJECT_ROOT, "config.toml"))
     setup_logging(
@@ -67,7 +67,7 @@ def main() -> None:
         backup_count=config.log.backup_count,
     )
     db = Database(config.local.db_file)
-    
+
     # --- 配置迁移：首次启动时将 config.toml 迁移到 DB ---
     from tmdb_watchlist_db import TmdbWatchlistDb
     from config import migrate_config_to_db
@@ -80,13 +80,13 @@ def main() -> None:
     except Exception as exc:
         logging.warning("[Migration] 迁移过程异常: %s", exc)
     # ---------------------------------------------------
-    
+
     # 从 OpenList API 加载 STRM 存储映射（需要网络）
     try:
         config.load_strm_storage_from_api()
     except Exception as exc:
         logging.warning("[STRM存储] 加载失败: %s", exc)
-    
+
     # 创建 OpenListAdminClient 并用 Admin API 验证
     admin_client = OpenListAdminClient(
         config.webdav.host,

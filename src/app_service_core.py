@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from config import AppConfig
+from config import AppConfig, ABMapping, LINEAGE_VERSION, mapping_version, normalize_local_root
 from database import Database, ARecord, BRecord
 from domain.media.subtitle_handler import SubtitleHandler
 from domain.sync.sync_service import SyncService
@@ -209,31 +209,16 @@ class AppService:
         self.cleanup_lock = self._cleanup_lock
         self.pending_cleanups = self._pending_cleanups
         
-# 多 A↔多 B 映射
-        a_b_mappings = getattr(config, 'a_b_mappings', [])
-        if not isinstance(a_b_mappings, list):
-            a_b_mappings = []
-        self.a_b_mappings: list[ABMapping] = a_b_mappings
-        # 向后兼容：若 a_b_mappings 为空但有旧 a_folders + b_root，自动构建映射
-        a_folders = getattr(config, 'a_folders', [])
-        if not isinstance(a_folders, list):
-            a_folders = []
-        b_root = getattr(config.paths, 'b_root', None) if getattr(config, 'paths', None) else None
-        if not self.a_b_mappings and a_folders and b_root:
-            from config import ABMapping
-            self.a_b_mappings = [
-                ABMapping(
-                    mapping_id="",
-                    a_root=str(Path(a).resolve()),
-                    b_root=str(Path(b_root).resolve()),
-                    label=f"映射#{i+1}"
-                )
-                for i, a in enumerate(a_folders)
-            ]
-        self.a_roots = [Path(m.a_root).resolve() for m in self.a_b_mappings]
+        # 多 A↔多 B 映射：运行时只接受显式配置，不从旧单根字段推导 fallback。
+        a_b_mappings = getattr(config, "a_b_mappings", [])
+        self.a_b_mappings: list[ABMapping] = (
+            a_b_mappings if isinstance(a_b_mappings, list) else []
+        )
+        self.a_roots = [normalize_local_root(m.a_root) for m in self.a_b_mappings]
         self._a_to_b_map: dict[str, Path] = {
-            str(Path(m.a_root).resolve()): Path(m.b_root).resolve()
+            str(normalize_local_root(m.a_root)): normalize_local_root(m.b_root)
             for m in self.a_b_mappings
+            if getattr(m, "mapping_id", "") and getattr(m, "a_root", "") and getattr(m, "b_root", "")
         }
         # C 根单一全局，不建立 _a_to_c_map
         
@@ -259,8 +244,10 @@ class AppService:
         self._refresh_lock = threading.Lock()
         self.sync_service = SyncService(self)
         self.subtitle_handler = SubtitleHandler(self)
+        self._mapping_version = mapping_version(self.a_b_mappings, self.c_root)
 
-    # 兼容属性：旧代码访问 self.b_root / self.c_root 时自动回退
+    # b_root 不作为生产同步、清理、迁移或血统推导的 fallback。
+    # 保留只读属性以兼容外部旧调用，但调用方必须先解析唯一 mapping。
     @property
     def b_root(self) -> Path:
         return next(iter(self._a_to_b_map.values())) if self._a_to_b_map else Path()
@@ -480,6 +467,11 @@ class AppService:
         logging.info("[启动] 准备环境并初始化数据库...")
         self.prepare_environment()
         self.db.init_db()
+        config_status = self.get_config_status()
+        if config_status["status"] != "ready":
+            logging.warning("[启动] 配置未就绪，进入 fail-safe: %s", config_status)
+            self._running = False
+            return
         logging.info("[启动] 数据库初始化完成")
         # 清理字幕表中目标文件已不存在的记录
         self.db.cleanup_invalid_subtitles()
@@ -554,6 +546,9 @@ class AppService:
         self.c_root.mkdir(parents=True, exist_ok=True)
 
     def start_watchers(self) -> None:
+        if self.get_config_status()["status"] != "ready":
+            logging.warning("[监控启动] 配置未就绪，禁止启动 watcher")
+            return
         from watchdog.observers import Observer
         self.observer = Observer()
         active_a = 0
@@ -578,37 +573,77 @@ class AppService:
         if active_a == 0:
             logging.warning("[提示] 没有可用的 A 区监控目录，程序将依赖后续目录出现或主动刷新")
 
-    def get_a_root_for_path(self, local_path: str | Path) -> Path | None:
-        target = Path(local_path).resolve()
-        for a_root in self.a_roots:
+    def get_mapping_for_a(self, local_path: str | Path) -> tuple[str, Path, Path] | None:
+        """严格解析 A 路径所属的唯一 mapping。零/多命中均 fail-closed。"""
+        target = normalize_local_root(local_path)
+        matches: list[tuple[str, Path, Path]] = []
+        for mapping in self.a_b_mappings:
+            mapping_id = str(getattr(mapping, "mapping_id", "")).strip()
+            if not mapping_id:
+                continue
+            a_root = normalize_local_root(mapping.a_root)
+            b_root = normalize_local_root(mapping.b_root)
             try:
                 target.relative_to(a_root)
-                return a_root
             except ValueError:
                 continue
-        return None
+            matches.append((mapping_id, a_root, b_root))
+        return matches[0] if len(matches) == 1 else None
 
-    def get_b_root_for_a(self, a_local_path: str | Path) -> Path:
-        """根据 A 区路径获取对应的 B 区根目录"""
-        a_root = self.get_a_root_for_path(a_local_path)
-        if a_root is None:
-            raise ValueError(f"文件不属于任何A根目录: {a_local_path}")
-        a_root_norm = str(Path(a_root).resolve())
-        b_root = self._a_to_b_map.get(a_root_norm)
-        if b_root is None:
-            raise ValueError(f"A根 {a_root} 没有对应的B根映射")
-        return b_root
-
-    def get_b_root_for_path(self, b_local_path: str | Path) -> Path | None:
-        """根据 B 区路径反查所属的 B 区根目录"""
-        target = Path(b_local_path).resolve()
-        for b_root in self._a_to_b_map.values():
+    def get_mapping_for_b(self, local_path: str | Path) -> tuple[str, Path, Path] | None:
+        """严格解析 B 路径所属的唯一 mapping。零/多命中均 fail-closed。"""
+        target = normalize_local_root(local_path)
+        matches: list[tuple[str, Path, Path]] = []
+        for mapping in self.a_b_mappings:
+            mapping_id = str(getattr(mapping, "mapping_id", "")).strip()
+            if not mapping_id:
+                continue
+            a_root = normalize_local_root(mapping.a_root)
+            b_root = normalize_local_root(mapping.b_root)
             try:
                 target.relative_to(b_root)
-                return b_root
             except ValueError:
                 continue
-        return None
+            matches.append((mapping_id, b_root, a_root))
+        return matches[0] if len(matches) == 1 else None
+
+    def get_config_status(self) -> dict[str, object]:
+        """返回可供 WebUI 使用的配置状态，不触发任何危险操作。"""
+        if not self.a_b_mappings:
+            return {"status": "not_configured", "reason": "没有配置 A/B mapping"}
+        seen_ids: set[str] = set()
+        seen_a: list[Path] = []
+        seen_b: list[Path] = []
+        for mapping in self.a_b_mappings:
+            mapping_id = str(getattr(mapping, "mapping_id", "")).strip()
+            if not mapping_id or mapping_id in seen_ids or not str(getattr(mapping, "a_root", "")).strip() or not str(getattr(mapping, "b_root", "")).strip():
+                return {"status": "fail_safe_active", "reason": "mapping 缺少唯一 ID 或根路径"}
+            seen_ids.add(mapping_id)
+            a_root = normalize_local_root(mapping.a_root)
+            b_root = normalize_local_root(mapping.b_root)
+            if any(a_root == old or b_root == old for old in seen_a + seen_b):
+                return {"status": "fail_safe_active", "reason": "mapping 根路径重复"}
+            seen_a.append(a_root)
+            seen_b.append(b_root)
+        return {"status": "ready", "reason": "mapping 配置有效"}
+
+    def get_a_root_for_path(self, local_path: str | Path) -> Path | None:
+        mapping = self.get_mapping_for_a(local_path)
+        return mapping[1] if mapping else None
+
+    def get_b_root_for_a(self, a_local_path: str | Path) -> Path:
+        mapping = self.get_mapping_for_a(a_local_path)
+        if mapping is None:
+            raise ValueError(f"文件无法唯一解析 A/B mapping: {a_local_path}")
+        return mapping[2]
+
+    def get_b_root_for_path(self, b_local_path: str | Path) -> Path | None:
+        mapping = self.get_mapping_for_b(b_local_path)
+        return mapping[1] if mapping else None
+
+    def _mapping_id_for_b(self, b_local_path: str | Path) -> str | None:
+        mapping = self.get_mapping_for_b(b_local_path)
+        return mapping[0] if mapping else None
 
     def build_b_path_from_a(self, a_local_path: str | Path,
                             webdav_path: str | None = None) -> Path:
@@ -862,7 +897,11 @@ class AppService:
         if a_media_name == b_media_name:
             self._log_lineage_pass_once("同一媒体不同Season", b_local_path)
             return True
-        boundary = self.db.get_media_boundary_by_source_name_only(a_media_name)
+        mapping = self.get_mapping_for_b(b_local_path)
+        if mapping is None:
+            logging.warning("[边界映射] 无法解析 mapping，跳过媒体名匹配: %s", b_local_path)
+            return False
+        boundary = self.db.get_media_boundary_by_source_name_only(mapping[0], a_media_name)
         if boundary:
             if b_media_name in (boundary.source_media_name, boundary.current_media_name):
                 self._log_lineage_pass_once("边界映射Season变化", b_local_path)
@@ -918,8 +957,10 @@ class AppService:
             self, fingerprint: str, cloud_show_name: str | None,
             physical_media_folder_name: str | None, b_local_path: str) -> bool:
         """检查边界映射匹配关系。"""
-        if fingerprint:
-            boundary = self.db.get_media_boundary_by_fingerprint(fingerprint)
+        mapping = self.get_mapping_for_b(b_local_path)
+        mapping_id = mapping[0] if mapping else None
+        if fingerprint and mapping_id:
+            boundary = self.db.get_media_boundary_by_fingerprint(mapping_id, fingerprint)
             if boundary:
                 source_media_name = boundary.source_media_name
                 current_media_name = boundary.current_media_name
@@ -930,9 +971,14 @@ class AppService:
                     self._log_lineage_pass_once("回到源边界", b_local_path)
                     return True
 
+        mapping = self.get_mapping_for_b(b_local_path)
+        if mapping is None:
+            logging.warning("[边界映射] 无法解析 mapping，跳过边界匹配: %s", b_local_path)
+            return False
+        mapping_id, b_root, _ = mapping
         if cloud_show_name and physical_media_folder_name:
             boundary_by_source = self.db.get_media_boundary_by_source_name_only(
-                physical_media_folder_name)
+                mapping_id, physical_media_folder_name)
             if boundary_by_source:
                 mapped_source = boundary_by_source.source_media_name
                 mapped_current = boundary_by_source.current_media_name
@@ -941,7 +987,7 @@ class AppService:
                     return True
 
             boundary_by_current = self.db.get_media_boundary_by_current_name(
-                physical_media_folder_name, str(self.get_b_root_for_path(b_local_path) or Path()))
+                mapping_id, physical_media_folder_name, str(b_root))
             if boundary_by_current:
                 mapped_source = boundary_by_current.source_media_name
                 mapped_current = boundary_by_current.current_media_name
@@ -950,7 +996,7 @@ class AppService:
                     return True
 
             boundary_by_cloud = self.db.get_media_boundary_by_source_name_only(
-                cloud_show_name)
+                mapping_id, cloud_show_name)
             if boundary_by_cloud:
                 mapped_source = boundary_by_cloud.source_media_name
                 mapped_current = boundary_by_cloud.current_media_name
@@ -964,10 +1010,15 @@ class AppService:
             self, fingerprint: str, cloud_show_name: str,
             physical_media_folder_name: str, b_local_path: str) -> None:
         """处理同步阶段的边界映射记录。"""
-        b_root = self.get_b_root_for_path(b_local_path) or Path()
-        existing = self.db.get_media_boundary_by_fingerprint(fingerprint)
+        mapping = self.get_mapping_for_b(b_local_path)
+        if mapping is None:
+            logging.warning("[边界映射] 无法解析 mapping，跳过记录: %s", b_local_path)
+            return
+        mapping_id, b_root, _ = mapping
+        existing = self.db.get_media_boundary_by_fingerprint(mapping_id, fingerprint)
         if not existing:
             self.db.upsert_media_boundary(
+                mapping_id=mapping_id,
                 fingerprint=fingerprint,
                 source_media_name=cloud_show_name,
                 current_media_name=physical_media_folder_name,
@@ -978,6 +1029,7 @@ class AppService:
                 physical_media_folder_name)
         elif existing.current_media_name != physical_media_folder_name:
             self.db.upsert_media_boundary(
+                mapping_id=mapping_id,
                 fingerprint=fingerprint,
                 source_media_name=existing.source_media_name,
                 current_media_name=physical_media_folder_name,
@@ -998,7 +1050,11 @@ class AppService:
             if total_a_episodes <= 1:
                 return True
 
-            b_root = self.get_b_root_for_path(b_local_path) or self.b_root
+            mapping = self.get_mapping_for_b(b_local_path)
+            if mapping is None:
+                logging.warning("[单兵检查] 无法唯一解析 B 区 mapping，安全跳过: %s", b_local_path)
+                return True
+            _, b_root, _ = mapping
             physical_media_root_dir = b_root
             for i, part in enumerate(b_parts):
                 if part == physical_media_folder_name:
@@ -1059,8 +1115,10 @@ class AppService:
         else:
             logging.info("[单兵审判] 审判结果：判定为合法的批量操作或单集作品，予以保留。")
 
-    def initial_scan_b(self) -> None:
+    def initial_scan_b(self, *, force_full: bool = False) -> None:
         """初始化扫描 B 区现有文件，与数据库记录进行同步。
+
+        ``force_full`` 只禁用 snapshot 快速路径；配置 fail-safe 时仍拒绝扫描。
         
         拆分为多个子函数以提高可读性：
         1. _scan_b_disk: 扫描磁盘文件
@@ -1069,7 +1127,10 @@ class AppService:
         4. _insert_new_b_records: 插入磁盘上新的 B 区记录
         """
         t_total = time.time()
-        logging.info("[初始化] B 区逆向自同步开始...")
+        if self.get_config_status()["status"] != "ready":
+            logging.warning("[初始化] 配置处于 fail-safe，拒绝 B 区扫描 (force_full=%s)", force_full)
+            return
+        logging.info("[初始化] B 区逆向自同步开始 (force_full=%s)...", force_full)
         disk_data = self._scan_b_disk()
         if disk_data is None:
             return
@@ -1079,9 +1140,43 @@ class AppService:
             return
         
         processed = set()
-        self._reconcile_b_historical_records(disk_data, db_records, processed)
+        self._reconcile_b_historical_records(disk_data, db_records, processed, force_full=force_full)
         self._insert_new_b_records(disk_data, processed)
         logging.info("[初始化] B 区逆向自同步完成 (%.1fs)", time.time() - t_total)
+
+    def _snapshot_reuses_valid_lineage(
+            self, local_path: str, fingerprint: str | None) -> bool:
+        mapping = self.get_mapping_for_b(local_path)
+        if mapping is None or not fingerprint:
+            return False
+        try:
+            stat_before = Path(local_path).stat()
+            snapshot = self.db.get_b_lineage_snapshot(mapping[0], local_path)
+            if snapshot is None:
+                return False
+            return (
+                snapshot.validation_state == "valid"
+                and snapshot.mapping_version == self._mapping_version
+                and snapshot.lineage_version == LINEAGE_VERSION
+                and snapshot.fingerprint == fingerprint
+                and snapshot.file_size == stat_before.st_size
+                and snapshot.mtime_ns == stat_before.st_mtime_ns
+            )
+        except (OSError, AttributeError, TypeError, ValueError) as exc:
+            logging.warning("[B区快照] 读取/比较失败，回退完整核对: %s (%s)", local_path, exc)
+            return False
+
+    def _store_valid_lineage_snapshot(self, local_path: str, fingerprint: str | None) -> None:
+        mapping = self.get_mapping_for_b(local_path)
+        if mapping is None or not fingerprint:
+            return
+        try:
+            stat_after = Path(local_path).stat()
+            self.db.upsert_b_lineage_snapshot(
+                mapping[0], local_path, stat_after.st_size, stat_after.st_mtime_ns,
+                fingerprint, self._mapping_version, LINEAGE_VERSION, "valid")
+        except (OSError, AttributeError, TypeError, ValueError) as exc:
+            logging.warning("[B区快照] 写入失败，记录保留但不复用: %s (%s)", local_path, exc)
 
     def _scan_b_disk(self) -> tuple[dict, dict] | None:
         """扫描 B 区磁盘文件，返回 (fingerprint_to_paths, path_to_data)"""
@@ -1136,11 +1231,13 @@ class AppService:
             return None
 
     def _reconcile_b_historical_records(
-        self, 
-        disk_data: tuple[dict, dict], 
-        db_records: list, 
-        processed: set
-    ) -> None:
+         self,
+         disk_data: tuple[dict, dict],
+         db_records: list,
+         processed: set,
+         force_full: bool = False,
+     ) -> None:
+
         """对比历史 DB 记录与磁盘数据，处理越界/迁移/删除"""
         t_start = time.time()
         logging.info("[初始化] B 区历史记录核对开始 (%d 条)", len(db_records))
@@ -1172,6 +1269,11 @@ class AppService:
             # 历史 DB 记录在磁盘上存在且指纹匹配
             if db_local_path in disk_path_to_data and disk_path_to_data[db_local_path]["fp"] == db_fingerprint:
                 webdav_path = disk_path_to_data[db_local_path]["webdav"]
+                row_mapping_id = getattr(row, "mapping_id", "") or self._mapping_id_for_b(db_local_path)
+                if not force_full and row_mapping_id and self._snapshot_reuses_valid_lineage(db_local_path, db_fingerprint):
+                    processed.add(db_local_path)
+                    logging.debug("[B区历史核对] 复用有效 lineage snapshot: %s", db_local_path)
+                    continue
                 logging.debug("[B区历史核对] lineage 校验: %s", db_local_path)
                 t_op = time.time()
                 if not self._verify_b_path_lineage(db_local_path, webdav_path):
@@ -1191,6 +1293,8 @@ class AppService:
                 if op_elapsed > B_SCAN_SLOW_OPERATION_SECONDS:
                     logging.warning("[B区历史核对] lineage 校验耗时 %.1fs: %s", op_elapsed, db_local_path)
                 processed.add(db_local_path)
+                if row_mapping_id:
+                    self._store_valid_lineage_snapshot(db_local_path, db_fingerprint)
                 continue
             
             # 历史 DB 记录的指纹在磁盘上存在，但路径不同（可能是重命名）
@@ -1200,7 +1304,7 @@ class AppService:
             
             for candidate_path in available_paths:
                 candidate_webdav = disk_path_to_data[candidate_path]["webdav"]
-                logging.debug("[B区历史核对] 候选路径 lineage 校验: %s", candidate_path)
+                logging.debug("[B区历史核对] 候选路径 lineage 校验: %s", db_local_path)
                 t_op = time.time()
                 if self._verify_b_path_lineage(candidate_path, candidate_webdav):
                     valid_new_path = candidate_path
@@ -1219,11 +1323,15 @@ class AppService:
             if valid_new_path:
                 logging.debug("[B区历史核对] 路径迁移: %s -> %s", db_local_path, valid_new_path)
                 self._handle_b_record_migration(db_local_path, valid_new_path, db_fingerprint)
+                self._store_valid_lineage_snapshot(valid_new_path, db_fingerprint)
                 processed.add(valid_new_path)
+
             else:
                 logging.debug("[B区历史核对] 无匹配磁盘路径，删除并刷新: %s", db_local_path)
                 self.db.delete_b_by_local(db_local_path)
-                self.refresh_identity_current_b_path(db_fingerprint)
+                mapping_id = getattr(row, "mapping_id", "") or self._mapping_id_for_b(db_local_path)
+                if mapping_id:
+                    self.refresh_identity_current_b_path(db_fingerprint, mapping_id)
                 logging.debug("[B区自同步] 删除失效数据库记录: %s", db_local_path)
 
         logging.info("[初始化] B 区历史记录核对完成 (%d/%d 条, %.1fs)",
@@ -1231,6 +1339,10 @@ class AppService:
 
     def _handle_b_record_migration(self, old_path: str, new_path: str, fingerprint: str) -> None:
         """处理 B 区记录的路径迁移"""
+        mapping_id = self._mapping_id_for_b(new_path) or self._mapping_id_for_b(old_path)
+        if not mapping_id:
+            logging.warning("[B区自同步] 无法解析 mapping，跳过路径迁移: %s -> %s", old_path, new_path)
+            return
         self.db.move_b_record(old_path, new_path)
         identity = self.db.get_identity_by_fingerprint(fingerprint)
         if identity and identity.current_b_path == old_path:
@@ -1245,7 +1357,7 @@ class AppService:
             logging.warning("[B区自同步] 删除旧路径物理文件失败: %s (%s)", old_path, e)
         
         if fingerprint:
-            self.ensure_single_visible_instance(fingerprint, new_path)
+            self.ensure_single_visible_instance(fingerprint, new_path, mapping_id=mapping_id)
         
         logging.info("[B区自同步] 更新路径(合法重命名): %s -> %s", old_path, new_path)
 
@@ -1266,17 +1378,24 @@ class AppService:
                     safe_remove_file(disk_path)
                     continue
                 
+                mapping_id = self._mapping_id_for_b(disk_path)
+                if not mapping_id:
+                    logging.warning("[初始化] 无法解析 B mapping，跳过记录: %s", disk_path)
+                    continue
                 self.db.upsert_b(
                     disk_path,
                     webdav_path,
                     webdav_parent(webdav_path),
                     None,  # source_a_path 在初始化扫描阶段未知，后续由 A→B 同步补全
                     fingerprint=fingerprint,
+                    mapping_id=mapping_id,
                     status="valid",
                 )
-                self.refresh_identity_current_b_path(fingerprint)
+                self.refresh_identity_current_b_path(fingerprint, mapping_id)
+                self._store_valid_lineage_snapshot(disk_path, fingerprint)
                 if fingerprint:
-                    self.ensure_single_visible_instance(fingerprint, disk_path)
+                    self.ensure_single_visible_instance(fingerprint, disk_path, mapping_id=self._mapping_id_for_b(disk_path))
+
                 new_insert_count += 1
                 
                 # 每 200 条输出进度
@@ -1538,28 +1657,72 @@ class AppService:
             use_bulk: bool = False) -> None:
         return self.sync_service.scan_a_to_b_full_sync(valid_engine_paths, use_bulk)
 
+    def get_c_path_for_b(
+            self, mapping_id: str, b_path: str | Path, b_root: str | Path) -> Path:
+        """按 mapping 生成并校验 B→C 的隔离路径。"""
+        mapping_id = str(mapping_id).strip()
+        if not mapping_id:
+            raise ValueError("mapping_id must be non-empty")
+        b_path_resolved = Path(b_path).resolve()
+        b_root_resolved = Path(b_root).resolve()
+        try:
+            relative = b_path_resolved.relative_to(b_root_resolved)
+        except ValueError as exc:
+            raise ValueError("B path escapes mapping root") from exc
+        if ".." in relative.parts:
+            raise ValueError("B path escapes mapping root")
+        return self.c_root / mapping_id / relative
+
+    @staticmethod
+    def _original_strm_candidate(path: str | Path) -> Path:
+        """将隔离后缀路径还原为可能的原始 STRM 路径。"""
+        candidate = Path(path)
+        name = candidate.name
+        for marker in (".duplicate", ".quarantined", ".invalid"):
+            index = name.find(marker)
+            if index >= 0:
+                return candidate.with_name(name[:index])
+        return candidate
+
     def cleanup_b_redundant(self) -> None:
-        # 遍历所有 B 根目录
+        # 后缀文件不是凭文件名即可删除：先解析自身/原始路径身份，并要求同源证明。
         for b_root in self._a_to_b_map.values():
             if not b_root.exists():
                 continue
             redundant_keywords = ["duplicate", "quarantined", "invalid"]
+            suffix_paths: set[Path] = set()
             for keyword in redundant_keywords:
-                for file_path in b_root.rglob(f"*.{keyword}"):
-                    try:
-                        safe_remove_file(file_path)
-                        self.db.delete_b_by_local(str(file_path))
-                        logging.info("[冗余清理] 已删除冗余文件: %s", file_path)
-                    except OSError as e:
-                        logging.warning("[冗余清理] 删除冗余文件失败: %s (%s)", file_path, e)
-                for file_path in b_root.rglob(f"*.{keyword}.*"):
-                    try:
-                        safe_remove_file(file_path)
-                        self.db.delete_b_by_local(str(file_path))
-                        logging.info("[冗余清理] 已删除带时间戳的冗余文件: %s", file_path)
-                    except OSError as e:
-                        logging.warning(
-                            "[冗余清理] 删除带时间戳冗余文件失败: %s (%s)", file_path, e)
+                suffix_paths.update(b_root.rglob(f"*.{keyword}"))
+                suffix_paths.update(b_root.rglob(f"*.{keyword}.*"))
+            for file_path in suffix_paths:
+                mapping = self.get_mapping_for_b(file_path)
+                if mapping is None:
+                    logging.warning("[冗余清理] 后缀文件 mapping 不明确，保留: %s", file_path)
+                    continue
+                candidate = self._original_strm_candidate(file_path)
+                own_record = self.db.get_b_by_local_full(str(file_path))
+                original_record = self.db.get_b_by_local_full(str(candidate))
+                source = read_strm_webdav_path(file_path)
+                if not source and own_record:
+                    source = own_record.webdav_path
+                if not source and original_record:
+                    source = original_record.webdav_path
+                if not source:
+                    logging.warning("[冗余清理] 后缀文件身份未知，保留: %s", file_path)
+                    continue
+                if candidate.exists():
+                    candidate_source = read_strm_webdav_path(candidate)
+                    if candidate_source != source:
+                        logging.warning("[冗余清理] 后缀文件与原始文件异源，保留: %s", file_path)
+                        continue
+                if not safe_remove_file(file_path):
+                    logging.warning("[冗余清理] 后缀文件删除失败，保留: %s", file_path)
+                    continue
+                self.db.delete_b_by_local(str(file_path))
+                if original_record and isinstance(original_record.fingerprint, str) and original_record.fingerprint:
+                    self.refresh_identity_current_b_path(
+                        original_record.fingerprint, mapping[0])
+                logging.info("[冗余清理] 已清理已证明同源的后缀文件: %s", file_path)
         try:
             all_b_records = self.db.get_all_b_records()
         except Exception as e:
@@ -1575,6 +1738,7 @@ class AppService:
             webdav_path = row.webdav_path
             source_a_path = row.source_a_path
             fingerprint = row.fingerprint
+            mapping_id = getattr(row, "mapping_id", "")
             if not webdav_path:
                 continue
             if self.db.is_ghost_protected(webdav_path):
@@ -1602,35 +1766,55 @@ class AppService:
                 if not local.exists():
                     self.db.delete_b_by_local(local_path)
                     if fingerprint:
-                        self.refresh_identity_current_b_path(fingerprint)
+                        self.refresh_identity_current_b_path(fingerprint, mapping_id)
+                    continue
+                mapping = self.get_mapping_for_b(local)
+                if mapping is None or not mapping_id or mapping[0] != mapping_id:
+                    logging.warning(
+                        "[冗余清理→C区] 无法唯一解析 mapping，保留来源: %s", local)
                     continue
                 try:
-                    b_root = self.get_b_root_for_path(local_path)
-                    if b_root is None:
-                        b_root = self.b_root  # 兼容回退
-                    rel = local.resolve().relative_to(b_root)
-                except ValueError:
-                    rel = Path(local.name)
-                target = self.c_root / rel
-                if local.exists():
-                    try:
-                        move_file(local, target)
-                    except OSError as exc:
+                    target = self.get_c_path_for_b(mapping_id, local, mapping[1])
+                except ValueError as exc:
+                    logging.warning(
+                        "[冗余清理→C区] 无法生成安全目标，保留来源: %s (%s)", local, exc)
+                    continue
+                if target.exists():
+                    target_webdav = read_strm_webdav_path(target)
+                    source_webdav = read_strm_webdav_path(local)
+                    if not source_webdav or not target_webdav or source_webdav != target_webdav:
                         logging.warning(
-                            "[冗余清理→C区] 迁移失败: %s -> %s (%s)", local, target, exc)
-                        safe_remove_file(local_path)
-                        self.db.delete_b_by_local(local_path)
-                        if fingerprint:
-                            self.refresh_identity_current_b_path(fingerprint)
+                            "[冗余清理→C区] C目标身份未知或异源，保留来源: %s -> %s",
+                            local, target)
                         continue
-                self.db.upsert_c(
-                    str(target),
-                    webdav_path,
-                    local_path,
-                    webdav_parent(webdav_path))
+                    if not safe_remove_file(local):
+                        logging.warning("[冗余清理→C区] 同源来源清理失败，保留 DB: %s", local)
+                        continue
+                    self.db.delete_b_by_local(local_path)
+                    if fingerprint:
+                        self.refresh_identity_current_b_path(fingerprint, mapping_id)
+                    migrated_count += 1
+                    continue
+                try:
+                    move_file(local, target)
+                except OSError as exc:
+                    logging.warning(
+                        "[冗余清理→C区] 迁移失败，保留来源: %s -> %s (%s)", local, target, exc)
+                    continue
+                try:
+                    self.db.upsert_c(
+                        str(target),
+                        webdav_path,
+                        local_path,
+                        webdav_parent(webdav_path))
+                except Exception as exc:
+                    logging.error(
+                        "[冗余清理→C区] C记录写入失败，保留已迁移文件待恢复: %s (%s)",
+                        target, exc)
+                    continue
                 self.db.delete_b_by_local(local_path)
                 if fingerprint:
-                    self.refresh_identity_current_b_path(fingerprint)
+                    self.refresh_identity_current_b_path(fingerprint, mapping_id)
                 migrated_count += 1
                 logging.info(
                     "[冗余清理→C区] A区源文件已不存在，迁移至C区: %s -> %s",
@@ -1648,7 +1832,7 @@ class AppService:
             safe_remove_file(local_path)
             self.db.delete_b_by_local(local_path)
             if fingerprint:
-                self.refresh_identity_current_b_path(fingerprint)
+                self.refresh_identity_current_b_path(fingerprint, mapping_id)
             removed_count += 1
             logging.info(
                 "[冗余清理] 已移除失效STRM(WebDAV不存在): %s -> %s",
@@ -1733,9 +1917,11 @@ class AppService:
         local = Path(local_path).resolve()
         if not local.exists():
             return
-        if self.get_a_root_for_path(local) is None:
-            logging.debug("[A区跳过] 不属于任何A根目录: %s", local)
+        mapping = self.get_mapping_for_a(local)
+        if mapping is None:
+            logging.debug("[A区跳过] 无法唯一解析 mapping: %s", local)
             return
+        mapping_id = mapping[0]
         if is_subtitle_file(local):
             self.process_subtitle_file(local)
             return
@@ -1784,7 +1970,7 @@ class AppService:
                 logging.warning("[A->B跳过] %s", exc)
                 return
             valid_b_instance = self.db.get_valid_b_instance_by_fingerprint(
-                fingerprint)
+                fingerprint, mapping_id)
             if valid_b_instance:
                 existing_main_path = valid_b_instance.local_path
                 # 检查磁盘文件是否实际存在，避免基于已删除文件的评分比较（P1-2）
@@ -1808,13 +1994,14 @@ class AppService:
                         parent,
                         str(local),
                         fingerprint=fingerprint,
+                        mapping_id=mapping_id,
                         status="valid")
                     self.db.upsert_identity(
                         fingerprint=fingerprint,
                         webdav_path=webdav_path,
                         source_a_path=str(local),
                         current_b_path=str(b_local))
-                    self.ensure_single_visible_instance(fingerprint, str(b_local))
+                    self.ensure_single_visible_instance(fingerprint, str(b_local), mapping_id=mapping_id)
                     return
             if old_identity and current_b_path is None:
                 exists = self.admin_api.check_exists(webdav_path)
@@ -1915,13 +2102,17 @@ class AppService:
         p = Path(path)
         name = p.name.lower()
         is_standard = self._is_standard_media_name(name)
-        b_root = self.get_b_root_for_path(p)
-        if b_root is None:
-            b_root = self.b_root  # 兼容回退
-        try:
-            b_rel_parts = p.relative_to(b_root).parts
-        except ValueError:
+        mapping = self.get_mapping_for_b(p)
+        if mapping is None:
+            logging.warning("[文件评分] 无法解析映射，使用路径自身降级评分: path=%s", path)
             b_rel_parts = p.parts
+        else:
+            _, b_root, _ = mapping
+            try:
+                b_rel_parts = p.relative_to(b_root).parts
+            except ValueError:
+                logging.warning("[文件评分] B路径不在对应根内: path=%s", path)
+                b_rel_parts = p.parts
         webdav_parts = []
         try:
             row = self.db.get_b_by_local_full(path)
@@ -1948,7 +2139,8 @@ class AppService:
         return (0 if is_standard else 1, match_count, path_len, name)
 
     def ensure_single_visible_instance(
-            self, fingerprint: str, trigger_path: str, prefer_path: str | None = None) -> None:
+            self, fingerprint: str, trigger_path: str,
+            prefer_path: str | None = None, mapping_id: str | None = None) -> None:
         """确保同一 fingerprint 只有一个 visible 实例。
         
         Args:
@@ -1956,7 +2148,16 @@ class AppService:
             trigger_path: 触发检查的路径
             prefer_path: 可选，评分相同时优先保留的路径（P2-10）
         """
-        all_instances = self.db.get_all_b_by_fingerprint(fingerprint)
+        if not mapping_id:
+            resolved = self.get_mapping_for_b(trigger_path)
+            if resolved is None:
+                logging.warning("[B区重复] 无法解析 mapping，跳过去重: %s", trigger_path)
+                return
+            mapping_id = resolved[0]
+        all_instances = self.db.get_all_b_by_fingerprint(fingerprint, mapping_id)
+        if not isinstance(all_instances, (list, tuple)):
+            logging.warning("[B区重复] DB 返回不可迭代记录，跳过去重: %s", trigger_path)
+            return
         if not all_instances:
             return
         valid_files = [row.local_path for row in all_instances if row.status
@@ -1972,7 +2173,7 @@ class AppService:
         valid_files.sort(key=_sort_key)
         keep = valid_files[0]
         duplicate_paths = self.db.mark_other_b_instances_duplicate(
-            fingerprint, keep)
+            fingerprint, keep, mapping_id)
         for dup_path in duplicate_paths:
             dup = Path(dup_path)
             if not dup.exists():
@@ -2052,6 +2253,10 @@ class AppService:
             logging.warning("[B区修复失败] A区不存在对应源文件: %s", webdav_path)
             return False
         target = Path(b_local_path).resolve()
+        mapping_id = self._mapping_id_for_b(target)
+        if not mapping_id:
+            logging.warning("[B区修复失败] 无法解析 mapping: %s", target)
+            return False
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
             shutil.copyfile(source, target)
@@ -2072,13 +2277,14 @@ class AppService:
                 parent_webdav_path,
                 source,
                 fingerprint=fingerprint,
+                mapping_id=mapping_id,
                 status="valid")
             self.db.upsert_identity(
                 fingerprint=fingerprint,
                 webdav_path=webdav_path,
                 source_a_path=source,
                 current_b_path=str(target))
-            self.ensure_single_visible_instance(fingerprint, str(target))
+            self.ensure_single_visible_instance(fingerprint, str(target), mapping_id=self._mapping_id_for_b(target))
             return True
         except sqlite3.Error as exc:
             logging.error("[B区修复失败] 数据库写入失败: %s", exc)
@@ -2203,7 +2409,7 @@ class AppService:
                 webdav_path=webdav_path,
                 source_a_path=final_source_a,
                 current_b_path=correct_b_path)
-            self.ensure_single_visible_instance(fingerprint, correct_b_path)
+            self.ensure_single_visible_instance(fingerprint, correct_b_path, mapping_id=self._mapping_id_for_b(correct_b_path))
 
     def _verify_a_source_exists(
             self, b_local_path: str, webdav_path: str, fingerprint: str) -> bool:
@@ -2214,7 +2420,8 @@ class AppService:
         a_source = self.find_a_source_by_webdav(webdav_path)
         if a_source and Path(a_source).exists():
             return True
-        boundary = self.db.get_media_boundary_by_fingerprint(fingerprint)
+            boundary = self.db.get_media_boundary_by_fingerprint(mapping_id, fingerprint)
+
         if boundary:
             logging.debug("[A区源校验] 边界映射存在，放宽检查: %s (指纹: %s...)",
                           b_local_path, fingerprint[:8])
@@ -2310,12 +2517,17 @@ class AppService:
     def _refresh_b_record(self, local: Path, webdav_path: str, parent: str,
                           source_a_path: str | None, fingerprint: str, status: str | None) -> None:
         normalized_status = status or "valid"
+        mapping_id = self._mapping_id_for_b(local)
+        if not mapping_id:
+            logging.warning("[B区记录] 无法解析 mapping，跳过更新: %s", local)
+            return
         self.db.upsert_b(
             str(local),
             webdav_path,
             parent,
             source_a_path,
             fingerprint=fingerprint,
+            mapping_id=mapping_id,
             status=normalized_status)
         self.db.upsert_identity(
             fingerprint=fingerprint,
@@ -2323,7 +2535,7 @@ class AppService:
             source_a_path=source_a_path,
             current_b_path=str(local) if normalized_status == "valid" else None)
         if normalized_status == "valid":
-            self.ensure_single_visible_instance(fingerprint, str(local))
+            self.ensure_single_visible_instance(fingerprint, str(local), mapping_id=self._mapping_id_for_b(local))
 
     def _quarantine_modified_b_file(self, local: Path, fingerprint: str | None = None) -> None:
         # B-7 删除归因：物理隔离前标记 fingerprint 为引擎内部操作，
@@ -2343,6 +2555,10 @@ class AppService:
 
     def _handle_new_b_file(self, local: Path, webdav_path: str,
                            parent: str, fingerprint: str) -> None:
+        mapping_id = self._mapping_id_for_b(local)
+        if not mapping_id:
+            logging.warning("[B区] 无法解析 mapping，跳过新增文件: %s", local)
+            return
         identity = self.db.get_identity_by_fingerprint(fingerprint)
         source_a_path = identity.source_a_path if identity else self.find_a_source_by_webdav(
             webdav_path)
@@ -2357,13 +2573,14 @@ class AppService:
             parent,
             source_a_path,
             fingerprint=fingerprint,
+            mapping_id=mapping_id,
             status="valid")
         self.db.upsert_identity(
             fingerprint=fingerprint,
             webdav_path=webdav_path,
             source_a_path=source_a_path,
             current_b_path=str(local))
-        self.ensure_single_visible_instance(fingerprint, str(local))
+        self.ensure_single_visible_instance(fingerprint, str(local), mapping_id=mapping_id)
 
     def _cloud_path_to_engine_paths(self, cloud_path: str) -> list[str]:
         result = []
@@ -2428,12 +2645,18 @@ class AppService:
                         local_path)
                     self.db.delete_b_by_local(str(local))
                     return
-            if fingerprint and self.db.has_other_b_instance(fingerprint, str(local)):
+            mapping_id = row.mapping_id
+            if not mapping_id:
+                logging.warning("[B区删除] 记录缺少 mapping_id，跳过云端和 A 区删除: %s", local_path)
+                self.db.delete_b_by_local(str(local))
+                return
+            if fingerprint and self.db.has_other_b_instance(mapping_id, fingerprint, str(local)):
                 logging.info("[B区删除联动] B区中仍存在同指纹文件，跳过WebDAV删除: %s", local_path)
                 self.db.delete_b_by_local(str(local))
                 return
             if fingerprint and self._check_fingerprint_exists_in_b(
-                    fingerprint, exclude_path=str(local)):
+                    fingerprint,
+                    exclude_path=str(local), mapping_id=mapping_id):
                 logging.info(
                     "[B区删除联动] B区文件系统中仍存在同指纹文件，跳过WebDAV删除: %s",
                     local_path)
@@ -2444,15 +2667,18 @@ class AppService:
                 self._delete_a_file_by_webdav(webdav_path)
             self.db.delete_b_by_local(str(local))
             if fingerprint:
-                self.refresh_identity_current_b_path(fingerprint)
+                self.refresh_identity_current_b_path(fingerprint, mapping_id)
             # 异步触发局部冗余检查：清理该父目录下的 B 区僵尸文件
             # 与 A 区删除保持一致的异步处理模式，避免阻塞 watchdog 事件处理线程
             if parent_webdav_path:
                 self.trigger_delayed_cleanup(parent_webdav_path)
 
     def _check_fingerprint_exists_in_b(
-            self, fingerprint: str, exclude_path: str | None = None) -> bool:
-        b_instances = self.db.get_b_instances_by_fingerprint(fingerprint)
+            self, fingerprint: str, exclude_path: str | None = None,
+            mapping_id: str | None = None) -> bool:
+        if not mapping_id:
+            return False
+        b_instances = self.db.get_b_instances_by_fingerprint(fingerprint, mapping_id)
         for instance in b_instances:
             instance_path = instance.local_path
             if exclude_path and instance_path == exclude_path:
@@ -2572,18 +2798,35 @@ class AppService:
             local_path = record.local_path
             webdav_path = record.webdav_path
             source_a_path = record.source_a_path
+            mapping_id = getattr(record, "mapping_id", "") or self._mapping_id_for_b(local_path)
+            if not mapping_id:
+                logging.warning("[B区迁移→C区] 无法解析 mapping，保留来源: %s", local_path)
+                continue
             local = Path(local_path)
             if not local.exists():
                 self.db.delete_b_by_local(local_path)
                 continue
+            mapping = self.get_mapping_for_b(local)
+            if mapping is None or mapping[0] != mapping_id:
+                logging.warning("[B区迁移→C区] B路径 mapping 不一致，保留来源: %s", local_path)
+                continue
             try:
-                b_root = self.get_b_root_for_path(local_path)
-                if b_root is None:
-                    b_root = self.b_root  # 兼容回退
-                rel = local.resolve().relative_to(b_root)
-            except ValueError:
-                rel = Path(local.name)
-            target = self.c_root / rel
+                target = self.get_c_path_for_b(mapping_id, local, mapping[1])
+            except ValueError as exc:
+                logging.warning("[B区迁移→C区] 无法生成安全 C 目标，保留来源: %s (%s)", local_path, exc)
+                continue
+            if target.exists():
+                source_identity = read_strm_webdav_path(local)
+                target_identity = read_strm_webdav_path(target)
+                if not source_identity or not target_identity or source_identity != target_identity:
+                    logging.warning("[B区迁移→C区] C目标身份未知或异源，保留来源: %s", local_path)
+                    continue
+                if not safe_remove_file(local):
+                    logging.warning("[B区迁移→C区] 同源来源清理失败，保留来源: %s", local_path)
+                    continue
+                self.db.delete_b_by_local(local_path)
+                migrated_count += 1
+                continue
             try:
                 move_file(local, target)
                 self.db.upsert_c(
@@ -2594,12 +2837,12 @@ class AppService:
                 )
                 self.db.delete_b_by_local(local_path)
                 if fingerprint := make_strm_fingerprint(webdav_path):
-                    self.refresh_identity_current_b_path(fingerprint)
+                    self.refresh_identity_current_b_path(fingerprint, mapping_id)
                 migrated_count += 1
                 logging.info("[B区迁移→C区] %s -> %s", local_path, target)
             except OSError as exc:
                 logging.warning(
-                    "[B区迁移→C区] 迁移失败: %s -> %s (%s)",
+                    "[B区迁移→C区] 迁移失败，保留来源: %s -> %s (%s)",
                     local_path,
                     target,
                     exc,
@@ -2622,6 +2865,9 @@ class AppService:
         root_path = root_path.rstrip("/") or "/"
         logging.info("[B区僵尸清理] 开始扫描: %s", root_path)
         records = self.db.get_b_under_root(root_path)
+        if not isinstance(records, (list, tuple)):
+            logging.warning("[B区僵尸清理] DB 返回不可迭代记录，跳过: %s", root_path)
+            return
         if not records:
             logging.info("[B区僵尸清理] 目录下无记录，跳过: %s", root_path)
             return
@@ -2704,20 +2950,25 @@ class AppService:
 
         return result
 
-    def refresh_identity_current_b_path(self, fingerprint: str) -> None:
+    def refresh_identity_current_b_path(self, fingerprint: str, mapping_id: str | None = None) -> None:
         if not fingerprint:
             return
+        if not mapping_id:
+            logging.warning("[身份投影] 缺少 mapping_id，跳过刷新: %s", fingerprint)
+            return
         identity = self.db.get_identity_by_fingerprint(fingerprint)
-        b_instances = self.db.get_all_b_by_fingerprint(fingerprint)
+        b_instances = self.db.get_all_b_by_fingerprint(fingerprint, mapping_id)
         valid_instances = [
             row for row in b_instances
             if row.status == "valid" and Path(row.local_path).exists()
         ]
         if not valid_instances:
-            self.db.clear_identity_b_path_by_fingerprint(fingerprint)
+            self.db.delete_identity_projection(fingerprint, mapping_id)
             return
         valid_instances.sort(key=lambda row: self._b_file_score(row.local_path))
         best = valid_instances[0]
+        self.db.upsert_identity_projection(
+            fingerprint, mapping_id, best.local_path, "visible")
         if identity:
             self.db.update_identity_b_path(fingerprint, best.local_path)
         else:
@@ -2762,7 +3013,13 @@ class AppService:
             return
         if cloud_show_name == physical_media_folder_name:
             return
+        mapping = self.get_mapping_for_b(local)
+        if mapping is None:
+            logging.warning("[边界映射] 无法解析 mapping，跳过记录: %s", local)
+            return
+        mapping_id = mapping[0]
         self.db.upsert_media_boundary(
+            mapping_id=mapping_id,
             fingerprint=fingerprint,
             source_media_name=cloud_show_name,
             current_media_name=physical_media_folder_name,
@@ -2795,11 +3052,12 @@ class AppService:
         # 事件会让 handle_b_deleted 在 DB 行仍存在时找到记录并误判为用户删除，
         # 连带触发不可逆的 WebDAV 源文件 + A 区源文件删除。先删 DB 行后，
         # handle_b_deleted 的 get_b_by_local_full 返回 None → 提前返回，不级联。
+        mapping_id = self._mapping_id_for_b(local)
         self.db.delete_b_by_local(str(local))
         if local.exists():
             safe_remove_file(local)
-        if fingerprint:
-            self.refresh_identity_current_b_path(fingerprint)
+            if fingerprint and mapping_id:
+                self.refresh_identity_current_b_path(fingerprint, mapping_id)
         if webdav_path:
             self.db.set_ghost_protection(
                 webdav_path,

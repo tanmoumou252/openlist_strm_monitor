@@ -143,7 +143,7 @@ def setup_logging(
         max_size_mb,
         backup_count,
     )
-    
+
     # 启动分隔标记：区分不同运行周期的日志
     logging.info("")
     logging.info("=" * 70)

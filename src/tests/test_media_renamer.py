@@ -441,7 +441,7 @@ class TestProcessSubtitleGroup:
         """单语种字幕自动加 forced"""
         sub_file = tmp_path / "show.sc.srt"
         sub_file.write_text("subtitle content", encoding="utf-8")
-        
+
         result = process_subtitle_group([sub_file], (1, 1), "Show")
         assert len(result) == 1
         path, new_name = result[0]
@@ -455,7 +455,7 @@ class TestProcessSubtitleGroup:
         sub1.write_text("english", encoding="utf-8")
         sub2 = tmp_path / "show.sc.srt"
         sub2.write_text("chinese", encoding="utf-8")
-        
+
         result = process_subtitle_group([sub1, sub2], (2, 5), "Series")
         assert len(result) == 2
         # 简体中文应该排在前面（优先级高）
@@ -466,7 +466,7 @@ class TestProcessSubtitleGroup:
         """无法识别语言的字幕保持原名"""
         sub_file = tmp_path / "show.unknown.srt"
         sub_file.write_text("content", encoding="utf-8")
-        
+
         result = process_subtitle_group([sub_file], (1, 3), "Show")
         assert len(result) == 1
         path, new_name = result[0]
@@ -485,7 +485,7 @@ class TestProcessMediaFile:
         """标准 STRM 文件（含季集信息）"""
         strm_file = tmp_path / "Show.S01E05.strm"
         strm_file.write_text("content", encoding="utf-8")
-        
+
         result = process_media_file(strm_file)
         assert result is not None
         assert result["season"] == 1
@@ -497,7 +497,7 @@ class TestProcessMediaFile:
         """字幕文件"""
         sub_file = tmp_path / "Show.S02E10.sc.srt"
         sub_file.write_text("subtitle", encoding="utf-8")
-        
+
         result = process_media_file(sub_file)
         assert result is not None
         assert result["season"] == 2
@@ -533,7 +533,7 @@ class TestProcessMediaFile:
         season_dir.mkdir()
         ep_file = season_dir / "episode.05.strm"
         ep_file.write_text("content", encoding="utf-8")
-        
+
         result = process_media_file(ep_file)
         assert result is not None
         assert result["season"] == 3

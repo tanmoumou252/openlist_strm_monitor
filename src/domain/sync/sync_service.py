@@ -27,11 +27,11 @@ class SyncService:
         self.db: Database = app.db
         # 启动同步缓存（sync 期间有效，finally 清除）
         self._cache_ghost: set[str] | None = None
-        self._cache_b_fp: set[str] | None = None
+        self._cache_b_fp: set[tuple[str, str]] | None = None  # set of (mapping_id, fingerprint)
 
     def initial_scan_a(self, use_bulk: bool = False) -> None:
         """启动时批量索引 A 区 STRM 文件到数据库。
-        
+
         性能优化：
         - 启动时使用 bulk_connection 长连接模式（核心优化：消除反复获取 rw_lock + 打开连接的开销）
         - 使用多线程并发读取 .strm 文件（辅助优化：利用多核 CPU 并发 I/O）
@@ -39,17 +39,17 @@ class SyncService:
         - use_bulk=True 时使用 bulk_connection 长连接模式（仅启动时）
         - use_bulk=False 时使用 upsert_a_batch（定期刷新时）
         - 延迟 FTS 重建（仅 use_bulk=True 时，扫描完成后一次性重建）
-        
+
         设计决策：为什么不用 OpenList API 扫描 A 区？
         - OpenList API /api/fs/list 单页最多返回 100 个文件（maximum: 100）
         - API 返回目录下所有文件类型（.strm、.nfo、.jpg、.srt 等），无法过滤
         - 因此，使用本地文件系统遍历 + 多线程并发读取是更好的选择
-        
+
         Args:
             use_bulk: True 用 bulk_connection（启动时，单线程安全）。
                       False 用 upsert_a_batch（刷新时，多线程安全）。
         """
-        logging.info("[初始化] 扫描 A 区 STRM 文件（%s）...", 
+        logging.info("[初始化] 扫描 A 区 STRM 文件（%s）...",
                      "bulk模式" if use_bulk else "标准模式")
         t0 = time.time()
         BATCH_SIZE = 1000
@@ -90,20 +90,20 @@ class SyncService:
                 if not a_root.exists():
                     logging.warning("[初始化] A 区根目录不存在: %s", a_root)
                     continue
-                
+
                 # 收集所有 .strm 文件路径
                 strm_files: list[Path] = []
                 for root, _dirs, files in os.walk(a_root):
                     for name in files:
                         if name.lower().endswith(".strm"):
                             strm_files.append(Path(root) / name)
-                
+
                 logging.info("[初始化] 发现 %d 个 .strm 文件，开始多线程处理...", len(strm_files))
-                
+
                 # 使用多线程并发处理
                 with ThreadPoolExecutor(max_workers=4) as executor:
                     futures = {executor.submit(process_strm_file, fp): fp for fp in strm_files}
-                    
+
                     for future in as_completed(futures):
                         result = future.result()
                         if result:
@@ -150,7 +150,7 @@ class SyncService:
 
     def _upsert_a_batch_bulk(self, conn, records: list[tuple[str, str, str]]) -> int:
         """批量插入 A 区记录（使用 bulk_connection，跳过 FTS 同步）。
-        
+
         性能优化：
         - 使用单个连接（不获取 rw_lock）
         - 跳过 FTS 同步（延迟到扫描完成后由 rebuild_fts_table 一次性重建）
@@ -160,7 +160,7 @@ class SyncService:
             return 0
         now = time.time()
         data = [(lp, wp, pwp, now) for lp, wp, pwp in records]
-        
+
         conn.executemany(
             """
             INSERT OR REPLACE INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
@@ -168,29 +168,29 @@ class SyncService:
             """,
             data,
         )
-        
+
         return len(data)
 
     def scan_a_to_b_full_sync(
             self, valid_engine_paths: list[str] | None = None,
             use_bulk: bool = False) -> None:
         """A -> B 全量同步（两遍结构：索引 + 执行）。
-        
+
         第一遍（索引阶段）：遍历所有 A 记录，计算目标路径，建立
         target_path -> [source_info, ...] 索引，并检测目标路径冲突。
         只读操作（ghost/fp 缓存检查），不产生文件复制或 DB 写入。
-        
+
         冲突检测：第一遍完成后，遍历索引，标记存在多个不同 WebDAV
         身份的目标为冲突，全部安全跳过。
-        
+
         第二遍（执行阶段）：遍历原始记录，对非冲突目标调用
         _sync_one_record 执行现有同步逻辑；对冲突目标跳过。
-        
+
         Args:
             valid_engine_paths: 限制同步范围。
             use_bulk: True 用单事务提交（首次启动，无并发）。
                       False 用分批提交（主动刷新，有并发，每 1000 条提交一次）。
-        
+
         并发安全说明
         -----------
         批量同步使用 bulk_connection 绕过 rw_lock，写入未提交前对其他连接不可见。
@@ -202,8 +202,8 @@ class SyncService:
         BATCH_COMMIT_SIZE = 1000  # 分批提交大小
         MAX_CONFLICT_EXAMPLES = 5  # 汇总输出最多示例数
         SLOW_OP_THRESHOLD = 3.0  # 慢操作告警阈值（秒）
-        
-        logging.info("[初始化] A -> B 全量同步开始 (%s)", 
+
+        logging.info("[初始化] A -> B 全量同步开始 (%s)",
                      "单事务模式" if use_bulk else "分批提交模式")
         if valid_engine_paths is not None:
             logging.info("[初始化] 限制同步范围: %s", valid_engine_paths)
@@ -215,7 +215,11 @@ class SyncService:
 
         # 预加载读缓存（两种模式都受益）
         self._cache_ghost = self.db.get_all_ghost_protected_paths()
-        self._cache_b_fp = self.db.get_all_b_fingerprints()
+        self._cache_b_fp = set()
+        for m in self.app.a_b_mappings:
+            fps = self.db.get_all_b_fingerprints(m.mapping_id)
+            for fp in fps:
+                self._cache_b_fp.add((m.mapping_id, fp))
         logging.info("[初始化] 预加载: ghost=%d, B指纹=%d (%.1fs)",
                      len(self._cache_ghost), len(self._cache_b_fp),
                      time.time() - t0)
@@ -227,54 +231,63 @@ class SyncService:
         # target_path -> [(source_a_path, webdav_path, fingerprint, original_index), ...]
         target_index: dict[str, list[tuple[str, str, str, int]]] = {}
         target_conflicts: set[str] = set()  # 存在多个不同 WebDAV 的目标
-        # 记录每条 A 记录对应的 target_path（第二遍复用）
+        # 记录每条 A 记录对应的 target_path 和 mapping_id（第二遍复用）
         rec_target_map: list[str | None] = [None] * total_count
+        rec_mapping_map: list[str | None] = [None] * total_count
         pass1_skipped = {"skip_ghost": 0, "skip_fp": 0, "skip_missing": 0,
                          "skip_filtered": 0}
-        
+
         for idx, rec in enumerate(all_a_records):
             local_path = rec.local_path
             webdav_path = rec.webdav_path
-            
+
             # 与 _sync_one_record 一致的预检
             if not Path(local_path).exists():
                 pass1_skipped["skip_missing"] += 1
                 continue
-            
+
             if valid_engine_paths is not None:
                 if not any(webdav_path == p or webdav_path.startswith(p + "/")
                            for p in valid_engine_paths):
                     pass1_skipped["skip_filtered"] += 1
                     continue
-            
+
             if webdav_path in self._cache_ghost:
                 pass1_skipped["skip_ghost"] += 1
                 continue
-            
+
+            # 解析 mapping 上下文
+            mapping = self.app.get_mapping_for_a(local_path)
+            if mapping is None:
+                logging.debug("[A->B] 无法解析 A 路径的映射上下文, 跳过: %s", local_path)
+                continue
+            mapping_id, _, _ = mapping
+            rec_mapping_map[idx] = mapping_id
+
             fingerprint = make_strm_fingerprint(webdav_path)
-            if fingerprint in self._cache_b_fp:
+            if (mapping_id, fingerprint) in self._cache_b_fp:
                 pass1_skipped["skip_fp"] += 1
                 continue
-            
+
             # 计算目标路径（只读，无副作用）
             try:
                 b_local = self.app.build_b_path_from_a(local_path, webdav_path)
             except ValueError:
                 continue
-            
+
             target_path = str(b_local)
             rec_target_map[idx] = target_path
-            
+
             if target_path not in target_index:
                 target_index[target_path] = []
             target_index[target_path].append(
                 (local_path, webdav_path, fingerprint, idx))
-            
+
             # 冲突检测：同目标 + 不同 WebDAV 身份
             existing_webdavs = {info[1] for info in target_index[target_path]}
             if len(existing_webdavs) > 1:
                 target_conflicts.add(target_path)
-        
+
         t_pass1_elapsed = time.time() - t_pass1
         logging.info(
             "[初始化] A -> B 索引阶段完成: %d 条索引, %d 个唯一目标, "
@@ -282,7 +295,7 @@ class SyncService:
             total_count - sum(pass1_skipped.values()),
             len(target_index), len(target_conflicts),
             sum(pass1_skipped.values()), t_pass1_elapsed)
-        
+
         # 输出冲突示例（限量，避免日志洪水）
         # 不可逆边界说明：如果 OpenList 上游已将同名不同扩展名（如 .mkv/.mp4）
         # 覆盖成同一个 .strm，桥接程序只能观察到当前剩余的单个 .strm，无法证明
@@ -317,15 +330,15 @@ class SyncService:
         }
         log_interval = max(100, total_count // 100)
         batch_count = 0
-        dedup_queue: list[tuple[str, str]] = []  # 延迟去重队列
+        dedup_queue: list[tuple[str, str, str]] = []  # (mapping_id, fingerprint, b_path)
 
         def _flush_dedup_queue():
             """提交后执行延迟的去重操作（此时数据已可见）"""
             if not dedup_queue:
                 return
-            for fp, b_path in dedup_queue:
+            for mid, fp, b_path in dedup_queue:
                 try:
-                    self.app.ensure_single_visible_instance(fp, b_path)
+                    self.app.ensure_single_visible_instance(fp, b_path, mapping_id=mid)
                 except Exception as e:
                     logging.warning("[A->B] 去重失败 %s: %s", b_path, e)
             dedup_queue.clear()
@@ -335,17 +348,18 @@ class SyncService:
             with self.db.bulk_connection() as conn:
                 for idx, rec in enumerate(all_a_records, 1):
                     target_path = rec_target_map[idx - 1]
-                    
-                    # Pass 1 中被跳过的记录（ghost/fp/missing/filtered）target_path 为 None
+
+                    # Pass 1 中被跳过的记录（ghost/fp/missing/filtered/mapping）target_path 为 None
                     if target_path is None:
                         continue
-                    
+
                     if target_path in target_conflicts:
                         counters["skip_target_conflict"] += 1
                         continue
-                    
+
                     result = self._sync_one_record(rec, valid_engine_paths, conn,
-                                                   dedup_queue)
+                                                   dedup_queue,
+                                                   mapping_id=rec_mapping_map[idx - 1])
                     counters[result] = counters.get(result, 0) + 1
                     batch_count += 1
 
@@ -368,7 +382,7 @@ class SyncService:
                             idx, total_count, idx / total_count * 100,
                             time.time() - t0, c["success"],
                             total_skip_2, c["skip_target_conflict"], c["fail"])
-                
+
                 # 提交剩余批次
                 if batch_count > 0:
                     conn.commit()
@@ -398,25 +412,30 @@ class SyncService:
 
     def _write_manual_review_list(self, target_index: dict, target_conflicts: set) -> None:
         """将冲突跳过的 A 源清单写入 B 区根目录的清单文件。
-        
+
         格式：Markdown 表格，含 A 源路径、WebDAV 路径、目标路径、原因。
         文件名：`_MANUAL_REVIEW_YYYYMMDD_HHMMSS.md`
         """
         from pathlib import Path, PosixPath, WindowsPath
-        # 使用第一个冲突目标路径对应的 B 根
+        # 使用第一个冲突目标路径对应的映射上下文获取 B 根
         first_target = next(iter(target_conflicts)) if target_conflicts else None
         if first_target:
-            b_root = self.app.get_b_root_for_path(first_target)
+            mapping = self.app.get_mapping_for_b(first_target)
+            if mapping is None:
+                logging.warning("[手动复查] 无法解析目标路径的映射")
+                return  # Fail-closed: skip generating manual review list
+            _, b_root, _ = mapping
         else:
-            b_root = self.app.b_root  # 兼容回退
-        # 在测试场景中 self.app.b_root 可能是 Mock 对象，不生成清单
+            # No conflict targets - no need to generate list
+            return
+        # 在测试场景中 b_root 可能是 Mock 对象，不生成清单
         if not isinstance(b_root, (Path, PosixPath, WindowsPath)):
             return
-        
+
         from datetime import datetime
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         list_path = b_root / f"_MANUAL_REVIEW_{ts}.md"
-        
+
         lines = [
             "# 人工处理清单",
             "",
@@ -427,71 +446,41 @@ class SyncService:
             "| A 区路径 | WebDAV 路径 | 目标路径 | 原因 |",
             "|----------|-------------|----------|------|",
         ]
-        
+
         for target_path in sorted(target_conflicts):
             sources = target_index[target_path]
             for local_path, webdav_path, fingerprint, idx in sources:
                 lines.append(f"| `{local_path}` | `{webdav_path}` | `{target_path}` | 目标路径冲突 |")
-        
+
         try:
             list_path.write_text("\n".join(lines), encoding="utf-8")
-            logging.info("[初始化] 人工处理清单已生成: %s (%d 个冲突目标)", 
+            logging.info("[初始化] 人工处理清单已生成: %s (%d 个冲突目标)",
                          list_path, len(target_conflicts))
         except Exception as e:
             logging.warning("[初始化] 生成人工处理清单失败: %s", e)
 
     def _sync_one_record(self, rec, valid_engine_paths, conn,
-                         dedup_queue: list | None = None) -> str:
+                         dedup_queue: list | None = None,
+                         mapping_id: str | None = None) -> str:
         """处理单条 A 记录的 A→B 同步。返回状态字符串。
-        
+
         完整实现包括：
         1. 路径过滤和缓存检查
         2. B 文件已存在时的处理
         3. 文件拷贝
         4. 数据库写入（使用 bulk_connection）
         5. 重复实例隔离（延迟到提交后执行）
-        
+
         Args:
             rec: A 区记录对象（ARecord）
             valid_engine_paths: 有效的引擎路径列表
             conn: bulk_connection 的数据库连接（两种模式都使用）
-            dedup_queue: 可选的去重队列，传入时将 (fingerprint, b_local) 追加到此列表，
+            dedup_queue: 可选的去重队列，传入时将 (mapping_id, fingerprint, b_local) 追加到此列表，
                          而非直接调用 ensure_single_visible_instance（避免在未提交事务上读取）
+            mapping_id: 由调用方预解析的映射标识
         Returns:
             "success" / "skip_ghost" / "skip_fp" / "skip_missing" / "skip_filtered"
             / "skip_exists_diff" / "fail"
-        
-        设计决策：为什么不使用指纹锁（get_fingerprint_lock）
-        --------------------------------------------------
-        经过代码验证，_sync_one_record 不需要添加指纹锁，原因如下：
-        
-        1. 现有三层防御已经足够：
-           - L1: 内存缓存 _cache_b_fp — 快速过滤已知指纹
-           - L2: 文件系统检查 b_local.exists() — 磁盘文件对所有线程可见
-           - L3: ensure_single_visible_instance — 兜底去重（将多余实例改名为 .duplicate）
-        
-        2. 添加指纹锁会引入性能灾难：
-           - 指纹锁持有时间从毫秒级变成秒级（包含文件拷贝）
-           - 50,000 条记录 × 每次持锁 0.1-1 秒 = 1.4-2.8 小时总锁持有时间
-           - 会严重阻塞 watchdog 的 handle_a_created_or_modified（使用同一把锁）
-        
-        3. b_fingerprint_exists 看不到 bulk_connection 的未提交写入：
-           - bulk_connection 绕过 rw_lock，直接 sqlite3.connect
-           - b_fingerprint_exists 获取 rw_lock 读锁，打开新连接
-           - SQLite 事务隔离导致新连接看不到未提交写入
-           - "双重检查"只能看到 watchdog 的已提交写入，看不到同批次写入
-           - 内存缓存 _cache_b_fp 已经能处理同批次重复
-        
-        4. 并发场景分析：
-           - _sync_one_record vs handle_a_created_or_modified：
-             handle_a_created_or_modified 在指纹锁内检查 b_local.exists()，
-             如果文件已存在则 upsert 已有文件并 return，不到达 copy_a_record_to_b
-           - _sync_one_record vs copy_a_record_to_b_if_needed：
-             同样被 L2 文件系统检查覆盖
-           - 真正的 TOCTOU（两个线程同时检查 b_local.exists() → 都得到 False）：
-             概率极低（需要微秒级时序），且 L3 兜底
-        
-        结论：添加指纹锁不带来实质安全提升，但引入性能风险和代码复杂度。
         """
         local_path = rec.local_path
         webdav_path = rec.webdav_path
@@ -511,9 +500,16 @@ class SyncService:
         if webdav_path in self._cache_ghost:
             return "skip_ghost"
 
+        # 3a. 解析映射上下文（如未预解析）
+        if mapping_id is None:
+            mapping = self.app.get_mapping_for_a(local_path)
+            if mapping is None:
+                return "fail"
+            mapping_id, _, _ = mapping
+
         # 4. 计算指纹并检查 B 区是否已存在（使用缓存）
         fingerprint = make_strm_fingerprint(webdav_path)
-        if fingerprint in self._cache_b_fp:
+        if (mapping_id, fingerprint) in self._cache_b_fp:
             return "skip_fp"
 
         # 5. 构建 B 区路径
@@ -528,16 +524,16 @@ class SyncService:
             if existing_webdav == webdav_path:
                 # 使用 bulk_connection 写入数据库
                 self._bulk_upsert_b(conn, str(b_local), webdav_path,
-                                    parent, local_path, fingerprint)
+                                    parent, local_path, fingerprint, mapping_id)
                 self._bulk_upsert_identity(conn, fingerprint, webdav_path,
                                            local_path, str(b_local))
-                self._cache_b_fp.add(fingerprint)
+                self._cache_b_fp.add((mapping_id, fingerprint))
                 # 去重延迟到事务提交后执行
                 if dedup_queue is not None:
-                    dedup_queue.append((fingerprint, str(b_local)))
+                    dedup_queue.append((mapping_id, fingerprint, str(b_local)))
                 else:
                     try:
-                        self.app.ensure_single_visible_instance(fingerprint, str(b_local))
+                        self.app.ensure_single_visible_instance(fingerprint, str(b_local), mapping_id=mapping_id)
                     except Exception as e:
                         logging.warning("[A->B] 去重失败 %s: %s", b_local, e)
                 return "success"
@@ -560,16 +556,16 @@ class SyncService:
         # 8. 写入数据库（使用 bulk_connection）
         try:
             self._bulk_upsert_b(conn, str(b_local), webdav_path,
-                                parent, local_path, fingerprint)
+                                parent, local_path, fingerprint, mapping_id)
             self._bulk_upsert_identity(conn, fingerprint, webdav_path,
                                        local_path, str(b_local))
-            self._cache_b_fp.add(fingerprint)
+            self._cache_b_fp.add((mapping_id, fingerprint))
             # 去重延迟到事务提交后执行
             if dedup_queue is not None:
-                dedup_queue.append((fingerprint, str(b_local)))
+                dedup_queue.append((mapping_id, fingerprint, str(b_local)))
             else:
                 try:
-                    self.app.ensure_single_visible_instance(fingerprint, str(b_local))
+                    self.app.ensure_single_visible_instance(fingerprint, str(b_local), mapping_id=mapping_id)
                 except Exception as e:
                     logging.warning("[A->B] 去重失败 %s: %s", b_local, e)
             return "success"
@@ -584,14 +580,14 @@ class SyncService:
             return "fail"
 
     def _bulk_upsert_b(self, conn, local_path, webdav_path, parent_webdav_path,
-                       source_a_path, fingerprint) -> None:
+                       source_a_path, fingerprint, mapping_id) -> None:
         """在 bulk_connection 的 conn 上写入 B 区记录（绕过 rw_lock）。
-        
+
         与 database.py:upsert_b() 逻辑相同，但：
         - 直接使用传入的 conn（不获取 rw_lock）
         - 不单独 commit（由 bulk_connection 统一管理）
         - 正确处理 FTS 孤儿行（与 upsert_b 一致的 rowid 管理）
-        
+
         FTS 孤儿行处理流程：
         1. 获取旧 rowid（如果存在）
         2. 删除旧 rowid 的 FTS 行（避免 REPLACE 改变 rowid 后残留孤儿）
@@ -600,27 +596,29 @@ class SyncService:
         5. 删除新 rowid 上可能残留的孤儿 FTS 行（防止 constraint failed）
         6. 插入新 FTS 行
         """
+        if not mapping_id:
+            raise ValueError("_bulk_upsert_b: mapping_id must be a non-empty string")
         now = time.time()
-        
+
         # 步骤 1-2：获取旧 rowid，删除旧 FTS 行
         old_row = conn.execute(
             "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
         ).fetchone()
         if old_row:
             conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (old_row[0],))
-        
+
         # 步骤 3：INSERT OR REPLACE 基表
         conn.execute(
             """
             INSERT OR REPLACE INTO b_strm_files(
                 local_path, webdav_path, parent_webdav_path,
-                source_a_path, fingerprint, status, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 'valid', ?)
+                source_a_path, fingerprint, status, updated_at, mapping_id
+            ) VALUES (?, ?, ?, ?, ?, 'valid', ?, ?)
             """,
             (local_path, webdav_path, parent_webdav_path,
-             source_a_path, fingerprint, now),
+             source_a_path, fingerprint, now, mapping_id),
         )
-        
+
         # 步骤 4-6：获取新 rowid，清理残留，插入新 FTS 行
         new_row = conn.execute(
             "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
@@ -637,7 +635,7 @@ class SyncService:
     def _bulk_upsert_identity(self, conn, fingerprint, webdav_path,
                               source_a_path, current_b_path) -> None:
         """在 bulk_connection 的 conn 上写入 identity 记录（绕过 rw_lock）。
-        
+
         与 database.py:upsert_identity() 逻辑相同，但：
         - 直接使用传入的 conn（不获取 rw_lock）
         - 不单独 commit（由 bulk_connection 统一管理）
@@ -658,19 +656,34 @@ class SyncService:
         if self.db.is_ghost_protected(webdav_path):
             return None
         fingerprint = make_strm_fingerprint(webdav_path)
+        # 解析映射上下文
+        mapping = self.app.get_mapping_for_a(a_local_path)
+        if mapping is None:
+            logging.warning("[A->B] 无法解析 A 路径的映射上下文, 跳过复制: %s", a_local_path)
+            return None
+        mapping_id, _, _ = mapping
         # 按 fingerprint 串行化，与 handle_a_created_or_modified 共用同一锁（P1-4）
         fp_lock = self.app.get_fingerprint_lock(fingerprint)
         with fp_lock:
-            if self.db.b_fingerprint_exists(fingerprint):
+            if self.db.b_fingerprint_exists(fingerprint, mapping_id):
                 return None  # 会被统计为 skip_count
             return self.copy_a_record_to_b(
-                a_local_path, webdav_path, parent_webdav_path)
+                a_local_path, webdav_path, parent_webdav_path, mapping_id=mapping_id)
 
     def copy_a_record_to_b(self, a_local_path: str,
-                           webdav_path: str, parent: str) -> bool | None:
+                           webdav_path: str, parent: str,
+                           mapping_id: str | None = None) -> bool | None:
         try:
             # 1. 计算物理路径
             b_local = self.app.build_b_path_from_a(a_local_path, webdav_path)
+
+            # 1a. 解析映射上下文（如未提供）
+            if mapping_id is None:
+                mapping = self.app.get_mapping_for_a(a_local_path)
+                if mapping is None:
+                    logging.error("[A->B复制失败] 无法解析映射上下文: %s", a_local_path)
+                    return False
+                mapping_id, _, _ = mapping
 
             # 2. 血统校验（同步阶段）
             if not self.app._verify_b_path_lineage(
@@ -688,7 +701,7 @@ class SyncService:
                 try:
                     fingerprint = make_strm_fingerprint(webdav_path)
                     self.db.upsert_b(
-                        str(b_local), webdav_path, parent, a_local_path, fingerprint=fingerprint, status="valid"
+                        str(b_local), webdav_path, parent, a_local_path, fingerprint=fingerprint, mapping_id=mapping_id, status="valid"
                     )
                     self.db.upsert_identity(
                         fingerprint=fingerprint,
@@ -697,7 +710,7 @@ class SyncService:
                         current_b_path=str(b_local),
                     )
                     self.app.ensure_single_visible_instance(
-                        fingerprint, str(b_local))
+                        fingerprint, str(b_local), mapping_id=mapping_id)
                     return None
                 except Exception as e:
                     logging.error("[A->B跳过失败] %s", e)
@@ -752,6 +765,7 @@ class SyncService:
                 parent,
                 a_local_path,
                 fingerprint=fingerprint,
+                mapping_id=mapping_id,
                 status="valid")
             self.db.upsert_identity(
                 fingerprint=fingerprint,
@@ -759,7 +773,7 @@ class SyncService:
                 source_a_path=a_local_path,
                 current_b_path=str(b_local),
             )
-            self.app.ensure_single_visible_instance(fingerprint, str(b_local))
+            self.app.ensure_single_visible_instance(fingerprint, str(b_local), mapping_id=mapping_id)
             return True
         except Exception as e:
             logging.error(

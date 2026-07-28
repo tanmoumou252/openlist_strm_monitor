@@ -35,6 +35,8 @@ pip install -r requirements.txt
 
 ### `config.toml`
 
+生产同步依赖显式 A/B mapping。空 mapping_id、重复 mapping 根、零命中或多命中均进入 fail-safe；C 区按 mapping_id 隔离保存，格式为 `C/<mapping_id>/<relative>`。
+
 主配置文件位于项目根目录，包含以下段：
 
 ```toml
@@ -42,8 +44,12 @@ pip install -r requirements.txt
 db_file = "./bridge.db"          # 核心数据库路径
 
 [paths]
-b_root = "./测试b"               # B 区根目录
-c_root = "./测试c"               # C 区幽灵目录
+ b_root = ""                      # 仅兼容显示，不自动生成生产 mapping
+ c_root = "./测试c"               # 全局 C 区幽灵目录
+
+# 生产映射在 WebUI/DB 中显式配置：
+# [{mapping_id="m1", a_root="./测试a1", b_root="./测试b1"}]
+
 
 [webdav]
 host = "http://192.168.x.x:5243" # OpenList WebDAV 地址

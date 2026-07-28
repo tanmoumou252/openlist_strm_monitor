@@ -4,7 +4,7 @@ TMDB 待看列表独立 SQLite 数据库模块。
 职责：
   - 管理 tmdb_watchlist.db 的建表、CRUD、全量同步
   - 不持有持久连接（每次操作新建 sqlite3.connect，WAL 模式）
-- 不依赖 webui.py / standalone_webui.py 内部状态    
+- 不依赖 webui.py / standalone_webui.py 内部状态
 """
 
 from __future__ import annotations
@@ -161,7 +161,7 @@ class TmdbWatchlistDb:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
-        
+
         # 尝试加载 simple 分词器（与 database.py 保持一致）
         # 静默失败 → 后续 FTS5 建表统一降级到 unicode61
         self._simple_version = _load_simple_into(conn) or ""
@@ -242,7 +242,7 @@ class TmdbWatchlistDb:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_tmdb_log_ts ON tmdb_operation_log(ts DESC)
             """)
-            
+
             # FTS5 全文搜索表（用于 TMDB 待看列表搜索）
             # 尝试使用 simple 分词器，失败则降级到 unicode61
             # _conn() 已尝试加载 simple；这里仅在尚未加载时再尝试一次（例如复用旧连接的情况）
@@ -252,7 +252,7 @@ class TmdbWatchlistDb:
                 if loaded:
                     tokenizer = 'simple'
                     self._simple_version = loaded
-            
+
             conn.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS tmdb_watchlist_fts USING fts5(
                     title,
@@ -261,7 +261,7 @@ class TmdbWatchlistDb:
                     tokenize='{tokenizer}'
                 )
             """)
-            
+
             conn.commit()
         logging.debug("[TMDB-DB] 数据库初始化完成: %s", self._db_path)
 
@@ -662,13 +662,13 @@ class TmdbWatchlistDb:
             match_updated_at = existing[2] if existing else 0.0
             manual_override_at = existing[3] if existing else 0.0
             manual_override_by = existing[4] if existing else ""
-            
+
             # 删除旧的 FTS 记录
             conn.execute(
                 "DELETE FROM tmdb_watchlist_fts WHERE rowid = (SELECT rowid FROM movies WHERE id=?)",
                 (item["id"],),
             )
-            
+
             conn.execute(
                 """INSERT OR REPLACE INTO movies
                 (id, title, original_title, overview, poster_path, backdrop_path,
@@ -705,7 +705,7 @@ class TmdbWatchlistDb:
                     manual_override_by,
                 ),
             )
-            
+
             # 插入新的 FTS 记录
             conn.execute(
                 """INSERT INTO tmdb_watchlist_fts(rowid, title, original_title, overview)
@@ -717,7 +717,7 @@ class TmdbWatchlistDb:
                     self._val(item, "overview"),
                 ),
             )
-            
+
             conn.commit()
 
     def _upsert_tv(self, item: dict, synced_at: float) -> None:
@@ -792,7 +792,7 @@ class TmdbWatchlistDb:
                     manual_override_by,
                 ),
             )
-            
+
             # 插入新的 FTS 记录（使用 name 作为 title）
             conn.execute(
                 """INSERT INTO tmdb_watchlist_fts(rowid, title, original_title, overview)
@@ -804,7 +804,7 @@ class TmdbWatchlistDb:
                     self._val(item, "overview"),
                 ),
             )
-            
+
             conn.commit()
 
     # ----------------------------------------------------------
@@ -909,17 +909,17 @@ class TmdbWatchlistDb:
             # 清理 7 天前的日志
             conn.execute(
                 "DELETE FROM tmdb_operation_log WHERE ts < ?", (seven_days_ago,))
-            
+
             # 清理超过行数限制的日志（保留最新的 N 条）
             conn.execute("""
-                DELETE FROM tmdb_operation_log 
+                DELETE FROM tmdb_operation_log
                 WHERE id NOT IN (
-                    SELECT id FROM tmdb_operation_log 
-                    ORDER BY ts DESC 
+                    SELECT id FROM tmdb_operation_log
+                    ORDER BY ts DESC
                     LIMIT ?
                 )
             """, (self._tmdb_log_max_rows,))
-            
+
             cur = conn.execute(
                 "SELECT id, ts, op, level, msg, detail FROM tmdb_operation_log ORDER BY ts DESC LIMIT ?",
                 (limit,),

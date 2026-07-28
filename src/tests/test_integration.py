@@ -103,12 +103,14 @@ class TestDatabaseRecordTypes:
     def test_boundary_record_creation(self):
         """测试 BoundaryRecord 创建"""
         record = BoundaryRecord(
+            mapping_id="test_mapping",
             fingerprint="abc123",
             source_media_name="Source Show",
             current_media_name="Current Show",
             engine_entry_path="/engine/path",
             updated_at=time.time(),
         )
+        assert record.mapping_id == "test_mapping"
         assert record.source_media_name == "Source Show"
         assert record.current_media_name == "Current Show"
 
@@ -178,6 +180,7 @@ class TestDatabaseOperations:
             source_a_path="/source/path.strm",
             fingerprint="abc123",
             status="valid",
+            mapping_id="test_mapping",
         )
 
         # 查询记录
@@ -205,7 +208,7 @@ class TestDatabaseOperations:
 
     def test_get_all_b_records(self, temp_db: Database):
         """测试获取所有 B 区记录"""
-        # 插入多条记录
+# 插入记录
         for i in range(3):
             temp_db.upsert_b(
                 local_path=f"/test/path{i}.strm",
@@ -214,6 +217,7 @@ class TestDatabaseOperations:
                 source_a_path=f"/source/path{i}.strm",
                 fingerprint=f"fp{i}",
                 status="valid",
+                mapping_id="test_mapping",
             )
 
         # 获取所有记录
@@ -237,6 +241,7 @@ class TestDatabaseOperations:
         """测试媒体边界记录操作"""
         # 插入记录
         temp_db.upsert_media_boundary(
+            mapping_id="test_mapping",
             fingerprint="abc123",
             source_media_name="Source Show",
             current_media_name="Current Show",
@@ -244,7 +249,7 @@ class TestDatabaseOperations:
         )
 
         # 查询记录
-        record = temp_db.get_media_boundary_by_fingerprint("abc123")
+        record = temp_db.get_media_boundary_by_fingerprint("test_mapping", "abc123")
         assert record is not None
         assert isinstance(record, BoundaryRecord)
         assert record.source_media_name == "Source Show"
@@ -427,6 +432,7 @@ class TestDataFlow:
             source_a_path=a_record.local_path,
             fingerprint=fingerprint,
             status="valid",
+            mapping_id="test_mapping",
         )
 
         # 5. 更新身份记录的 current_b_path
@@ -491,7 +497,7 @@ class TestBatchOperations:
     def test_upsert_b_batch(self, temp_db: Database):
         """测试批量插入 B 区记录"""
         records = [
-            (f"/path{i}.strm", f"/webdav{i}.strm", "/webdav", f"/source{i}.strm", f"fp{i}", "valid")
+            (f"/path{i}.strm", f"/webdav{i}.strm", "/webdav", f"/source{i}.strm", f"fp{i}", "valid", "test_mapping")
             for i in range(10)
         ]
         count = temp_db.upsert_b_batch(records)
@@ -548,7 +554,7 @@ class TestFTSIntegrityBStrm:
         # 制造孤儿：插入后用 delete_b_under_root 删除主表行，
         # 再手动残留一个 FTS 行来模拟历史损坏状态。
         temp_db.upsert_b("/b/old.strm", "/w/old.mp4", "/w", "/a/old.strm",
-                         fingerprint="fpold", status="valid")
+                         fingerprint="fpold", status="valid", mapping_id="test_mapping")
         # 直接删主表行但保留 FTS 行，模拟旧版删除路径的 bug
         with temp_db.rw_lock.write_locked(), temp_db.connection() as conn:
             conn.execute("DELETE FROM b_strm_files")  # 只删主表，FTS 残留
@@ -557,7 +563,7 @@ class TestFTSIntegrityBStrm:
 
         # 新 upsert 会复用 rowid=1，历史版本此处会抛 constraint failed
         temp_db.upsert_b("/b/new.strm", "/w/new.mp4", "/w", "/a/new.strm",
-                         fingerprint="fpnew", status="valid")
+                         fingerprint="fpnew", status="valid", mapping_id="test_mapping")
 
         # 应成功且无孤儿
         rec = temp_db.get_b_by_local("/b/new.strm")
@@ -566,28 +572,28 @@ class TestFTSIntegrityBStrm:
 
     def test_delete_b_under_root_cleans_fts(self, temp_db: Database):
         temp_db.upsert_b("/b/x1.strm", "/root/a/x1.mp4", "/root/a", None,
-                         fingerprint="fp1", status="valid")
+                         fingerprint="fp1", status="valid", mapping_id="test_mapping")
         temp_db.upsert_b("/b/x2.strm", "/root/a/x2.mp4", "/root/a", None,
-                         fingerprint="fp2", status="valid")
+                         fingerprint="fp2", status="valid", mapping_id="test_mapping")
         temp_db.delete_b_under_root("/root/a")
         assert self._fts_orphan_count(temp_db) == 0
 
     def test_delete_b_by_fingerprint_cleans_fts(self, temp_db: Database):
         temp_db.upsert_b("/b/y.strm", "/w/y.mp4", "/w", None,
-                         fingerprint="fpY", status="valid")
+                         fingerprint="fpY", status="valid", mapping_id="test_mapping")
         temp_db.delete_b_by_fingerprint("fpY")
         assert self._fts_orphan_count(temp_db) == 0
 
     def test_delete_b_batch_cleans_fts(self, temp_db: Database):
         for i in range(3):
             temp_db.upsert_b(f"/b/z{i}.strm", f"/w/z{i}.mp4", "/w", None,
-                             fingerprint=f"fpZ{i}", status="valid")
+                             fingerprint=f"fpZ{i}", status="valid", mapping_id="test_mapping")
         temp_db.delete_b_batch([f"/b/z{i}.strm" for i in range(3)])
         assert self._fts_orphan_count(temp_db) == 0
 
     def test_move_b_record_cleans_fts(self, temp_db: Database):
         temp_db.upsert_b("/b/old.strm", "/w/m.mp4", "/w", None,
-                         fingerprint="fpM", status="valid")
+                         fingerprint="fpM", status="valid", mapping_id="test_mapping")
         assert temp_db.move_b_record("/b/old.strm", "/b/moved.strm") is True
         assert self._fts_orphan_count(temp_db) == 0
         # 移动后新路径可被搜索到、旧路径不残留
@@ -597,7 +603,7 @@ class TestFTSIntegrityBStrm:
     def test_upsert_b_batch_cleans_fts(self, temp_db: Database):
         """批量 upsert 后不应残留 FTS 孤儿"""
         records = [
-            (f"/b/batch{i}.strm", f"/w/batch{i}.mp4", "/w", None, f"fpB{i}", "valid")
+            (f"/b/batch{i}.strm", f"/w/batch{i}.mp4", "/w", None, f"fpB{i}", "valid", "test_mapping")
             for i in range(3)
         ]
         temp_db.upsert_b_batch(records)

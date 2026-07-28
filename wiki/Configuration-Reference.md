@@ -28,9 +28,14 @@ db_file = "./bridge.db"
 
 ```toml
 [paths]
-b_root = "./测试b"
+# 旧 b_root 仅为兼容显示，不自动生成生产 mapping
+b_root = ""
 c_root = "./测试c"
+
+# 生产 B 归属通过 WebUI/DB 的 a_b_mappings 显式配置：
+# [{mapping_id="m1", a_root="./测试a1", b_root="./测试b1"}]
 ```
+
 
 | 键 | 默认值 | 说明 |
 |-----|------|------|
