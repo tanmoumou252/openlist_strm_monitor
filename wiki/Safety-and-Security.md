@@ -15,6 +15,7 @@
 5. **`_resolve_cloud_and_physical_names`** — 引擎配置与云端/物理名称解析
 6. **`_check_boundary_files`** — 越界文件检查（验证 B 区文件是否在合法范围内）
 7. **`_check_boundary_mappings`** — 边界映射匹配检查（比对 `strm_media_boundary` 记录）
+   - A 源缺失时由 `_verify_a_source_exists` 进行二次安全校验：只有 B 路径能解析唯一 mapping，且该 mapping 下存在对应 fingerprint 的 boundary 记录时，才允许继续放行；mapping 无法解析或 boundary 不属于当前 mapping 时 fail-closed 返回 `False`。
 8. **`_handle_sync_phase_boundary`** — 同步阶段边界记录（仅同步阶段执行）
 9. **`_check_solo_episode`** — 单集/批量检测（间接触发 `trigger_delayed_solo_check` 30 秒观察定时器）
 
@@ -125,7 +126,7 @@ B 区文件变动（创建/修改/移动）
 
 ### 血统校验跳过
 
-生产 snapshot 只允许在 mapping/version/lineage/state/size/mtime/fingerprint 全部匹配时复用；它不是只扫描变化文件的替代品。snapshot 缺失、损坏、读取异常、stat 异常或文件在核对期间变化时，必须回退完整 lineage。
+生产 snapshot 只允许在 mapping/version/lineage/state/size/mtime/fingerprint 全部匹配时复用；它不是只扫描变化文件的替代品。snapshot 缺失、损坏、读取异常、stat 异常或文件在核对期间变化时，必须回退完整 lineage。正式生产等价性测试必须使用真实 `AppService + Database`；独立 benchmark 不能作为生产 reconciliation 或安全正确性的证据。旧 boundary 表若缺少 `mapping_id`，初始化时 fail-closed 重建并删除无法归属的旧行，不把旧数据猜测迁移到任意 mapping。
 
 启动同步跳过 `_verify_b_path_lineage`，原因：
 - 首次运行：B 区为空，血统校验始终通过
@@ -207,6 +208,8 @@ B 区扫描时检查每个 STRM 文件：
 
 - **引擎管辖路径**：完整刷新，允许 B 区清理
 - **非引擎路径**：只读刷新，扫描目录结构，**不清理** B 区
+- **周期扫描范围**：`refresh_paths` 为空时不主动扫描 A 根；非空时仅扫描其匹配的 mapping。B 区 watchdog 删除联动不受此配置影响，仍使用记录中的真实 WebDAV 路径。
+- **全量审计**：默认每 7 天执行一次全 A 根审计用于回收失活记录，可能唤醒机械盘；`full_audit_interval_days=0` 可关闭。
 
 防止云存储离线 → 引擎标记路径不存在 → 程序不会误删 B 区文件。
 
@@ -250,7 +253,7 @@ B 区扫描时检查每个 STRM 文件：
 
 以下安全机制在其他章节中未详细介绍：
 
-- **三重防误删**（`handle_b_deleted`）：`_restoring_markers`（恢复操作标记）→ `_engine_internal_markers`（引擎内部删除标记）→ `has_other_b_instance` + `_check_fingerprint_exists_in_b`（同指纹其他实例检查）。三重全不通过才执行云端删除。
+- **三重防误删**（`handle_b_deleted`）：`_restoring_markers`（恢复操作标记）→ `_engine_internal_markers`（引擎内部删除标记）→ `has_other_b_instance(mapping_id, fingerprint, exclude_local_path)` + `_check_fingerprint_exists_in_b(fingerprint, exclude_path, mapping_id)`（同 mapping、同指纹其他可见实例检查）。两者均只检查同一 mapping 下的实例；mapping 无法解析时 fail-closed 跳过云端删除。三重全不通过才执行云端删除。
 - **`ensure_single_visible_instance(fingerprint, trigger_path, prefer_path=None)`** — 同一指纹仅一个实例保持 `valid` 状态，其余强制改为 `.duplicate`。回滚失败时抛出异常使清理中止。
 - **`get_webdav_lock(namespace)`** — 命名空间隔离的 WebDAV 操作锁，防止不同引擎/路径的并发冲突。
 - **DB 建表幂等性** — `_create_schema` 使用 `CREATE TABLE IF NOT EXISTS` 幂等语句，可安全重复调用，不存在回滚机制。

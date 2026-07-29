@@ -19,6 +19,7 @@ def build_mock_app(
     refresh_paths: list[str] | None = None,
     interval_seconds: int = 300,
     strm_engine_paths: list[str] | None = None,
+    full_audit_interval_days: int = 7,
     # SubtitleHandler 配置
     setup_b_root: bool = False,
     # SyncService 配置
@@ -41,6 +42,7 @@ def build_mock_app(
     # RefreshService 配置
     app.config.refresh.enabled = refresh_enabled
     app.config.refresh.interval_seconds = interval_seconds
+    app.config.refresh.full_audit_interval_days = full_audit_interval_days
     app.config.refresh_paths = refresh_paths or []
     app.config.strm_engine_paths = strm_engine_paths or []
 

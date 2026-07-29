@@ -68,6 +68,7 @@ totp_secret = ""
 | `depth` | `5` | WebDAV PROPFIND 扫描深度 |
 | `timeout_seconds` | `300` | 刷新操作超时时间（秒） |
 | `log_level` | `"INFO"` | 刷新日志级别：DEBUG/INFO/WARNING |
+| `full_audit_interval_days` | `7` | A 区全量审计周期；0 关闭。`refresh_paths` 为空时周期局部扫描停止，但到期全量审计仍可能访问所有 A 根。DB 键名为 `refresh_full_audit_interval_days`（带 `refresh_` 前缀） |
 
 ### `[behavior]` — `BehaviorConfig`
 
@@ -144,6 +145,7 @@ totp_secret = ""
 | `openlist` | `webdav_totp_secret` | TOTP 密钥（加密存储） |
 | `openlist` | `b_root` | B 区根目录 |
 | `openlist` | `c_root` | C 区根目录 |
+| `openlist` | `a_b_mappings` | A↔B 映射列表（JSON 数组，元素含 `mapping_id`、`a_root`、`b_root`、`label`；由 `openlist.js` 提交，替代旧 `b_root` 单值输入） |
 | `openlist` | `strm_engines` | 引擎配置（从 WebUI 写入，派生 `a_folders` 和 `strm_engine_paths`） |
 | `openlist` | `engines_initialized` | 引擎初始化标志（迁移时设为 `true`） |
 | `openlist` | `refresh_paths` | 刷新路径 |
@@ -151,6 +153,7 @@ totp_secret = ""
 | `openlist` | `refresh_interval_minutes` | 刷新间隔（分钟，内部转秒） |
 | `openlist` | `refresh_depth` | WebDAV PROPFIND 扫描深度 |
 | `openlist` | `refresh_log_level` | 刷新日志级别 |
+| `openlist` | `refresh_full_audit_interval_days` | 全量审计周期（天）；0 关闭。**注意：TOML 中对应键名为 `full_audit_interval_days`（无 `refresh_` 前缀），两者不同** |
 | `openlist` | `behavior_action` | 删除行为（MOVE/DELETE） |
 | `openlist` | `behavior_trash_dir_name` | 云端回收站目录名 |
 | `openlist` | `behavior_ghost_protect_seconds` | 幽灵保护时长（秒） |

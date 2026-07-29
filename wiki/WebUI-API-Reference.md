@@ -107,7 +107,7 @@
 - **数据库**：`db_file`、`db_exists`
 - **WebUI**：`webui_port`、`webui_bind`
 - **TMDB**：`tmdb_configured`、`tmdb_token_configured`、`tmdb_language`、`tmdb_host`、`tmdb_api_key`（**布尔值**，已脱敏）、`tmdb_api_key_configured`、`tmdb_proxy_configured`、`tmdb_proxy_enabled`、`tmdb_account_id`、`tmdb_watchlist_db`、`tmdb_watchlist_enabled`、`tmdb_fuzzy_threshold`、`tmdb_anime_min_ep_ratio`、`tmdb_anime_max_season_diff`、`tmdb_anime_min_season_ratio`、`tmdb_cache_ttl`
-- **A/B/C 区**：`b_root`、`c_root`、`a_folders`、`strm_engine_paths`、`refresh_paths`
+- **A/B/C 区**：`a_b_mappings`（A↔B 映射列表）、`b_root`、`c_root`、`a_folders`、`strm_engine_paths`、`refresh_paths`
 - **OpenList/WebDAV**：`webdav_host`、`webdav_user`、`webdav_password`（**布尔值**，已脱敏）、`webdav_totp_secret`（**布尔值**，已脱敏）
 - **刷新/行为**：`refresh_enabled`、`refresh_interval`、`behavior_action`、`ghost_protect_seconds`
 
@@ -128,7 +128,7 @@
 - POST 允许的 scope：`tmdb`、`openlist`、`ui`。`migration` scope 仅支持 GET，POST 返回 403「不允许的 scope: migration」。
 - `ui` scope 有严格键白名单，仅允许写入：`tmdb_cache_never_remind`、`tmdb_match_toast_disabled`、`admin_password`、`onboarding_completed`、`onboarding_skipped`。其他键返回 403「不允许的配置项: ...」。
 - `admin_password` 以明文写入时会自动哈希后存储。
-- `openlist` scope 的 `strm_engines` 会经 `_validate_strm_engines` 校验。
+- `openlist` scope 的 `strm_engines` 会经 `_validate_strm_engines` 校验；`a_b_mappings` 会经 `_validate_a_b_mappings` 校验——每个映射必须是非空字符串 `a_root` 与 `b_root` 组成的 dict，否则返回 400「A↔B 映射配置(a_b_mappings)格式不正确：每个映射必须包含非空的 a_root 和 b_root 字段。」
 
 成功返回 `{"success": true, "scope": "<scope>", "saved": <写入键数>}`。
 
@@ -177,7 +177,14 @@ Ping OpenList API。**免 Token**。
 获取监控路径配置。必填 query 参数 `engine`（缺失返回 400「engine 参数必填」）。成功返回 `{"success": true, "engine": "<engine>", "paths": [...]}`。
 
 ### `GET /api/openlist/paths`
-获取 OpenList 路径配置（B 区根目录、C 区根目录等）。
+获取 OpenList 路径配置。响应字段：
+
+- `a_folders` — A 区根目录列表（由 STRM 引擎自动发现）
+- `a_b_mappings` — A↔B 映射列表，每个元素含 `a_root`（A 区根路径）与 `b_root`（对应的 B 区根路径）
+- `b_root` — 全局 B 区根目录（兼容旧配置）
+- `c_root` — C 区根目录
+
+> 注：当前前端 `openlist.js` 已将「B 区根目录」输入替换为「A↔B 目录映射」逐行填写模式。写入时通过 `POST /api/webui/config/openlist` 提交 `a_b_mappings` JSON 字符串。
 
 ## TMDB
 

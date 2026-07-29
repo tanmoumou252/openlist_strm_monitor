@@ -17,6 +17,7 @@ export const OpenListState = {
   availableEngines: [],
   apiStatus: 'checking',
   refreshPaths: [],
+  abMappings: [],
   configured: false,
 };
 

@@ -99,6 +99,7 @@ class RefreshConfig:
     depth: int = 5
     timeout_seconds: int = 300  # 刷新操作超时时间（秒）
     log_level: str = "INFO"  # 刷新日志级别：DEBUG/INFO/WARNING
+    full_audit_interval_days: int = 7  # A 区全量审计周期；0 表示关闭
 
 
 @dataclass(slots=True)
@@ -330,6 +331,12 @@ class AppConfig:
                     refresh_cfg.depth = int(db_cfg["refresh_depth"])
                 except (ValueError, TypeError) as e:
                     logging.warning("[Config] 转换 refresh_depth 失败: %s", e)
+            if "refresh_full_audit_interval_days" in db_cfg:
+                try:
+                    refresh_cfg.full_audit_interval_days = max(
+                        0, int(db_cfg["refresh_full_audit_interval_days"]))
+                except (ValueError, TypeError) as e:
+                    logging.warning("[Config] 转换 refresh_full_audit_interval_days 失败: %s", e)
 
             # OpenList 初始化标志
             if "engines_initialized" in db_cfg:
@@ -452,6 +459,7 @@ class AppConfig:
             depth=refresh_data.get("depth", 5),
             timeout_seconds=refresh_data.get("timeout_seconds", 300),
             log_level=refresh_data.get("log_level", "INFO"),
+            full_audit_interval_days=refresh_data.get("full_audit_interval_days", 7),
         )
 
         behavior_data = data.get("behavior", {})
@@ -703,6 +711,8 @@ def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
                                 str(config.refresh.interval_seconds // 60))
         watchlist_db.set_config("openlist", "refresh_depth",
                                 str(config.refresh.depth))
+        watchlist_db.set_config("openlist", "refresh_full_audit_interval_days",
+                                str(config.refresh.full_audit_interval_days))
         watchlist_db.set_config("openlist", "refresh_log_level",
                                 config.refresh.log_level)
 

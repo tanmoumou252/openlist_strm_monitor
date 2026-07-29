@@ -470,6 +470,33 @@ class Database:
                 )
                 """)
 
+            # 旧 boundary 表迁移检测：旧表缺少 mapping_id 或仅有 fingerprint 主键时重建
+            existing_boundary_columns = {
+                row[1] for row in cur.execute(
+                    "PRAGMA table_info(strm_media_boundary)").fetchall()
+            }
+            if existing_boundary_columns and "mapping_id" not in existing_boundary_columns:
+                logging.warning("[DB] 检测到旧版 strm_media_boundary 表，启动安全迁移（删除无可归属 mapping 的旧行）")
+                try:
+                    cur.execute("""
+                        CREATE TABLE strm_media_boundary_new (
+                            mapping_id TEXT NOT NULL,
+                            fingerprint TEXT NOT NULL,
+                            source_media_name TEXT NOT NULL,
+                            current_media_name TEXT NOT NULL,
+                            engine_entry_path TEXT NOT NULL,
+                            updated_at REAL NOT NULL,
+                            PRIMARY KEY (mapping_id, fingerprint)
+                        )
+                    """)
+                    # 旧记录无法可靠确定 mapping_id，按用户选择不猜测、不迁移，直接重建空表
+                    cur.execute("DROP TABLE strm_media_boundary")
+                    cur.execute("ALTER TABLE strm_media_boundary_new RENAME TO strm_media_boundary")
+                    logging.info("[DB] 旧版 strm_media_boundary 表迁移完成，不可归属的旧记录已删除")
+                except Exception as exc:
+                    logging.error("[DB] strm_media_boundary 表迁移失败，回滚: %s", exc)
+                    raise
+
             # 映射级身份投影表：每个 mapping_id + fingerprint 组合记录当前 visible B 路径
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS b_identity_projection (

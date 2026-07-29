@@ -1,6 +1,6 @@
 # 测试脚本说明
 
-本目录包含 `openlist_strm_bridge` 项目的全部测试文件，当前共 **40** 个 `test_*.py`（其中 **36** 个被 pytest 收集，**4** 个独立手动脚本由 `conftest.py` 的 `collect_ignore_glob` 排除）+ 若干辅助工具脚本。
+本目录包含 `openlist_strm_bridge` 项目的全部测试文件。使用 `python -m pytest src/tests --collect-only -q` 获取当前实时收集的测试数量。`conftest.py` 的 `collect_ignore_glob` 排除部分独立手动脚本（需要外部服务运行）。+ 若干辅助工具脚本。
 
 所有测试均从**项目根目录**运行（`src/tests/conftest.py` 负责 `src/` 路径注入），推荐命令：
 
@@ -21,6 +21,8 @@ python -m pytest src/tests/ -v
 | `test_refresh_service.py` | 周期性 WebDAV 刷新服务测试 |
 | `test_bootstrap.py` | 启动路径工具（`ensure_base_dir_first`、`load_local_module`）测试 |
 | `test_log_issues_simulation.py` | 八类真实日志问题的沙盒实验与修复回归（SQLite 锁竞争、padding 路径碰撞、B 区血统清理健康度、B 区事件洪泛、重复实例隔离、字幕路由、WebDAV 假阴性、Unicode 路径） |
+| `test_lineage_snapshot_production.py` | 真实 `AppService` 的 mapping-scoped lineage snapshot 验收：覆盖未变更复用、内容修改、删除、同 mapping 重命名、跨 mapping/非法目录移动、无指纹、同/跨 mapping 重复指纹、A 源缺失 boundary 放行、同名不同根、mapping/lineage 版本变化、snapshot 缺失或损坏、stat/DB 写异常及扫描期间文件修改。 |
+| `test_multi_mapping_production_acceptance.py` | 多 mapping 生产验收与跨根隔离测试。 |
 
 ### 数据库 / FTS
 
@@ -30,11 +32,13 @@ python -m pytest src/tests/ -v
 | `test_fts5_search.py` | FTS5 全文检索查询与匹配测试（含 simple 分词器加载、版本可读、`黑暗`/`暗黑` 按词分词语义断言） |
 | `test_fts5_escape_and_tmdb_search.py` | FTS5 查询转义函数（`_escape_fts5_query`）与 TMDB 搜索路由测试（含 `进击的巨人[限制级]`、`电影：测试*`、`Spy×Family` 真实媒体名转义） |
 | `test_fts_orphan_cleanup.py` | FTS 孤儿行清理与一致性测试 |
+| `test_tmdb_watchlist_db.py` | TMDB 待看列表 DB 单元测试：匹配状态 CRUD、季数缓存、全量同步 upsert/FTS/独立事务、TV detail 填充、操作日志、webui_config CRUD、加密迁移 |
 
 ### 配置 / 安全
 
 | 文件 | 说明 |
 |------|------|
+| `test_config.py` | 配置模块单元测试：ABMapping、mapping_version、AppConfig.from_file、update_from_db、load_strm_storage_from_api、migrate_config_to_db、配置 fail-closed |
 | `test_password_security.py` | 管理员密码 PBKDF2 哈希与校验安全测试 |
 | `test_secret_manager.py` | 密钥/凭据安全管理测试 |
 | `test_migrate_encryption.py` | 加密方案迁移测试 |
@@ -52,6 +56,7 @@ python -m pytest src/tests/ -v
 | `test_subtitle_multi_bug_repro.py` | 番剧多字幕场景 NameError 回归测试 |
 | `test_boundary_conditions.py` | 边界条件与异常输入健壮性测试 |
 | `test_error_translator.py` | 错误码到用户可读信息的翻译测试 |
+| `test_subset_font.py` | 字体子集化脚本单元测试：参数解析、Unicode 集合运算、网页字符扫描、缺字来源区分、CSS 一致性校验、icon-preview 与 icons.js 一致性 |
 
 ### API 客户端
 
@@ -68,7 +73,8 @@ python -m pytest src/tests/ -v
 |------|------|
 | `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试 |
 | `test_call_coverage.py` | 路由调用覆盖率测试 |
-| `test_logging_system.py` | 日志系统测试 |
+| `test_logging_system.py` | TMDB 操作日志表、日志读取接口与轮转产物测试 |
+| `test_logger_setup.py` | logger_setup 模块单元测试：handler 装配、重复初始化（热更新）、回退路径、级别过滤、启动分隔标记、临时目录清理 |
 | `test_concurrency.py` | 并发请求与锁竞争测试 |
 
 ### 匹配 / 监视
@@ -84,6 +90,12 @@ python -m pytest src/tests/ -v
 |------|------|
 | `test_e2e_full_flow.py` | 完整业务流程端到端测试（登录→配置→A/B 区→状态校验） |
 | `test_onboarding_e2e.py` | 新手引导流程端到端测试 |
+
+### 性能基准门禁
+
+| 文件 | 说明 |
+|------|------|
+| `perf/test_benchmark_lineage.py` | 基准正确性门禁：compute_digest 稳定性、build_fixture 结构、baseline/optimized 等价性（不包含性能阈值断言） |
 
 ### 独立手动脚本（非 pytest 测试）
 

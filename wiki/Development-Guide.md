@@ -12,7 +12,7 @@
 | **HTTP 客户端** | `requests` 库 |
 | **WebDAV XML** | `lxml` 库 |
 | **TOML 解析** | `tomli` 库（Python < 3.11 回退） |
-| **测试** | pytest（40 个 test_*.py，其中 4 个手动脚本不计入收集，pytest 实际收集 36 个；`src/tests/`） |
+| **测试** | pytest（见 `src/tests/README.md` 获取测试文件清单，`python -m pytest src/tests --collect-only -q` 获取实时收集数量；`src/tests/`） |
 
 ## 源码目录
 
@@ -47,7 +47,7 @@ src/
 │   ├── encoding_utils.py   # 编码规范化（NFC/NFD、URL、全角/连续空格）
 │   └── bootstrap.py        # 启动引导工具
 ├── webui/                   # SPA 前端 + HTTP 服务器
-└── tests/                   # 40 个测试文件
+└── tests/                   # 测试文件（见 src/tests/README.md）
 ```
 
 ## 前端构建
@@ -125,7 +125,7 @@ src/tests/run_tests.bat --cov      # 额外生成覆盖率报告
 python -m pytest src/tests/ -v
 ```
 
-40 个测试文件覆盖（其中 4 个为需外部服务的手动脚本，pytest 默认不收集；实际收集 36 个）：配置加载、数据库 CRUD、指纹计算、WebDAV 路径解析、字幕语言检测、媒体重命名、待看列表匹配，以及：
+测试文件覆盖（见 `src/tests/README.md` 获取完整清单；`python -m pytest src/tests --collect-only -q` 获取实时收集数量）：配置加载、数据库 CRUD、指纹计算、WebDAV 路径解析、字幕语言检测、媒体重命名、待看列表匹配，以及：
 
 - **FTS5 中文搜索**：`test_fts5_search.py`（黑暗/暗黑分词语义 `test_search_dark_vs_reverse`、`test_simple_version_readable`）、`test_fts5_escape_and_tmdb_search.py`（真实媒体名转义，如 `进击的巨人[限制级]`、`电影：测试*`、`Spy×Family`）。
 - **simple 分词器加载与版本**：`src/tokenizers/simple/` 下的 `simple.dll` + `VERSION` + `README.md`，由 `database.py` 的 `_load_simple_tokenizer` 与 `tmdb_watchlist_db.py` 的 `_load_simple_into` 加载，版本可读性由 `test_simple_version_readable` 校验。

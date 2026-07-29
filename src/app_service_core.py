@@ -515,6 +515,15 @@ class AppService:
             logging.info("[启动] A→B 同步耗时: %.1fs", time.time() - t_phase)
         else:
             logging.info("[启动] 跳过 A→B 全量同步（sync_on_startup=false）")
+
+        # 启动阶段已经完成一次全量 A 区审计，7 天兜底从本次启动重新计时。
+        try:
+            audit_now = time.time()
+            self.db.set_control("last_full_audit_at", str(audit_now))
+            if hasattr(self.refresh_service, "_last_full_audit_at"):
+                self.refresh_service._last_full_audit_at = audit_now
+        except (AttributeError, OSError):
+            logging.warning("[启动] 保存全量审计时间失败")
         
         t_sub = time.time()
         self.start_watchers()
@@ -607,6 +616,49 @@ class AppService:
             matches.append((mapping_id, b_root, a_root))
         return matches[0] if len(matches) == 1 else None
 
+    def get_a_roots_for_refresh_paths(self) -> list[Path]:
+        """返回 refresh_paths 命中的 A 根；空列表表示周期主动扫描全部跳过。"""
+        refresh_paths = [str(p).rstrip("/") or "/" for p in (self.config.refresh_paths or [])]
+        if not refresh_paths:
+            return []
+
+        storage_map = getattr(self.config, "strm_storage_map", {}) or {}
+        matched: list[Path] = []
+        seen: set[Path] = set()
+        for mapping in self.a_b_mappings:
+            a_root = normalize_local_root(mapping.a_root)
+            storage_entries = [
+                (entry_path, storage)
+                for entry_path, storage in storage_map.items()
+                if normalize_local_root(storage.local_path) == a_root
+            ]
+            # 无法从 storage map 唯一关联引擎时 fail-closed，不能把一个 refresh
+            # path 错误地套用到所有 mapping。
+            engine_paths = {storage.mount_path for _, storage in storage_entries}
+            if not engine_paths:
+                continue
+            is_matched = any(
+                rp == ep.rstrip("/") or rp.startswith(ep.rstrip("/") + "/")
+                for rp in refresh_paths
+                for ep in engine_paths
+            )
+            if is_matched and a_root not in seen:
+                seen.add(a_root)
+                matched.append(a_root)
+        return matched
+
+    def get_engine_paths_for_a_roots(self, a_roots: list[Path]) -> list[str]:
+        """返回指定 A 根对应的 STRM engine mount paths，供周期同步过滤。"""
+        roots = {normalize_local_root(root) for root in a_roots}
+        result: list[str] = []
+        storage_map = getattr(self.config, "strm_storage_map", {}) or {}
+        for entry_path, storage in storage_map.items():
+            if normalize_local_root(storage.local_path) in roots:
+                mount = str(storage.mount_path).rstrip("/") or "/"
+                if mount not in result:
+                    result.append(mount)
+        return result
+
     def get_config_status(self) -> dict[str, object]:
         """返回可供 WebUI 使用的配置状态，不触发任何危险操作。"""
         if not self.a_b_mappings:
@@ -616,7 +668,9 @@ class AppService:
         seen_b: list[Path] = []
         for mapping in self.a_b_mappings:
             mapping_id = str(getattr(mapping, "mapping_id", "")).strip()
-            if not mapping_id or mapping_id in seen_ids or not str(getattr(mapping, "a_root", "")).strip() or not str(getattr(mapping, "b_root", "")).strip():
+            if (not mapping_id or mapping_id in seen_ids
+                    or not str(getattr(mapping, "a_root", "")).strip()
+                    or not str(getattr(mapping, "b_root", "")).strip()):
                 return {"status": "fail_safe_active", "reason": "mapping 缺少唯一 ID 或根路径"}
             seen_ids.add(mapping_id)
             a_root = normalize_local_root(mapping.a_root)
@@ -1286,7 +1340,10 @@ class AppService:
                     logging.debug("[B区历史核对] DB删除: %s", db_local_path)
                     self.db.delete_b_by_local(db_local_path)
                     logging.debug("[B区历史核对] 身份刷新 fp=%s", db_fingerprint)
-                    self.refresh_identity_current_b_path(db_fingerprint)
+                    if row_mapping_id:
+                        self.refresh_identity_current_b_path(db_fingerprint, row_mapping_id)
+                    else:
+                        logging.warning("[B区历史核对] 无法解析 mapping，跳过 projection 刷新: %s", db_local_path)
                     processed.add(db_local_path)
                     continue
                 op_elapsed = time.time() - t_op
@@ -1404,8 +1461,11 @@ class AppService:
         
         logging.info("[初始化] B 区新增记录处理完成: %d 条 (%.1fs)", new_insert_count, time.time() - t_start)
 
-    def initial_scan_a(self, use_bulk: bool = False):
-        return self.sync_service.initial_scan_a(use_bulk=use_bulk)
+    def initial_scan_a(
+            self, use_bulk: bool = False,
+            a_roots: list[Path] | None = None):
+        return self.sync_service.initial_scan_a(
+            use_bulk=use_bulk, a_roots=a_roots)
 
     def cleanup_a_redundant_using_api(self) -> None:
         """使用 OpenList API 批量清理 A 区冗余文件。
@@ -2390,6 +2450,11 @@ class AppService:
             else:
                 logging.warning("[B区越界恢复] 找不到 A 区源文件，无法恢复: %s", webdav_path)
         if correct_b_path:
+            mapping_id = self._mapping_id_for_b(correct_b_path)
+            if not mapping_id:
+                logging.warning(
+                    "[B区越界恢复] 无法解析目标 mapping，跳过 DB 恢复: %s", correct_b_path)
+                return
             parent = webdav_parent(webdav_path)
             final_source_a = source_a_path or (
                 identity.source_a_path if identity else self.find_a_source_by_webdav(webdav_path))
@@ -2402,6 +2467,7 @@ class AppService:
                 webdav_path,
                 parent,
                 final_source_a,
+                mapping_id=mapping_id,
                 fingerprint=fingerprint,
                 status="valid")
             self.db.upsert_identity(
@@ -2409,7 +2475,7 @@ class AppService:
                 webdav_path=webdav_path,
                 source_a_path=final_source_a,
                 current_b_path=correct_b_path)
-            self.ensure_single_visible_instance(fingerprint, correct_b_path, mapping_id=self._mapping_id_for_b(correct_b_path))
+            self.ensure_single_visible_instance(fingerprint, correct_b_path, mapping_id=mapping_id)
 
     def _verify_a_source_exists(
             self, b_local_path: str, webdav_path: str, fingerprint: str) -> bool:
@@ -2420,10 +2486,13 @@ class AppService:
         a_source = self.find_a_source_by_webdav(webdav_path)
         if a_source and Path(a_source).exists():
             return True
-            boundary = self.db.get_media_boundary_by_fingerprint(mapping_id, fingerprint)
-
+        mapping = self.get_mapping_for_b(b_local_path)
+        if mapping is None:
+            logging.warning("[A区源校验] 无法解析 B mapping，拒绝放行: %s", b_local_path)
+            return False
+        boundary = self.db.get_media_boundary_by_fingerprint(mapping[0], fingerprint)
         if boundary:
-            logging.debug("[A区源校验] 边界映射存在，放宽检查: %s (指纹: %s...)",
+            logging.debug("[A区源校验] mapping boundary 存在，放宽检查: %s (指纹: %s...)",
                           b_local_path, fingerprint[:8])
             return True
         logging.debug(
@@ -2723,7 +2792,11 @@ class AppService:
                     webdav = read_strm_webdav_path(dst)
                     if webdav:
                         fp = make_strm_fingerprint(webdav)
-                        self.refresh_identity_current_b_path(fp)
+                        mid = self._mapping_id_for_b(dst)
+                        if mid:
+                            self.refresh_identity_current_b_path(fp, mid)
+                        else:
+                            logging.warning("[B区重命名] 无法解析目标 mapping，跳过 projection 刷新: %s", dst)
 
     def _execute_webdav_deletion(
             self, webdav_path: str, parent_webdav_path: str) -> bool:

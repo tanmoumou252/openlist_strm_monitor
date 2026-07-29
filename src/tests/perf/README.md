@@ -36,6 +36,20 @@
 | 第3层: 路径缓存 | A/B根只resolve一次 | -50% resolve调用 |
 | 第4层: 结果复用 | exists/relative_to不重复计算 | — |
 
+## pytest 门禁测试
+
+`src/tests/perf/` 下的 `test_benchmark_lineage.py` 包含正确的 pytest 门禁测试，验证：
+
+- `compute_digest` 的确定性与稳定性
+- `build_fixture` 构造的测试环境结构完整
+- `baseline` 与 `optimized` 在小规模数据上 digest 等价（正确性门禁，不依赖性能阈值）
+
+```bash
+python -m pytest src/tests/perf -v
+```
+
+性能基线门禁只做正确性校验（不包含耗时/加速比断言，避免机器差异导致不稳定），性能阈值仅由显式 CLI 执行。
+
 ## 运行
 
 ```bash

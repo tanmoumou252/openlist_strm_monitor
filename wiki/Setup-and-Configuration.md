@@ -60,9 +60,10 @@ totp_secret = ""                  # TOTP 二步验证密钥
 [refresh]
 enabled = true                    # 是否启用主动刷新
 interval_minutes = 20             # 刷新间隔（分钟）
-depth = 5                         # 目录扫描深度
+depth = 5                         # WebDAV 刷新递归深度
 timeout_seconds = 300             # 刷新操作超时时间（秒）
 log_level = "INFO"                # 刷新日志级别
+full_audit_interval_days = 7      # A 区全量审计周期；0 关闭（可能访问所有 A 根）
 
 [behavior]
 sync_on_startup = true            # 启动时是否全量同步（默认 true，示例可改为 false 跳过）
@@ -129,7 +130,7 @@ fuzzy_threshold = 0.60            # 标题匹配阈值
    - API 验证通过后从下拉列表选择引擎
    - 监控目录从 API 数据自动填充
 6. 设置 B 区和 C 区根目录
-7. 配置刷新路径和行为设置
+7. 配置刷新路径和行为设置：`refresh_paths` 为空时不执行周期主动扫描，仅依赖 watchdog 和 B 区删除联动；非空时只扫描命中这些 WebDAV 引擎路径的 A↔B mapping。`full_audit_interval_days` 默认每 7 天执行一次全量 A 区审计，可能访问未订阅的 A 根，设为 0 可关闭。
 8. 进入 **配置 → WebUI/TMDB** 设置：
    - TMDB access_token 或 api_key
    - 语言偏好和缓存 TTL
@@ -154,7 +155,7 @@ WebUI 和核心同步引擎同时启动。主程序状态显示在 WebUI 仪表�
 
 | 文件 | 用途 | 表数量 | 位置 |
 |------|------|--------|------|
-| `bridge.db` | 核心同步状态 | 14 张表 | `[local] db_file` 配置 |
+| `bridge.db` | 核心同步状态 | 13 常规表 + 3 FTS5 | `[local] db_file` 配置 |
 | `tmdb_watchlist.db` | TMDB 缓存 + WebUI 配置 | 6 张表 | 项目根目录（`main.py` 硬编码） |
 
 两个数据库均使用 **WAL 模式** 以获得并发读取性能。

@@ -4,7 +4,7 @@
 
 ## bridge.db — 核心同步状态
 
-由 `Database` 类管理（`src/database.py`）。通过自定义 `ReadWriteLock` 类（`database.py` 顶部定义，支持读写分离：多个读者并发、写者独占、写者优先防饥饿）保证线程安全。所有表在 `_create_schema()` 方法中创建。bridge.db 共 **14 张表**：10 张常规表、3 张 FTS5 虚拟表以及 1 张 `subtitles` 字幕表（由 `init_subtitle_table()` 独立创建）。
+由 `Database` 类管理（`src/database.py`）。通过自定义 `ReadWriteLock` 类（`database.py` 顶部定义，支持读写分离：多个读者并发、写者独占、写者优先防饥饿）保证线程安全。所有表在 `_create_schema()` 方法中创建。bridge.db 共 **16 张表**：13 张常规表（`a_strm_files`、`b_strm_files`、`strm_identity`、`c_ghost_files`、`ghost_protection`、`known_folders`、`protected_roots`、`protected_roots_snapshot`、`sync_control`、`strm_media_boundary`、`b_identity_projection`、`b_lineage_snapshot`、`subtitles`）+ 3 张 FTS5 虚拟表（`a_strm_files_fts`、`b_strm_files_fts`、`c_ghost_files_fts`）。`subtitles` 在 `_create_schema()` 内通过 `CREATE TABLE IF NOT EXISTS subtitles` 创建，与其余常规表统建，不再需要独立的 `init_subtitle_table()` 调用。
 
 ### 性能 PRAGMA 设置
 
@@ -137,6 +137,8 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 | `updated_at` | REAL NOT NULL | 时间戳 |
 
 **主键**：`(mapping_id, fingerprint)`。**索引**：`idx_boundary_source_name`、`idx_boundary_current_name`。不同 mapping 的同名边界互不覆盖。
+
+旧版只有 fingerprint 主键或缺少 `mapping_id` 的 boundary 表无法可靠归属到任意 mapping。数据库初始化时会在同一写事务中重建为上述结构，并删除无法归属的旧记录；迁移失败会回滚并保留原表，不猜测 mapping。
 
 #### `b_identity_projection` — mapping 级当前可见身份
 

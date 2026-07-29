@@ -56,7 +56,7 @@ class AppService:
 
 ### `Database`（`database.py`）
 SQLite 数据库管理器，WAL 模式。通过自定义 `ReadWriteLock` 类保证线程安全（非 `RLock`）。
-管理 bridge.db 中 14 张表（10 张普通表 + 3 张 FTS5 虚拟表 + `subtitles`），提供读写连接的上下文管理器。
+管理 bridge.db 中 16 张表（13 张普通表 + 3 张 FTS5 虚拟表），提供读写连接的上下文管理器。
 
 ### `OpenListAdminClient`（`webdav_client.py`）
 JWT 认证的 OpenList Admin API 客户端：

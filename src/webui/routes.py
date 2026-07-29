@@ -3010,6 +3010,8 @@ def handle_config_api(handler) -> None:
         refresh_cfg,
         "interval_seconds",
         300) if refresh_cfg else 300
+    refresh_full_audit_interval_days = getattr(
+        refresh_cfg, "full_audit_interval_days", 7) if refresh_cfg else 7
 
     # Behavior
     behavior_cfg = getattr(cfg, "behavior", None)
@@ -3116,6 +3118,7 @@ def handle_config_api(handler) -> None:
         # Refresh
         "refresh_enabled": refresh_enabled,
         "refresh_interval": refresh_interval,
+        "refresh_full_audit_interval_days": refresh_full_audit_interval_days,
         # Behavior
         "behavior_action": behavior_action,
         "ghost_protect_seconds": ghost_protect_seconds,

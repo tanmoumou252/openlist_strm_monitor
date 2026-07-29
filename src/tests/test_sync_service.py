@@ -94,9 +94,43 @@ class TestSyncServiceInitialScanA:
         assert "/mount" in saved_folders
         assert "/mount/show" in saved_folders
 
+    def test_scan_a_explicit_root_subset(self, tmp_path):
+        """周期刷新可显式只扫描命中 refresh_paths 的 A root。"""
+        first = tmp_path / "a1"
+        second = tmp_path / "a2"
+        first.mkdir()
+        second.mkdir()
+        (first / "one.strm").write_text("/engine-a/one.mp4", encoding="utf-8")
+        (second / "two.strm").write_text("/engine-b/two.mp4", encoding="utf-8")
+        app = _make_app(tmp_path, a_dirs=[first, second])
+        svc = SyncService(app)
+
+        captured: list[tuple[str, str, str]] = []
+
+        def capture(records):
+            captured.extend(list(records))
+            return len(records)
+
+        app.db.upsert_a_batch.side_effect = capture
+        svc.initial_scan_a(use_bulk=False, a_roots=[first])
+
+        assert [Path(row[0]).name for row in captured] == ["one.strm"]
+        assert all(not row[0].startswith(str(second)) for row in captured)
+
+    def test_scan_a_explicit_empty_roots_is_noop(self, tmp_path):
+        """refresh_paths 无匹配时传空列表，不能回退为扫描全部 A root。"""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        (a_root / "movie.strm").write_text("/mount/movie.mp4", encoding="utf-8")
+        svc = SyncService(app)
+
+        svc.initial_scan_a(use_bulk=False, a_roots=[])
+
+        app.db.upsert_a_batch.assert_not_called()
+        app.db.save_known_folders_batch.assert_not_called()
+
     def test_scan_a_empty_directory(self, tmp_path):
         app = _make_app(tmp_path)
-        # a_root exists but is empty
         svc = SyncService(app)
         svc.initial_scan_a(use_bulk=False)
         app.db.upsert_a_batch.assert_not_called()

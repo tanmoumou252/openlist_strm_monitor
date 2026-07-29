@@ -39,7 +39,7 @@ This file provides guidance to AI coding assistants when working with the `openl
 - **Database**: SQLite (WAL mode): `bridge.db` + `tmdb_watchlist.db`
 - **Search/Tokenizer**: SQLite FTS5 + `simple` extension (wangfenjin/simple, cppjieba wrapper, v0.7.1, `simple.dll` under `src/tokenizers/simple/`). Hard dependency for Chinese search; falls back to `unicode61` (no Chinese tokens) on load failure.
 - **Dependencies**: watchdog, requests, lxml
-- **Dev dependencies**: pytest (37 test files under `src/tests/`), listed in `src/tests/requirements-dev.txt`
+- **Dev dependencies**: pytest (test files under `src/tests/`; see `src/tests/README.md` for the current list and `python -m pytest src/tests --collect-only -q` for the live count), listed in `src/tests/requirements-dev.txt`
 
 ## Key Architecture
 
@@ -52,7 +52,7 @@ This file provides guidance to AI coding assistants when working with the `openl
 - Password (PBKDF2-HMAC-SHA256, 600k iterations) → session token (64 hex chars, 7-day sliding expiry)
 - Token sent as `X-Session-Token` header via `api()` wrapper in `api.js`
 - IP whitelist (LAN only) + token check on every request
-- Whitelisted paths (no token): `/api/config`, `/api/webui/config/ui`, `/api/tmdb/avatar`, `/api/tmdb/poster`, `/api/openlist/status`, `/api/openlist/ping`, `/api/admin/status`, `/api/login`, static assets
+- Whitelisted paths (no token): `/api/config`, `/api/webui/config/ui`, `/api/tmdb/avatar`, `/api/tmdb/poster`, `/api/openlist/status`, `/api/openlist/ping`, `/api/admin/status`, `/api/login`, `/api/page`, static assets
 
 ### Frontend API Calls
 - ALWAYS use the `api()` function from `src/webui/modules/core/api.js` — it auto-attaches the auth token

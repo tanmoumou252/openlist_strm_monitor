@@ -96,7 +96,7 @@ openlist_strm_bridge/
 │   ├── utils/encoding_utils.py  # 编码规范化（NFC/NFD、URL、全角/连续空格）
 │   ├── utils/bootstrap.py       # 启动引导辅助
 │   ├── webui/                   # WebUI 服务端 + 前端源码
-│   ├── tests/                   # 测试（40 个测试文件，pytest 收集 36 个）
+│   ├── tests/                   # 测试（见 src/tests/README.md，pytest --collect-only -q 获取实时数量）
 │   └── tokenizers/              # simple 中文分词器（simple.dll 等资源）
 ├── dist/                        # 构建后的前端产物（Vite 输出）
 ├── docs/                        # API 文档、设计文档

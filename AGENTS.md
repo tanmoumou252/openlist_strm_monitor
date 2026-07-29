@@ -64,7 +64,7 @@ This file provides guidance to AI coding assistants when working with code in th
 | **File watching** | `watchdog` library |
 | **HTTP client** | `requests` library |
 | **WebDAV XML** | `lxml` library |
-| **Testing** | pytest (40 test files under `src/tests/` of which 4 are standalone manual scripts excluded by `conftest.py`'s `collect_ignore_glob`; 36 actually collected); dev deps in `src/tests/requirements-dev.txt` |
+| **Testing** | pytest (test files under `src/tests/`; see `src/tests/README.md` for the current list and `python -m pytest src/tests --collect-only -q` for the live count); dev deps in `src/tests/requirements-dev.txt` |
 
 ## Directory Structure
 
@@ -98,12 +98,15 @@ openlist_strm_bridge/
 │   │       ├── core/            # api.js, router.js, state.js, icons.js, theme.js, utils.js, wallpaper.js
 │   │       ├── pages/           # dashboard.js, area.js, config.js, login.js, logs.js, openlist.js, tmdb.js
 │   │       └── components/      # dialog.js, toast.js
+│   │   ├── scripts/             # 字体子集化脚本（subset_font.py）
+│   │   ├── public/              # 静态资源（icon-preview.html 等）
+│   │   └── styles/              # CSS 样式（main.css）
 │   ├── domain/media/            # subtitle_handler.py
 │   ├── domain/sync/             # sync_service.py
 │   ├── domain/storage/          # Placeholder (reserved, currently only __init__.py)
 │   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py, encoding_utils.py
 │   ├── tokenizers/              # simple/ (cppjieba wrapper for Chinese search)
-│   └── tests/                   # 40 test files (36 collected by pytest; 4 manual scripts excluded)
+│   └── tests/                   # Test files: see src/tests/README.md for live count
 ├── dist/                        # Built frontend (Vite output)
 │   └── assets/                  # Hashed JS/CSS/font files
 ├── wiki/                        # Documentation
@@ -163,7 +166,7 @@ The Vite config groups modules into chunks:
 - Token transmitted via `X-Session-Token` header
 - Frontend `api()` wrapper in `api.js` auto-attaches token from localStorage
 - IP whitelist (LAN only) as first defense layer
-- Whitelisted paths (no token required): `/api/config`, `/api/webui/config/ui`, `/api/tmdb/avatar`, `/api/tmdb/poster`, `/api/openlist/status`, `/api/openlist/ping`, `/api/admin/status`, `/api/login`, static assets
+- Whitelisted paths (no token required): `/api/config`, `/api/webui/config/ui`, `/api/tmdb/avatar`, `/api/tmdb/poster`, `/api/openlist/status`, `/api/openlist/ping`, `/api/admin/status`, `/api/login`, `/api/page`, static assets
 
 ### Backend API Routes
 - `do_GET` / `do_POST` dispatch in `server.py` → delegates to handlers in `routes.py`

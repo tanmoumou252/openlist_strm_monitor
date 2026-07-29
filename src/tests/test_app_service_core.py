@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app_service_core import AppService, StrmStorageManager, StrmStorageInfo
 from database import Database, BRecord
-from config import AppConfig, ABMapping
+from config import AppConfig, ABMapping, StrmStorageMapping
 
 
 # ===========================================================================
@@ -2703,3 +2703,108 @@ class TestHandleBDeletedTriggersCleanup:
 
             # 验证：调用 trigger_delayed_cleanup 并传入父目录路径
             mock_trigger.assert_called_once_with("/cloud/dir1")
+
+
+# ===========================================================================
+# TestRefreshPathMappingScoped  (Task 1: 修复 strm_storage_map 引用)
+# ===========================================================================
+
+
+class TestRefreshPathMappingScoped:
+    """验证 get_a_roots_for_refresh_paths / get_engine_paths_for_a_roots
+    使用 config.strm_storage_map 且 mapping-scoped。"""
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_m1 = os.path.join(self.tmp, "a_m1")
+        self.a_m2 = os.path.join(self.tmp, "a_m2")
+        self.b_m1 = os.path.join(self.tmp, "b_m1")
+        self.b_m2 = os.path.join(self.tmp, "b_m2")
+        self.c_dir = os.path.join(self.tmp, "c")
+        for d in [self.a_m1, self.a_m2, self.b_m1, self.b_m2, self.c_dir]:
+            os.makedirs(d)
+
+        config = Mock(spec=AppConfig)
+        config.a_folders = [self.a_m1, self.a_m2]
+        config.a_b_mappings = [
+            ABMapping(mapping_id="m1", a_root=self.a_m1, b_root=self.b_m1),
+            ABMapping(mapping_id="m2", a_root=self.a_m2, b_root=self.b_m2),
+        ]
+        config.strm_storage_map = {
+            "m1": StrmStorageMapping(mount_path="/strm_m1", paths=[], local_path=self.a_m1),
+            "m2": StrmStorageMapping(mount_path="/strm_m2", paths=[], local_path=self.a_m2),
+        }
+        config.refresh_paths = ["/strm_m1"]
+        config.paths = Mock()
+        config.paths.b_root = self.b_m1
+        config.paths.c_root = self.c_dir
+        config.behavior = Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.strm_engine_paths = []
+
+        db = Mock(spec=Database)
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, Mock())
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_refresh_paths_uses_config_storage_map(self):
+        """refresh_paths=/strm_m1 只返回 m1 的 A 根。"""
+        result = self.app.get_a_roots_for_refresh_paths()
+        assert len(result) == 1
+        assert result[0] == Path(self.a_m1)
+
+    def test_engine_paths_is_mapping_scoped(self):
+        """指定 m1 A 根只返回 m1 的 engine mount path。"""
+        result = self.app.get_engine_paths_for_a_roots([Path(self.a_m1)])
+        assert result == ["/strm_m1"]
+        result2 = self.app.get_engine_paths_for_a_roots([Path(self.a_m2)])
+        assert result2 == ["/strm_m2"]
+
+
+class TestRefreshPathMappingScopedFailClosed:
+    """storage map 为空时 fail-closed：不返回全部 A 根。"""
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = os.path.join(self.tmp, "a")
+        self.b_dir = os.path.join(self.tmp, "b")
+        self.c_dir = os.path.join(self.tmp, "c")
+        for d in [self.a_dir, self.b_dir, self.c_dir]:
+            os.makedirs(d)
+
+        config = Mock(spec=AppConfig)
+        config.a_folders = [self.a_dir]
+        config.a_b_mappings = [
+            ABMapping(mapping_id="m1", a_root=self.a_dir, b_root=self.b_dir),
+        ]
+        config.strm_storage_map = {}
+        config.refresh_paths = ["/any_engine_path"]
+        config.paths = Mock()
+        config.paths.b_root = self.b_dir
+        config.paths.c_root = self.c_dir
+        config.behavior = Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.strm_engine_paths = []
+
+        db = Mock(spec=Database)
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, Mock())
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_empty_storage_map_returns_no_roots(self):
+        """storage map 为空时不能把 refresh path 套到所有 mapping。"""
+        result = self.app.get_a_roots_for_refresh_paths()
+        assert result == []
+
+    def test_empty_storage_map_engine_paths_empty(self):
+        """storage map 为空时 engine paths 也应为空列表。"""
+        result = self.app.get_engine_paths_for_a_roots([Path(self.a_dir)])
+        assert result == []

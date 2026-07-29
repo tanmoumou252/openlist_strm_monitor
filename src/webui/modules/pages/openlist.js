@@ -67,6 +67,12 @@ export async function _renderOpenListConfig(cfg) {
 
   OpenListState.refreshPaths = refreshPaths.slice();
 
+  let abMappings = [];
+  try {
+    if (openlistCfg.a_b_mappings) abMappings = JSON.parse(openlistCfg.a_b_mappings);
+  } catch (e) { abMappings = []; }
+  OpenListState.abMappings = abMappings;
+
   function olField(id, label, value, placeholder, type = 'text', persistLabel = false, readOnly = false) {
     return createField(id, label, value, {
       placeholder, type, persistLabel, readOnly,
@@ -197,11 +203,13 @@ export async function _renderOpenListConfig(cfg) {
   const refreshEnabled = (openlistCfg.refresh_enabled || 'true').toLowerCase() === 'true';
   const refreshInterval = openlistCfg.refresh_interval_minutes || '10';
   const refreshDepth = openlistCfg.refresh_depth || '5';
+  const fullAuditDays = openlistCfg.refresh_full_audit_interval_days || '7';
   html += `<div class="config-section"><h3>${icon('refresh')} 刷新配置</h3>
     ${olToggle('ol-refresh-enabled', '启用主动刷新', refreshEnabled)}
     <div class="field-grid">
       ${olField('ol-refresh-interval', '刷新间隔 (分钟)', refreshInterval, '10', 'number')}
       ${olField('ol-refresh-depth', '刷新深度', refreshDepth, '5', 'number')}
+      ${olField('ol-refresh-audit-days', '全量审计周期 (天，0=关闭)', fullAuditDays, '7', 'number')}
       ${olSelect('ol-refresh-log-level', '刷新日志级别', openlistCfg.refresh_log_level || 'INFO', [
         { value: 'DEBUG', label: 'DEBUG — 调试' },
         { value: 'INFO', label: 'INFO — 信息（推荐）' },
@@ -579,11 +587,12 @@ const data = await api('/api/restart-webui', { method: 'POST' });
         webdav_totp_secret: document.getElementById('ol-webdav-totp-secret')?.value || '',
         c_root: document.getElementById('ol-c-root')?.value || '',
         refresh_paths: JSON.stringify(OpenListState.refreshPaths || []),
-        strm_engines: JSON.stringify(cleanedEngines),
+        strm_engines: JSON.stringify(configuredEngines),
         a_b_mappings: JSON.stringify(abMappings),  // ← 新增，替代 b_root
         refresh_enabled: document.querySelector('#ol-refresh-enabled button[data-value="on"].active') ? 'true' : 'false',
-        refresh_interval_minutes: document.getElementById('ol-refresh-interval')?.value || '10',
-        refresh_depth: document.getElementById('ol-refresh-depth')?.value || '5',
+    refresh_interval_minutes: document.getElementById('ol-refresh-interval')?.value || '10',
+    refresh_depth: document.getElementById('ol-refresh-depth')?.value || '5',
+    refresh_full_audit_interval_days: document.getElementById('ol-refresh-audit-days')?.value || '7',
         refresh_log_level: document.getElementById('ol-refresh-log-level')?.value || 'INFO',
         behavior_action: document.getElementById('ol-action')?.value || 'MOVE',
         behavior_trash_dir_name: document.getElementById('ol-trash-dir')?.value || 'trash',
@@ -604,6 +613,7 @@ if (data.success) {
         showToast('OpenList 配置已保存并热更新', 'success');
         const savedHost = document.getElementById('ol-webdav-host')?.value || '';
         OpenListState.configured = !!savedHost.trim();
+        OpenListState.abMappings = abMappings;
         _updateApiStatusDot();
         await _checkApiStatus();
         _refreshABMappings();

@@ -29,8 +29,10 @@ class SyncService:
         self._cache_ghost: set[str] | None = None
         self._cache_b_fp: set[tuple[str, str]] | None = None  # set of (mapping_id, fingerprint)
 
-    def initial_scan_a(self, use_bulk: bool = False) -> None:
-        """启动时批量索引 A 区 STRM 文件到数据库。
+    def initial_scan_a(
+            self, use_bulk: bool = False,
+            a_roots: list[Path] | None = None) -> None:
+        """启动时或刷新时批量索引指定 A 区 STRM 文件到数据库。
 
         性能优化：
         - 启动时使用 bulk_connection 长连接模式（核心优化：消除反复获取 rw_lock + 打开连接的开销）
@@ -48,9 +50,13 @@ class SyncService:
         Args:
             use_bulk: True 用 bulk_connection（启动时，单线程安全）。
                       False 用 upsert_a_batch（刷新时，多线程安全）。
+            a_roots: 显式限制扫描的 A 根；None 表示扫描全部配置根，空列表表示不扫描。
         """
         logging.info("[初始化] 扫描 A 区 STRM 文件（%s）...",
                      "bulk模式" if use_bulk else "标准模式")
+        if a_roots == []:
+            logging.info("[初始化] 未命中主动刷新路径，跳过 A 区扫描")
+            return
         t0 = time.time()
         BATCH_SIZE = 1000
         LOG_INTERVAL = 100
@@ -86,7 +92,8 @@ class SyncService:
             conn = bulk_ctx.__enter__()
 
         try:
-            for a_root in self.app.a_roots:
+            roots = self.app.a_roots if a_roots is None else a_roots
+            for a_root in roots:
                 if not a_root.exists():
                     logging.warning("[初始化] A 区根目录不存在: %s", a_root)
                     continue

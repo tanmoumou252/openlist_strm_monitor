@@ -50,15 +50,54 @@ class RefreshService:
         self._thread: threading.Thread | None = None
         self._consecutive_failures: int = 0
         self._last_error_summary: str = ""
+        self._last_full_audit_at = self._load_last_full_audit_at()
+
+    def _load_last_full_audit_at(self) -> float:
+        try:
+            value = self.app.db.get_control("last_full_audit_at", "0")
+            return float(value or 0)
+        except (AttributeError, TypeError, ValueError, OSError):
+            return 0.0
+
+    def _full_audit_interval_seconds(self) -> float:
+        try:
+            days = float(getattr(self.app.config.refresh, "full_audit_interval_days", 7))
+        except (TypeError, ValueError):
+            return 7 * 86400
+        return max(0.0, days) * 86400
+
+    def _maybe_run_full_audit(self) -> bool:
+        """按周期执行一次全 A 区审计，回收长期未触发的失活记录。"""
+        interval = self._full_audit_interval_seconds()
+        if interval <= 0:
+            return False
+        now = time.time()
+        if now - self._last_full_audit_at < interval:
+            return False
+        logging.warning("[主动刷新] 触发兜底全量审计，可能访问所有 A 区磁盘")
+        self.app.initial_scan_a(use_bulk=False, a_roots=None)
+        self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
+        self._last_full_audit_at = now
+        try:
+            self.app.db.set_control("last_full_audit_at", str(now))
+        except (AttributeError, OSError):
+            logging.warning("[主动刷新] 保存全量审计时间失败")
+        return True
+
+    def _refresh_audit_enabled(self) -> bool:
+        return self._full_audit_interval_seconds() > 0
 
     def start(self) -> None:
         if not self.app.config.refresh.enabled:
             logging.info("[主动刷新] 已关闭")
             return
 
-        if not self.app.config.refresh_paths:
-            logging.info("[主动刷新] 未配置刷新路径或内容为空，已关闭")
+        if not self.app.config.refresh_paths and not self._refresh_audit_enabled():
+            logging.info("[主动刷新] 未配置刷新路径且全量审计已关闭，已关闭")
             return
+
+        if not self.app.config.refresh_paths:
+            logging.info("[主动刷新] 未配置刷新路径，仅保留兜底全量审计")
 
         self._running = True
         self._thread = threading.Thread(target=self._worker, daemon=True)
@@ -116,6 +155,10 @@ class RefreshService:
         """执行完整的主动刷新周期。"""
         logging.info("[主动刷新] 开始执行")
 
+        full_audit_ran = self._maybe_run_full_audit()
+        if not self.app.config.refresh_paths:
+            logging.info("[主动刷新] refresh_paths 为空，本轮仅保留 watchdog 和删除联动")
+            return
         self._sync_and_scan_protected_roots()
 
         path_analysis = self._analyze_paths()
@@ -134,8 +177,10 @@ class RefreshService:
         # 等待同步落地
         self._wait_for_sync()
 
-        # 扫描和同步
-        self._scan_and_sync(accessible_engines)
+        # 扫描和同步：7 天全量审计已完成时，不重复执行本轮局部扫描。
+        if not full_audit_ran:
+            refresh_a_roots = self.app.get_a_roots_for_refresh_paths()
+            self._scan_and_sync(accessible_engines, a_roots=refresh_a_roots)
 
         # 保存快照
         self._persist_snapshot(accessible_engines, path_analysis.engine_set)
@@ -368,19 +413,40 @@ class RefreshService:
         logging.info("[主动刷新] 等待 openlist / 外部同步落地...")
         time.sleep(self.app.config.behavior.a_to_b_restore_delay_seconds)
 
-    def _scan_and_sync(self, accessible_engines: set[str]) -> None:
-        """执行 A 区扫描和 A→B 同步。"""
-        self.app.initial_scan_a(use_bulk=False)
+    def _scan_and_sync(
+            self, accessible_engines: set[str],
+            a_roots: list[Path] | None = None) -> None:
+        """仅扫描 refresh_paths 命中的 A 根，并限制 A→B 同步范围。"""
+        roots = self.app.a_roots if a_roots is None else a_roots
+        if not roots:
+            logging.info("[主动刷新] 无匹配 A 区根，跳过本地扫描与 A→B 同步")
+            return
 
-        # 同步是本地文件复制，不涉及 WebDAV 网络请求
-        # 引擎路径可访问性只影响清理/迁移等涉及 WebDAV 的操作
-        self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
-
+        self.app.initial_scan_a(use_bulk=False, a_roots=roots)
+        engine_paths = self.app.get_engine_paths_for_a_roots(roots)
+        if not accessible_engines:
+            logging.warning("[主动刷新] 没有可访问引擎，跳过 A→B 同步")
+            return
+        engine_paths = [p for p in engine_paths if p in accessible_engines]
+        if not engine_paths:
+            logging.warning("[主动刷新] A 根未能映射到可访问引擎，跳过 A→B 同步")
+            return
+        self.app.scan_a_to_b_full_sync(
+            valid_engine_paths=engine_paths, use_bulk=False)
         self.app.cleanup_local_empty_dirs()
 
     def _persist_snapshot(
             self, accessible_engines: set[str], engine_set: set[str]) -> None:
-        """保存保护根目录快照。"""
+        """保存保护根目录快照。
+
+        fail-closed：当 engine_set 非空但 accessible_engines 为空时
+        （Admin API 验证失败），保留已有快照不被空集合覆盖。
+        """
+        if engine_set and not accessible_engines:
+            logging.warning(
+                "[主动刷新] Admin API 不可信（engine_set=%d, accessible=0），"
+                "保留已有根目录快照不被空集合覆盖", len(engine_set))
+            return
         snapshot_paths = sorted(accessible_engines) if engine_set else None
         self.app.persist_current_roots_snapshot(
             valid_engine_paths=snapshot_paths)

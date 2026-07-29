@@ -94,7 +94,7 @@ AppService.__init__()
 
 `_sync_one_record` 在批量同步（`scan_a_to_b_full_sync`）中使用，**不使用** `get_fingerprint_lock`。这是经过代码验证的设计决策，而非遗漏。
 
-B 区启动核对现支持生产 `b_lineage_snapshot` 快速路径，但仍扫描所有 B 根元数据；snapshot 只减少 STRM 内容读取、完整 lineage 和重复 DB 查询。首轮、版本不匹配、stat/DB 异常或并发修改均回退完整核对。`force_full=True` 可强制审计且不能绕过 fail-safe。
+B 区启动核对现支持生产 `b_lineage_snapshot` 快速路径，但仍扫描所有 B 根元数据；snapshot 只减少 STRM 内容读取、完整 lineage 和重复 DB 查询。首轮、版本不匹配、stat/DB 异常或并发修改均回退完整核对。`force_full=True` 可强制审计且不能绕过 fail-safe。正式生产测试使用真实 `AppService + Database` 分别比较 force-full 与 incremental 的最终 DB、磁盘、projection、boundary 和快照状态；独立 benchmark 仅用于性能趋势，不等价于生产 reconciliation 验证。
 
 **现有三层防御**：
 
@@ -178,7 +178,7 @@ A 区文件被删除时触发：
 新 `.strm` 出现在 B 区时触发：
 1. 计算指纹
 2. 血统验证（9 步管线 `_verify_b_path_lineage`）
-3. 血统失败：调用 `_restore_b_from_a_after_violation()`（物理删除越界文件 → 从 A 区恢复到正确位置），而非设 `invalid` 状态
+3. 血统失败：调用 `_restore_b_from_a_after_violation()`（物理删除越界文件 → 从 A 区恢复到正确位置），而非设 `invalid` 状态；恢复 DB 前必须由目标 B 路径解析唯一 `mapping_id`，解析失败则 fail-closed 跳过 `BRecord` 写入，并由后续去重复用同一 mapping
 4. 无法解析 STRM：走 `_handle_unparseable_strm()` 分支
 5. 重复指纹：重命名为 `.duplicate`
 6. 有效新文件：注册 DB，加入身份跟踪
@@ -190,7 +190,7 @@ A 区文件被删除时触发：
 2. 查找 DB 记录（fingerprint、webdav_path 等）
 3. **第一重：`_restoring_markers` 检查** — 如果 fingerprint 在程序恢复标记集合中，跳过追删
 4. **第二重：`_engine_internal_markers` 检查**（B-7 标记）— 如果是程序内部删除（隔离/去重/迁移），跳过云端删除，仅清理本地 DB 记录
-5. **第三重：`has_other_b_instance` + `_check_fingerprint_exists_in_b`** — 如果 DB 或文件系统中仍存在同指纹的其他 B 区实例，跳过 WebDAV 删除
+5. **第三重：`has_other_b_instance(mapping_id, fingerprint, exclude_local_path)` + `_check_fingerprint_exists_in_b(fingerprint, exclude_path, mapping_id)`** — 仅检查同一 mapping 下的同指纹其他可见实例；mapping 无法解析时 fail-closed 跳过云端删除
 6. 三重全不通过，执行云端删除：
    - MOVE 模式：通过 `build_webdav_trash_path()` 递归创建回收站目录树，调用 `admin_api.move()`，触发刷新钩子
    - DELETE 模式：调用 `admin_api.remove()`，触发刷新钩子
@@ -279,12 +279,13 @@ def _worker(self) -> None:
 
 ### 安全方法
 
-- **`_restore_b_from_a_after_violation(local, webdav_path, fingerprint)`** — 血统越界后恢复：物理删除越界文件 → 从 A 区复制到正确位置 → 更新 DB 记录。
+- **`_restore_b_from_a_after_violation(local, webdav_path, fingerprint)`** — 血统越界后恢复：物理删除越界文件 → 从 A 区复制到正确位置 → 更新 DB 记录。写入前通过 `_mapping_id_for_b(correct_b_path)` 解析目标 mapping；无法解析时 fail-closed 返回，不写入 B 记录。调用 `ensure_single_visible_instance` 时复用已解析的 `mapping_id`，避免重复解析造成跨 mapping 去重。
+- **`_verify_a_source_exists(b_local_path, webdav_path, fingerprint)`** — A 源存在性校验：优先检查 identity 记录中的 A 源和按 WebDAV 路径查找到的 A 源；两者都缺失时，仅当 B 路径能解析唯一 mapping 且该 mapping 下存在对应 fingerprint 的 boundary 记录才放行，否则返回 `False`（mapping 无法解析时 fail-closed）。
 - **`_force_delete_and_verify(path)`** — 强制删除文件并验证删除是否成功。
 - **`_handle_b_zombie(path)`** — 处理 B 区僵尸文件（DB 记录存在但磁盘文件已消失）。
 - **`cleanup_a_deleted_on_cloud(webdav_path)`** — 清理云端已删除的 A 区残留记录。
 - **`handle_b_renamed_to_non_strm(src_path, dest_path)`** — B 区 `.strm` 被重命名为非 `.strm` 扩展名时的处理。
-- **`ensure_single_visible_instance(fingerprint, trigger_path, prefer_path=None)`** — 确保同一指纹仅一个 `valid` 实例可见，其余改为 `.duplicate`。失败语义采用 **B3-A / B3-B** 自愈策略（详见 `wiki/Safety-and-Security.md` §9），不静默继续，回滚二次失败仍抛出异常使清理中止。
+- **`ensure_single_visible_instance(fingerprint, trigger_path, prefer_path=None, mapping_id=None)`** — 确保同一 fingerprint 在指定 mapping 内仅一个 `valid` 实例可见，其余改为 `.duplicate`。失败语义采用 **B3-A / B3-B** 自愈策略（详见 `wiki/Safety-and-Security.md` §9），不静默继续，回滚二次失败仍抛出异常使清理中止。
 
 ### API 响应校验与 fail-closed 清理链路
 
