@@ -485,7 +485,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         if path == "/" or path == "/api/page":
             self._send_static_file()
         elif path == "/login":
-            self._send_login_page()
+            self._send_static_file()
         elif path == "/favicon.ico":
             # publicDir 提供稳定无哈希路径 assets/favicon.ico
             self._send_static_file("assets/favicon.ico")

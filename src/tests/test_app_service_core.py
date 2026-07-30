@@ -26,7 +26,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app_service_core import AppService, StrmStorageManager, StrmStorageInfo
-from database import Database, BRecord
+from database import Database, ARecord, BRecord
 from config import AppConfig, ABMapping, StrmStorageMapping
 
 
@@ -933,10 +933,211 @@ class TestCleanupBRedundant:
         assert not b_file.exists()
         self.db.delete_b_by_local.assert_called()
 
+    # ----------------------------------------------------------
+    # fail-closed：check_exists() is None
+    # ----------------------------------------------------------
 
-# ===========================================================================
-# TestVerifyBPathLineage
-# ===========================================================================
+    def _make_b_record(self, b_file: Path, webdav_path: str, *,
+                       source_a_path: str, mapping_id: str = "test_m1") -> BRecord:
+        return BRecord(
+            local_path=str(b_file),
+            webdav_path=webdav_path,
+            parent_webdav_path=webdav_path.rsplit("/", 1)[0] or "/",
+            source_a_path=source_a_path,
+            fingerprint="fp_x",
+            status="valid",
+            updated_at=0,
+            mapping_id=mapping_id,
+        )
+
+    def test_untrusted_existence_with_missing_a_source_keeps_all(self):
+        """A 源不存在 + check_exists() is None → B 文件/DB/来源全部保留。"""
+        b_file = self.b_dir / "untrusted.strm"
+        b_file.write_text("/mount/untrusted.mp4", encoding="utf-8")
+
+        record = self._make_b_record(
+            b_file, "/mount/untrusted.mp4",
+            source_a_path=str(self.a_dir / "missing.strm"))
+        self.db.get_all_b_records.return_value = [record]
+        self.db.is_ghost_protected.return_value = False
+        self.db.get_a_local_path_by_webdav.return_value = None
+        self.admin_api.check_exists.return_value = None  # 不可信
+
+        self.app.cleanup_b_redundant()
+
+        assert b_file.exists(), "None（不可信）不得删除 B 文件"
+        self.db.delete_b_by_local.assert_not_called()
+        self.db.upsert_c.assert_not_called()
+        # C 区不应出现任何迁移产物
+        assert list(self.c_dir.rglob("*.strm")) == []
+
+    def test_untrusted_existence_with_existing_a_source_keeps_all(self):
+        """A 源存在 + check_exists() is None → 不进入删除分支。"""
+        a_file = self.a_dir / "src.strm"
+        a_file.write_text("/mount/src.mp4", encoding="utf-8")
+        b_file = self.b_dir / "src.strm"
+        b_file.write_text("/mount/src.mp4", encoding="utf-8")
+
+        record = self._make_b_record(
+            b_file, "/mount/src.mp4", source_a_path=str(a_file))
+        self.db.get_all_b_records.return_value = [record]
+        self.db.is_ghost_protected.return_value = False
+        self.admin_api.check_exists.return_value = None  # 不可信
+
+        self.app.cleanup_b_redundant()
+
+        assert b_file.exists(), "None（不可信）不得删除 B 文件"
+        assert a_file.exists()
+        self.db.delete_b_by_local.assert_not_called()
+
+    # ----------------------------------------------------------
+    # mapping 边界
+    # ----------------------------------------------------------
+
+    def test_mapping_unresolvable_keeps_source(self):
+        """get_mapping_for_b() 返回 None → 不迁移 C 区、不删来源。"""
+        b_file = self.b_dir / "orphan.strm"
+        b_file.write_text("/mount/gone.mp4", encoding="utf-8")
+
+        record = self._make_b_record(
+            b_file, "/mount/gone.mp4",
+            source_a_path=str(self.a_dir / "missing.strm"))
+        self.db.get_all_b_records.return_value = [record]
+        self.db.is_ghost_protected.return_value = False
+        self.db.get_a_local_path_by_webdav.return_value = None
+        self.admin_api.check_exists.return_value = False  # 云端权威缺失
+
+        with patch.object(self.app, "get_mapping_for_b", return_value=None):
+            self.app.cleanup_b_redundant()
+
+        assert b_file.exists(), "mapping 不明确时必须保留来源"
+        self.db.upsert_c.assert_not_called()
+        self.db.delete_b_by_local.assert_not_called()
+        assert list(self.c_dir.rglob("*.strm")) == []
+
+    def test_mapping_id_mismatch_keeps_source(self):
+        """记录 mapping_id 与解析出的 mapping 不一致 → 保留来源。"""
+        b_file = self.b_dir / "orphan.strm"
+        b_file.write_text("/mount/gone.mp4", encoding="utf-8")
+
+        # 记录声明属于 other_m，与实际解析出的 test_m1 冲突
+        record = self._make_b_record(
+            b_file, "/mount/gone.mp4",
+            source_a_path=str(self.a_dir / "missing.strm"),
+            mapping_id="other_m")
+        self.db.get_all_b_records.return_value = [record]
+        self.db.is_ghost_protected.return_value = False
+        self.db.get_a_local_path_by_webdav.return_value = None
+        self.admin_api.check_exists.return_value = False
+
+        self.app.cleanup_b_redundant()
+
+        assert b_file.exists(), "mapping_id 不匹配时必须保留来源"
+        self.db.upsert_c.assert_not_called()
+        self.db.delete_b_by_local.assert_not_called()
+
+    def test_empty_mapping_id_keeps_source(self):
+        """记录缺少 mapping_id → 无法证明隔离边界，保留来源。"""
+        b_file = self.b_dir / "orphan.strm"
+        b_file.write_text("/mount/gone.mp4", encoding="utf-8")
+
+        record = self._make_b_record(
+            b_file, "/mount/gone.mp4",
+            source_a_path=str(self.a_dir / "missing.strm"),
+            mapping_id="")
+        self.db.get_all_b_records.return_value = [record]
+        self.db.is_ghost_protected.return_value = False
+        self.db.get_a_local_path_by_webdav.return_value = None
+        self.admin_api.check_exists.return_value = False
+
+        self.app.cleanup_b_redundant()
+
+        assert b_file.exists()
+        self.db.upsert_c.assert_not_called()
+        self.db.delete_b_by_local.assert_not_called()
+
+    # ----------------------------------------------------------
+    # C 目标已存在但异源
+    # ----------------------------------------------------------
+
+    def test_existing_c_target_with_different_source_keeps_source(self):
+        """C 目标已存在但与来源 WebDAV 不同 → 保留来源，不删不覆盖。"""
+        b_file = self.b_dir / "orphan.strm"
+        b_file.write_text("/mount/mine.mp4", encoding="utf-8")
+
+        record = self._make_b_record(
+            b_file, "/mount/mine.mp4",
+            source_a_path=str(self.a_dir / "missing.strm"))
+        self.db.get_all_b_records.return_value = [record]
+        self.db.is_ghost_protected.return_value = False
+        self.db.get_a_local_path_by_webdav.return_value = None
+        self.admin_api.check_exists.return_value = False
+
+        # 预置一个异源的 C 目标
+        c_target = self.app.get_c_path_for_b(
+            "test_m1", b_file, self.b_dir)
+        c_target.parent.mkdir(parents=True, exist_ok=True)
+        c_target.write_text("/mount/OTHER.mp4", encoding="utf-8")
+
+        self.app.cleanup_b_redundant()
+
+        assert b_file.exists(), "C 目标异源时必须保留来源"
+        assert c_target.read_text(encoding="utf-8") == "/mount/OTHER.mp4", \
+            "异源 C 目标不得被覆盖"
+        self.db.delete_b_by_local.assert_not_called()
+
+    def test_existing_c_target_same_source_removes_source_only(self):
+        """C 目标已存在且同源 → 删除来源、删 DB 记录，不重复写 C 记录。"""
+        b_file = self.b_dir / "orphan.strm"
+        b_file.write_text("/mount/same.mp4", encoding="utf-8")
+
+        record = self._make_b_record(
+            b_file, "/mount/same.mp4",
+            source_a_path=str(self.a_dir / "missing.strm"))
+        self.db.get_all_b_records.return_value = [record]
+        self.db.is_ghost_protected.return_value = False
+        self.db.get_a_local_path_by_webdav.return_value = None
+        self.admin_api.check_exists.return_value = False
+        self.db.get_identity_by_fingerprint = Mock(return_value=None)
+        self.db.get_all_b_by_fingerprint = Mock(return_value=[])
+
+        c_target = self.app.get_c_path_for_b("test_m1", b_file, self.b_dir)
+        c_target.parent.mkdir(parents=True, exist_ok=True)
+        c_target.write_text("/mount/same.mp4", encoding="utf-8")
+
+        self.app.cleanup_b_redundant()
+
+        assert not b_file.exists(), "同源 C 目标存在时应清理来源"
+        self.db.delete_b_by_local.assert_called_once_with(str(b_file))
+        # 目标已存在，不再写入新的 C 记录
+        self.db.upsert_c.assert_not_called()
+
+    def test_upsert_c_failure_keeps_migrated_file_and_b_record(self):
+        """db.upsert_c() 抛异常 → 保留已迁移文件待恢复，不删 B 记录。
+
+        断言当前代码实际承诺的结果：物理文件已移动到 C，
+        但 DB B 记录保留（不调用 delete_b_by_local），供后续恢复。
+        """
+        b_file = self.b_dir / "orphan.strm"
+        b_file.write_text("/mount/gone.mp4", encoding="utf-8")
+
+        record = self._make_b_record(
+            b_file, "/mount/gone.mp4",
+            source_a_path=str(self.a_dir / "missing.strm"))
+        self.db.get_all_b_records.return_value = [record]
+        self.db.is_ghost_protected.return_value = False
+        self.db.get_a_local_path_by_webdav.return_value = None
+        self.admin_api.check_exists.return_value = False
+        self.db.upsert_c.side_effect = RuntimeError("db write failed")
+
+        self.app.cleanup_b_redundant()
+
+        c_target = self.app.get_c_path_for_b("test_m1", b_file, self.b_dir)
+        # 物理迁移已发生
+        assert not b_file.exists()
+        assert c_target.exists(), "迁移后的文件应保留在 C 区待恢复"
+        # DB B 记录未被删除（异常后 continue）
+        self.db.delete_b_by_local.assert_not_called()
 
 
 class TestVerifyBPathLineage:
@@ -2292,6 +2493,300 @@ class TestCollectCloudFilesConcurrent:
         # Should be cloud_path + "/" + name, NOT item["path"]
         assert result == {"/mount/show/episode.strm"}
 
+    # ----------------------------------------------------------
+    # 后续页失败 / 不可信 → 整组 fail-closed
+    # ----------------------------------------------------------
+
+    def _page(self, total: int, names: list[str]) -> dict:
+        return {
+            "code": 200,
+            "data": {
+                "total": total,
+                "content": [
+                    {"name": n, "is_dir": False, "path": f"D:\\storage\\{n}"}
+                    for n in names
+                ],
+            },
+        }
+
+    def test_second_page_none_returns_none(self):
+        """第 2 页返回 None（重试耗尽）→ 整组返回 None，不返回部分集。"""
+        page1 = self._page(150, [f"f{i}.strm" for i in range(100)])
+        self.admin_api.list_directory.side_effect = [page1, None, None, None]
+
+        result = self.app._collect_cloud_files_concurrent("/mount")
+
+        assert result is None, "后续页不可信时必须整组 fail-closed"
+
+    def test_second_page_malformed_contract_returns_none(self):
+        """第 2 页响应违反契约（code 非 0/200）→ 整组返回 None。"""
+        page1 = self._page(150, [f"f{i}.strm" for i in range(100)])
+        bad_page = {"code": 500, "data": {"total": 150, "content": []}}
+        self.admin_api.list_directory.side_effect = [page1, bad_page]
+
+        result = self.app._collect_cloud_files_concurrent("/mount")
+
+        assert result is None
+
+    def test_second_page_non_dict_data_returns_none(self):
+        """第 2 页 data 非 dict → 整组返回 None。"""
+        page1 = self._page(150, [f"f{i}.strm" for i in range(100)])
+        bad_page = {"code": 200, "data": "not-a-dict"}
+        self.admin_api.list_directory.side_effect = [page1, bad_page]
+
+        result = self.app._collect_cloud_files_concurrent("/mount")
+
+        assert result is None
+
+    def test_second_page_raises_exhausts_retries_returns_none(self):
+        """第 2 页始终抛异常 → 重试耗尽后整组返回 None。"""
+        page1 = self._page(150, [f"f{i}.strm" for i in range(100)])
+        calls = {"n": 0}
+
+        def side_effect(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return page1
+            raise ConnectionError("network down")
+
+        self.admin_api.list_directory.side_effect = side_effect
+
+        result = self.app._collect_cloud_files_concurrent("/mount")
+
+        assert result is None
+
+
+# ===========================================================================
+# TestCleanupAPaginationFailClosed — 分页不可信时上层不做 destructive cleanup
+# ===========================================================================
+
+
+class TestCleanupAPaginationFailClosed:
+    """A 区分页收集不可信时，cleanup_a_redundant_using_api() 不得删除本地记录。"""
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = Path(self.tmp) / "a"
+        self.b_dir = Path(self.tmp) / "b"
+        self.c_dir = Path(self.tmp) / "c"
+        for d in [self.a_dir, self.b_dir, self.c_dir]:
+            d.mkdir()
+
+        config = Mock(spec=AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = []
+        config.paths = Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.behavior = Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.strm_engine_paths = []
+
+        db = Mock(spec=Database)
+        db.init_subtitle_table = Mock()
+        self.db = db
+        self.admin_api = Mock()
+
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, self.admin_api)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _seed_a_record(self, name: str, parent: str):
+        a_file = self.a_dir / name
+        webdav_path = f"{parent}/{name}"
+        a_file.write_text(webdav_path, encoding="utf-8")
+        self.db.get_all_a_records.return_value = [
+            ARecord(local_path=str(a_file), webdav_path=webdav_path,
+                    parent_webdav_path=parent, updated_at=0.0)
+        ]
+        return a_file
+
+    def test_second_page_failure_blocks_cleanup(self):
+        """第 2 页失败使父目录不可信 → 该目录下本地记录一个都不删。"""
+        a_file = self._seed_a_record("keep.strm", "/mount")
+        page1 = {
+            "code": 200,
+            "data": {
+                "total": 150,
+                "content": [
+                    {"name": f"other{i}.strm", "is_dir": False,
+                     "path": f"D:\\s\\other{i}.strm"}
+                    for i in range(100)
+                ],
+            },
+        }
+        # 首页权威但不含 keep.strm；第 2 页始终失败 → 整组不可信
+        self.admin_api.list_directory.side_effect = (
+            [page1] + [None] * 20)
+
+        self.app.cleanup_a_redundant_using_api()
+
+        assert a_file.exists(), "父目录不可信时不得删除本地 STRM"
+        self.db.delete_a_by_local.assert_not_called()
+        self.db.set_ghost_protection.assert_not_called()
+
+    def test_malformed_second_page_blocks_cleanup(self):
+        """第 2 页响应契约不可信 → 该目录下本地记录一个都不删。"""
+        a_file = self._seed_a_record("keep.strm", "/mount")
+        page1 = {
+            "code": 200,
+            "data": {
+                "total": 150,
+                "content": [
+                    {"name": f"other{i}.strm", "is_dir": False,
+                     "path": f"D:\\s\\other{i}.strm"}
+                    for i in range(100)
+                ],
+            },
+        }
+        bad_page = {"code": 200, "data": {"total": 150, "content": "bad"}}
+        self.admin_api.list_directory.side_effect = [page1, bad_page]
+
+        self.app.cleanup_a_redundant_using_api()
+
+        assert a_file.exists()
+        self.db.delete_a_by_local.assert_not_called()
+
+
+# ===========================================================================
+# TestCollectCloudFilesInDirectorySafetyValve — B 区分页安全阀
+# ===========================================================================
+
+
+class TestCollectCloudFilesInDirectorySafetyValve:
+    """B 区 _collect_cloud_files_in_directory() 安全阀与 fail-closed。"""
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = Path(self.tmp) / "a"
+        self.b_dir = Path(self.tmp) / "b"
+        self.c_dir = Path(self.tmp) / "c"
+        for d in [self.a_dir, self.b_dir, self.c_dir]:
+            d.mkdir()
+
+        config = Mock(spec=AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [ABMapping(
+            mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
+        config.paths = Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.behavior = Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.strm_engine_paths = []
+
+        db = Mock(spec=Database)
+        db.init_subtitle_table = Mock()
+        self.db = db
+        self.admin_api = Mock()
+
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, self.admin_api)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_safety_valve_exhausted_returns_none(self):
+        """每页都满 100 条且始终有下一页 → 安全阀耗尽后返回 None，不返回部分集。"""
+        full_page = {
+            "code": 200,
+            "data": {
+                "total": 100000,
+                "content": [
+                    {"name": f"f{i}.strm", "is_dir": False}
+                    for i in range(100)
+                ],
+            },
+        }
+        self.admin_api.list_directory.return_value = full_page
+
+        result = self.app._collect_cloud_files_in_directory("/mount")
+
+        assert result is None, "安全阀耗尽必须 fail-closed"
+        # 安全阀上限为 100 页
+        assert self.admin_api.list_directory.call_count == 100
+
+    def test_untrusted_page_returns_none(self):
+        """任一页响应不可信 → 立即返回 None。"""
+        self.admin_api.list_directory.return_value = {"code": 500}
+
+        result = self.app._collect_cloud_files_in_directory("/mount")
+
+        assert result is None
+
+    def test_cleanup_b_zombies_does_not_delete_on_untrusted_collection(self):
+        """收集结果不可信时，B 区僵尸清理不得删除/迁移任何文件。"""
+        b_file = self.b_dir / "zombie.strm"
+        b_file.write_text("/mount/zombie.mp4", encoding="utf-8")
+
+        record = BRecord(
+            local_path=str(b_file),
+            webdav_path="/mount/zombie.mp4",
+            parent_webdav_path="/mount",
+            source_a_path=str(self.a_dir / "missing.strm"),
+            fingerprint="fp_z",
+            status="valid",
+            updated_at=0,
+            mapping_id="test_m1",
+        )
+        # cleanup_b_zombies_under_folder 通过 get_b_under_root 读取记录
+        self.db.get_b_under_root.return_value = [record]
+        self.db.is_ghost_protected.return_value = False
+        # 分页收集不可信（任一页 code 非 0/200）
+        self.admin_api.list_directory.return_value = {"code": 500}
+
+        with patch.object(self.app, "_handle_b_zombie") as mock_zombie:
+            self.app.cleanup_b_zombies_under_folder("/mount")
+
+        # 收集器返回 None → 该父目录被跳过，destructive 处理不得发生
+        mock_zombie.assert_not_called()
+        assert b_file.exists(), "不可信收集结果不得触发删除"
+        self.db.delete_b_by_local.assert_not_called()
+        self.db.upsert_c.assert_not_called()
+
+    def test_cleanup_b_zombies_safety_valve_exhausted_does_not_delete(self):
+        """安全阀耗尽（始终满页）→ 视为不可信，B 区僵尸清理不删除文件。"""
+        b_file = self.b_dir / "zombie.strm"
+        b_file.write_text("/mount/zombie.mp4", encoding="utf-8")
+
+        record = BRecord(
+            local_path=str(b_file),
+            webdav_path="/mount/zombie.mp4",
+            parent_webdav_path="/mount",
+            source_a_path=str(self.a_dir / "missing.strm"),
+            fingerprint="fp_z",
+            status="valid",
+            updated_at=0,
+            mapping_id="test_m1",
+        )
+        self.db.get_b_under_root.return_value = [record]
+        self.db.is_ghost_protected.return_value = False
+        # 每页都满 100 条 → 永远认为还有下一页 → 安全阀耗尽
+        # 且返回内容不含 zombie.strm，若误判权威会导致删除
+        self.admin_api.list_directory.return_value = {
+            "code": 200,
+            "data": {
+                "total": 100000,
+                "content": [
+                    {"name": f"other{i}.strm", "is_dir": False}
+                    for i in range(100)
+                ],
+            },
+        }
+
+        with patch.object(self.app, "_handle_b_zombie") as mock_zombie:
+            self.app.cleanup_b_zombies_under_folder("/mount")
+
+        mock_zombie.assert_not_called()
+        assert b_file.exists(), "安全阀耗尽必须 fail-closed，不得删除"
+        self.db.delete_b_by_local.assert_not_called()
+
 
 # ===========================================================================
 # TestParseFsListContent — /api/fs/list 响应契约校验（fail-closed）
@@ -2808,3 +3303,405 @@ class TestRefreshPathMappingScopedFailClosed:
         """storage map 为空时 engine paths 也应为空列表。"""
         result = self.app.get_engine_paths_for_a_roots([Path(self.a_dir)])
         assert result == []
+
+
+# ===========================================================================
+# TestCleanupADeletedOnCloud —— update 模式云端删除清理的直调安全测试
+# ===========================================================================
+
+
+class TestCleanupADeletedOnCloud:
+    """直调 cleanup_a_deleted_on_cloud()，验证前缀边界与三态 fail-closed。
+
+    仅使用临时目录中的真实文件与 mock DB / mock admin_api，
+    不访问真实 OpenList、不触碰工作区文件。
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = Path(self.tmp) / "a"
+        self.b_dir = Path(self.tmp) / "b"
+        self.c_dir = Path(self.tmp) / "c"
+        for d in [self.a_dir, self.b_dir, self.c_dir]:
+            d.mkdir()
+
+        config = Mock(spec=AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = []
+        config.paths = Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.behavior = Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.strm_engine_paths = []
+
+        db = Mock(spec=Database)
+        db.init_subtitle_table = Mock()
+        self.db = db
+        self.admin_api = Mock()
+
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, self.admin_api)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_a_file(self, name: str, webdav_path: str) -> Path:
+        """在临时 A 目录写入一个真实 STRM 文件。"""
+        path = self.a_dir / name
+        path.write_text(webdav_path, encoding="utf-8")
+        return path
+
+    def _record(self, local_path: Path, webdav_path: str) -> ARecord:
+        return ARecord(
+            local_path=str(local_path),
+            webdav_path=webdav_path,
+            parent_webdav_path=webdav_path.rsplit("/", 1)[0] or "/",
+            updated_at=0.0,
+        )
+
+    # ----------------------------------------------------------
+    # 空 engine_path
+    # ----------------------------------------------------------
+
+    def test_empty_engine_path_short_circuits(self):
+        """engine_path 为空时不读 DB、不调用 API、不删除任何文件。"""
+        self.app.cleanup_a_deleted_on_cloud("")
+
+        self.db.get_all_a_records.assert_not_called()
+        self.admin_api.check_exists.assert_not_called()
+        self.db.delete_a_by_local.assert_not_called()
+        self.db.set_ghost_protection.assert_not_called()
+
+    # ----------------------------------------------------------
+    # 前缀边界：/movies 不得误匹配 /movies_extra
+    # ----------------------------------------------------------
+
+    def test_similar_prefix_directory_not_matched(self):
+        """/movies 只处理 /movies/ 下记录，不误伤 /movies_extra/。"""
+        in_scope = self._make_a_file("in_scope.strm", "/movies/item.strm")
+        out_scope = self._make_a_file("out_scope.strm", "/movies_extra/item.strm")
+        self.db.get_all_a_records.return_value = [
+            self._record(in_scope, "/movies/item.strm"),
+            self._record(out_scope, "/movies_extra/item.strm"),
+        ]
+        # 云端权威判定：范围内的记录已删除
+        self.admin_api.check_exists.return_value = False
+
+        self.app.cleanup_a_deleted_on_cloud("/movies")
+
+        # 只对范围内的 WebDAV 路径做存在性查询
+        checked = [c.args[0] for c in self.admin_api.check_exists.call_args_list]
+        assert checked == ["/movies/item.strm"]
+        # 范围内文件被删除，范围外文件保留
+        assert not in_scope.exists()
+        assert out_scope.exists()
+        self.db.delete_a_by_local.assert_called_once_with(str(in_scope))
+
+    def test_webdav_path_equal_to_engine_path_is_in_scope(self):
+        """webdav_path 恰好等于 engine_path 时属于处理范围（当前方法契约）。"""
+        exact = self._make_a_file("exact.strm", "/movies")
+        self.db.get_all_a_records.return_value = [
+            self._record(exact, "/movies"),
+        ]
+        self.admin_api.check_exists.return_value = False
+
+        self.app.cleanup_a_deleted_on_cloud("/movies")
+
+        self.admin_api.check_exists.assert_called_once_with("/movies")
+        assert not exact.exists()
+        self.db.delete_a_by_local.assert_called_once_with(str(exact))
+
+    def test_engine_path_with_trailing_slash_normalized(self):
+        """engine_path 带尾部斜杠时前缀规范化，不产生双斜杠导致漏匹配。"""
+        a_file = self._make_a_file("item.strm", "/movies/item.strm")
+        self.db.get_all_a_records.return_value = [
+            self._record(a_file, "/movies/item.strm"),
+        ]
+        self.admin_api.check_exists.return_value = False
+
+        self.app.cleanup_a_deleted_on_cloud("/movies/")
+
+        self.admin_api.check_exists.assert_called_once_with("/movies/item.strm")
+        assert not a_file.exists()
+
+    # ----------------------------------------------------------
+    # check_exists 三态
+    # ----------------------------------------------------------
+
+    def test_check_exists_true_keeps_everything(self):
+        """云端仍存在（True）→ 不删本地、不删 DB、不写 ghost。"""
+        a_file = self._make_a_file("keep.strm", "/movies/keep.strm")
+        self.db.get_all_a_records.return_value = [
+            self._record(a_file, "/movies/keep.strm"),
+        ]
+        self.admin_api.check_exists.return_value = True
+
+        self.app.cleanup_a_deleted_on_cloud("/movies")
+
+        assert a_file.exists()
+        self.db.delete_a_by_local.assert_not_called()
+        self.db.set_ghost_protection.assert_not_called()
+
+    def test_check_exists_false_deletes_and_sets_ghost(self):
+        """云端权威缺失（False）→ 删本地 + 删 DB + 写 ghost protection。"""
+        a_file = self._make_a_file("gone.strm", "/movies/gone.strm")
+        self.db.get_all_a_records.return_value = [
+            self._record(a_file, "/movies/gone.strm"),
+        ]
+        self.admin_api.check_exists.return_value = False
+
+        self.app.cleanup_a_deleted_on_cloud("/movies")
+
+        assert not a_file.exists()
+        self.db.delete_a_by_local.assert_called_once_with(str(a_file))
+        self.db.set_ghost_protection.assert_called_once_with(
+            "/movies/gone.strm", 300, reason="cloud_deleted")
+
+    def test_check_exists_none_is_fail_closed(self):
+        """存在性不可信（None）→ 保留本地文件、保留 DB、不写 ghost。"""
+        a_file = self._make_a_file("untrusted.strm", "/movies/untrusted.strm")
+        self.db.get_all_a_records.return_value = [
+            self._record(a_file, "/movies/untrusted.strm"),
+        ]
+        self.admin_api.check_exists.return_value = None
+
+        self.app.cleanup_a_deleted_on_cloud("/movies")
+
+        assert a_file.exists(), "None（不可信）绝不能触发删除"
+        self.db.delete_a_by_local.assert_not_called()
+        self.db.set_ghost_protection.assert_not_called()
+
+    def test_mixed_three_states_only_false_deleted(self):
+        """同一批记录混合三态时，只有 False 记录被清理。"""
+        keep = self._make_a_file("keep.strm", "/movies/keep.strm")
+        gone = self._make_a_file("gone.strm", "/movies/gone.strm")
+        untrusted = self._make_a_file("untrusted.strm", "/movies/untrusted.strm")
+        self.db.get_all_a_records.return_value = [
+            self._record(keep, "/movies/keep.strm"),
+            self._record(gone, "/movies/gone.strm"),
+            self._record(untrusted, "/movies/untrusted.strm"),
+        ]
+        states = {
+            "/movies/keep.strm": True,
+            "/movies/gone.strm": False,
+            "/movies/untrusted.strm": None,
+        }
+        self.admin_api.check_exists.side_effect = lambda p: states[p]
+
+        self.app.cleanup_a_deleted_on_cloud("/movies")
+
+        assert keep.exists()
+        assert not gone.exists()
+        assert untrusted.exists()
+        deleted = [c.args[0] for c in self.db.delete_a_by_local.call_args_list]
+        assert deleted == [str(gone)]
+        ghosted = [c.args[0] for c in self.db.set_ghost_protection.call_args_list]
+        assert ghosted == ["/movies/gone.strm"]
+
+    def test_no_a_records_no_api_calls(self):
+        """DB 中无 A 记录时不调用存在性查询。"""
+        self.db.get_all_a_records.return_value = []
+
+        self.app.cleanup_a_deleted_on_cloud("/movies")
+
+        self.admin_api.check_exists.assert_not_called()
+        self.db.delete_a_by_local.assert_not_called()
+
+
+# ===========================================================================
+# TestForceDeleteAndVerify  —  _force_delete_and_verify 直调测试
+# ===========================================================================
+
+
+class TestForceDeleteAndVerify:
+    """验证 _force_delete_and_verify 的三层删除回退与权限失败行为。"""
+
+    @pytest.fixture
+    def app_service(self, tmp_path):
+        """构造最小 AppService，仅用于调用 _force_delete_and_verify。"""
+        from config import AppConfig
+        app = AppService.__new__(AppService)
+        app.config = MagicMock()
+        app.db = MagicMock()
+        return app
+
+    def test_file_already_gone_returns_true(self, app_service, tmp_path):
+        """路径不存在时直接返回 True。"""
+        target = tmp_path / "nonexistent.strm"
+        assert not target.exists()
+        result = app_service._force_delete_and_verify(target)
+        assert result is True
+
+    def test_normal_delete_returns_true(self, app_service, tmp_path):
+        """存在且可删除的文件正常删除后返回 True。"""
+        target = tmp_path / "normal.strm"
+        target.write_text("test")
+        assert target.exists()
+
+        with patch("app_service_core.safe_remove_file") as mock_safe:
+            mock_safe.side_effect = lambda p: Path(p).unlink() if Path(p).exists() else True
+            result = app_service._force_delete_and_verify(target)
+
+        assert result is True
+        assert not target.exists()
+
+    def test_all_three_tiers_fail_file_persists_returns_false(self, app_service, tmp_path):
+        """三级删除全部失败，文件仍存在时返回 False。"""
+        target = tmp_path / "stubborn.strm"
+        target.write_text("stubborn")
+        assert target.exists()
+
+        class FakePath(str):
+            def exists(self): return True
+
+        with patch("app_service_core.safe_remove_file", return_value=False), \
+             patch("os.remove", side_effect=OSError("access denied")), \
+             patch("os.chmod", side_effect=OSError("permission denied")):
+            result = app_service._force_delete_and_verify(target)
+
+        assert result is False
+        assert target.exists()
+
+    def test_safe_remove_succeeds_returns_true(self, app_service, tmp_path):
+        """第一级 safe_remove_file 成功删除后不再走后续重试。"""
+        target = tmp_path / "safe_remove_ok.strm"
+        target.write_text("data")
+
+        def safe_remove_then_check(p):
+            Path(p).unlink()
+            return True
+
+        with patch("app_service_core.safe_remove_file", side_effect=safe_remove_then_check):
+            result = app_service._force_delete_and_verify(target)
+
+        assert result is True
+        assert not target.exists()
+
+    def test_os_remove_fallback_succeeds(self, app_service, tmp_path):
+        """第一级失败但 os.remove 成功后返回 True。"""
+        target = tmp_path / "fallback.strm"
+        target.write_text("data")
+
+        def os_remove_then_check(p):
+            Path(p).unlink()
+        with patch("app_service_core.safe_remove_file", return_value=False), \
+             patch("os.remove", side_effect=os_remove_then_check):
+            result = app_service._force_delete_and_verify(target)
+
+        assert result is True
+        assert not target.exists()
+
+    def test_chmod_remove_fallback_succeeds(self, app_service, tmp_path):
+        """前两级均失败后 chmod+remove 第三级成功返回 True。"""
+        target = tmp_path / "readonly.strm"
+        target.write_text("locked")
+
+        remove_calls = [0]
+
+        def os_remove_fake(path):
+            remove_calls[0] += 1
+            if remove_calls[0] == 1:
+                raise OSError("access denied")  # 第一级失败
+            else:
+                Path(path).unlink()  # 第三级：chmod 后 os.remove 成功
+
+        with patch("app_service_core.safe_remove_file", return_value=False), \
+             patch("os.remove", side_effect=os_remove_fake), \
+             patch("os.chmod"):
+            result = app_service._force_delete_and_verify(target)
+
+        assert result is True
+        # File should be gone after chmod+remove
+        assert not target.exists()
+
+
+# ===========================================================================
+# TestCleanupLocalEmptyDirs  —  cleanup_local_empty_dirs 直调测试
+# ===========================================================================
+
+
+class TestCleanupLocalEmptyDirs:
+    """验证 cleanup_local_empty_dirs 对空目录的递归清理行为。"""
+
+    @pytest.fixture
+    def app_service(self, tmp_path):
+        """构造 AppService 实例，a_roots、_a_to_b_map、c_root 指向临时目录。"""
+        a_root = tmp_path / "A"
+        b_root = tmp_path / "B"
+        c_root = tmp_path / "C"
+        a_root.mkdir(parents=True, exist_ok=True)
+        b_root.mkdir(parents=True, exist_ok=True)
+        c_root.mkdir(parents=True, exist_ok=True)
+        app = AppService.__new__(AppService)
+        app.config = MagicMock()
+        app.config.paths = MagicMock()
+        app.config.paths.c_root = str(c_root)
+        app.db = MagicMock()
+        app.a_roots = [a_root]
+        app._a_to_b_map = {"map_id": b_root}
+        return app
+
+    def test_empty_dir_removed(self, app_service, tmp_path):
+        """空目录被正常删除，非空目录保留。"""
+        a_empty = app_service.a_roots[0] / "empty_sub"
+        a_empty.mkdir(parents=True)
+        b_deep_empty = app_service._a_to_b_map["map_id"] / "deep" / "nested"
+        b_deep_empty.mkdir(parents=True)
+
+        app_service.cleanup_local_empty_dirs()
+
+        assert not a_empty.exists()
+        assert not b_deep_empty.parent.exists()  # deep/ should be removed recursively
+        assert not b_deep_empty.exists()
+
+    def test_non_empty_dir_not_removed(self, app_service, tmp_path):
+        """有内容的目录不被删除。"""
+        a_root = app_service.a_roots[0]
+        file = a_root / "keep.strm"
+        file.write_text("content")
+        sub_dir = a_root / "nonempty"
+        sub_dir.mkdir()
+        (sub_dir / "inside.txt").write_text("data")  # 确保子目录非空
+
+        app_service.cleanup_local_empty_dirs()
+
+        assert a_root.exists()
+        assert file.exists()
+        assert sub_dir.exists()
+
+    def test_deeply_nested_empty_dirs_removed(self, app_service, tmp_path):
+        """多级嵌套空目录——最内层先删除，递归向上。"""
+        b_root = app_service._a_to_b_map["map_id"]
+        (b_root / "S1" / "S1" / "S1").mkdir(parents=True)
+
+        app_service.cleanup_local_empty_dirs()
+
+        assert not (b_root / "S1").exists()
+
+    def test_missing_root_dir_not_raise(self, app_service, tmp_path):
+        """根目录不存在时不抛异常。"""
+        app_service.a_roots = [tmp_path / "does_not_exist"]
+        app_service.cleanup_local_empty_dirs()  # no exception
+
+    def test_c_root_empty_subdirs_removed(self, app_service, tmp_path):
+        """C 区空子目录也被清理。"""
+        c_root = app_service.c_root
+        (c_root / "ghost" / "entry").mkdir(parents=True)
+
+        app_service.cleanup_local_empty_dirs()
+
+        assert not (c_root / "ghost").exists()
+
+    def test_multiple_a_roots_all_cleaned(self, app_service, tmp_path):
+        """多个 A 根目录的空目录都被清理。"""
+        a2 = tmp_path / "A2"
+        a2.mkdir()
+        (a2 / "empty_sub").mkdir()
+        app_service.a_roots = [app_service.a_roots[0], a2]
+
+        app_service.cleanup_local_empty_dirs()
+
+        assert not (a2 / "empty_sub").exists()

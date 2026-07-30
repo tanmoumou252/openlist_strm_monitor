@@ -52,7 +52,8 @@ This file provides guidance to AI coding assistants when working with the `openl
 - Password (PBKDF2-HMAC-SHA256, 600k iterations) → session token (64 hex chars, 7-day sliding expiry)
 - Token sent as `X-Session-Token` header via `api()` wrapper in `api.js`
 - IP whitelist (LAN only) + token check on every request
-- Whitelisted paths (no token): `/api/config`, `/api/webui/config/ui`, `/api/tmdb/avatar`, `/api/tmdb/poster`, `/api/openlist/status`, `/api/openlist/ping`, `/api/admin/status`, `/api/login`, `/api/page`, static assets
+- Whitelisted paths (no token): `/api/config`, `/api/webui/config/ui`, `/api/tmdb/avatar`, `/api/tmdb/poster`, `/api/openlist/status`, `/api/openlist/ping`, `/api/admin/status`, `/api/login`, `/login` (SPA route), `/api/page`, `/`, static assets (`/assets/*`, `/favicon.ico`, `/logo.png`, `/openlist_strm_bridge.png`, `/fonts/*`, `.woff2`/`.woff`/`.ttf`)
+- `/login` is a token-free SPA GET route served from `dist/index.html`; `/api/login` is the POST authentication endpoint. Do not confuse the two.
 
 ### Frontend API Calls
 - ALWAYS use the `api()` function from `src/webui/modules/core/api.js` — it auto-attaches the auth token
@@ -69,6 +70,66 @@ This file provides guidance to AI coding assistants when working with the `openl
 - A **7-step onboarding** flow guides first-run setup (confirm admin password → TMDB → OpenList → start engine → view A/B → refresh TMDB watchlist → detect TMDB match). Steps are defined in `dashboard.js`'s `steps` array.
 - State is stored in `tmdb_watchlist.db` → `webui_config` (scope=`ui`, e.g. `onboarding_completed`).
 - Single step: `POST /api/onboarding/complete-step`. Mark the whole flow complete/skip via `POST /api/webui/config/ui` with `{ onboarding_completed: '1' }`.
+
+## Directory Structure
+
+```
+openlist_strm_bridge/
+├── src/
+│   ├── main.py                  # Entry point
+│   ├── app_service_core.py      # Core sync engine
+│   ├── app_service.py           # Compat re-export layer
+│   ├── config.py                # Configuration classes (AppConfig, etc.)
+│   ├── database.py              # SQLite bridge.db manager
+│   ├── webdav_client.py         # OpenList Admin API + WebDAV client
+│   ├── area_watchers.py         # File system watchers for A/B/C zones
+│   ├── refresh_service.py       # Periodic WebDAV refresh
+│   ├── media_renamer.py         # Media renaming, season/episode extraction
+│   ├── tmdb_client.py           # TMDB API v3 client
+│   ├── tmdb_watchlist_db.py     # TMDB watchlist SQLite DB
+│   ├── tmdb_watchlist.py        # TMDB data classes (TmdbItem, etc.)
+│   ├── watchlist_match.py       # Watchlist matching logic
+│   ├── secret_manager.py        # Sensitive config encryption
+│   ├── logger_setup.py          # Logging setup
+│   ├── openlist_login_shared.py # Shared OpenList login logic
+│   ├── webui/
+│   │   ├── server.py            # HTTP server + auth + route dispatch
+│   │   ├── routes.py            # All API route handlers
+│   │   ├── index.html           # SPA entry point
+│   │   ├── main.js              # Frontend entry point
+│   │   ├── vite.config.js       # Vite build config
+│   │   ├── package.json         # Node dependencies
+│   │   └── modules/
+│   │       ├── core/            # api.js, router.js, state.js, icons.js, theme.js, utils.js, wallpaper.js
+│   │       ├── pages/           # dashboard.js, area.js, config.js, login.js, logs.js, openlist.js, tmdb.js
+│   │       └── components/      # dialog.js, toast.js
+│   │   ├── scripts/             # 字体子集化脚本（subset_font.py）
+│   │   ├── public/              # 静态资源（icon-preview.html 等）
+│   │   └── styles/              # CSS 样式（main.css）
+│   ├── domain/media/            # subtitle_handler.py
+│   ├── domain/sync/             # sync_service.py
+│   ├── domain/storage/          # Placeholder (reserved, currently only __init__.py)
+│   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py, encoding_utils.py
+│   ├── tools/                   # 维护工具
+│   ├── tokenizers/              # simple/ (cppjieba wrapper for Chinese search)
+│   └── tests/                   # Test files: see src/tests/README.md for live count
+│       ├── requirements-dev.txt # 测试/开发依赖
+│       └── perf/                # 性能测试
+├── dist/                        # Built frontend (Vite output)
+│   ├── assets/                  # Hashed JS/CSS/font files
+│   └── icon-preview.html        # 图标预览页面（构建产物）
+├── wiki/                        # Documentation
+├── docs/                        # API docs, design docs, UI templates
+├── config.toml                  # Main configuration
+├── bridge.db                    # Core SQLite database
+├── tmdb_watchlist.db            # TMDB watchlist SQLite database
+├── reset_admin.py               # Password reset utility
+├── requirements.txt             # Production dependencies
+├── config.toml.example          # Example configuration
+├── 嵌入式启动.bat                  # Embedded Python launcher
+├── 环境变量启动.bat                  # System Python launcher
+└── LICENSE                      # License file
+```
 
 ## Key Files
 
@@ -92,3 +153,4 @@ This file provides guidance to AI coding assistants when working with the `openl
 - Ghost protection: 30-second observation period for single-file desertion scenarios
 - Duplicate scoring: Standard `S01E01` naming ranks highest, inferior names get `.duplicate` suffix
 - Config layering: DB config overrides config.toml. If toml changes don't take effect, check DB `webui_config` table.
+- A↔B mapping isolation: `ABMapping` / the `a_b_mappings` table define each A root ↔ B root pair. `mapping_id` is the isolation boundary for B/C records, fingerprints, lineage, boundary snapshots, and identity projections — never deduplicate or share lineage across mappings. `get_mapping_for_a()` / `get_mapping_for_b()` fail closed on zero or multiple matches, and destructive paths must keep the source when the mapping cannot be uniquely resolved or the record's `mapping_id` disagrees.

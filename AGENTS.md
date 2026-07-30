@@ -105,10 +105,14 @@ openlist_strm_bridge/
 │   ├── domain/sync/             # sync_service.py
 │   ├── domain/storage/          # Placeholder (reserved, currently only __init__.py)
 │   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py, encoding_utils.py
+│   ├── tools/                   # 维护工具
 │   ├── tokenizers/              # simple/ (cppjieba wrapper for Chinese search)
 │   └── tests/                   # Test files: see src/tests/README.md for live count
+│       ├── requirements-dev.txt # 测试/开发依赖
+│       └── perf/                # 性能测试
 ├── dist/                        # Built frontend (Vite output)
-│   └── assets/                  # Hashed JS/CSS/font files
+│   ├── assets/                  # Hashed JS/CSS/font files
+│   └── icon-preview.html        # 图标预览页面（构建产物）
 ├── wiki/                        # Documentation
 ├── docs/                        # API docs, design docs, UI templates
 ├── config.toml                  # Main configuration
@@ -166,7 +170,8 @@ The Vite config groups modules into chunks:
 - Token transmitted via `X-Session-Token` header
 - Frontend `api()` wrapper in `api.js` auto-attaches token from localStorage
 - IP whitelist (LAN only) as first defense layer
-- Whitelisted paths (no token required): `/api/config`, `/api/webui/config/ui`, `/api/tmdb/avatar`, `/api/tmdb/poster`, `/api/openlist/status`, `/api/openlist/ping`, `/api/admin/status`, `/api/login`, `/api/page`, static assets
+- Whitelisted paths (no token required): `/api/config`, `/api/webui/config/ui`, `/api/tmdb/avatar`, `/api/tmdb/poster`, `/api/openlist/status`, `/api/openlist/ping`, `/api/admin/status`, `/api/login`, `/login` (SPA route), `/api/page`, `/`, static assets (`/assets/*`, `/favicon.ico`, `/logo.png`, `/openlist_strm_bridge.png`, `/fonts/*`, `.woff2`/`.woff`/`.ttf`)
+- `/login` is a SPA GET route served from `dist/index.html` (same fallback as `/` and `/api/page`); it is NOT a separate login page and must stay token-free so the SPA can load before login. `/api/login` is the POST authentication endpoint — the two are different things.
 
 ### Backend API Routes
 - `do_GET` / `do_POST` dispatch in `server.py` → delegates to handlers in `routes.py`
@@ -178,6 +183,11 @@ The Vite config groups modules into chunks:
 - `bridge.db`: A/B/C zone file records, fingerprints, ghost protection, subtitles, sync state
 - `tmdb_watchlist.db`: TMDB cache, webui_config (scopes: tmdb, openlist, ui, migration), operation logs
 - `Database` class uses read/write connection managers with `ReadWriteLock`
+
+### A↔B Mapping Isolation (`mapping_id`)
+- `ABMapping` (config) and the `a_b_mappings` table define each A root ↔ B root relationship; every mapping needs a unique non-empty `mapping_id` and non-empty A/B roots, otherwise `get_config_status()` returns `fail_safe_active` / `not_configured` and startup refuses to launch watchers.
+- `mapping_id` is the isolation boundary for B/C records, fingerprints, lineage, boundary snapshots, and identity projections. Never deduplicate across mappings, never share lineage, and never reuse another mapping's projection.
+- `get_mapping_for_a()` / `get_mapping_for_b()` fail closed: zero or multiple matches both return `None`. Any destructive path (cleanup, C-zone migration, dedup) must keep the source untouched when the mapping cannot be uniquely resolved or when the record's `mapping_id` disagrees with the resolved mapping.
 
 ### Frontend State Management
 - Global state in `state.js` (singleton module pattern, not a framework)

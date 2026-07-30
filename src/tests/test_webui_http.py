@@ -245,6 +245,26 @@ class TestStaticRoutes:
         assert isinstance(body, dict)
         assert "error" in body
 
+    def test_login_returns_spa_index_html(self, webui_server):
+        """GET /login 应返回 SPA index.html（与 / 和 /api/page 一致）。
+
+        回归守卫：修复前 do_GET 调用不存在的 _send_login_page()，
+        导致 AttributeError 或非 200 响应。
+        """
+        server, base, session_token = webui_server
+        status, headers, body = _http_get(base, "/login", session_token)
+        assert status == 200
+        assert "text/html" in headers.get("Content-Type", "")
+        assert b"<html>" in body
+
+    def test_login_without_token_returns_spa_index_html(self, webui_server):
+        """GET /login 无需 token 即可访问（白名单路径），返回 SPA index.html。"""
+        server, base, _ = webui_server
+        status, headers, body = _http_get(base, "/login", session_token=None)
+        assert status == 200
+        assert "text/html" in headers.get("Content-Type", "")
+        assert b"<html>" in body
+
 
 # ============================================================
 # Dashboard / 日志 / 记录 / 配置

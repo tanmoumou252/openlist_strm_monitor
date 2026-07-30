@@ -53,7 +53,7 @@
 
 ### 启动性能
 
-vX.X.X 版本对启动流程进行了重大优化：
+当前版本对启动流程进行了重大优化：
 
 **优化前**：
 - 4000 条记录：~18 分钟
@@ -67,7 +67,7 @@ vX.X.X 版本对启动流程进行了重大优化：
 - 批量索引 + 预加载缓存
 - A 区冗余清理：500 次 API 请求 × 100ms / 5 并发 = 10 秒
 - **主动刷新路径**（`refresh_paths`）：留空时跳过周期性扫描，但 B 区删除联动仍正常工作
-- **全量审计周期**（`full_audit_interval_days`）：每隔多少天执行一次 A→B 全量审计（默认周期执行，`0` 关闭，持久化在数据库 `sync_control` 表）
+- **全量审计周期**（`full_audit_interval_days`）：每隔多少天执行一次 A→B 全量审计（默认周期执行，`0` 关闭）。周期配置来自 `tmdb_watchlist.db` 的 `webui_config` 表（scope=`openlist`，DB 键 `refresh_full_audit_interval_days`）；上次审计时间 `last_full_audit_at` 则来自 `bridge.db` 的 `sync_control` 表，两者是不同的持久化字段
 
 **关键技术**：
 - `initial_scan_a()` 批量索引 A 区 STRM 文件（多线程 4 线程并发读取，每 100 条或每 2 秒输出进度日志 + records/s 性能基准）

@@ -19,9 +19,13 @@ python -m pytest src/tests/ -v
 | `test_area_watchers.py` | A/B/C 三区文件系统监视器事件处理测试 |
 | `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试 |
 | `test_refresh_service.py` | 周期性 WebDAV 刷新服务测试 |
+| `test_refresh_service_helpers.py` | RefreshService 辅助委托、路径分析日志、WebDAV 刷新与 update 模式清理测试。 |
 | `test_bootstrap.py` | 启动路径工具（`ensure_base_dir_first`、`load_local_module`）测试 |
 | `test_log_issues_simulation.py` | 八类真实日志问题的沙盒实验与修复回归（SQLite 锁竞争、padding 路径碰撞、B 区血统清理健康度、B 区事件洪泛、重复实例隔离、字幕路由、WebDAV 假阴性、Unicode 路径） |
 | `test_lineage_snapshot_production.py` | 真实 `AppService` 的 mapping-scoped lineage snapshot 验收：覆盖未变更复用、内容修改、删除、同 mapping 重命名、跨 mapping/非法目录移动、无指纹、同/跨 mapping 重复指纹、A 源缺失 boundary 放行、同名不同根、mapping/lineage 版本变化、snapshot 缺失或损坏、stat/DB 写异常及扫描期间文件修改。 |
+| `test_app_service_helpers.py` | AppService 辅助方法：锁工厂、mapping 路径解析、WebDAV 辅助、引擎内部标记与日志去重。 |
+| `test_app_service_roots.py` | 保护根目录同步、移除根目录扫描与当前根目录快照持久化。 |
+| `test_app_service_lifecycle.py` | `AppService` 生命周期编排：配置未就绪 fail-safe、启动阶段顺序、`start_watchers()` 的 A/B/C schedule（mock Observer，不启动真实 watchdog）、`stop()` 的定时器取消与 observer 停止、重复 stop 以及当前未提供的生命周期保证记录。 |
 | `test_multi_mapping_production_acceptance.py` | 多 mapping 生产验收与跨根隔离测试。 |
 
 ### 数据库 / FTS
@@ -29,6 +33,7 @@ python -m pytest src/tests/ -v
 | 文件 | 说明 |
 |------|------|
 | `test_integration.py` | 数据库重构与核心流程集成测试（含 A/B/C 区 FTS 完整性回归） |
+| `test_database_bulk.py` | bulk_connection 批量写入、只读 getter 读锁与并发数据库行为测试 |
 | `test_fts5_search.py` | FTS5 全文检索查询与匹配测试（含 simple 分词器加载、版本可读、`黑暗`/`暗黑` 按词分词语义断言） |
 | `test_fts5_escape_and_tmdb_search.py` | FTS5 查询转义函数（`_escape_fts5_query`）与 TMDB 搜索路由测试（含 `进击的巨人[限制级]`、`电影：测试*`、`Spy×Family` 真实媒体名转义） |
 | `test_fts_orphan_cleanup.py` | FTS 孤儿行清理与一致性测试 |
@@ -66,6 +71,7 @@ python -m pytest src/tests/ -v
 | `test_webdav_client.py` | WebDAV 协议客户端测试 |
 | `test_tmdb_client.py` | TMDB API v3 客户端测试 |
 | `test_openlist_login_shared.py` | OpenList 登录错误消息解析（`parse_login_error`）测试 |
+| `test_main_entry.py` | `main.py` 入口参数拒绝路径测试（禁止使用 `--webui-only` / `--webui`）。 |
 
 ### WebUI
 
@@ -224,6 +230,8 @@ python -m pytest src/tests/
 | `debug_console.py` | 调试控制台交互工具（数据库/区域状态检查） |
 | `verify_login_flow.py` | 登录流程手动验证脚本 |
 | `_test_helpers.py` | 测试共用辅助函数（被其他测试文件 import） |
+| `perf/benchmark_lineage.py` | B 区血统核对性能基准 CLI（增量校验方案），非 pytest 测试，用法见文件头注释 |
+| `perf/instrumentation.py` | 性能埋点/计时工具，用于基准测试的代码插桩 |
 
 ## 日志问题模拟测试（`test_log_issues_simulation.py`）
 
