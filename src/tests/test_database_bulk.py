@@ -340,3 +340,155 @@ class TestBulkIntegration:
             c2 = conn.execute("SELECT COUNT(*) FROM ghost_protection").fetchone()[0]
         assert c1 == 20
         assert c2 == 1
+
+
+# ────────────────────────────────────────────────
+# complete_index_generation / get_index_metadata
+# ────────────────────────────────────────────────
+
+class TestIndexGenerationControl:
+    """测试索引元数据的 generation 计数与时间戳管理。"""
+
+    def test_initial_generation_is_zero(self, db: Database):
+        """新库的初始 generation 为 0，时间戳为 0。"""
+        meta = db.get_index_metadata()
+        assert meta["index_generation"] == 0
+        assert meta["index_generation_at"] == 0
+        assert meta["last_full_index_at"] == 0
+        assert meta["mapping_version"] == ""
+        assert meta["mapping_version_generated_at"] == 0
+
+    def test_complete_index_generation_increments_once_for_multiple_mappings(self, db: Database):
+        """一次完成包含多个 mapping 的操作，generation 只递增一次。"""
+        # 第一次完成：mapping m1, m2
+        db.complete_index_generation(["m1", "m2"])
+        meta = db.get_index_metadata()
+        assert meta["index_generation"] == 1
+
+        # 第二次完成：mapping m1, m3（包含已存在的 m1，新增 m3）
+        db.complete_index_generation(["m1", "m3"])
+        meta = db.get_index_metadata()
+        assert meta["index_generation"] == 2
+
+        # 第三次完成：mapping m1, m2, m3（全部已存在）
+        db.complete_index_generation(["m1", "m2", "m3"])
+        meta = db.get_index_metadata()
+        assert meta["index_generation"] == 3
+
+    def test_per_mapping_generation_and_time_are_isolated(self, db: Database):
+        """不同 mapping 的 generation 和时间互不覆盖。"""
+        t1 = 1000.0
+        t2 = 2000.0
+        t3 = 3000.0
+
+        # 第一次：m1
+        db.complete_index_generation(["m1"], completed_at=t1)
+        meta = db.get_index_metadata("m1")
+        assert meta["mapping_index_generation"] == 1
+        assert meta["mapping_index_generation_at"] == t1
+
+        # 第二次：m2
+        db.complete_index_generation(["m2"], completed_at=t2)
+        meta1 = db.get_index_metadata("m1")
+        meta2 = db.get_index_metadata("m2")
+        assert meta1["mapping_index_generation"] == 1  # m1 未变
+        assert meta1["mapping_index_generation_at"] == t1
+        assert meta2["mapping_index_generation"] == 2
+        assert meta2["mapping_index_generation_at"] == t2
+
+        # 第三次：m1（再次完成）
+        db.complete_index_generation(["m1"], completed_at=t3)
+        meta1 = db.get_index_metadata("m1")
+        meta2 = db.get_index_metadata("m2")
+        assert meta1["mapping_index_generation"] == 3  # m1 更新到全局 generation
+        assert meta1["mapping_index_generation_at"] == t3
+        assert meta2["mapping_index_generation"] == 2  # m2 未变
+        assert meta2["mapping_index_generation_at"] == t2
+
+    def test_complete_index_generation_increases_last_full_index_at(self, db: Database):
+        """complete_index_generation 同时更新 last_full_index_at。"""
+        t1 = 1000.0
+        db.complete_index_generation(["m1"], completed_at=t1)
+        meta = db.get_index_metadata()
+        assert meta["last_full_index_at"] == t1
+
+        t2 = 2000.0
+        db.complete_index_generation(["m2"], completed_at=t2)
+        meta = db.get_index_metadata()
+        assert meta["last_full_index_at"] == t2
+
+    def test_empty_mapping_ids_is_rejected(self, db: Database):
+        """空 mapping_ids 列表应被拒绝（ValueError）。"""
+        with pytest.raises(ValueError):
+            db.complete_index_generation([])
+
+    def test_complete_index_generation_uses_single_transaction(self, db: Database):
+        """所有控制键写入在同一事务中完成（无部分 commit）。"""
+        # 第一次成功写入
+        db.complete_index_generation(["m1"], completed_at=1000.0)
+        meta = db.get_index_metadata()
+        assert meta["index_generation"] == 1
+
+        # 第二次成功写入
+        db.complete_index_generation(["m2"], completed_at=2000.0)
+        meta = db.get_index_metadata()
+        assert meta["index_generation"] == 2
+        assert meta["index_generation_at"] == 2000.0
+
+    def test_get_index_metadata_for_unknown_mapping_returns_defaults(self, db: Database):
+        """查询未知 mapping 返回该 mapping 的默认值（generation=0, time=0），不伪造历史。"""
+        db.complete_index_generation(["m1"], completed_at=1000.0)
+        
+        meta_unknown = db.get_index_metadata("unknown_mapping")
+        # 全局 generation 仍然被返回
+        assert meta_unknown["index_generation"] == 1
+        assert meta_unknown["index_generation_at"] == 1000.0
+        # 未知 mapping 的元数据返回默认值
+        assert meta_unknown["mapping_id"] == "unknown_mapping"
+        assert meta_unknown["mapping_index_generation"] == 0
+        assert meta_unknown["mapping_index_generation_at"] == 0
+        
+        # 已存在的 mapping 仍然正确
+        meta_known = db.get_index_metadata("m1")
+        assert meta_known["mapping_index_generation"] == 1
+        assert meta_known["mapping_index_generation_at"] == 1000.0
+
+    def test_mapping_version_is_updated_only_when_changed(self, db: Database):
+        """mapping_version 摘要未变时不更新时间，变化时更新。"""
+        # 第一次设置版本
+        version1 = "abc123"
+        db.set_mapping_version(version1, version_generated_at=1000.0)
+        meta = db.get_index_metadata()
+        assert meta["mapping_version"] == version1
+        assert meta["mapping_version_generated_at"] == 1000.0
+
+        # 第二次设置相同版本：时间不应更新
+        db.set_mapping_version(version1, version_generated_at=2000.0)
+        meta = db.get_index_metadata()
+        assert meta["mapping_version"] == version1
+        assert meta["mapping_version_generated_at"] == 1000.0  # 保持原时间
+
+        # 第三次设置不同版本：时间应更新
+        version2 = "def456"
+        db.set_mapping_version(version2, version_generated_at=3000.0)
+        meta = db.get_index_metadata()
+        assert meta["mapping_version"] == version2
+        assert meta["mapping_version_generated_at"] == 3000.0
+
+    def test_old_database_compatibility(self, db: Database):
+        """旧库仅有 sync_control 表时，get_index_metadata 返回未知/默认值。"""
+        # 手动插入一个不相关的 control 键（模拟旧库）
+        with db.rw_lock.write_locked(), db.connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO sync_control(control_key, control_value, updated_at) VALUES (?, ?, ?)",
+                ("last_full_audit_at", str(time.time()), time.time()),
+            )
+            conn.commit()
+
+        # 查询索引元数据应返回默认值
+        meta = db.get_index_metadata()
+        assert meta["index_generation"] == 0
+        assert meta["index_generation_at"] == 0
+        assert meta["last_full_index_at"] == 0
+        assert meta["mapping_version"] == ""
+        assert meta["mapping_version_generated_at"] == 0

@@ -441,11 +441,77 @@ export async function renderDashboard(el) {
   <div class="stat-card"><div class="label">${icon('tmdb')} TMDB</div><div class="value stat-value-large">${d.tmdb_configured ? '已配置' : '未配置'}</div></div>
   <div class="stat-card"><div class="label">WebUI 运行时间</div><div class="value stat-value-large" id="uptime-val">-</div></div>
 </div>
+
+<!-- 索引元数据（Task 2） -->
+<div class="stat-grid" style="margin-top:16px">
+  <div class="stat-card"><div class="label">${icon('update')} 索引代次</div><div class="value stat-value-primary">#${d.index_metadata?.index_generation || 0}</div></div>
+  <div class="stat-card"><div class="label">${icon('schedule')} 最近索引</div><div class="value">${d.index_metadata?.last_full_index_at ? _formatTimestamp(d.index_metadata.last_full_index_at) : '暂无记录'}</div></div>
+  <div class="stat-card"><div class="label">${icon('link')} 映射版本</div><div class="value" title="${esc(d.index_metadata?.mapping_version || '')}">${d.index_metadata?.mapping_version ? d.index_metadata.mapping_version.substring(0, 8) + '...' : '-'}</div></div>
+</div>
+
+<!-- Mapping 列表（Task 2） -->
+${d.mappings && d.mappings.length > 0 ? `
+<div style="margin-top:16px">
+  <div style="font-size:14px;font-weight:500;margin-bottom:8px;color:var(--text-primary)">映射配置</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px">
+    ${d.mappings.map(m => `
+      <div style="background:var(--bg-surface-variant);padding:12px;border-radius:8px;border:1px solid var(--border-subtle)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-weight:500;color:var(--text-primary)">${esc(m.label || m.mapping_id)}</span>
+          <span style="font-size:11px;color:var(--text-muted)">#${m.index_generation || 0}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px">
+          <div>A: ${esc(_shortenPath(m.a_root))}</div>
+          <div>B: ${esc(_shortenPath(m.b_root))}</div>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted)">
+          索引时间: ${m.index_generation_at ? _formatTimestamp(m.index_generation_at) : '未索引'}
+        </div>
+      </div>
+    `).join('')}
+  </div>
+</div>
+` : ''}
 	
 	  <!-- 密码提示 -->
 	  <div style="text-align:center;font-size:12px;color:var(--text-muted);margin-top:8px">
       管理密码仅在首次启动时打印到控制台（不写入日志） · 忘记密码可运行 <code style="background:var(--bg-control);padding:1px 4px;border-radius:3px">python reset_admin.py</code> 重置
 	  </div>`;
+
+// Task 2: 索引元数据辅助函数
+function _formatTimestamp(timestamp) {
+  if (!timestamp || timestamp === 0) return '未知';
+  try {
+    const date = new Date(timestamp * 1000);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+    
+    if (diffMins < 1) return '刚刚';
+    if (diffMins < 60) return `${diffMins}分钟前`;
+    if (diffHours < 24) return `${diffHours}小时前`;
+    if (diffDays < 7) return `${diffDays}天前`;
+    
+    return date.toLocaleDateString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch (e) {
+    return '未知';
+  }
+}
+
+function _shortenPath(path) {
+  if (!path) return '/';
+  const parts = path.split('/').filter(Boolean);
+  if (parts.length <= 2) return '/' + parts.join('/');
+  return '/' + parts.slice(0, 2).join('/').replace(/\/$/, '') + '/...';
+}
 
   // Bind start/stop buttons (replaces inline onclick)
   document.getElementById('main-start-btn')?.addEventListener('click', startMainProgram);

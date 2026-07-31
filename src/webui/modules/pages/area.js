@@ -183,13 +183,14 @@ async function renderAreaDetail(el, area, params) {
     if (root && p.startsWith(root)) return p.slice(root.length);
     return p;
   }
-  const localRoot = d.local_root || '';
-  const webdavRoot = d.webdav_root || '';
-  const strmEngineRoot = d.strm_engine_root || '';
 
   const kindPart = kind ? '?kind=' + encodeURIComponent(kind) : '';
   const areaLabels = { a: 'A 区', b: 'B 区', c: 'C 区' };
   const areaLabel = areaLabels[area] || area.toUpperCase() + ' 区';
+  
+  // Task 2: 检测是否为多 mapping 场景
+  const isMultiMapping = d.mappings && Array.isArray(d.mappings) && d.mappings.length > 0;
+  
   let html = `
 <div class="toolbar" style="gap:12px">
   <a href="#area_${area}${kindPart}" class="back-icon-btn" title="返回列表">${icon('back')}</a>
@@ -203,67 +204,91 @@ async function renderAreaDetail(el, area, params) {
   <button class="toolbar-btn" id="collapse-all-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('collapse')} 折叠全部</button>
 </div>`;
 
-  if (localRoot || webdavRoot || strmEngineRoot) {
-    html += `<div class="area-detail-head"><div class="area-path-block">`;
-    if (localRoot) html += `<div class="path-line"><span class="path-label">${areaLabel} 本地根：</span><span class="path-value mono">${esc(localRoot)}</span></div>`;
-    if (webdavRoot) html += `<div class="path-line"><span class="path-label">WebDAV 根：</span><span class="path-value mono">${esc(webdavRoot)}</span></div>`;
-    if (strmEngineRoot) html += `<div class="path-line"><span class="path-label">STRM 入口：</span><span class="path-value mono">${esc(strmEngineRoot)}</span></div>`;
-    html += `</div>${expandBtns}</div>`;
-  } else {
-    html += `<div class="area-detail-head" style="justify-content:flex-end">${expandBtns}</div>`;
-  }
-
-  function sortLink(colName, colKey) {
-    return createSortLink(area, sort, order, colName, colKey, { kind, q, media });
-  }
-
-  const seasonParts = [];
-  for (const season of d.seasons) {
-    seasonParts.push(`<details class="season-details" open><summary>${esc(season.label)} <span style="font-size:calc(var(--font-base) - 1px);color:var(--text-muted)">(${season.records.length} 个文件)</span></summary>`);
-    seasonParts.push('<div class="table-wrap"><table><thead><tr><th>序号</th>');
-
-if (area === 'a') {
-	      seasonParts.push(`<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>${sortLink('时间', 'updated_at')}</th>`);
-	    } else if (area === 'b') {
-	      seasonParts.push(`<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>指纹</th><th>状态</th><th>${sortLink('时间', 'updated_at')}</th>`);
-	    } else if (area === 'c') {
-	      seasonParts.push(`<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>原 B 路径</th><th>幽灵根</th><th>${sortLink('时间', 'moved_at')}</th>`);
-	    }
-
-    seasonParts.push('</tr></thead><tbody>');
-
-    const recordParts = [];
-    season.records.forEach((r, i) => {
-      let row = '<tr>';
-      row += `<td>${i + 1}</td>`;
-      if (area === 'a') {
-        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td>${fmtTime(r.updated_at)}</td>`;
-      } else if (area === 'b') {
-        const fp = r.fingerprint || '-'; const fpShort = fp.length > 5 ? fp.substring(0, 5) + '...' : fp;
-        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono" style="font-size:calc(var(--font-base) - 2px);cursor:default" title="${esc(fp)}">${esc(fpShort)}</td><td class="${_statusClass(r.status || '-')}">${esc(r.status || '-')}</td><td>${fmtTime(r.updated_at)}</td>`;
-      } else if (area === 'c') {
-        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono">${esc(r.original_b_path || '-')}</td><td class="mono">${esc(r.ghost_root || '-')}</td><td>${fmtTime(r.moved_at)}</td>`;
+  // Task 2: 多 mapping 场景渲染
+  if (isMultiMapping) {
+    // 为每个 mapping 渲染独立分区
+    for (const mapping of d.mappings) {
+      const mappingId = mapping.mapping_id || 'unknown';
+      const localRoot = mapping.local_root || '';
+      const webdavRoot = mapping.webdav_root || '';
+      const strmEngineRoot = mapping.strm_engine_root || '';
+      const indexMetadata = mapping.index_metadata;
+      
+      // Mapping 分区标题
+      html += `<div style="margin:16px 0 8px;padding:12px;background:var(--bg-surface-variant);border-radius:8px;border:1px solid var(--border-subtle)">`;
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">`;
+      html += `<span style="font-weight:600;color:var(--text-primary)">${mappingId === 'unknown' ? '未知映射' : '映射 ' + mappingId}</span>`;
+      if (indexMetadata && indexMetadata.mapping_index_generation) {
+        html += `<span style="font-size:11px;color:var(--text-muted)">索引 #${indexMetadata.mapping_index_generation} · ${indexMetadata.mapping_index_generation_at ? _formatTimestamp(indexMetadata.mapping_index_generation_at) : '未索引'}</span>`;
       }
-      row += '</tr>';
-      recordParts.push(row);
-    });
-
-    seasonParts.push(recordParts.join(''));
-    seasonParts.push('</tbody></table></div></details>');
-  }
-  html += seasonParts.join('');
-
-  // Pager
-  if (d.total_pages > 1) {
-    html += '<div class="pager">';
-    if (d.page > 1) {
-      html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}">${icon('chevron_l')} 上一页</a>`;
+      html += `</div>`;
+      
+      // 路径信息
+      html += `<div class="area-path-block" style="font-size:12px">`;
+      if (localRoot) html += `<div class="path-line"><span class="path-label">${areaLabel} 本地根：</span><span class="path-value mono">${esc(localRoot)}</span></div>`;
+      if (webdavRoot) html += `<div class="path-line"><span class="path-label">WebDAV 根：</span><span class="path-value mono">${esc(webdavRoot)}</span></div>`;
+      if (strmEngineRoot) html += `<div class="path-line"><span class="path-label">STRM 入口：</span><span class="path-value mono">${esc(strmEngineRoot)}</span></div>`;
+      html += `</div>`;
+      html += `</div>`;
+      
+      // 季分组（独立）
+      html += _renderSeasons(area, mapping.seasons || [], sort, order, kind, q, media, localRoot, webdavRoot, expandBtns, mappingId);
+      
+      // 分页（独立）
+      if (mapping.total_pages > 1) {
+        html += '<div class="pager">';
+        if (mapping.page > 1) {
+          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}&mapping_id=${mappingId}">${icon('chevron_l')} 上一页</a>`;
+        }
+        html += `<span class="current">第 ${mapping.page} / ${mapping.total_pages} 页</span>`;
+        if (mapping.page < mapping.total_pages) {
+          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}&mapping_id=${mappingId}">下一页 ${icon('chevron_r')}</a>`;
+        }
+        html += '</div>';
+      }
     }
-    html += `<span class="current">第 ${d.page} / ${d.total_pages} 页</span>`;
-    if (d.page < d.total_pages) {
-      html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}">下一页 ${icon('chevron_r')}</a>`;
+  } else {
+    // 单 mapping 或旧 API（向后兼容）
+    const localRoot = d.local_root || '';
+    const webdavRoot = d.webdav_root || '';
+    const strmEngineRoot = d.strm_engine_root || '';
+    const mappingId = d.mapping_id || '';
+    const indexMetadata = d.index_metadata;
+    
+    // 索引元数据（单 mapping）
+    if (indexMetadata && indexMetadata.mapping_index_generation) {
+      html += `<div style="margin:8px 0;padding:8px 12px;background:var(--bg-surface-variant);border-radius:6px;font-size:12px;color:var(--text-secondary)">`;
+      html += `索引代次 #${indexMetadata.mapping_index_generation} · `;
+      html += `最近索引: ${indexMetadata.mapping_index_generation_at ? _formatTimestamp(indexMetadata.mapping_index_generation_at) : '未索引'}`;
+      html += `</div>`;
     }
-    html += '</div>';
+    
+    // 路径信息
+    if (localRoot || webdavRoot || strmEngineRoot) {
+      html += `<div class="area-detail-head"><div class="area-path-block">`;
+      if (localRoot) html += `<div class="path-line"><span class="path-label">${areaLabel} 本地根：</span><span class="path-value mono">${esc(localRoot)}</span></div>`;
+      if (webdavRoot) html += `<div class="path-line"><span class="path-label">WebDAV 根：</span><span class="path-value mono">${esc(webdavRoot)}</span></div>`;
+      if (strmEngineRoot) html += `<div class="path-line"><span class="path-label">STRM 入口：</span><span class="path-value mono">${esc(strmEngineRoot)}</span></div>`;
+      html += `</div>${expandBtns}</div>`;
+    } else {
+      html += `<div class="area-detail-head" style="justify-content:flex-end">${expandBtns}</div>`;
+    }
+    
+    // 季分组
+    html += _renderSeasons(area, d.seasons || [], sort, order, kind, q, media, localRoot, webdavRoot, expandBtns, mappingId);
+    
+    // 分页
+    if (d.total_pages > 1) {
+      html += '<div class="pager">';
+      if (d.page > 1) {
+        html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}">${icon('chevron_l')} 上一页</a>`;
+      }
+      html += `<span class="current">第 ${d.page} / ${d.total_pages} 页</span>`;
+      if (d.page < d.total_pages) {
+        html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}">下一页 ${icon('chevron_r')}</a>`;
+      }
+      html += '</div>';
+    }
   }
 
   el.innerHTML = html;
@@ -321,5 +346,83 @@ if (area === 'a') {
         null
       );
     });
+  }
+}
+
+// Task 2: 渲染季分组和记录表
+function _renderSeasons(area, seasons, sort, order, kind, q, media, localRoot, webdavRoot, expandBtns, mappingId) {
+  function stripPath(p, root) {
+    if (root && p.startsWith(root)) return p.slice(root.length);
+    return p;
+  }
+  
+  function sortLink(colName, colKey) {
+    const params = { kind, q, media };
+    if (mappingId) params.mapping_id = mappingId;
+    return createSortLink(area, sort, order, colName, colKey, params);
+  }
+  
+  let html = '';
+  for (const season of seasons) {
+    html += `<details class="season-details" open><summary>${esc(season.label)} <span style="font-size:calc(var(--font-base) - 1px);color:var(--text-muted)">(${season.records.length} 个文件)</span></summary>`;
+    html += '<div class="table-wrap"><table><thead><tr><th>序号</th>';
+
+    if (area === 'a') {
+      html += `<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>${sortLink('时间', 'updated_at')}</th>`;
+    } else if (area === 'b') {
+      html += `<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>指纹</th><th>状态</th><th>${sortLink('时间', 'updated_at')}</th>`;
+    } else if (area === 'c') {
+      html += `<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>原 B 路径</th><th>幽灵根</th><th>${sortLink('时间', 'moved_at')}</th>`;
+    }
+
+    html += '</tr></thead><tbody>';
+
+    const recordParts = [];
+    season.records.forEach((r, i) => {
+      let row = '<tr>';
+      row += `<td>${i + 1}</td>`;
+      if (area === 'a') {
+        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td>${fmtTime(r.updated_at)}</td>`;
+      } else if (area === 'b') {
+        const fp = r.fingerprint || '-'; const fpShort = fp.length > 5 ? fp.substring(0, 5) + '...' : fp;
+        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono" style="font-size:calc(var(--font-base) - 2px);cursor:default" title="${esc(fp)}">${esc(fpShort)}</td><td class="${_statusClass(r.status || '-')}">${esc(r.status || '-')}</td><td>${fmtTime(r.updated_at)}</td>`;
+      } else if (area === 'c') {
+        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono">${esc(r.original_b_path || '-')}</td><td class="mono">${esc(r.ghost_root || '-')}</td><td>${fmtTime(r.moved_at)}</td>`;
+      }
+      row += '</tr>';
+      recordParts.push(row);
+    });
+
+    html += recordParts.join('');
+    html += '</tbody></table></div></details>';
+  }
+  return html;
+}
+
+// Task 2: 时间戳格式化辅助函数
+function _formatTimestamp(timestamp) {
+  if (!timestamp || timestamp === 0) return '未知';
+  try {
+    const date = new Date(timestamp * 1000);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+    
+    if (diffMins < 1) return '刚刚';
+    if (diffMins < 60) return `${diffMins}分钟前`;
+    if (diffHours < 24) return `${diffHours}小时前`;
+    if (diffDays < 7) return `${diffDays}天前`;
+    
+    return date.toLocaleDateString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch (e) {
+    return '未知';
   }
 }

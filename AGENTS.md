@@ -15,7 +15,18 @@ This file provides guidance to AI coding assistants when working with code in th
 9. **Prefer small, targeted changes** over large rewrites. This project is close to completion.
 10. **Do NOT fake verification** — use real commands, real server startup, and real API/UI checks when available. Do not claim tests were run unless they were actually executed.
 11. **Reply in Chinese**
-12. **Documentation must not use exact line numbers**. When referencing code locations in wiki/docs/README markdown files, use method names, function names, class names, or approximate ranges (e.g., "in the authentication section", "near the database initialization") instead of specific line numbers like "line 123" or "lines 45-67". Line numbers change frequently as code evolves, making such references quickly outdated and misleading. 
+12. **Documentation must not use exact line numbers**. When referencing code locations in wiki/docs/README markdown files, use method names, function names, class names, or approximate ranges (e.g., "in the authentication section", "near the database initialization") instead of specific line numbers like "line 123" or "lines 45-67". Line numbers change frequently as code evolves, making such references quickly outdated and misleading.
+13. **Plan files must be written to disk, never kept as chat text only.** All implementation plans live in `.kilo/plans/` as persistent markdown files. The agent must write the plan file and verify it exists before any execution begins. Plans exist only in chat (not on disk) are considered draft-only and never authorize code changes.
+14. **Three-gate authorization model.** Every implementation task must pass through three distinct gates, each requiring explicit user confirmation:
+    - **Gate 1 — Plan Approved**: User confirms the plan file is acceptable. This only authorizes the plan content, never code changes.
+    - **Gate 2 — Execution Authorized**: User explicitly authorizes code changes (keywords: 执行, 执行吧, go, 开始, proceed). Without this, the agent must not write code, run tests, or run builds.
+    - **Gate 3 — Commit Authorized**: User explicitly authorizes git commit/push. Without this, the agent must not commit or push.
+    The agent must not conflate Gate 1 with Gate 2. Plan approval ≠ execution authorization.
+15. **Plan mode tool restrictions.** When the user says "先写计划" or "不许执行", the agent must:
+    - Only write to `.kilo/plans/` files
+    - Only read existing code for reference
+    - Not run tests, builds, or any write operations on source code
+    - Wait for explicit user authorization before any code change
 
 ## Configuration
 

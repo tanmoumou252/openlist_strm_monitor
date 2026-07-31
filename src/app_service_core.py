@@ -246,6 +246,14 @@ class AppService:
         self.subtitle_handler = SubtitleHandler(self)
         self._mapping_version = mapping_version(self.a_b_mappings, self.c_root)
 
+    def _current_mapping_ids(self) -> list[str]:
+        """返回去重非空的 mapping_id 集合，供 generation 推进使用。"""
+        return list({
+            str(m.mapping_id).strip()
+            for m in self.a_b_mappings
+            if str(getattr(m, "mapping_id", "")).strip()
+        })
+
     # b_root 不作为生产同步、清理、迁移或血统推导的 fallback。
     # 保留只读属性以兼容外部旧调用，但调用方必须先解析唯一 mapping。
     @property
@@ -507,14 +515,32 @@ class AppService:
         
         # 根据配置决定是否执行 A→B 全量同步（实际复制文件）
         sync_on_startup = getattr(behavior_cfg, "sync_on_startup", True)
-        if sync_on_startup:
-            t_phase = time.time()
-            self.scan_a_to_b_full_sync(
-                valid_engine_paths=list(self.config.paths.strm_engine_paths),
-                use_bulk=True)
-            logging.info("[启动] A→B 同步耗时: %.1fs", time.time() - t_phase)
-        else:
-            logging.info("[启动] 跳过 A→B 全量同步（sync_on_startup=false）")
+        generation_pushed = False
+        try:
+            if sync_on_startup:
+                t_phase = time.time()
+                self.scan_a_to_b_full_sync(
+                    valid_engine_paths=list(self.config.paths.strm_engine_paths),
+                    use_bulk=True)
+                logging.info("[启动] A→B 同步耗时: %.1fs", time.time() - t_phase)
+            else:
+                logging.info("[启动] 跳过 A→B 全量同步（sync_on_startup=false）")
+
+            # 成功收口：仅当 sync_on_startup=true 时推进 generation
+            if sync_on_startup:
+                mapping_ids = self._current_mapping_ids()
+                if mapping_ids:
+                    self.db.complete_index_generation(mapping_ids)
+                    generation_pushed = True
+                    logging.info("[启动] 索引代次推进到 %d", 
+                                 self.db.get_control("index_generation", "0"))
+                    
+                    # 同步 mapping 版本摘要（仅当变化时更新时间）
+                    current_version = self._mapping_version
+                    self.db.set_mapping_version(current_version)
+        except Exception:
+            generation_pushed = False
+            raise  # 保持现有中止语义，不写入审计时间
 
         # 启动阶段已经完成一次全量 A 区审计，7 天兜底从本次启动重新计时。
         try:

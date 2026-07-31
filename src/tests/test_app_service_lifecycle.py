@@ -487,3 +487,114 @@ class TestLifecycleKnownGaps(_LifecycleBase):
 
         assert self.app.observer is mock_observer
         mock_observer.start.assert_not_called()
+
+
+# ============================================================
+# 索引 generation 推进
+# ============================================================
+
+class TestIndexGenerationPush:
+    """测试 AppService.start() 中的 generation 推进逻辑。"""
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = Path(self.tmp) / "a"
+        self.b_dir = Path(self.tmp) / "b"
+        self.c_dir = Path(self.tmp) / "c"
+        for d in [self.a_dir, self.b_dir, self.c_dir]:
+            d.mkdir()
+
+        config = Mock(spec=AppConfig)
+        config.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(self.a_dir),
+            b_root=str(self.b_dir))]
+        config.paths = Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.paths.strm_engine_paths = []
+        config.behavior = Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.behavior.sync_on_startup_wait = 0
+        config.behavior.sync_on_startup = True
+        config.strm_engine_paths = []
+
+        self.config = config
+        self.db = MagicMock(spec=Database)
+        self.admin_api = Mock()
+
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, self.db, self.admin_api)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_generation_pushed_when_sync_on_startup_true(self, db=None):
+        """sync_on_startup=True 且成功完成扫描时，generation 应被推进。"""
+        mock_db = self.db
+        mock_db.get_control.return_value = "0"
+
+        with patch.object(self.app, "initial_scan_a"), \
+             patch.object(self.app, "scan_a_to_b_full_sync"), \
+             patch.object(self.app, "start_watchers"), \
+             patch.object(self.app, "_scan_a_subtitles_on_startup"), \
+             patch.object(self.app, "refresh_service"), \
+             patch.object(self.app, "prepare_environment"), \
+             patch.object(self.app, "update_engine_configs"), \
+             patch.object(self.app, "initial_scan_b"), \
+             patch.object(self.app, "sync_protected_roots_from_config"), \
+             patch.object(self.app, "scan_removed_protected_roots"), \
+             patch.object(self.app, "persist_current_roots_snapshot"):
+            
+            self.config.behavior.sync_on_startup = True
+            self.app.start()
+            
+            # 验证 complete_index_generation 被调用
+            mock_db.complete_index_generation.assert_called_once_with(["m1"])
+
+    def test_generation_not_pushed_when_sync_on_startup_false(self):
+        """sync_on_startup=False 时，generation 不应被推进。"""
+        mock_db = self.db
+        mock_db.get_control.return_value = "0"
+
+        with patch.object(self.app, "initial_scan_a"), \
+             patch.object(self.app, "scan_a_to_b_full_sync") as mock_sync, \
+             patch.object(self.app, "start_watchers"), \
+             patch.object(self.app, "_scan_a_subtitles_on_startup"), \
+             patch.object(self.app, "refresh_service"), \
+             patch.object(self.app, "prepare_environment"), \
+             patch.object(self.app, "update_engine_configs"), \
+             patch.object(self.app, "initial_scan_b"), \
+             patch.object(self.app, "sync_protected_roots_from_config"), \
+             patch.object(self.app, "scan_removed_protected_roots"), \
+             patch.object(self.app, "persist_current_roots_snapshot"):
+            
+            self.config.behavior.sync_on_startup = False
+            self.app.start()
+            
+            # 验证 scan_a_to_b_full_sync 未被调用
+            mock_sync.assert_not_called()
+            
+            # 验证 complete_index_generation 未被调用
+            mock_db.complete_index_generation.assert_not_called()
+
+    def test_generation_not_pushed_on_exception(self):
+        """扫描过程中抛异常时，generation 不应被推进。"""
+        mock_db = self.db
+        mock_db.get_control.return_value = "0"
+
+        with patch.object(self.app, "initial_scan_a", side_effect=RuntimeError("boom")), \
+             patch.object(self.app, "prepare_environment"), \
+             patch.object(self.app, "update_engine_configs"), \
+             patch.object(self.app, "initial_scan_b"), \
+             patch.object(self.app, "sync_protected_roots_from_config"), \
+             patch.object(self.app, "scan_removed_protected_roots"), \
+             patch.object(self.app, "persist_current_roots_snapshot"):
+            
+            with pytest.raises(RuntimeError, match="boom"):
+                self.app.start()
+            
+            # 验证 complete_index_generation 未被调用
+            mock_db.complete_index_generation.assert_not_called()

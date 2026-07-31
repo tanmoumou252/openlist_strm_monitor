@@ -1082,6 +1082,155 @@ class Database:
             row = cur.fetchone()
             return row[0] if row else default
 
+    def _set_controls_conn(self, conn, items: list[tuple[str, str]]) -> None:
+        """连接级内部写入辅助，供单事务多键写入（不提交事务）。"""
+        now = time.time()
+        for key, value in items:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO sync_control(control_key, control_value, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (key, value, now),
+            )
+
+    def complete_index_generation(
+        self,
+        mapping_ids: list[str],
+        completed_at: float | None = None,
+    ) -> dict:
+        """
+        一次成功完成全量索引后调用，递增全局 generation 并记录时间戳。
+        
+        所有控制键写入在同一事务中完成。mapping_ids 必须去重、非空。
+        """
+        if not mapping_ids:
+            raise ValueError("mapping_ids must be non-empty")
+        
+        # 去重并过滤空字符串
+        unique_ids = list({mid.strip() for mid in mapping_ids if mid.strip()})
+        if not unique_ids:
+            raise ValueError("mapping_ids must contain at least one non-empty string")
+        
+        now = completed_at or time.time()
+        
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            # 读取当前 generation
+            cur = conn.execute(
+                "SELECT control_value FROM sync_control WHERE control_key = ?",
+                ("index_generation",),
+            )
+            row = cur.fetchone()
+            current_gen = int(row[0]) if row else 0
+            new_gen = current_gen + 1
+            
+            # 批量写入所有控制键
+            controls = [
+                ("index_generation", str(new_gen)),
+                ("index_generation_at", str(now)),
+                ("last_full_index_at", str(now)),
+            ]
+            
+            # 为每个 mapping 写入独立的 generation 和时间戳
+            for mapping_id in unique_ids:
+                controls.append((f"index_generation:{mapping_id}", str(new_gen)))
+                controls.append((f"index_generation_at:{mapping_id}", str(now)))
+            
+            self._set_controls_conn(conn, controls)
+            conn.commit()
+        
+        return {
+            "index_generation": new_gen,
+            "index_generation_at": now,
+            "last_full_index_at": now,
+            "mapping_ids_completed": unique_ids,
+        }
+
+    def get_index_metadata(self, mapping_id: str | None = None) -> dict:
+        """
+        获取索引元数据。
+        
+        不传 mapping_id 时返回全局元数据；传 mapping_id 时附加该 mapping 的元数据。
+        缺失的键返回默认值（generation=0, time=0），不伪造历史。
+        """
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
+            # 全局元数据
+            def _get_control(key: str, default: str = "") -> str:
+                cur = conn.execute(
+                    "SELECT control_value FROM sync_control WHERE control_key = ?",
+                    (key,),
+                )
+                row = cur.fetchone()
+                return row[0] if row else default
+            
+            gen = int(_get_control("index_generation", "0"))
+            gen_at = float(_get_control("index_generation_at", "0"))
+            last_full = float(_get_control("last_full_index_at", "0"))
+            mv = _get_control("mapping_version", "")
+            mv_at = float(_get_control("mapping_version_generated_at", "0"))
+            
+            result = {
+                "index_generation": gen,
+                "index_generation_at": gen_at,
+                "last_full_index_at": last_full,
+                "mapping_version": mv,
+                "mapping_version_generated_at": mv_at,
+            }
+            
+            # 附加指定 mapping 的元数据
+            if mapping_id is not None and mapping_id.strip():
+                mapping_gen = int(_get_control(f"index_generation:{mapping_id}", "0"))
+                mapping_gen_at = float(_get_control(f"index_generation_at:{mapping_id}", "0"))
+                result["mapping_id"] = mapping_id
+                result["mapping_index_generation"] = mapping_gen
+                result["mapping_index_generation_at"] = mapping_gen_at
+            else:
+                # 空/None mapping_id，返回未知
+                result["mapping_id"] = mapping_id or ""
+                result["mapping_index_generation"] = 0
+                result["mapping_index_generation_at"] = 0
+            
+            return result
+
+    def set_mapping_version(
+        self,
+        version: str,
+        version_generated_at: float | None = None,
+    ) -> None:
+        """
+        设置 mapping 版本摘要。
+        
+        仅当版本变化时更新时间戳，避免将首次观察时间冒充历史生成时间。
+        """
+        now = version_generated_at or time.time()
+        
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            # 读取当前版本
+            cur = conn.execute(
+                "SELECT control_value FROM sync_control WHERE control_key = ?",
+                ("mapping_version",),
+            )
+            row = cur.fetchone()
+            current_version = row[0] if row else ""
+            
+            # 仅当版本变化时更新
+            if version != current_version:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO sync_control(control_key, control_value, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    ("mapping_version", version, now),
+                )
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO sync_control(control_key, control_value, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    ("mapping_version_generated_at", str(now), now),
+                )
+                conn.commit()
+
     def get_b_under_root(self, webdav_root: str) -> list[BRecord]:
         pattern = escape_like(webdav_root.rstrip("/")) + "/%"
         with self.rw_lock.read_locked(), self.read_connection() as conn:

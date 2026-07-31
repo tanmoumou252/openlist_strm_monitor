@@ -1852,6 +1852,34 @@ def _get_records_paginated(handler, area: str, page: int = 1,
 # Dashboard / Area / Records / Logs / Config 处理器
 # ============================================================
 
+def _get_mapping_metadata_list(handler) -> list[dict]:
+    """获取所有 mapping 的元数据列表（供 Dashboard 展示）。"""
+    app_service = getattr(handler.webui, '_app_service', None)
+    if not app_service:
+        return []
+    
+    db = handler.webui._db
+    a_b_mappings = getattr(app_service, 'a_b_mappings', [])
+    metadata_list = []
+    
+    for mapping in a_b_mappings:
+        mapping_id = str(getattr(mapping, 'mapping_id', '')).strip()
+        if not mapping_id:
+            continue
+        
+        meta = db.get_index_metadata(mapping_id)
+        metadata_list.append({
+            "mapping_id": mapping_id,
+            "label": getattr(mapping, 'label', ''),
+            "a_root": getattr(mapping, 'a_root', ''),
+            "b_root": getattr(mapping, 'b_root', ''),
+            "index_generation": meta.get("mapping_index_generation", 0),
+            "index_generation_at": meta.get("mapping_index_generation_at", 0),
+        })
+    
+    return metadata_list
+
+
 def handle_dashboard(handler) -> None:
     """处理 GET /api/dashboard"""
     db = handler.webui._db
@@ -1859,6 +1887,11 @@ def handle_dashboard(handler) -> None:
         counts = _db_get_table_counts(db)
         b_status = _db_get_b_status_counts(db)
         db_size = _db_get_db_file_size(db)
+        
+        # 获取索引元数据（Task 2）
+        index_metadata = db.get_index_metadata()
+        mapping_metadata = _get_mapping_metadata_list(handler)
+        
         handler._send_json({
             "a_count": counts.get("a_strm_files", 0),
             "b_count": counts.get("b_strm_files", 0),
@@ -1873,6 +1906,15 @@ def handle_dashboard(handler) -> None:
             "db_file_size": db_size,
             "db_file_size_human": _human_size(db_size),
             "uptime": time.time() - handler.webui._start_time,
+            # Task 2: 索引元数据
+            "index_metadata": {
+                "index_generation": index_metadata.get("index_generation", 0),
+                "index_generation_at": index_metadata.get("index_generation_at", 0),
+                "last_full_index_at": index_metadata.get("last_full_index_at", 0),
+                "mapping_version": index_metadata.get("mapping_version", ""),
+                "mapping_version_generated_at": index_metadata.get("mapping_version_generated_at", 0),
+            },
+            "mappings": mapping_metadata,
         })
     except Exception as e:
         handler._send_json({"error": str(e)}, 500)
@@ -2442,7 +2484,14 @@ def _escape_fts5_query(query: str) -> str:
 
 
 def handle_area_detail(handler, area, params) -> None:
-    """处理 GET /api/area/{area}/detail — 区域详情，返回指定媒体的所有记录"""
+    """处理 GET /api/area/{area}/detail — 区域详情，返回指定媒体的所有记录
+    
+    Task 2: 支持多 mapping 分区
+    - 列表页：按 kind + media_name 合并（不拆分）
+    - 详情页：按 mapping_id 分区，每个 mapping 独立根路径/季分组/分页
+    - 单一 mapping：保持向后兼容扁平响应
+    - 多 mapping：返回 mappings 数组
+    """
     if area not in ("a", "b", "c"):
         handler._send_json({"error": "无效区域"}, 400)
         return
@@ -2460,16 +2509,16 @@ def handle_area_detail(handler, area, params) -> None:
         sort_order = "asc"
 
     db = handler.webui._db
-    records: list[dict] = []
+    all_records: list[dict] = []
     total = 0
     search_params: tuple[str, ...] = ()
     try:
-        # 构建列列表和 COUNT
+        # 构建列列表和 COUNT（Task 2: B 区添加 mapping_id 列）
         if area == "a":
             columns = "local_path, webdav_path, parent_webdav_path, updated_at"
             table = "a_strm_files"
         elif area == "b":
-            columns = "local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at"
+            columns = "local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id"
             table = "b_strm_files"
         else:  # area == "c"
             columns = "local_path, webdav_path, original_b_path, ghost_root, moved_at"
@@ -2486,73 +2535,193 @@ def handle_area_detail(handler, area, params) -> None:
         with db.read_connection() as conn:
             total = conn.execute(count_sql, search_params).fetchone()[0]
 
-        # 分页查询（SQL 不做全局排序，改为 Python 季内排序）
-        offset = (page - 1) * PAGE_SIZE
-        query_sql = (
-            f"SELECT {columns} FROM {table}{where_clause}"
-            f" LIMIT ? OFFSET ?"
-        )
+        # 查询所有记录（不做分页，由 mapping 分区独立分页）
+        query_sql = f"SELECT {columns} FROM {table}{where_clause}"
         with db.read_connection() as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(query_sql, search_params + (PAGE_SIZE, offset)).fetchall()
-        records = [dict(r) for r in rows]
+            rows = conn.execute(query_sql, search_params).fetchall()
+        all_records = [dict(r) for r in rows]
     except Exception as e:
         logging.error("查询 %s 区详情失败: %s", area, e)
 
+    # Task 2: 按 mapping 分区
+    app_service = getattr(handler.webui, '_app_service', None)
+    current_mapping_ids = set()
+    if app_service:
+        current_mapping_ids = {
+            str(m.mapping_id).strip()
+            for m in getattr(app_service, 'a_b_mappings', [])
+            if str(getattr(m, 'mapping_id', '')).strip()
+        }
+    
+    # B 区和 A 区按 mapping 分区，C 区不分区
+    if area in ("a", "b"):
+        # 按 mapping_id 分组（B 区直接用 mapping_id 列，A 区通过 get_mapping_for_a 解析）
+        mapping_groups: dict[str, list[dict]] = {}
+        for rec in all_records:
+            if area == "b":
+                # B 区：直接用 mapping_id 列
+                mid = rec.get("mapping_id", "")
+            else:
+                # A 区：通过 get_mapping_for_a 解析
+                local_path = rec.get("local_path", "")
+                mapping_result = app_service.get_mapping_for_a(local_path) if app_service else None
+                mid = mapping_result[0] if mapping_result else ""
+            
+            # 未知 mapping 归入 unknown
+            if mid and mid not in current_mapping_ids:
+                mid = "unknown"
+            elif not mid:
+                mid = "unknown"
+            
+            mapping_groups.setdefault(mid, []).append(rec)
+        
+        # 处理 A 区无 mapping_id 但有记录的情况（fallback）
+        if not mapping_groups and all_records:
+            mapping_groups["unknown"] = all_records
+        
+        # 对每个 mapping 分区独立计算分页和排序
+        mappings_result = []
+        for mid, records in mapping_groups.items():
+            mapping_meta = _process_mapping_partition(
+                db, app_service, area, records, mid,
+                sort_field, sort_order, page, handler
+            )
+            mappings_result.append(mapping_meta)
+        
+        # 单一 mapping 向后兼容（扁平响应）
+        if len(mappings_result) == 1:
+            result = mappings_result[0]
+            result["area"] = area
+            result["media"] = media_name
+            result["mapping_id"] = mid
+            result["index_metadata"] = db.get_index_metadata(mid)
+            handler._send_json(result)
+        else:
+            # 多 mapping 返回 mappings 数组
+            total_pages = max(1, ceil(total / PAGE_SIZE)) if total else 1
+            page = max(1, min(page, total_pages))
+            
+            handler._send_json({
+                "area": area,
+                "media": media_name,
+                "total": total,
+                "page": page,
+                "total_pages": total_pages,
+                "mappings": mappings_result,
+            })
+    else:
+        # C 区：不按 mapping 分区（保持现有逻辑）
+        local_root = ""
+        webdav_root = ""
+        strm_engine_root = ""
+        if all_records:
+            local_root = _compute_media_root(all_records[0].get("local_path", ""))
+            webdav_root = _compute_media_root(all_records[0].get("webdav_path", ""))
+            if app_service and webdav_root:
+                engine_paths = app_service._cloud_path_to_engine_paths(webdav_root)
+                if engine_paths:
+                    strm_engine_root = engine_paths[0]
+
+        total_pages = max(1, ceil(total / PAGE_SIZE)) if total else 1
+        page = max(1, min(page, total_pages))
+
+        # 按季分组
+        seasons_map: dict[str, list[dict]] = {}
+        for rec in all_records:
+            label = _extract_season_from_local_path(rec.get("local_path", "")) or "默认"
+            seasons_map.setdefault(label, []).append(rec)
+
+        # 排序
+        rev = sort_order.upper() == "DESC"
+        if sort_field == "local_path":
+            for recs in seasons_map.values():
+                recs.sort(key=lambda r: _natural_sort_key(r.get("local_path", "") or ""), reverse=rev)
+        elif sort_field in ("updated_at", "moved_at"):
+            for recs in seasons_map.values():
+                recs.sort(key=lambda r: r.get(sort_field, 0) or 0, reverse=rev)
+
+        seasons = [{"label": lbl, "records": recs} for lbl, recs in seasons_map.items()]
+
+        handler._send_json({
+            "area": area,
+            "media": media_name,
+            "local_root": local_root,
+            "webdav_root": webdav_root,
+            "strm_engine_root": strm_engine_root,
+            "total": total,
+            "page": page,
+            "total_pages": total_pages,
+            "seasons": seasons,
+        })
+
+
+def _process_mapping_partition(
+    db,
+    app_service,
+    area: str,
+    records: list[dict],
+    mapping_id: str,
+    sort_field: str,
+    sort_order: str,
+    page: int,
+    handler,
+) -> dict:
+    """处理单个 mapping 分区的数据：独立分页、排序、计算根路径和 index_metadata。"""
+    # 计算根路径
     local_root = ""
     webdav_root = ""
     strm_engine_root = ""
     if records:
         local_root = _compute_media_root(records[0].get("local_path", ""))
         webdav_root = _compute_media_root(records[0].get("webdav_path", ""))
-        # 计算 STRM 引擎入口根（引擎挂载点 + 媒体路径）
-        app_service = getattr(handler.webui, '_app_service', None)
         if app_service and webdav_root:
             engine_paths = app_service._cloud_path_to_engine_paths(webdav_root)
             if engine_paths:
                 strm_engine_root = engine_paths[0]
 
+    # 独立分页
+    total = len(records)
     total_pages = max(1, ceil(total / PAGE_SIZE)) if total else 1
     page = max(1, min(page, total_pages))
+    offset = (page - 1) * PAGE_SIZE
+    paged_records = records[offset:offset + PAGE_SIZE]
 
     # 按季分组
     seasons_map: dict[str, list[dict]] = {}
-    for rec in records:
-        label = _extract_season_from_local_path(
-            rec.get("local_path", "")) or "默认"
+    for rec in paged_records:
+        label = _extract_season_from_local_path(rec.get("local_path", "")) or "默认"
         seasons_map.setdefault(label, []).append(rec)
 
-    # 每季内部独立排序（不跨季混合）
+    # 排序
     rev = sort_order.upper() == "DESC"
     if sort_field == "local_path":
-        # 自然排序：对 basename 的连续数字按整数比较，避免字典序导致的
-        # `1, 10, 2, 21` 错乱（缺前导零时）。`local_path` 作为 tiebreaker。
         for recs in seasons_map.values():
-            recs.sort(key=lambda r: _natural_sort_key(r.get("local_path", "") or ""),
-                     reverse=rev)
-    elif sort_field == "updated_at" or sort_field == "moved_at":
-        sort_key = "updated_at" if sort_field == "updated_at" else "moved_at"
+            recs.sort(key=lambda r: _natural_sort_key(r.get("local_path", "") or ""), reverse=rev)
+    elif sort_field == "updated_at":
         for recs in seasons_map.values():
-            recs.sort(key=lambda r: r.get(sort_key, 0) or 0, reverse=rev)
+            recs.sort(key=lambda r: r.get("updated_at", 0) or 0, reverse=rev)
 
-    seasons = [{"label": lbl, "records": recs}
-               for lbl, recs in seasons_map.items()]
+    seasons = [{"label": lbl, "records": recs} for lbl, recs in seasons_map.items()]
 
-    handler._send_json({
-        "area": area,
-        "media": media_name,
+    return {
+        "mapping_id": mapping_id,
         "local_root": local_root,
         "webdav_root": webdav_root,
         "strm_engine_root": strm_engine_root,
+        "index_metadata": db.get_index_metadata(mapping_id) if mapping_id != "unknown" else None,
         "total": total,
         "page": page,
         "total_pages": total_pages,
         "seasons": seasons,
-    })
+    }
 
 
 def handle_area_refresh(handler, area, body: bytes) -> None:
-    """处理 POST /api/area/{area}/refresh — 通过 STRM 入口路径触发引擎刷新并同步到 B 区"""
+    """处理 POST /api/area/{area}/refresh — 通过 STRM 入口路径触发引擎刷新并同步到 B 区
+    
+    Task 2: 支持 mapping_id 参数，按 mapping 过滤 A 区记录
+    """
     if area not in ("a", "b"):
         handler._send_json({"error": "无效区域，仅支持 'a' 或 'b'"}, 400)
         return
@@ -2567,6 +2736,9 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
     if not media_name:
         handler._send_json({"error": "缺少 media 参数"}, 400)
         return
+
+    # Task 2: 可选的 mapping_id 参数
+    mapping_id = (data.get("mapping_id") or "").strip() or None
 
     # 路径穿越校验：防止恶意构造路径
     # 检查长度
@@ -2607,7 +2779,7 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
         return
 
     try:
-        result = _do_media_refresh(app_service, area, media_name)
+        result = _do_media_refresh(app_service, area, media_name, mapping_id=mapping_id)
         handler._send_json(result)
     except Exception as e:
         logging.error("[Refresh] 刷新媒体 %s 失败: %s", media_name, e)
@@ -2616,8 +2788,11 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
         refresh_lock.release()
 
 
-def _do_media_refresh(app_service, area: str, media_name: str) -> dict:
-    """执行媒体刷新逻辑：通过 STRM 入口路径触发引擎重新生成，然后同步到 B 区。"""
+def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str | None = None) -> dict:
+    """执行媒体刷新逻辑：通过 STRM 入口路径触发引擎重新生成，然后同步到 B 区。
+    
+    Task 2: 支持 mapping_id 参数，按 mapping 过滤 A 区记录
+    """
     db = app_service.db
     admin_api = app_service.admin_api
 
@@ -2628,9 +2803,9 @@ def _do_media_refresh(app_service, area: str, media_name: str) -> dict:
         log_level_name = getattr(app_config.refresh, 'log_level', "INFO").upper()
     _refresh_log = _make_refresh_logger(log_level_name)
 
-    _refresh_log("info", "[Refresh] 开始刷新 媒体=%s 区=%s", media_name, area)
+    _refresh_log("info", "[Refresh] 开始刷新 媒体=%s 区=%s mapping_id=%s", media_name, area, mapping_id)
 
-    # 1. 从 A 区 DB 查询该媒体的所有记录
+    # 1. 从 A 区 DB 查询该媒体的所有记录（Task 2: 支持 mapping_id 过滤）
     # 注意：LIKE '%media_name%' 是子串匹配，理论上当两部媒体名互为子串时会误匹配
     # （如 '巨人' 会命中 '进击的巨人'）。此处依赖后续 _compute_common_parent_path
     # 计算公共父目录 + '/' 根目录保护来收敛范围；若误匹配导致跨目录，公共父目录会退化为
@@ -2644,11 +2819,40 @@ def _do_media_refresh(app_service, area: str, media_name: str) -> dict:
             # 转义 media_name 中的 LIKE 通配符（% _ \），配合 ESCAPE '\' 子句。
             # 下划线在媒体名中极常见（如 S01_E01、The_Movie），不转义会被当作单字符通配符过度匹配。
             like = f"%{escape_like(media_name)}%"
-            rows = conn.execute(
-                "SELECT local_path, webdav_path, parent_webdav_path FROM a_strm_files "
-                "WHERE local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\'",
-                (like, like)
-            ).fetchall()
+            
+            # Task 2: 如果指定了 mapping_id，通过 app_service 获取对应的 A 区路径进行过滤
+            if mapping_id and app_service:
+                # 通过 mapping_id 找到对应的 a_root
+                a_root = None
+                for m in getattr(app_service, 'a_b_mappings', []):
+                    if str(getattr(m, 'mapping_id', '')).strip() == mapping_id:
+                        a_root = getattr(m, 'a_root', '')
+                        break
+                
+                if a_root:
+                    # 按 a_root 和 media_name 过滤 A 区记录
+                    like_root = f"%{escape_like(a_root)}%"
+                    rows = conn.execute(
+                        "SELECT local_path, webdav_path, parent_webdav_path FROM a_strm_files "
+                        "WHERE (local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\') "
+                        "AND (local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\')",
+                        (like_root, like_root, like, like)
+                    ).fetchall()
+                else:
+                    # mapping_id 未找到匹配的 a_root，使用默认查询
+                    rows = conn.execute(
+                        "SELECT local_path, webdav_path, parent_webdav_path FROM a_strm_files "
+                        "WHERE local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\'",
+                        (like, like)
+                    ).fetchall()
+            else:
+                # 无 mapping_id，使用默认查询（向后兼容）
+                rows = conn.execute(
+                    "SELECT local_path, webdav_path, parent_webdav_path FROM a_strm_files "
+                    "WHERE local_path LIKE ? ESCAPE '\\' OR webdav_path LIKE ? ESCAPE '\\'",
+                    (like, like)
+                ).fetchall()
+            
             a_records = [dict(r) for r in rows]
     except Exception as e:
         logging.error("[Refresh] 查询 A 区记录失败: %s", e)

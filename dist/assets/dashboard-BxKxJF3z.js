@@ -1,4 +1,4 @@
-import{A as e,C as t,F as n,I as r,N as i,h as a,j as o,m as s,n as c,o as l,r as u,u as d}from"./core-YkKw60Re.js";var f=null;async function p(){try{return await s(`/api/config/status`)}catch{return null}}async function m(){try{await s(`/api/webui/config/ui`,{method:`POST`,body:JSON.stringify({onboarding_completed:`1`})})}catch{}}async function h(){try{await s(`/api/webui/config/ui`,{method:`POST`,body:JSON.stringify({onboarding_completed:`0`})})}catch{}}function g(e){if(!e||e.onboarding_completed)return``;let t=[{key:`password`,label:`确认管理员密码`,done:e.password_set,link:`#config`,linkText:`前往配置`,message:`首次启动时系统已自动生成随机密码并打印到控制台（仅显示一次，不写入日志）。遗忘或需自定义密码，请运行 reset_admin.py。`},{key:`tmdb`,label:`配置 TMDB`,done:e.tmdb_configured,link:`#config?sub=config`,linkText:`前往配置`,message:`配置 TMDB API Token 以启用待看列表和影视信息获取功能（可选）。`},{key:`openlist`,label:`配置 OpenList`,done:e.openlist_configured,link:`#config?sub=openlist`,linkText:`前往配置`,message:`填写 OpenList WebDAV 地址、用户名和密码，以连接 STRM 引擎。`},{key:`main`,label:`启动主程序`,done:e.main_running,link:null,linkText:`点击下方启动按钮`,message:`完成以上配置后，点击「启动主程序」按钮开始同步服务。`},{key:`view_ab`,label:`查看 A/B 分区`,done:e.view_ab_completed||!1,link:`#area_a`,linkText:`前往查看`,message:`浏览 A 区和 B 区的文件列表，了解同步状态。`},{key:`tmdb_refresh`,label:`刷新 TMDB 待看列表`,done:e.tmdb_refresh_completed||!1,link:`#config?sub=config`,linkText:`前往刷新`,message:`点击「刷新待看列表」按钮，从 TMDB 获取最新数据。`},{key:`tmdb_match`,label:`检测 TMDB 收录状态`,done:e.tmdb_match_completed||!1,link:`#config?sub=config`,linkText:`前往检测`,message:`点击「刷新收录状态」按钮，检测本地文件是否已收录到 TMDB。`}],n=t.filter(e=>!e.done).length,i=n===0,a=t.map((e,t)=>`
+import{A as e,C as t,F as n,I as r,N as i,h as a,j as o,m as s,n as c,o as l,r as u,u as d}from"./core-99DnM501.js";var f=null;async function p(){try{return await s(`/api/config/status`)}catch{return null}}async function m(){try{await s(`/api/webui/config/ui`,{method:`POST`,body:JSON.stringify({onboarding_completed:`1`})})}catch{}}async function h(){try{await s(`/api/webui/config/ui`,{method:`POST`,body:JSON.stringify({onboarding_completed:`0`})})}catch{}}function g(e){if(!e||e.onboarding_completed)return``;let t=[{key:`password`,label:`确认管理员密码`,done:e.password_set,link:`#config`,linkText:`前往配置`,message:`首次启动时系统已自动生成随机密码并打印到控制台（仅显示一次，不写入日志）。遗忘或需自定义密码，请运行 reset_admin.py。`},{key:`tmdb`,label:`配置 TMDB`,done:e.tmdb_configured,link:`#config?sub=config`,linkText:`前往配置`,message:`配置 TMDB API Token 以启用待看列表和影视信息获取功能（可选）。`},{key:`openlist`,label:`配置 OpenList`,done:e.openlist_configured,link:`#config?sub=openlist`,linkText:`前往配置`,message:`填写 OpenList WebDAV 地址、用户名和密码，以连接 STRM 引擎。`},{key:`main`,label:`启动主程序`,done:e.main_running,link:null,linkText:`点击下方启动按钮`,message:`完成以上配置后，点击「启动主程序」按钮开始同步服务。`},{key:`view_ab`,label:`查看 A/B 分区`,done:e.view_ab_completed||!1,link:`#area_a`,linkText:`前往查看`,message:`浏览 A 区和 B 区的文件列表，了解同步状态。`},{key:`tmdb_refresh`,label:`刷新 TMDB 待看列表`,done:e.tmdb_refresh_completed||!1,link:`#config?sub=config`,linkText:`前往刷新`,message:`点击「刷新待看列表」按钮，从 TMDB 获取最新数据。`},{key:`tmdb_match`,label:`检测 TMDB 收录状态`,done:e.tmdb_match_completed||!1,link:`#config?sub=config`,linkText:`前往检测`,message:`点击「刷新收录状态」按钮，检测本地文件是否已收录到 TMDB。`}],n=t.filter(e=>!e.done).length,i=n===0,a=t.map((e,t)=>`
     <div class="onboarding-step ${e.done?`done`:``}">
       <div class="onboarding-step-indicator">
         ${e.done?r(`check`):`<span>${t+1}</span>`}
@@ -85,8 +85,39 @@ import{A as e,C as t,F as n,I as r,N as i,h as a,j as o,m as s,n as c,o as l,r a
   <div class="stat-card"><div class="label">${r(`tmdb`)} TMDB</div><div class="value stat-value-large">${c.tmdb_configured?`已配置`:`未配置`}</div></div>
   <div class="stat-card"><div class="label">WebUI 运行时间</div><div class="value stat-value-large" id="uptime-val">-</div></div>
 </div>
+
+<!-- 索引元数据（Task 2） -->
+<div class="stat-grid" style="margin-top:16px">
+  <div class="stat-card"><div class="label">${r(`update`)} 索引代次</div><div class="value stat-value-primary">#${c.index_metadata?.index_generation||0}</div></div>
+  <div class="stat-card"><div class="label">${r(`schedule`)} 最近索引</div><div class="value">${c.index_metadata?.last_full_index_at?u(c.index_metadata.last_full_index_at):`暂无记录`}</div></div>
+  <div class="stat-card"><div class="label">${r(`link`)} 映射版本</div><div class="value" title="${l(c.index_metadata?.mapping_version||``)}">${c.index_metadata?.mapping_version?c.index_metadata.mapping_version.substring(0,8)+`...`:`-`}</div></div>
+</div>
+
+<!-- Mapping 列表（Task 2） -->
+${c.mappings&&c.mappings.length>0?`
+<div style="margin-top:16px">
+  <div style="font-size:14px;font-weight:500;margin-bottom:8px;color:var(--text-primary)">映射配置</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px">
+    ${c.mappings.map(e=>`
+      <div style="background:var(--bg-surface-variant);padding:12px;border-radius:8px;border:1px solid var(--border-subtle)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-weight:500;color:var(--text-primary)">${l(e.label||e.mapping_id)}</span>
+          <span style="font-size:11px;color:var(--text-muted)">#${e.index_generation||0}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px">
+          <div>A: ${l(f(e.a_root))}</div>
+          <div>B: ${l(f(e.b_root))}</div>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted)">
+          索引时间: ${e.index_generation_at?u(e.index_generation_at):`未索引`}
+        </div>
+      </div>
+    `).join(``)}
+  </div>
+</div>
+`:``}
 	
 	  <!-- 密码提示 -->
 	  <div style="text-align:center;font-size:12px;color:var(--text-muted);margin-top:8px">
       管理密码仅在首次启动时打印到控制台（不写入日志） · 忘记密码可运行 <code style="background:var(--bg-control);padding:1px 4px;border-radius:3px">python reset_admin.py</code> 重置
-	  </div>`,document.getElementById(`main-start-btn`)?.addEventListener(`click`,S),document.getElementById(`main-stop-btn`)?.addEventListener(`click`,C);let l=document.getElementById(`onboarding-quick-btn`);l&&l.addEventListener(`click`,async()=>{try{await s(`/api/webui/config/ui`,{method:`POST`,body:JSON.stringify({onboarding_completed:`0`})})}catch(e){console.error(`Failed to reset onboarding:`,e)}await v()}),v(),x(),i(),t&&clearInterval(t),e(setInterval(x,a.MAIN_STATUS_POLL_INTERVAL))}export{w as renderDashboard,x as updateMainStatus,n as updateUptime};
+	  </div>`;function u(e){if(!e||e===0)return`未知`;try{let t=new Date(e*1e3),n=new Date-t,r=Math.floor(n/6e4),i=Math.floor(n/36e5),a=Math.floor(n/864e5);return r<1?`刚刚`:r<60?`${r}分钟前`:i<24?`${i}小时前`:a<7?`${a}天前`:t.toLocaleDateString(`zh-CN`,{year:`numeric`,month:`2-digit`,day:`2-digit`,hour:`2-digit`,minute:`2-digit`})}catch{return`未知`}}function f(e){if(!e)return`/`;let t=e.split(`/`).filter(Boolean);return t.length<=2?`/`+t.join(`/`):`/`+t.slice(0,2).join(`/`).replace(/\/$/,``)+`/...`}document.getElementById(`main-start-btn`)?.addEventListener(`click`,S),document.getElementById(`main-stop-btn`)?.addEventListener(`click`,C);let p=document.getElementById(`onboarding-quick-btn`);p&&p.addEventListener(`click`,async()=>{try{await s(`/api/webui/config/ui`,{method:`POST`,body:JSON.stringify({onboarding_completed:`0`})})}catch(e){console.error(`Failed to reset onboarding:`,e)}await v()}),v(),x(),i(),t&&clearInterval(t),e(setInterval(x,a.MAIN_STATUS_POLL_INTERVAL))}export{w as renderDashboard,x as updateMainStatus,n as updateUptime};
