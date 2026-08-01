@@ -48,12 +48,32 @@ class _StubStateDb:
     def __init__(self, items):
         self._items = items
         self.calls = []
+        # 模拟 DB 状态存储，用于 get_match_states
+        self._match_store: dict[str, dict[int, dict]] = {"movie": {}, "tv": {}}
 
     def get_all(self):
         return list(self._items)
 
     def replace_match_state(self, media_type, states):
         self.calls.append((media_type, list(states)))
+        # 模拟 replace_match_state 写入到内部 store
+        store = self._match_store.get(media_type, {})
+        for item_id, status, reason, updated_at, override_at, override_by in states:
+            # 保留已有的 manual_override_at（模拟 WHERE manual_override_at=0 守卫）
+            existing = store.get(item_id)
+            if existing and existing.get("manual_override_at", 0) > 0:
+                continue  # 跳过手动覆盖行
+            store[item_id] = {
+                "match_status": status,
+                "manual_override_at": override_at,
+                "manual_override_by": override_by,
+            }
+        self._match_store[media_type] = store
+
+    def get_match_states(self, media_type, item_ids):
+        """从内部 store 读取最终状态（模拟 DB 读取）。"""
+        store = self._match_store.get(media_type, {})
+        return {iid: store[iid] for iid in item_ids if iid in store}
 
 
 def _movie(name, **kw):
@@ -367,3 +387,125 @@ def test_upsert_tv_preserves_episode_count(tmp_path: Path):
     items = db.get_all()
     tv_items = [i for i in items if i.get("_media_type") == "tv"]
     assert tv_items[0]["_episode_count"] == 87
+
+
+# ============================================================
+# 四桶统计口径：写回后按 DB 最终状态
+# ============================================================
+
+class TestRefreshStatsFourBuckets:
+    """refresh_watchlist_match_state 返回四桶 + skipped_manual + total。
+    matched+fuzzy+unmatched+uncomputed == total。
+    """
+
+    def test_four_buckets_sum_to_total_with_manual_override(self, tmp_path: Path):
+        """构造混合列表（含人工覆盖行），断言四桶之和 == total 且 skipped_manual 合理。"""
+        db = TmdbWatchlistDb(tmp_path / "wl.db")
+        now = time.time()
+
+        # movie id=1: 无候选 → 自动评分 unmatched; 正常写回
+        db._upsert_movie({"id": 1, "title": "Movie1", "original_title": "Movie1"}, now)
+        # movie id=2: 有精确候选 → 自动评分 matched; 正常写回
+        db._upsert_movie({"id": 2, "title": "Movie2", "original_title": "Movie2"}, now)
+        # movie id=3: 手动覆盖为 matched → replace_match_state 应跳过
+        db._upsert_movie({"id": 3, "title": "Movie3", "original_title": "Movie3"}, now)
+        db.override_match_state("movie", 3, "matched", "manual")
+
+        # 构造 B 区快照: Movie2 精确命中; Movie1 无候选; Movie3 有候选但不应被覆盖
+        b_rows = [
+            ("/b/电影/Movie2/Movie2.strm", "/b/电影/Movie2/Movie2.strm",
+             "/b/电影/Movie2", "", "", "valid", 0.0),
+        ]
+        bdb = _StubDb(b_rows)
+
+        wdb = db
+        webui = _StubWebUI(wdb, bdb)
+        counts = _refresh_watchlist_match_state(webui)
+
+        assert counts["total"] == 3
+        assert counts["matched"] + counts["fuzzy"] + counts["unmatched"] + counts["uncomputed"] == counts["total"]
+        # id=3 有候选但被守卫跳过; id=2 精确命中 → matched; id=1 无候选 → unmatched
+        assert counts["matched"] >= 1
+        # skipped_manual > 0 表示至少有一行人工覆盖被跳过
+        assert counts.get("skipped_manual", 0) >= 1
+
+    def test_four_buckets_with_all_statuses(self, tmp_path: Path):
+        """构造四种状态均出现的列表，验证桶之和。"""
+        db = TmdbWatchlistDb(tmp_path / "wl.db")
+        now = time.time()
+
+        # id=1: 有精确候选 → matched
+        db._upsert_movie({"id": 1, "title": "Exact", "original_title": "Exact"}, now)
+        # id=2: 有模糊候选（仅子串匹配）→ fuzzy
+        db._upsert_movie({"id": 2, "title": "FuzzyLongName", "original_title": "FuzzyLongName"}, now)
+        # id=3: 无候选 → unmatched
+        db._upsert_movie({"id": 3, "title": "NoCandidate", "original_title": "NoCandidate"}, now)
+
+        b_rows = [
+            ("/b/电影/Exact/Exact.strm", "/b/电影/Exact/Exact.strm",
+             "/b/电影/Exact", "", "", "valid", 0.0),
+            ("/b/电影/Fuzzy/Fuzzy.strm", "/b/电影/Fuzzy/Fuzzy.strm",
+             "/b/电影/Fuzzy", "", "", "valid", 0.0),
+        ]
+        bdb = _StubDb(b_rows)
+
+        webui = _StubWebUI(db, bdb)
+        counts = _refresh_watchlist_match_state(webui)
+
+        assert counts["total"] == 3
+        assert counts["matched"] + counts["fuzzy"] + counts["unmatched"] + counts["uncomputed"] == counts["total"]
+
+    def test_manual_override_not_overwritten(self, tmp_path: Path):
+        """人工覆盖行不被自动刷新覆盖（回归）。"""
+        db = TmdbWatchlistDb(tmp_path / "wl.db")
+        now = time.time()
+
+        db._upsert_movie({"id": 1, "title": "Override", "original_title": "Override"}, now)
+        db.override_match_state("movie", 1, "matched", "manual")
+
+        # B 区无任何候选 → 评分会是 unmatched, 但 replace_match_state 应跳过
+        bdb = _StubDb([])
+        webui = _StubWebUI(db, bdb)
+        _refresh_watchlist_match_state(webui)
+
+        state = db.get_match_state("movie", 1)
+        assert state["match_status"] == "matched"
+        assert state["manual_override_at"] > 0
+
+    def test_invalid_item_id_still_counted_in_buckets(self, tmp_path: Path):
+        """id=0 的条目计入 total 且不进任何桶 → 不变量被破坏。"""
+        db = TmdbWatchlistDb(tmp_path / "wl.db")
+        now = time.time()
+        db._upsert_movie({"id": 0, "title": "NoId", "original_title": "NoId"}, now)
+        db._upsert_movie({"id": 1, "title": "Normal", "original_title": "Normal"}, now)
+        b_rows = [
+            ("/b/电影/Normal/Normal.strm", "/b/电影/Normal/Normal.strm",
+             "/b/电影/Normal", "", "", "valid", 0.0),
+        ]
+        bdb = _StubDb(b_rows)
+        webui = _StubWebUI(db, bdb)
+        counts = _refresh_watchlist_match_state(webui)
+        assert counts["total"] == 2
+        assert counts["matched"] + counts["fuzzy"] + counts["unmatched"] + counts["uncomputed"] == counts["total"]
+
+    def test_status_named_total_does_not_pollute_counts(self, tmp_path: Path):
+        """DB 中 match_status='total' 不应污染 counts["total"]。"""
+        db = TmdbWatchlistDb(tmp_path / "wl.db")
+        now = time.time()
+        db._upsert_movie({"id": 1, "title": "M1", "original_title": "M1"}, now)
+        db._upsert_movie({"id": 2, "title": "M2", "original_title": "M2"}, now)
+        db._upsert_movie({"id": 3, "title": "M3", "original_title": "M3"}, now)
+        db.override_match_state("movie", 3, "total", "manual")
+        b_rows = [
+            ("/b/电影/M1/M1.strm", "/b/电影/M1/M1.strm",
+             "/b/电影/M1", "", "", "valid", 0.0),
+            ("/b/电影/M2/M2.strm", "/b/电影/M2/M2.strm",
+             "/b/电影/M2", "", "", "valid", 0.0),
+        ]
+        bdb = _StubDb(b_rows)
+        webui = _StubWebUI(db, bdb)
+        counts = _refresh_watchlist_match_state(webui)
+        assert counts["total"] == 3
+        assert counts["matched"] + counts["fuzzy"] + counts["unmatched"] + counts["uncomputed"] == counts["total"]
+        # 关键断言：counts["total"] 必须等于 len(all_items)=3，不被 match_status='total' 污染
+        assert counts["total"] == 3

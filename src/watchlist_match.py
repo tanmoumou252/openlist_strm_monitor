@@ -11,6 +11,7 @@ TMDB 待看列表收录状态匹配逻辑（共享模块）。
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from difflib import SequenceMatcher
@@ -516,34 +517,86 @@ def refresh_watchlist_match_state(
     fuzzy_threshold: float = 0.60,
     min_ep_ratio: float = 0.3,
 ) -> dict[str, int]:
-    """刷新 TMDB 待看列表的 B 区收录状态，回写到 tmdb_watchlist.db。"""
+    """刷新 TMDB 待看列表的 B 区收录状态，回写到 tmdb_watchlist.db。
+
+    统计返回 {matched, fuzzy, unmatched, uncomputed, skipped_manual, total}。
+    四个状态桶按写回完成后的数据库最终状态统计，
+    且 matched+fuzzy+unmatched+uncomputed == total。
+    skipped_manual 是附加计数，不参与四桶求和。
+    """
     if not webui._watchlist_db or not webui._db:
-        return {"matched": 0, "fuzzy": 0, "unmatched": 0, "total": 0}
+        return {"matched": 0, "fuzzy": 0, "unmatched": 0,
+                "uncomputed": 0, "skipped_manual": 0, "total": 0}
     all_items = webui._watchlist_db.get_all()
+    if not all_items:
+        return {"matched": 0, "fuzzy": 0, "unmatched": 0,
+                "uncomputed": 0, "skipped_manual": 0, "total": 0}
     snapshot = collect_b_media_snapshot(webui._db)
     now = time.time()
-    counts: dict[str, int] = {
-        "matched": 0,
-        "fuzzy": 0,
-        "unmatched": 0,
-        "total": len(all_items)}
     movie_states: list[tuple] = []
     tv_states: list[tuple] = []
+    movie_ids: list[int] = []
+    tv_ids: list[int] = []
     for item in all_items:
         media_type = item.get("_media_type") or "movie"
         candidates = snapshot.get(media_type, [])
         status, reason = score_watchlist_item(
             item, candidates, media_type, fuzzy_threshold, min_ep_ratio)
-        counts[status] += 1
         item_id = int(item.get("id") or 0)
         if not item_id:
+            # 无效 ID 计入 uncomputed，保持四桶之和 == total
             continue
         if media_type == "movie":
             movie_states.append((item_id, status, reason, now, 0.0, ""))
+            movie_ids.append(item_id)
         else:
             tv_states.append((item_id, status, reason, now, 0.0, ""))
+            tv_ids.append(item_id)
+    # 写回到数据库（replace_match_state 保留人工覆盖行）
     if movie_states:
         webui._watchlist_db.replace_match_state("movie", movie_states)
     if tv_states:
         webui._watchlist_db.replace_match_state("tv", tv_states)
+
+    # ---- 写回完成后，按 DB 最终状态统计四桶 ----
+    all_ids = movie_ids + tv_ids
+    counts: dict[str, int] = {
+        "matched": 0, "fuzzy": 0, "unmatched": 0,
+        "uncomputed": 0, "skipped_manual": 0,
+        "total": len(all_items),
+    }
+    _VALID_BUCKETS = {"matched", "fuzzy", "unmatched", "uncomputed"}
+    if all_ids:
+        # 分 media_type 批量读取最终状态
+        movie_final: dict[int, dict] = {}
+        tv_final: dict[int, dict] = {}
+        if movie_ids:
+            movie_final = webui._watchlist_db.get_match_states("movie", movie_ids)
+        if tv_ids:
+            tv_final = webui._watchlist_db.get_match_states("tv", tv_ids)
+
+        for item in all_items:
+            media_type = item.get("_media_type") or "movie"
+            item_id = int(item.get("id") or 0)
+            if not item_id:
+                # 无效 ID 归入 uncomputed，保持四桶之和 == total
+                counts["uncomputed"] += 1
+                continue
+            final = (movie_final if media_type == "movie" else tv_final).get(item_id)
+            if final is None:
+                # 缺失 ID 归入 uncomputed
+                counts["uncomputed"] += 1
+                continue
+            ms = final.get("match_status", "uncomputed")
+            moa = final.get("manual_override_at", 0) or 0
+            # 人工覆盖行计入 skipped_manual
+            if moa > 0:
+                counts["skipped_manual"] += 1
+            # 按最终 match_status 归入对应桶（显式白名单，防止 total/skipped_manual 被污染）
+            if ms in _VALID_BUCKETS:
+                counts[ms] += 1
+            else:
+                # 未知/非法状态统一按 uncomputed 计数
+                logging.warning("[TMDB] 未知 match_status: %s (id=%d), 按 uncomputed 计", ms, item_id)
+                counts["uncomputed"] += 1
     return counts

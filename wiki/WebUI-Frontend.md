@@ -87,6 +87,18 @@ npx vite          # 开发服务器（HMR）
 - TMDB 状态 — 待看列表缓存（30 分钟 TTL）、类型缓存（1000 LRU）
 - UI 配置 — 带 `AbortController` 取消进行中的保存
 
+### 表单字段帮助文本系统（`helperText` / `helpKey` / `_openlistHelpTexts`）
+
+OpenList 配置页（`openlist.js`）实现了结构化的帮助文本系统，用于在表单控件下方显示上下文相关的帮助说明：
+
+- **`_openlistHelpTexts`** — 常量对象，定义所有帮助文本的键值对。键名对应控件的 `helpKey`，值为帮助文本字符串。
+- **`helpKey`** — 表单字段配置对象中的可选属性。当 `createField()` 创建浮动标签输入框时，若存在 `helpKey`，自动从 `_openlistHelpTexts` 中查找对应的帮助文本，并在输入框下方渲染为 `<p class="form-help">` 元素。
+- **`helperText`** — 表单字段配置对象中的可选属性。与 `helpKey` 类似，但直接指定帮助文本内容（不通过字典查找）。
+- **关系**：`helpKey` 用于从 `_openlistHelpTexts` 查找帮助文本，查找结果作为 `helperText` 传递给 `createField`。两者互补，非竞争关系。若同时指定，`helpKey` 的查找结果生效。
+- **渲染位置**：帮助文本显示在浮动标签输入框的外层容器内，紧接输入框之后、下一个字段之前。
+
+`utils.js` 的 `createField()` 函数负责解析 `helpKey`/`helperText` 并生成对应的 DOM 结构。
+
 ### `theme.js` — 双主题系统
 - `syncTheme()` — 应用 `data-system`、`data-color`、`data-font` 到 `<html>`，持久化到 localStorage
 - 两个主题：**Material Design 3**（`data-system="material"`）和 **Fluent 2**（`data-system="fluent"`）

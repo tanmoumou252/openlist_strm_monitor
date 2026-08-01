@@ -341,6 +341,7 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
         <button class="seg-btn seg-que${st === 'que' ? ' active' : ''}" data-status="fuzzy" title="标记为存疑">${icon('badge_que')} 存疑</button>
         <button class="seg-btn seg-out${st === 'out' ? ' active' : ''}" data-status="unmatched" title="标记为未收录">${icon('badge_out')} 未收录</button>
       </div>
+      ${isManual ? `<button class="tt-restore-auto-btn tmdb-restore-auto-btn" data-tmdb-id="${tmdbId}" data-tmdb-type="${mediaType}" title="清除人工覆盖，恢复自动判断">恢复自动判断</button>` : ''}
     </div>
   </div>
 </div>`;
@@ -425,6 +426,36 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
         }
       } catch (err) {
         showToast('更新失败: ' + err.message, 'error');
+      }
+    });
+  });
+
+  // "恢复自动判断"按钮事件
+  document.querySelectorAll('.tt-restore-auto-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const tmdbId = btn.dataset.tmdbId;
+      const mediaType = btn.dataset.tmdbType;
+      try {
+        const response = await api('/api/tmdb/watchlist/match/clear', {
+          method: 'POST',
+          body: JSON.stringify({
+            media_type: mediaType,
+            id: parseInt(tmdbId)
+          })
+        });
+        if (response.success) {
+          showToast('人工覆盖已清除，将在下次刷新时重新计算', 'success');
+          // 局部刷新：通过 hash 跳转触发 SPA 重新渲染当前页
+          const cur = window.location.hash;
+          window.location.hash = '#tmdb';
+          if (cur !== '#tmdb') window.location.hash = cur;
+          else window.dispatchEvent(new HashChangeEvent('hashchange'));
+        } else {
+          showToast('清除失败: ' + (response.message || '未知错误'), 'error');
+        }
+      } catch (err) {
+        showToast('清除失败: ' + err.message, 'error');
       }
     });
   });

@@ -211,20 +211,27 @@ A 区文件被删除时触发：
 
 ### RefreshService（`refresh_service.py`）
 
-后台线程周期调用 `app.refresh_webdav_root()`。工作线程每次循环重新读取间隔值，使 WebUI 热重载后的新间隔在下个周期生效：
+后台线程周期调用 `app.refresh_webdav_root()`。工作线程使用 `threading.Event` 等待，支持即时唤醒：WebUI 修改间隔/启用状态/刷新路径后调用 `reconfigure()` → `notify_config_changed()` → `_config_changed.set()`，工作线程立即退出等待并执行下一轮。
 
 ```python
+# 以下为简化示意，实际实现包含熔断器、enabled 守卫、max(1, interval) 下限、双重 _running 检查
 def _worker(self) -> None:
-    self.execute_refresh_cycle()
     while self._running:
-        interval = self.app.config.refresh.interval_seconds
-        waited = 0
-        while self._running and waited < interval:
-            time.sleep(1)
-            waited += 1
+        self.execute_refresh_cycle()
         if not self._running:
             break
-        self.execute_refresh_cycle()
+        interval = self.app.config.refresh.interval_seconds
+        self._config_changed.wait(timeout=interval)
+        self._config_changed.clear()
+
+def reconfigure(self) -> None:
+    """WebUI 配置变更后调用，即时重载间隔/启用状态/路径。"""
+    # 持有 _lifecycle_lock，停止旧线程或唤醒当前线程
+    ...
+
+def notify_config_changed(self) -> None:
+    """唤醒工作线程，使其立即读取新配置并执行下一轮刷新。"""
+    self._config_changed.set()
 ```
 
 ### 路径分析（`PathAnalysis`）

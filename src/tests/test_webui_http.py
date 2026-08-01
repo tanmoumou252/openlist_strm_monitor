@@ -902,6 +902,101 @@ class TestPostRoutes:
             {"media_type": "movie", "id": 1, "status": "bogus"}, session_token)
         assert status == 400
 
+
+class TestMatchClearEndpoint:
+    """POST /api/tmdb/watchlist/match/clear 端点测试。"""
+
+    def test_clear_requires_auth(self, tmp_path):
+        """未携带 token 时返回 401/403（不在免鉴权白名单）。"""
+        from webui.routes import _login_attempts
+        _login_attempts.clear()
+
+        cfg = _make_mock_config(tmp_path)
+        db = _make_mock_db(tmp_path)
+        port = _free_port()
+        cfg.webui.port = port
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"):
+            (tmp_path / "static").mkdir(exist_ok=True)
+            (tmp_path / "static" / "index.html").write_text(
+                "<html><body>test</body></html>", encoding="utf-8")
+            (tmp_path / "static" / "assets").mkdir(exist_ok=True)
+            (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
+
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            test_password = "test_password_123"
+            os.environ["WEBUI_TEST_MODE"] = "1"
+            os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
+            server.start()
+            deadline = time.time() + 2.0
+            while not server._server and time.time() < deadline:
+                time.sleep(0.05)
+
+            try:
+                base_url = f"http://127.0.0.1:{port}"
+                status, _, body = _http_post(
+                    base_url, "/api/tmdb/watchlist/match/clear",
+                    {"media_type": "movie", "id": 1}, session_token=None)
+                assert status in (401, 403), f"未认证应返回 401/403，实际: {status}"
+            finally:
+                server.stop()
+
+    def test_clear_invalid_media_type_returns_400(self, webui_server):
+        server, base, session_token = webui_server
+        status, _, body = _http_post(
+            base, "/api/tmdb/watchlist/match/clear",
+            {"media_type": "invalid", "id": 1}, session_token)
+        assert status == 400
+        assert isinstance(body, dict)
+
+    def test_clear_invalid_id_returns_400(self, webui_server):
+        server, base, session_token = webui_server
+        status, _, body = _http_post(
+            base, "/api/tmdb/watchlist/match/clear",
+            {"media_type": "movie", "id": -1}, session_token)
+        assert status == 400
+
+    def test_clear_missing_item_returns_404(self, webui_server):
+        server, base, session_token = webui_server
+        status, _, body = _http_post(
+            base, "/api/tmdb/watchlist/match/clear",
+            {"media_type": "movie", "id": 999999}, session_token)
+        assert status == 404
+
+    def test_clear_success(self, webui_server):
+        """成功清除人工覆盖后返回 success=True。"""
+        server, base, session_token = webui_server
+        wdb = server._watchlist_db
+        if not wdb:
+            pytest.skip("watchlist_db not initialized")
+        # 先插入一条记录并设为手动覆盖
+        wdb._upsert_movie({"id": 1, "title": "Test", "original_title": "Test"}, 0.0)
+        wdb.override_match_state("movie", 1, "matched", "manual")
+        assert wdb.get_match_state("movie", 1)["manual_override_at"] > 0
+
+        status, _, body = _http_post(
+            base, "/api/tmdb/watchlist/match/clear",
+            {"media_type": "movie", "id": 1}, session_token)
+        assert status == 200
+        assert body.get("success") is True
+
+        # 验证清除后状态
+        state = wdb.get_match_state("movie", 1)
+        assert state["manual_override_at"] == 0.0
+        assert state["manual_override_by"] == ""
+        assert state["match_status"] == "uncomputed"
+
+    def test_clear_endpoint_reachable_via_do_post(self, webui_server):
+        """新端点经 do_POST 可达（覆盖 server.py 分发）。"""
+        server, base, session_token = webui_server
+        # 不存在的 id → 404 表示端点可达（不是 404 from do_POST）
+        status, _, body = _http_post(
+            base, "/api/tmdb/watchlist/match/clear",
+            {"media_type": "movie", "id": 0}, session_token)
+        # id<=0 → 400
+        assert status == 400
+
     def test_openlist_save_with_empty_optional_fields_accepted(
             self, webui_server):
         """2FA/b_root/c_root 为空仍可保存（后端支持空 b/c，前端软警告不阻断）"""

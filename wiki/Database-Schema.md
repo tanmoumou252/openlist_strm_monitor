@@ -4,7 +4,7 @@
 
 ## bridge.db — 核心同步状态
 
-由 `Database` 类管理（`src/database.py`）。通过自定义 `ReadWriteLock` 类（`database.py` 顶部定义，支持读写分离：多个读者并发、写者独占、写者优先防饥饿）保证线程安全。所有表在 `_create_schema()` 方法中创建。bridge.db 共 **16 张表**：13 张常规表（`a_strm_files`、`b_strm_files`、`strm_identity`、`c_ghost_files`、`ghost_protection`、`known_folders`、`protected_roots`、`protected_roots_snapshot`、`sync_control`、`strm_media_boundary`、`b_identity_projection`、`b_lineage_snapshot`、`subtitles`）+ 3 张 FTS5 虚拟表（`a_strm_files_fts`、`b_strm_files_fts`、`c_ghost_files_fts`）。`subtitles` 在 `_create_schema()` 内通过 `CREATE TABLE IF NOT EXISTS subtitles` 创建，与其余常规表统建，不再需要独立的 `init_subtitle_table()` 调用。
+由 `Database` 类管理（`src/database.py`）。通过自定义 `ReadWriteLock` 类（`database.py` 顶部定义，支持读写分离：多个读者并发、写者独占、写者优先防饥饿）保证线程安全。所有表在 `_create_schema()` 方法中创建。bridge.db 共 **16 张表**：12 张常规表（`a_strm_files`、`b_strm_files`、`strm_identity`、`c_ghost_files`、`ghost_protection`、`known_folders`、`protected_roots`、`protected_roots_snapshot`、`sync_control`、`strm_media_boundary`、`b_identity_projection`、`b_lineage_snapshot`）+ 1 张独立创建的 `subtitles` 表（由 `init_subtitle_table()` 单独创建，`Database.__init__()` 时调用）+ 3 张 FTS5 虚拟表（`a_strm_files_fts`、`b_strm_files_fts`、`c_ghost_files_fts`）。
 
 ### 性能 PRAGMA 设置
 
@@ -124,6 +124,19 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 | `control_key` | TEXT PRIMARY KEY | 控制键名 |
 | `control_value` | TEXT NOT NULL | 控制值（JSON 编码） |
 | `updated_at` | REAL NOT NULL | 更新时间戳 |
+
+已知键值（`control_key`）：
+
+| 键名 | 说明 |
+|------|------|
+| `index_generation` | 全局索引代数（int），每次 `complete_index_generation` 调用递增 |
+| `index_generation_at` | 全局索引重建时间戳 |
+| `index_generation:{mapping_id}` | 每个 mapping 的索引代数（int） |
+| `index_generation_at:{mapping_id}` | 每个 mapping 的索引重建时间戳 |
+| `mapping_version` | mapping 配置 + C 根的稳定摘要字符串，用于 `b_lineage_snapshot` 失效判断 |
+| `mapping_version_generated_at` | mapping_version 生成时间戳 |
+
+`get_index_metadata()` 方法返回上述键值的聚合快照，供 Dashboard 展示索引健康状态。
 
 #### `strm_media_boundary` — 媒体边界映射表
 

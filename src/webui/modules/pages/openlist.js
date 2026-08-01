@@ -28,6 +28,8 @@ const _openlistHelpTexts = {
   log_max_size_mb: '单个日志文件最大大小（MB）。\n超过此大小会自动轮转。\n建议：2-10 MB。',
   log_backup_count: '保留的历史日志文件数量。\n超过此数量的旧日志会被删除。\n建议：5-10 个。',
   log_file: '日志文件保存路径（默认存放在项目根目录下，文件名 strm_bridge.log）。\n留空使用默认值。\n修改并保存后，重启 WebUI / 主程序即按此路径与上面设置的级别写日志。',
+  refresh_full_audit_interval_days: '每隔多少天执行一次 A→B 全量审计。\n设为 0 可关闭周期审计。\n保存后即时生效。',
+  refresh_log_level: '刷新日志级别控制：DEBUG / INFO / WARNING。\n保存后即时生效。',
 };
 
 function _olHelpIcon(key, tooltipBelow = false) {
@@ -73,14 +75,17 @@ export async function _renderOpenListConfig(cfg) {
   } catch (e) { abMappings = []; }
   OpenListState.abMappings = abMappings;
 
-  function olField(id, label, value, placeholder, type = 'text', persistLabel = false, readOnly = false) {
+  function olField(id, label, value, placeholder, type = 'text', persistLabel = false, readOnly = false, helperText = '', helpKey = '') {
+    const key = helpKey || id.replace(/^ol-/, '');
     return createField(id, label, value, {
       placeholder, type, persistLabel, readOnly,
-      helpIcon: _olHelpIcon(id.replace(/^ol-/, ''))
+      helpIcon: _olHelpIcon(key),
+      helperText
     });
   }
 
-  function olSelect(id, label, value, options, persistLabel = false) {
+  function olSelect(id, label, value, options, persistLabel = false, helpKey = '', helperText = '') {
+    const key = helpKey || id.replace(/^ol-/, '');
     const hasValue = value !== null && value !== undefined && String(value).trim() !== '';
     const floated = hasValue || persistLabel;
     const labelCls = floated
@@ -94,20 +99,21 @@ export async function _renderOpenListConfig(cfg) {
     return `
       <div class="floating-field" data-field="${id}">
         <div class="field-control">
-          <label class="${labelCls}" data-role="label" for="${id}">${esc(label)}${_olHelpIcon(id.replace(/^ol-/, ''))}</label>
+          <label class="${labelCls}" data-role="label" for="${id}">${esc(label)}${_olHelpIcon(key)}</label>
           <select id="${id}" class="ol-select"${persistAttr}>${optsHtml}</select>
-        </div>
+        </div>${helperText ? `<div class="field-helper-text">${esc(helperText)}</div>` : ''}
       </div>`;
   }
 
-  function olToggle(id, label, checked) {
+  function olToggle(id, label, checked, helpKey = '', helperText = '') {
+    const key = helpKey || id.replace(/^ol-/, '');
     return `<div class="toggle-row">
-      <span>${esc(label)}${_olHelpIcon(id.replace(/^ol-/, ''))}</span>
+      <span>${esc(label)}${_olHelpIcon(key)}</span>
       <div class="segmented-switch" data-key="${id}" id="${id}">
         <button type="button" data-value="on"${checked ? ' class="active"' : ''}>开</button>
         <button type="button" data-value="off"${!checked ? ' class="active"' : ''}>关</button>
       </div>
-    </div>`;
+    </div>${helperText ? `<div class="field-helper-text">${esc(helperText)}</div>` : ''}`;
   }
 
   function buildEngineTable() {
@@ -207,14 +213,14 @@ export async function _renderOpenListConfig(cfg) {
   html += `<div class="config-section"><h3>${icon('refresh')} 刷新配置</h3>
     ${olToggle('ol-refresh-enabled', '启用主动刷新', refreshEnabled)}
     <div class="field-grid">
-      ${olField('ol-refresh-interval', '刷新间隔 (分钟)', refreshInterval, '10', 'number')}
+      ${olField('ol-refresh-interval', '刷新间隔 (分钟)', refreshInterval, '10', 'number', false, false, _openlistHelpTexts.refresh_interval_minutes, 'refresh_interval_minutes')}
       ${olField('ol-refresh-depth', '刷新深度', refreshDepth, '5', 'number')}
-      ${olField('ol-refresh-audit-days', '全量审计周期 (天，0=关闭)', fullAuditDays, '7', 'number')}
+      ${olField('ol-refresh-audit-days', '全量审计周期 (天，0=关闭)', fullAuditDays, '7', 'number', false, false, _openlistHelpTexts.refresh_full_audit_interval_days, 'refresh_full_audit_interval_days')}
       ${olSelect('ol-refresh-log-level', '刷新日志级别', openlistCfg.refresh_log_level || 'INFO', [
         { value: 'DEBUG', label: 'DEBUG — 调试' },
         { value: 'INFO', label: 'INFO — 信息（推荐）' },
         { value: 'WARNING', label: 'WARNING — 警告' }
-      ])}
+      ], false, 'refresh_log_level', _openlistHelpTexts.refresh_log_level)}
     </div>
     <div style="margin-top:12px">
       <div style="margin-bottom:6px">
@@ -235,13 +241,13 @@ export async function _renderOpenListConfig(cfg) {
       ${olSelect('ol-action', '删除动作', currentAction, [
         { value: 'MOVE', label: 'MOVE — 移动到回收站（推荐）' },
         { value: 'DELETE', label: 'DELETE — 直接删除（危险）' }
-      ])}
-      ${olField('ol-trash-dir', '回收站目录名', openlistCfg.behavior_trash_dir_name || 'trash', 'strm_回收站')}
-      ${olField('ol-ghost-protect', 'Ghost 保护时间 (秒)', openlistCfg.behavior_ghost_protect_seconds || '300', '300', 'number')}
-      ${olField('ol-restore-delay', 'A→B 恢复延迟 (秒)', openlistCfg.behavior_a_to_b_restore_delay_seconds || '30', '30', 'number')}
-      ${olField('ol-startup-wait', '启动等待时间 (秒)', openlistCfg.behavior_sync_on_startup_wait || '0', '0', 'number')}
+      ], false, 'behavior_action', _openlistHelpTexts.behavior_action)}
+      ${olField('ol-trash-dir', '回收站目录名', openlistCfg.behavior_trash_dir_name || 'trash', 'strm_回收站', 'text', false, false, _openlistHelpTexts.behavior_trash_dir_name, 'behavior_trash_dir_name')}
+      ${olField('ol-ghost-protect', 'Ghost 保护时间 (秒)', openlistCfg.behavior_ghost_protect_seconds || '300', '300', 'number', false, false, _openlistHelpTexts.behavior_ghost_protect_seconds, 'behavior_ghost_protect_seconds')}
+      ${olField('ol-restore-delay', 'A→B 恢复延迟 (秒)', openlistCfg.behavior_a_to_b_restore_delay_seconds || '30', '30', 'number', false, false, _openlistHelpTexts.behavior_a_to_b_restore_delay_seconds, 'behavior_a_to_b_restore_delay_seconds')}
+      ${olField('ol-startup-wait', '启动等待时间 (秒)', openlistCfg.behavior_sync_on_startup_wait || '0', '0', 'number', false, false, _openlistHelpTexts.behavior_sync_on_startup_wait, 'behavior_sync_on_startup_wait')}
     </div>
-    ${olToggle('ol-sync-startup', '启动时全量同步', syncOnStartup)}
+    ${olToggle('ol-sync-startup', '启动时全量同步', syncOnStartup, 'behavior_sync_on_startup', _openlistHelpTexts.behavior_sync_on_startup)}
   </div>`;
 
   const currentLogLevel = openlistCfg.log_level || 'INFO';
@@ -253,9 +259,9 @@ export async function _renderOpenListConfig(cfg) {
         { value: 'WARNING', label: 'WARNING — 警告' },
         { value: 'ERROR', label: 'ERROR — 错误' }
       ])}
-      ${olField('ol-log-max-size', '日志最大大小 (MB)', openlistCfg.log_max_size_mb || '2', '2', 'number')}
+      ${olField('ol-log-max-size', '日志最大大小 (MB)', openlistCfg.log_max_size_mb || '2', '2', 'number', false, false, _openlistHelpTexts.log_max_size_mb, 'log_max_size_mb')}
       ${olField('ol-log-backup-count', '历史日志数量', openlistCfg.log_backup_count || '5', '5', 'number')}
-      ${olField('ol-log-path', '日志保存路径', openlistCfg.log_file || cfg.log_file || '', 'strm_bridge.log')}
+      ${olField('ol-log-path', '日志保存路径', openlistCfg.log_file || cfg.log_file || '', 'strm_bridge.log', 'text', false, false, _openlistHelpTexts.log_file, 'log_file')}
     </div>
   </div>`;
 

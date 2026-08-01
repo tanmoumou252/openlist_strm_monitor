@@ -469,6 +469,50 @@ class TmdbWatchlistDb:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_match_states(self, media_type: str, item_ids: Iterable[int]) -> dict[int, dict]:
+        """批量读取指定条目的 match_status / manual_override_at / manual_override_by。
+
+        返回 {item_id: {match_status, manual_override_at, manual_override_by}} 字典。
+        不存在的 ID 不包含在结果中，调用方需自行判断缺失 ID。
+        """
+        table = "movies" if media_type == "movie" else "tv"
+        ids_list = list(item_ids)
+        if not ids_list:
+            return {}
+        result: dict[int, dict] = {}
+        with self._conn() as conn:
+            # SQLite 参数上限约 999，分批处理
+            BATCH = 500
+            for i in range(0, len(ids_list), BATCH):
+                batch = ids_list[i:i + BATCH]
+                placeholders = ",".join("?" * len(batch))
+                rows = conn.execute(
+                    f"SELECT id, match_status, manual_override_at, manual_override_by FROM {table} WHERE id IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    result[row[0]] = {
+                        "match_status": row[1],
+                        "manual_override_at": row[2],
+                        "manual_override_by": row[3],
+                    }
+        return result
+
+    def clear_match_override(self, media_type: str, item_id: int) -> None:
+        """清除人工覆盖，恢复为 uncomputed 等待下次刷新重新计算。
+
+        复用 set_match_state 显式传 manual_override_at=0.0 / manual_override_by=''。
+        不在清除请求内同步调 TMDB 或扫 B 区。
+        """
+        self.set_match_state(
+            media_type,
+            item_id,
+            "uncomputed",
+            "",
+            manual_override_at=0.0,
+            manual_override_by="",
+        )
+
     def get_season_count(self, tmdb_id: int) -> int:
         """获取指定 TV 剧集的季数缓存。返回 int，0 表示未找到或无效。"""
         try:

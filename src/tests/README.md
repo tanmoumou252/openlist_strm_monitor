@@ -77,7 +77,7 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试 |
+| `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试（含 `TestAreaDetailKindParameter`、`TestAreaDetailCZonePagination`、`TestAreaDetailSingleMappingMid`） |
 | `test_call_coverage.py` | 路由调用覆盖率测试 |
 | `test_logging_system.py` | TMDB 操作日志表、日志读取接口与轮转产物测试 |
 | `test_logger_setup.py` | logger_setup 模块单元测试：handler 装配、重复初始化（热更新）、回退路径、级别过滤、启动分隔标记、临时目录清理 |
@@ -87,13 +87,15 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_watchlist_match.py` | TMDB 想看列表与本地收藏匹配逻辑测试 |
+| `test_watchlist_match.py` | TMDB 想看列表与本地收藏匹配逻辑测试（含 `TestExtractSeasonFromLocalPath`） |
 | `test_watchlist_match_state.py` | 匹配状态持久化与状态机测试 |
 
 ### 端到端
 
 | 文件 | 说明 |
 |------|------|
+| `test_index_metadata_api.py` | 索引元数据 API 测试 |
+| `test_multi_mapping_partition.py` | 多 mapping 分区测试 |
 | `test_e2e_full_flow.py` | 完整业务流程端到端测试（登录→配置→A/B 区→状态校验） |
 | `test_onboarding_e2e.py` | 新手引导流程端到端测试 |
 

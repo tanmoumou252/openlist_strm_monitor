@@ -1213,6 +1213,11 @@ def _hot_reload_openlist_config(webui_server) -> None:
             logging.info("[HotReload] STRM 存储映射已重新加载")
         except Exception as exc:
             logging.warning("[HotReload] 重新加载 STRM 存储映射失败: %s", exc)
+
+        app_service = getattr(webui_server, "_app_service", None)
+        refresh_service = getattr(app_service, "refresh_service", None)
+        if refresh_service is not None:
+            refresh_service.reconfigure()
     except Exception as e:
         logging.warning("[HotReload] OpenList 配置热更新失败: %s", e)
 
@@ -1627,6 +1632,72 @@ def _handle_tmdb_watchlist_match_override(
     except Exception as e:
         logging.error("[TMDB] 手动覆盖收录状态失败: %s", e, exc_info=True)
         handler._send_json({"success": False, "message": f"覆盖失败: {e}"}, 500)
+
+
+def _handle_tmdb_watchlist_match_clear(
+        handler, webui_server, body: bytes) -> None:
+    """清除 TMDB 待看条目的人工覆盖，恢复为 uncomputed。
+
+    请求体: {media_type: str, id: int}
+    - 非法 media_type 或 id<=0 → 400
+    - get_match_state() 返回 None → 404
+    - 成功清除 → 200 {success: true}
+    """
+    if not getattr(webui_server, '_watchlist_db', None):
+        handler._send_json(
+            {"success": False, "message": "TMDB 待看数据库未启用"}, 400)
+        return
+    # 检查 watchlist_enabled 开关（只有明确设为 "false" 才禁用）
+    _wdb_enabled_check = getattr(webui_server, '_watchlist_db', None)
+    if _wdb_enabled_check:
+        enabled_raw = _wdb_enabled_check.get_config("tmdb", "watchlist_enabled")
+        if str(enabled_raw).lower() == "false":
+            handler._send_json(
+                {"success": False, "message": "TMDB 待看列表已禁用"}, 400)
+            return
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        handler._send_json({"success": False, "message": "无效的 JSON"}, 400)
+        return
+    media_type = str(data.get("media_type") or "").strip()
+    if media_type not in {"movie", "tv"}:
+        handler._send_json(
+            {"success": False, "message": "无效的 media_type"}, 400)
+        return
+    try:
+        item_id = int(data.get("id") or 0)
+    except (TypeError, ValueError):
+        handler._send_json({"success": False, "message": "无效的 id"}, 400)
+        return
+    if item_id <= 0:
+        handler._send_json(
+            {"success": False, "message": "id 必须大于 0"}, 400)
+        return
+    # 先检查条目是否存在
+    existing = webui_server._watchlist_db.get_match_state(media_type, item_id)
+    if existing is None:
+        handler._send_json(
+            {"success": False, "message": "条目不存在"}, 404)
+        return
+    try:
+        webui_server._watchlist_db.clear_match_override(media_type, item_id)
+        handler._send_json({"success": True, "message": "人工覆盖已清除"})
+        _wdb = getattr(webui_server, '_watchlist_db', None)
+        if _wdb:
+            try:
+                _wdb.log_tmdb_operation(
+                    "match_clear", "info",
+                    f"清除人工覆盖 {media_type}/{item_id}",
+                    detail=json.dumps({
+                        "media_type": media_type, "id": item_id,
+                    }),
+                )
+            except Exception:
+                pass
+    except Exception as e:
+        logging.error("[TMDB] 清除人工覆盖失败: %s", e, exc_info=True)
+        handler._send_json({"success": False, "message": f"清除失败: {e}"}, 500)
 
 
 def _handle_tmdb_watchlist_bg_sync(handler, webui_server) -> None:
@@ -2612,6 +2683,16 @@ def handle_area_detail(handler, area, params) -> None:
             result["mapping_id"] = result["mapping_id"]  # 使用分区处理返回的真实 mapping_id
             result["index_metadata"] = db.get_index_metadata(result["mapping_id"])
             handler._send_json(result)
+        elif not mappings_result and not all_records:
+            # 无记录时返回空 seasons，保持响应契约一致
+            handler._send_json({
+                "area": area,
+                "media": media_name,
+                "total": 0,
+                "page": 1,
+                "total_pages": 1,
+                "seasons": [],
+            })
         else:
             # 多 mapping 返回 mappings 数组
             total_pages = max(1, ceil(total / PAGE_SIZE)) if total else 1

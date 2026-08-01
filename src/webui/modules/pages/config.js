@@ -84,8 +84,8 @@ function _renderConfigContent(cfg) {
   function section(titleIcon, title, rowsHtml) {
     return `<div class="config-section"><h3>${icon(titleIcon)} ${esc(title)}</h3>${rowsHtml}</div>`;
   }
-  function field(id, label, value, placeholder, type = 'text', persistLabel = false, readOnly = false, htmlLabel = '') {
-    return createField(id, label, value, { placeholder, type, persistLabel, readOnly, htmlLabel });
+  function field(id, label, value, placeholder, type = 'text', persistLabel = false, readOnly = false, htmlLabel = '', helperText = '') {
+    return createField(id, label, value, { placeholder, type, persistLabel, readOnly, htmlLabel, helperText });
   }
 
   const presetLangs = ['zh-CN', 'en-US', 'ja-JP'];
@@ -424,7 +424,9 @@ const data = await api('/api/tmdb/watchlist/match/refresh', { method: 'POST' });
               if (r.error) {
                 showToast('收录状态刷新失败: ' + r.error, 'error');
               } else {
-                showToast(`收录状态已刷新: ${r.matched} 已收录 / ${r.fuzzy} 待确认 / ${r.unmatched} 未收录 (共 ${r.total} 项)`, 'success');
+                const manualInfo = r.skipped_manual > 0 ? ` · 跳过 ${r.skipped_manual} 个人工覆盖` : '';
+                const uncomputedInfo = r.uncomputed > 0 ? ` · ${r.uncomputed} 项未计算` : '';
+                showToast(`收录状态已刷新: ${r.matched} 已收录 / ${r.fuzzy} 待确认 / ${r.unmatched} 未收录${uncomputedInfo} (共 ${r.total} 项)${manualInfo}`, 'success');
                 _tmdbCache.movies = null;
                 _tmdbCache.tv = null;
               }

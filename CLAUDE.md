@@ -10,7 +10,8 @@ This file provides guidance to AI coding assistants when working with the `openl
 4. **For dangerous operations** (delete, move, cloud linkage), explain safety risk before editing.
 5. **Preserve the A/B/C three-zone model.** Do not merge or flatten zones.
 6. **Prefer small, targeted changes** over large rewrites.
-7. **Documentation must not use exact line numbers**. When referencing code locations in wiki/docs/README markdown files, use method names, function names, class names, or approximate ranges (e.g., "in the authentication section", "near the database initialization") instead of specific line numbers like "line 123" or "lines 45-67". Line numbers change frequently as code evolves, making such references quickly outdated and misleading.
+7. **No exact line numbers in markdown docs.** Reference method, function, or class names instead of `file.py:123` or "lines 45-67".
+8. **`todo.md` is off-limits** — user's personal memo, not part of the workspace. Never read, audit, or edit it.
 
 ## Quick Start
 

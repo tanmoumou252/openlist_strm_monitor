@@ -48,6 +48,8 @@ class RefreshService:
         self.app = app
         self._running = False
         self._thread: threading.Thread | None = None
+        self._config_changed = threading.Event()
+        self._lifecycle_lock = threading.RLock()
         self._consecutive_failures: int = 0
         self._last_error_summary: str = ""
         self._last_full_audit_at = self._load_last_full_audit_at()
@@ -78,6 +80,12 @@ class RefreshService:
         self.app.initial_scan_a(use_bulk=False, a_roots=None)
         self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
         self._last_full_audit_at = now
+        mapping_ids = self.app._current_mapping_ids()
+        if mapping_ids:
+            try:
+                self.app.db.complete_index_generation(mapping_ids)
+            except Exception:
+                logging.warning("[主动刷新] 推进索引代次失败", exc_info=True)
         try:
             self.app.db.set_control("last_full_audit_at", str(now))
         except (AttributeError, OSError):
@@ -87,26 +95,56 @@ class RefreshService:
     def _refresh_audit_enabled(self) -> bool:
         return self._full_audit_interval_seconds() > 0
 
+    def _has_source(self) -> bool:
+        analysis = self._analyze_paths()
+        return bool(analysis.valid_refresh_paths or analysis.only_refresh or self._refresh_audit_enabled())
+
+    def notify_config_changed(self) -> None:
+        self._config_changed.set()
+
+    def reconfigure(self) -> None:
+        old_thread = None
+        with self._lifecycle_lock:
+            has_source = self._has_source()
+            enabled = self.app.config.refresh.enabled
+            if not has_source:
+                old_thread = self._thread
+                self._running = False
+                self._config_changed.set()
+                self._thread = None
+            elif self._running:
+                self.notify_config_changed()
+            elif enabled:
+                if self._thread and self._thread.is_alive():
+                    old_thread = self._thread
+                self._running = True
+                self._thread = threading.Thread(target=self._worker, daemon=True)
+                self._thread.start()
+        if old_thread and old_thread.is_alive():
+            old_thread.join(timeout=2)
+
     def start(self) -> None:
-        if not self.app.config.refresh.enabled:
-            logging.info("[主动刷新] 已关闭")
-            return
-
-        if not self.app.config.refresh_paths and not self._refresh_audit_enabled():
-            logging.info("[主动刷新] 未配置刷新路径且全量审计已关闭，已关闭")
-            return
-
-        if not self.app.config.refresh_paths:
-            logging.info("[主动刷新] 未配置刷新路径，仅保留兜底全量审计")
-
-        self._running = True
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._running:
+                return
+            if not self.app.config.refresh.enabled:
+                logging.info("[主动刷新] 已关闭")
+                return
+            if not self._has_source():
+                logging.info("[主动刷新] 未配置刷新路径且全量审计已关闭，已关闭")
+                return
+            self._running = True
+            self._thread = threading.Thread(target=self._worker, daemon=True)
+            self._thread.start()
 
     def stop(self) -> None:
-        self._running = False
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2)
+        with self._lifecycle_lock:
+            self._running = False
+            self._config_changed.set()
+            old_thread = self._thread
+            self._thread = None
+        if old_thread and old_thread.is_alive():
+            old_thread.join(timeout=2)
 
     def _worker(self) -> None:
         # 兜底：任何未捕获异常不得杀死刷新线程，记录后继续下一轮。
@@ -116,13 +154,14 @@ class RefreshService:
         self._run_cycle_with_breaker()
 
         while self._running:
-            # 在循环内读取间隔，使热重载后的新间隔即时生效；
-            # 用 1 秒粒度睡眠兼顾快速停止（_running）与间隔变更感知。
+            self._config_changed.clear()
+            if not self._running:
+                break
+            if not self.app.config.refresh.enabled:
+                self._config_changed.wait()
+                continue
             interval = self.app.config.refresh.interval_seconds
-            waited = 0
-            while self._running and waited < interval:
-                time.sleep(1)
-                waited += 1
+            self._config_changed.wait(timeout=max(1, interval))
             if not self._running:
                 break
             self._run_cycle_with_breaker()

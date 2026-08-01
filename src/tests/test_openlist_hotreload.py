@@ -214,6 +214,21 @@ class TestReinitAdminClient:
 class TestHotReloadOpenlistConfig:
     """_hot_reload_openlist_config 异常吞咽测试。"""
 
+    def test_hot_reload_success_reconfigures_refresh_service(self):
+        server = _make_mock_server()
+        server._config.update_from_db = MagicMock()
+        server._config.load_strm_storage_from_api = MagicMock()
+        server._app_service.refresh_service = MagicMock()
+        _hot_reload_openlist_config(server)
+        server._app_service.refresh_service.reconfigure.assert_called_once_with()
+
+    def test_hot_reload_failure_does_not_reconfigure_refresh_service(self):
+        server = _make_mock_server()
+        server._config.update_from_db = MagicMock(side_effect=RuntimeError("bad config"))
+        server._app_service.refresh_service = MagicMock()
+        _hot_reload_openlist_config(server)
+        server._app_service.refresh_service.reconfigure.assert_not_called()
+
     def test_hot_reload_strm_reload_failure_is_swallowed(self):
         """load_strm_storage_from_api 抛异常 → 被 except 吞咽，无异常逃逸。
 

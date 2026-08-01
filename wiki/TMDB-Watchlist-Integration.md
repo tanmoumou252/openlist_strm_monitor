@@ -139,3 +139,7 @@ TMDB 待看列表页面提供：
 ### 手动覆盖机制
 
 `POST /api/tmdb/watchlist/match/override` 允许手动设置匹配状态。写入 `match_status` + `manual_override_at`（时间戳）+ `match_reason`（默认 `"manual_override"`）。后续自动匹配不会覆盖 `manual_override_at > 0` 的条目（除非用户再次手动触发）。
+
+### 清除覆盖
+
+`POST /api/tmdb/watchlist/match/clear` 允许清除手动覆盖，将条目恢复为 `uncomputed` 状态。写入 `match_status='uncomputed'`，清除 `manual_override_at` 和 `manual_override_by`。请求体：`{media_type: str, id: int}`。前端 TMDB 卡片翻转视图中的"恢复自动匹配"按钮调用此端点。调用前需检查 `watchlist_enabled` 开关（与 `/match/override` 行为一致）。

@@ -507,3 +507,58 @@ class TestExtractSeasonFromLocalPath:
         path = "/b/电影/某电影/Movie.S01E01.strm"
         season = _extract_season_from_local_path(path, allow_filename_fallback=False)
         assert season == "", f"all kind 应不从文件名提取季，实际得到: {season}"
+
+
+# ============================================================
+# Task 4: 电影误分季测试
+# ============================================================
+
+class TestMovieSeasonMisclassification:
+    """测试电影不应因文件名包含 SxxExx 而被错误分类为番剧/季。"""
+
+    def test_movie_with_s01e01_in_name_does_not_get_season_classification(self):
+        """电影文件名包含 S01E01 时，movie kind 下不应提取季"""
+        # 模拟电影文件路径：/b/电影/某电影/Movie.S01E01.strm
+        # 在 movie kind 下，allow_filename_fallback=False
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"电影 kind 下文件名 S01E01 不应产生季，实际得到: {season}"
+
+    def test_movie_with_s02e05_in_name_does_not_get_season_classification(self):
+        """电影文件名包含 S02E05 时，movie kind 下不应提取季"""
+        path = "/b/电影/某电影/Movie.S02E05.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"电影 kind 下文件名 S02E05 不应产生季，实际得到: {season}"
+
+    def test_movie_kind_filter_excludes_season_structure(self):
+        """movie kind 过滤器应正确排除有 Season 结构的条目"""
+        # 这是对 score_watchlist_item 的集成测试
+        # 电影条目不应匹配到有季结构的 B 区候选
+        item = _item(title="盗梦空间")
+        # 候选包含季结构（如番剧）
+        candidates = [_c("盗梦空间", season_num=1, episode_hint=True, season="第1季")]
+        status, reason = score_watchlist_item(item, candidates, "movie")
+        # 电影匹配不应考虑季结构，应基于名字匹配
+        # 如果名字匹配，应返回 matched（电影不关心季）
+        assert status in ("matched", "unmatched"), f"电影匹配不应返回 fuzzy，实际: {status}"
+        if status == "matched":
+            assert "movie_" in reason, f"电影匹配原因应以 movie_ 开头，实际: {reason}"
+
+    def test_movie_with_explicit_season_dir_recognized(self):
+        """电影路径包含显式 Season 目录时，所有 kind 都会识别季（现有行为）"""
+        # 显式 Season 目录在所有 kind 下都被识别（这是现有行为，由 test_explicit_season_dir_recognized_all_kinds 验证）
+        path = "/b/电影/某电影/Season 2/Movie.S02E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "S02", f"显式 Season 2 目录应被识别，实际得到: {season}"
+
+    def test_other_kind_with_s01e01_no_season(self):
+        """other kind 下文件名 S01E01 不产生季"""
+        path = "/b/其他/某内容/Content.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"other kind 下文件名 S01E01 不应产生季，实际得到: {season}"
+
+    def test_all_kind_with_s01e01_no_season(self):
+        """all kind 下文件名 S01E01 不产生季（安全行为）"""
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"all kind 下文件名 S01E01 不应产生季，实际得到: {season}"

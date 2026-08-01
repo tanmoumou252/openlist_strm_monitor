@@ -15,18 +15,11 @@ This file provides guidance to AI coding assistants when working with code in th
 9. **Prefer small, targeted changes** over large rewrites. This project is close to completion.
 10. **Do NOT fake verification** — use real commands, real server startup, and real API/UI checks when available. Do not claim tests were run unless they were actually executed.
 11. **Reply in Chinese**
-12. **Documentation must not use exact line numbers**. When referencing code locations in wiki/docs/README markdown files, use method names, function names, class names, or approximate ranges (e.g., "in the authentication section", "near the database initialization") instead of specific line numbers like "line 123" or "lines 45-67". Line numbers change frequently as code evolves, making such references quickly outdated and misleading.
-13. **Plan files must be written to disk, never kept as chat text only.** All implementation plans live in `.kilo/plans/` as persistent markdown files. The agent must write the plan file and verify it exists before any execution begins. Plans exist only in chat (not on disk) are considered draft-only and never authorize code changes.
-14. **Three-gate authorization model.** Every implementation task must pass through three distinct gates, each requiring explicit user confirmation:
-    - **Gate 1 — Plan Approved**: User confirms the plan file is acceptable. This only authorizes the plan content, never code changes.
-    - **Gate 2 — Execution Authorized**: User explicitly authorizes code changes (keywords: 执行, 执行吧, go, 开始, proceed). Without this, the agent must not write code, run tests, or run builds.
-    - **Gate 3 — Commit Authorized**: User explicitly authorizes git commit/push. Without this, the agent must not commit or push.
-    The agent must not conflate Gate 1 with Gate 2. Plan approval ≠ execution authorization.
-15. **Plan mode tool restrictions.** When the user says "先写计划" or "不许执行", the agent must:
-    - Only write to `.kilo/plans/` files
-    - Only read existing code for reference
-    - Not run tests, builds, or any write operations on source code
-    - Wait for explicit user authorization before any code change
+12. **No exact line numbers in markdown docs.** Reference method, function, or class names instead of `file.py:123` or "lines 45-67".
+13. **Plans must be written to `.kilo/plans/` before execution.** Chat-only plans are drafts and never authorize code changes.
+14. **Three gates, each needs explicit user confirmation**: plan approved → execution authorized (执行/go/开始) → commit authorized. Plan approval ≠ execution authorization.
+15. **In plan mode** ("先写计划" / "不许执行"): write only to `.kilo/plans/`, read code for reference, no tests/builds/source edits.
+16. **`todo.md` is off-limits** — user's personal memo, not part of the workspace. Never read, audit, or edit it.
 
 ## Configuration
 
@@ -196,7 +189,7 @@ The Vite config groups modules into chunks:
 - `Database` class uses read/write connection managers with `ReadWriteLock`
 
 ### A↔B Mapping Isolation (`mapping_id`)
-- `ABMapping` (config) and the `a_b_mappings` table define each A root ↔ B root relationship; every mapping needs a unique non-empty `mapping_id` and non-empty A/B roots, otherwise `get_config_status()` returns `fail_safe_active` / `not_configured` and startup refuses to launch watchers.
+- `ABMapping` (config) and the `a_b_mappings` config key in `webui_config` (scope=`openlist`) define each A root ↔ B root relationship; every mapping needs a unique non-empty `mapping_id` and non-empty A/B roots, otherwise `get_config_status()` returns `fail_safe_active` / `not_configured` and startup refuses to launch watchers.
 - `mapping_id` is the isolation boundary for B/C records, fingerprints, lineage, boundary snapshots, and identity projections. Never deduplicate across mappings, never share lineage, and never reuse another mapping's projection.
 - `get_mapping_for_a()` / `get_mapping_for_b()` fail closed: zero or multiple matches both return `None`. Any destructive path (cleanup, C-zone migration, dedup) must keep the source untouched when the mapping cannot be uniquely resolved or when the record's `mapping_id` disagrees with the resolved mapping.
 
@@ -313,3 +306,6 @@ The Vite config groups modules into chunks:
 | `src/webui/modules/pages/openlist.js` | OpenList config page. Engine select change handler at `_bindEngineSelectEvents()`. |
 | `src/config.py` | `AppConfig` dataclass. `load_strm_storage_from_api()` for dynamic storage mapping. |
 | `src/webdav_client.py` | JWT auth, Admin API, WebDAV protocol. TOTP support. |
+| `src/refresh_service.py` | Event-driven periodic WebDAV refresh. `RefreshService` with `_lifecycle_lock`, `reconfigure()`, `notify_config_changed()`. |
+| `src/watchlist_match.py` | TMDB watchlist vs local B-zone matching logic (three-level title match + structural verification). |
+| `src/tmdb_watchlist_db.py` | TMDB watchlist SQLite DB manager. `get_config()`/`set_config()` for `webui_config` (scope-based). |

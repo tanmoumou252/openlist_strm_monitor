@@ -643,11 +643,12 @@ class Database:
                     """,
                     (local_path, webdav_path, parent_webdav_path, now),
                 )
-                # 插入 FTS
+                # 插入 FTS（先清理可能残留的同 rowid 孤儿行）
                 new_row = conn.execute(
                     "SELECT rowid FROM a_strm_files WHERE local_path = ?", (local_path,)
                 ).fetchone()
                 if new_row:
+                    conn.execute("DELETE FROM a_strm_files_fts WHERE rowid = ?", (new_row[0],))
                     conn.execute(
                         "INSERT INTO a_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
                         (new_row[0], local_path, webdav_path),
@@ -724,11 +725,12 @@ class Database:
                         mapping_id,
                     ),
                 )
-                # 插入 FTS
+                # 插入 FTS（先清理可能残留的同 rowid 孤儿行）
                 new_row = conn.execute(
                     "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
                 ).fetchone()
                 if new_row:
+                    conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (new_row[0],))
                     conn.execute(
                         "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
                         (new_row[0], local_path, webdav_path),

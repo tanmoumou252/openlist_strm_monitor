@@ -626,6 +626,71 @@ class TestWebuiConfig:
 
 
 # ============================================================
+# clear_match_override + get_match_states
+# ============================================================
+
+class TestClearMatchOverride:
+    """清除人工覆盖后应恢复为 uncomputed 等待下次刷新。"""
+
+    def test_clear_resets_to_uncomputed(self, db):
+        db._upsert_movie(_movie(1), time.time())
+        db.override_match_state("movie", 1, "matched", "用户确认")
+        db.clear_match_override("movie", 1)
+        state = db.get_match_state("movie", 1)
+        assert state["manual_override_at"] == 0.0
+        assert state["manual_override_by"] == ""
+        assert state["match_status"] == "uncomputed"
+
+    def test_clear_tv(self, db):
+        db._upsert_tv(_tv(2), time.time())
+        db.override_match_state("tv", 2, "fuzzy", "存疑")
+        db.clear_match_override("tv", 2)
+        state = db.get_match_state("tv", 2)
+        assert state["manual_override_at"] == 0.0
+        assert state["manual_override_by"] == ""
+        assert state["match_status"] == "uncomputed"
+
+    def test_clear_nonexistent_is_noop(self, db):
+        # 不应抛异常
+        db.clear_match_override("movie", 999)
+
+
+class TestGetMatchStates:
+    """批量读取 match states 供统计使用。"""
+
+    def test_returns_dict_keyed_by_id(self, db):
+        now = time.time()
+        db._upsert_movie(_movie(1), now)
+        db._upsert_movie(_movie(2), now)
+        db.set_match_state("movie", 1, "matched", "reason1")
+        db.set_match_state("movie", 2, "fuzzy", "reason2")
+        result = db.get_match_states("movie", [1, 2])
+        assert 1 in result
+        assert 2 in result
+        assert result[1]["match_status"] == "matched"
+        assert result[2]["match_status"] == "fuzzy"
+
+    def test_missing_ids_not_in_result(self, db):
+        now = time.time()
+        db._upsert_movie(_movie(1), now)
+        result = db.get_match_states("movie", [1, 999])
+        assert 1 in result
+        assert 999 not in result
+
+    def test_empty_ids_returns_empty(self, db):
+        result = db.get_match_states("movie", [])
+        assert result == {}
+
+    def test_tv_table(self, db):
+        now = time.time()
+        db._upsert_tv(_tv(3), now)
+        db.set_match_state("tv", 3, "unmatched", "no candidate")
+        result = db.get_match_states("tv", [3])
+        assert 3 in result
+        assert result[3]["match_status"] == "unmatched"
+
+
+# ============================================================
 # 缓存状态与统计
 # ============================================================
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -422,6 +423,64 @@ class TestCheckEngineAccessibility:
                           return_value=None):
             result = svc._check_engine_accessibility({"/strm"})
             assert result == set()
+
+
+class TestRefreshServiceHotReloadContract:
+    def test_interval_change_wakes_waiting_worker(self):
+        app = _make_app(refresh_paths=["/strm"], interval_seconds=3600)
+        svc = RefreshService(app)
+        svc._run_cycle_with_breaker = MagicMock()
+        svc._running = True
+        worker = threading.Thread(target=svc._worker, daemon=True)
+        svc._thread = worker
+        worker.start()
+        time.sleep(0.05)
+        app.config.refresh.interval_seconds = 1
+        svc.notify_config_changed()
+        time.sleep(0.05)
+        svc.stop()
+        assert svc._run_cycle_with_breaker.call_count >= 2
+
+    def test_disabled_worker_waits_without_running_cycles(self):
+        app = _make_app(refresh_paths=["/strm"], refresh_enabled=False)
+        svc = RefreshService(app)
+        svc._run_cycle_with_breaker = MagicMock()
+        svc._running = True
+        worker = threading.Thread(target=svc._worker, daemon=True)
+        svc._thread = worker
+        worker.start()
+        time.sleep(0.05)
+        assert svc._run_cycle_with_breaker.call_count == 1
+        assert worker.is_alive()
+        svc.stop()
+
+    def test_reconfigure_does_not_create_duplicate_worker(self):
+        app = _make_app(refresh_paths=["/strm"])
+        svc = RefreshService(app)
+        with patch("refresh_service.threading.Thread") as thread_cls:
+            svc.start()
+            svc.reconfigure()
+        assert thread_cls.call_count == 1
+
+    def test_audit_completion_advances_generation(self):
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        app._current_mapping_ids.return_value = ["m1"]
+        with patch.object(app, "initial_scan_a"), patch.object(app, "scan_a_to_b_full_sync"):
+            svc = RefreshService(app)
+            with patch("refresh_service.time.time", return_value=8 * 86400):
+                svc._maybe_run_full_audit()
+        app.db.complete_index_generation.assert_called_once_with(["m1"])
+
+    def test_audit_with_empty_mappings_does_not_complete_generation(self):
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        app._current_mapping_ids.return_value = []
+        with patch.object(app, "initial_scan_a"), patch.object(app, "scan_a_to_b_full_sync"):
+            svc = RefreshService(app)
+            with patch("refresh_service.time.time", return_value=8 * 86400):
+                svc._maybe_run_full_audit()
+        app.db.complete_index_generation.assert_not_called()
 
 
 if __name__ == "__main__":

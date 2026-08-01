@@ -72,7 +72,8 @@ from app_service_core import AppService  # noqa: E402
 from webui.routes import (  # noqa: E402
     _tmdb_routes, _is_lan_ip, _try_bind_port,
     _handle_login, _handle_tmdb_configure, _handle_tmdb_watchlist_match_refresh,
-    _handle_tmdb_watchlist_match_override, _handle_tmdb_watchlist_bg_sync,
+    _handle_tmdb_watchlist_match_override, _handle_tmdb_watchlist_match_clear,
+    _handle_tmdb_watchlist_bg_sync,
     _handle_restart_webui, _handle_webui_config_get, _handle_webui_config_post,
     _handle_openlist_test_connection, _handle_openlist_strm_engines,
     _handle_openlist_monitored_paths, _handle_openlist_status,
@@ -596,6 +597,8 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             _handle_tmdb_watchlist_match_refresh(self, self.webui)
         elif path == "/api/tmdb/watchlist/match/override":
             _handle_tmdb_watchlist_match_override(self, self.webui, body)
+        elif path == "/api/tmdb/watchlist/match/clear":
+            _handle_tmdb_watchlist_match_clear(self, self.webui, body)
         elif path == "/api/tmdb/watchlist/sync":
             _handle_tmdb_watchlist_bg_sync(self, self.webui)
         elif path == "/api/restart-webui":
@@ -841,7 +844,8 @@ class WebUIServer:
     def refresh_watchlist_match_state(self) -> dict[str, int]:
         """刷新收录状态（独立运行模式使用）。"""
         if not self._watchlist_db or not self._db:
-            return {"matched": 0, "fuzzy": 0, "unmatched": 0, "total": 0}
+            return {"matched": 0, "fuzzy": 0, "unmatched": 0,
+                    "uncomputed": 0, "skipped_manual": 0, "total": 0}
         tmdb_cfg = getattr(self._config, "tmdb", None)
         fuzzy = float(
             getattr(
