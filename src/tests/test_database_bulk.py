@@ -492,3 +492,293 @@ class TestIndexGenerationControl:
         assert meta["last_full_index_at"] == 0
         assert meta["mapping_version"] == ""
         assert meta["mapping_version_generated_at"] == 0
+
+
+# ────────────────────────────────────────────────
+# upsert updated_at 时间语义与 FTS 收敛
+# ────────────────────────────────────────────────
+
+
+class TestUpsertTimestampSemantics:
+    """验证六个 upsert 实现只在业务字段真正变化时更新 updated_at，
+    并正确收敛 FTS 维护（无孤儿、无重复、仅对变化行同步）。"""
+
+    @staticmethod
+    def _query_a(db: Database, local_path: str):
+        with db.read_connection() as conn:
+            return conn.execute(
+                "SELECT webdav_path, parent_webdav_path, updated_at "
+                "FROM a_strm_files WHERE local_path = ?",
+                (local_path,),
+            ).fetchone()
+
+    @staticmethod
+    def _query_b(db: Database, local_path: str):
+        with db.read_connection() as conn:
+            return conn.execute(
+                "SELECT webdav_path, parent_webdav_path, source_a_path, "
+                "fingerprint, status, updated_at, mapping_id "
+                "FROM b_strm_files WHERE local_path = ?",
+                (local_path,),
+            ).fetchone()
+
+    @staticmethod
+    def _fts_a_count(db: Database) -> int:
+        with db.read_connection() as conn:
+            return conn.execute("SELECT COUNT(*) FROM a_strm_files_fts").fetchone()[0]
+
+    @staticmethod
+    def _fts_b_count(db: Database) -> int:
+        with db.read_connection() as conn:
+            return conn.execute("SELECT COUNT(*) FROM b_strm_files_fts").fetchone()[0]
+
+    @staticmethod
+    def _sleep():
+        # 保证 time.time() 在新版更新时一定会推进（比上次的值更大）
+        time.sleep(0.005)
+
+    # === upsert_a ===
+
+    def test_upsert_a_unchanged_keeps_updated_at(self, db: Database):
+        db.upsert_a("/a/x.strm", "/m/x.mp4", "/m")
+        first = self._query_a(db, "/a/x.strm")
+        self._sleep()
+        db.upsert_a("/a/x.strm", "/m/x.mp4", "/m")  # 完全相同的重复扫描
+        second = self._query_a(db, "/a/x.strm")
+        assert second[2] == first[2], "字段无变化时应保留原 updated_at"
+
+    def test_upsert_a_changed_updates_updated_at(self, db: Database):
+        db.upsert_a("/a/x.strm", "/m/x.mp4", "/m")
+        first = self._query_a(db, "/a/x.strm")
+        self._sleep()
+        db.upsert_a("/a/x.strm", "/m/x2.mp4", "/m")  # webdav_path 变化
+        second = self._query_a(db, "/a/x.strm")
+        assert second[2] > first[2], "webdav_path 变化时应更新 updated_at"
+        assert second[0] == "/m/x2.mp4"
+
+    def test_upsert_a_new_record_has_updated_at(self, db: Database):
+        db.upsert_a("/a/new.strm", "/m/new.mp4", "/m")
+        row = self._query_a(db, "/a/new.strm")
+        assert row is not None and row[2] > 0
+
+    def test_upsert_a_unchanged_no_duplicate_fts(self, db: Database):
+        db.upsert_a("/a/x.strm", "/m/x.mp4", "/m")
+        self._sleep()
+        db.upsert_a("/a/x.strm", "/m/x.mp4", "/m")
+        assert self._fts_a_count(db) == 1
+
+    def test_upsert_a_webdav_change_fts_old_missing_new_present(self, db: Database):
+        db.upsert_a("/a/x.strm", "/m/old.mp4", "/m")
+        self._sleep()
+        db.upsert_a("/a/x.strm", "/m/new.mp4", "/m")
+        with db.read_connection() as conn:
+            # rowid 稳定（ON CONFLICT 不改 rowid），按新路径可查到、按旧路径查不到
+            row = conn.execute("SELECT rowid FROM a_strm_files WHERE local_path = ?", ("/a/x.strm",)).fetchone()
+            assert row is not None
+            rid = row[0]
+            new_hit = conn.execute(
+                "SELECT rowid FROM a_strm_files_fts WHERE rowid = ? AND webdav_path MATCH 'new'",
+                (rid,),
+            ).fetchone()
+            assert new_hit is not None, "应能按新 webdav_path 查到 FTS"
+            old_hit = conn.execute(
+                "SELECT rowid FROM a_strm_files_fts WHERE rowid = ? AND webdav_path MATCH 'old'",
+                (rid,),
+            ).fetchone()
+            assert old_hit is None, "不应残留按旧 webdav_path 的 FTS"
+
+    # === upsert_b ===
+
+    def test_upsert_b_unchanged_keeps_updated_at(self, db: Database):
+        db.upsert_b("/b/x.strm", "/m/x.mp4", "/m", "/a/x.strm", "m1", "fp", "valid")
+        first = self._query_b(db, "/b/x.strm")
+        self._sleep()
+        db.upsert_b("/b/x.strm", "/m/x.mp4", "/m", "/a/x.strm", "m1", "fp", "valid")
+        second = self._query_b(db, "/b/x.strm")
+        assert second[5] == first[5], "字段无变化时应保留原 updated_at"
+
+    def test_upsert_b_changed_updates_updated_at(self, db: Database):
+        db.upsert_b("/b/x.strm", "/m/x.mp4", "/m", "/a/x.strm", "m1", "fp", "valid")
+        first = self._query_b(db, "/b/x.strm")
+        self._sleep()
+        db.upsert_b("/b/x.strm", "/m/x2.mp4", "/m", "/a/x.strm", "m1", "fp", "valid")
+        second = self._query_b(db, "/b/x.strm")
+        assert second[5] > first[5], "业务字段变化时应更新 updated_at"
+
+    def test_upsert_b_status_change_updates_updated_at(self, db: Database):
+        """upsert_b / upsert_b_batch 的 status 是业务字段，变化应更新 updated_at。"""
+        db.upsert_b("/b/x.strm", "/m/x.mp4", "/m", "/a/x.strm", "m1", "fp", "valid")
+        first = self._query_b(db, "/b/x.strm")
+        self._sleep()
+        db.upsert_b("/b/x.strm", "/m/x.mp4", "/m", "/a/x.strm", "m1", "fp", "duplicate")
+        second = self._query_b(db, "/b/x.strm")
+        assert second[5] > first[5], "status 变化应更新 updated_at"
+        assert second[4] == "duplicate"
+
+    def test_upsert_b_fingerprint_null_keeps_updated_at(self, db: Database):
+        """NULL 与 NULL 视为相等，不触发 updated_at 更新。"""
+        db.upsert_b("/b/x.strm", "/m/x.mp4", "/m", None, "m1", None, "valid")
+        first = self._query_b(db, "/b/x.strm")
+        self._sleep()
+        db.upsert_b("/b/x.strm", "/m/x.mp4", "/m", None, "m1", None, "valid")
+        second = self._query_b(db, "/b/x.strm")
+        assert second[5] == first[5]
+
+    def test_upsert_b_unchanged_no_duplicate_fts(self, db: Database):
+        db.upsert_b("/b/x.strm", "/m/x.mp4", "/m", "/a/x.strm", "m1", "fp", "valid")
+        self._sleep()
+        db.upsert_b("/b/x.strm", "/m/x.mp4", "/m", "/a/x.strm", "m1", "fp", "valid")
+        assert self._fts_b_count(db) == 1
+
+    def test_upsert_b_mapping_id_required(self, db: Database):
+        with pytest.raises(ValueError):
+            db.upsert_b("/b/x.strm", "/m/x.mp4", "/m", "/a/x.strm", "", "fp", "valid")
+
+    # === upsert_a_batch ===
+
+    def test_upsert_a_batch_unchanged_keeps_updated_at(self, db: Database):
+        db.upsert_a_batch([("/a/1.strm", "/m/1.mp4", "/m"), ("/a/2.strm", "/m/2.mp4", "/m")])
+        first = {lp: self._query_a(db, lp)[2] for lp in ("/a/1.strm", "/a/2.strm")}
+        self._sleep()
+        db.upsert_a_batch([("/a/1.strm", "/m/1.mp4", "/m"), ("/a/2.strm", "/m/2.mp4", "/m")])
+        second = {lp: self._query_a(db, lp)[2] for lp in ("/a/1.strm", "/a/2.strm")}
+        assert second == first, "批量重复扫描应保留全部 updated_at"
+
+    def test_upsert_a_batch_changed_updates_only_changed(self, db: Database):
+        db.upsert_a_batch([("/a/1.strm", "/m/1.mp4", "/m"), ("/a/2.strm", "/m/2.mp4", "/m")])
+        first = {lp: self._query_a(db, lp)[2] for lp in ("/a/1.strm", "/a/2.strm")}
+        self._sleep()
+        # 只改第一条
+        db.upsert_a_batch([("/a/1.strm", "/m/1b.mp4", "/m"), ("/a/2.strm", "/m/2.mp4", "/m")])
+        second = {lp: self._query_a(db, lp)[2] for lp in ("/a/1.strm", "/a/2.strm")}
+        assert second["/a/1.strm"] > first["/a/1.strm"], "变化的行应更新 updated_at"
+        assert second["/a/2.strm"] == first["/a/2.strm"], "未变化的行应保留 updated_at"
+
+    def test_upsert_a_batch_returns_processed_count(self, db: Database):
+        """int 返回值语义保持『本批处理条数』，不改为变化条数。"""
+        n = db.upsert_a_batch([("/a/1.strm", "/m/1.mp4", "/m"), ("/a/2.strm", "/m/2.mp4", "/m")])
+        assert n == 2
+        # 第二批全部无变化，返回值仍为本批处理条数
+        self._sleep()
+        n2 = db.upsert_a_batch([("/a/1.strm", "/m/1.mp4", "/m"), ("/a/2.strm", "/m/2.mp4", "/m")])
+        assert n2 == 2, "返回值不得改为『变化条数』"
+
+    def test_upsert_a_batch_new_record_has_updated_at(self, db: Database):
+        db.upsert_a_batch([("/a/new.strm", "/m/new.mp4", "/m")])
+        row = self._query_a(db, "/a/new.strm")
+        assert row is not None and row[2] > 0
+
+    def test_upsert_a_batch_no_duplicate_fts(self, db: Database):
+        db.upsert_a_batch([("/a/1.strm", "/m/1.mp4", "/m")])
+        self._sleep()
+        db.upsert_a_batch([("/a/1.strm", "/m/1.mp4", "/m")])
+        assert self._fts_a_count(db) == 1
+
+    def test_upsert_a_batch_webdav_change_fts(self, db: Database):
+        db.upsert_a_batch([("/a/1.strm", "/m/old.mp4", "/m")])
+        self._sleep()
+        db.upsert_a_batch([("/a/1.strm", "/m/new.mp4", "/m")])
+        with db.read_connection() as conn:
+            row = conn.execute("SELECT rowid FROM a_strm_files WHERE local_path = ?", ("/a/1.strm",)).fetchone()
+            rid = row[0]
+            new_hit = conn.execute(
+                "SELECT rowid FROM a_strm_files_fts WHERE rowid = ? AND webdav_path MATCH 'new'",
+                (rid,),
+            ).fetchone()
+            old_hit = conn.execute(
+                "SELECT rowid FROM a_strm_files_fts WHERE rowid = ? AND webdav_path MATCH 'old'",
+                (rid,),
+            ).fetchone()
+            assert new_hit is not None and old_hit is None
+
+    def test_upsert_a_batch_empty_returns_zero(self, db: Database):
+        assert db.upsert_a_batch([]) == 0
+
+    # === upsert_b_batch ===
+
+    def test_upsert_b_batch_unchanged_keeps_updated_at(self, db: Database):
+        recs = [("/b/1.strm", "/m/1.mp4", "/m", "/a/1.strm", "fp1", "m1", "valid"),
+                ("/b/2.strm", "/m/2.mp4", "/m", "/a/2.strm", "fp2", "m1", "valid")]
+        db.upsert_b_batch(recs)
+        first = {lp: self._query_b(db, lp)[5] for lp in ("/b/1.strm", "/b/2.strm")}
+        self._sleep()
+        db.upsert_b_batch(recs)
+        second = {lp: self._query_b(db, lp)[5] for lp in ("/b/1.strm", "/b/2.strm")}
+        assert second == first
+
+    def test_upsert_b_batch_changed_updates_only_changed(self, db: Database):
+        recs = [("/b/1.strm", "/m/1.mp4", "/m", "/a/1.strm", "fp1", "m1", "valid"),
+                ("/b/2.strm", "/m/2.mp4", "/m", "/a/2.strm", "fp2", "m1", "valid")]
+        db.upsert_b_batch(recs)
+        first = {lp: self._query_b(db, lp)[5] for lp in ("/b/1.strm", "/b/2.strm")}
+        self._sleep()
+        # 第一条改 webdav_path，第二条完全不变
+        recs2 = [("/b/1.strm", "/m/1b.mp4", "/m", "/a/1.strm", "fp1", "m1", "valid"),
+                 ("/b/2.strm", "/m/2.mp4", "/m", "/a/2.strm", "fp2", "m1", "valid")]
+        db.upsert_b_batch(recs2)
+        second = {lp: self._query_b(db, lp)[5] for lp in ("/b/1.strm", "/b/2.strm")}
+        assert second["/b/1.strm"] > first["/b/1.strm"]
+        assert second["/b/2.strm"] == first["/b/2.strm"]
+
+    def test_upsert_b_batch_status_change_updates_updated_at(self, db: Database):
+        recs = [("/b/1.strm", "/m/1.mp4", "/m", "/a/1.strm", "fp1", "m1", "valid")]
+        db.upsert_b_batch(recs)
+        first = self._query_b(db, "/b/1.strm")[5]
+        self._sleep()
+        recs2 = [("/b/1.strm", "/m/1.mp4", "/m", "/a/1.strm", "fp1", "m1", "duplicate")]
+        db.upsert_b_batch(recs2)
+        second = self._query_b(db, "/b/1.strm")[5]
+        assert second > first, "status 变化应更新 updated_at"
+        assert self._query_b(db, "/b/1.strm")[4] == "duplicate"
+
+    def test_upsert_b_batch_returns_processed_count(self, db: Database):
+        recs = [("/b/1.strm", "/m/1.mp4", "/m", "/a/1.strm", "fp1", "m1", "valid"),
+                ("/b/2.strm", "/m/2.mp4", "/m", "/a/2.strm", "fp2", "m1", "valid")]
+        n = db.upsert_b_batch(recs)
+        assert n == 2
+        self._sleep()
+        n2 = db.upsert_b_batch(recs)  # 全部无变化
+        assert n2 == 2, "返回值不得改为『变化条数』"
+
+    def test_upsert_b_batch_mapping_id_required(self, db: Database):
+        with pytest.raises(ValueError):
+            db.upsert_b_batch([("/b/1.strm", "/m/1.mp4", "/m", "/a/1.strm", "fp1", "", "valid")])
+
+    def test_upsert_b_batch_no_duplicate_fts(self, db: Database):
+        recs = [("/b/1.strm", "/m/1.mp4", "/m", "/a/1.strm", "fp1", "m1", "valid")]
+        db.upsert_b_batch(recs)
+        self._sleep()
+        db.upsert_b_batch(recs)
+        assert self._fts_b_count(db) == 1
+
+    # === upsert_c 回归（moved_at 语义零变化） ===
+
+    def test_upsert_c_moved_at_changes_each_call(self, db: Database):
+        """upsert_c 不属于本次改动范围，其 moved_at 语义每次都更新（回归断言）。"""
+        db.upsert_c("/c/x.strm", "/m/x.mp4", "/b/x.strm", "/c/root")
+        with db.read_connection() as conn:
+            first = conn.execute("SELECT moved_at FROM c_ghost_files WHERE local_path = ?", ("/c/x.strm",)).fetchone()[0]
+        self._sleep()
+        db.upsert_c("/c/x.strm", "/m/x.mp4", "/b/x.strm", "/c/root")
+        with db.read_connection() as conn:
+            second = conn.execute("SELECT moved_at FROM c_ghost_files WHERE local_path = ?", ("/c/x.strm",)).fetchone()[0]
+        assert second > first, "upsert_c 的 moved_at 语义应每次更新，不被本次改动影响"
+
+    # === 综合：FTS 行数与主表一致（无孤儿） ===
+
+    def test_upsert_a_b_mixed_no_orphan_fts(self, db: Database):
+        """混合 upsert_a / upsert_b 重复扫描后，FTS 行数始终与主表一致。"""
+        db.upsert_a("/a/x.strm", "/m/x.mp4", "/m")
+        db.upsert_b("/b/x.strm", "/m/x.mp4", "/m", "/a/x.strm", "m1", "fp", "valid")
+        self._sleep()
+        # 重复扫描多次（每次无变化）
+        for _ in range(3):
+            db.upsert_a("/a/x.strm", "/m/x.mp4", "/m")
+            db.upsert_b("/b/x.strm", "/m/x.mp4", "/m", "/a/x.strm", "m1", "fp", "valid")
+        with db.read_connection() as conn:
+            a_main = conn.execute("SELECT COUNT(*) FROM a_strm_files").fetchone()[0]
+            a_fts = conn.execute("SELECT COUNT(*) FROM a_strm_files_fts").fetchone()[0]
+            b_main = conn.execute("SELECT COUNT(*) FROM b_strm_files").fetchone()[0]
+            b_fts = conn.execute("SELECT COUNT(*) FROM b_strm_files_fts").fetchone()[0]
+            assert a_fts == a_main == 1
+            assert b_fts == b_main == 1

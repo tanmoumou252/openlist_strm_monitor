@@ -158,8 +158,15 @@ def _media_info(record: dict) -> tuple[str, str]:
     return kind, media_name or (Path(parts[-1]).stem if parts else "未分类")
 
 
-def _extract_season_from_local_path(local_path: str) -> str:
-    """从本地路径中提取季信息，返回如 'S01' 或 '第一季' 的字符串"""
+def _extract_season_from_local_path(local_path: str, allow_filename_fallback: bool = True) -> str:
+    """从本地路径中提取季信息，返回如 'S01' 或 '第一季' 的字符串
+
+    Args:
+        local_path: 本地文件路径
+        allow_filename_fallback: 是否允许从文件名提取季信息（SxxExx 格式）。
+            - True (默认): 保持原有行为，允许从文件名提取
+            - False: 仅从目录名提取，不从文件名提取（用于 movie/other/all kind）
+    """
     parts = _path_parts(local_path)
     for part in reversed(parts[:-1]):  # 不看文件名本身
         sn = _extract_season_int(part)
@@ -171,11 +178,12 @@ def _extract_season_from_local_path(local_path: str) -> str:
             num = _cn_to_int(m.group(1))
             if num:
                 return f"S{num:02d}"
-    # 从文件名提取
-    stem = Path(parts[-1]).stem if parts else ""
-    m = re.search(r"S(\d{1,2})E", stem, re.I)
-    if m:
-        return f"S{int(m.group(1)):02d}"
+    # 从文件名提取（仅当 allow_filename_fallback=True 时）
+    if allow_filename_fallback:
+        stem = Path(parts[-1]).stem if parts else ""
+        m = re.search(r"S(\d{1,2})E", stem, re.I)
+        if m:
+            return f"S{int(m.group(1)):02d}"
     return ""
 
 

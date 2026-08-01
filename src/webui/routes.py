@@ -2491,6 +2491,11 @@ def handle_area_detail(handler, area, params) -> None:
     - 详情页：按 mapping_id 分区，每个 mapping 独立根路径/季分组/分页
     - 单一 mapping：保持向后兼容扁平响应
     - 多 mapping：返回 mappings 数组
+    
+    Task 4: 支持 kind 参数控制季提取行为
+    - kind ∈ {anime, movie, other, all}，非法值降级为 all
+    - 仅 kind == 'anime' 允许文件名 SxxExx fallback
+    - movie/other/all 只认目录显式季标识，否则归入「默认」
     """
     if area not in ("a", "b", "c"):
         handler._send_json({"error": "无效区域"}, 400)
@@ -2500,6 +2505,14 @@ def handle_area_detail(handler, area, params) -> None:
     sort_field = params.get("sort", ["local_path"])[0]
     sort_order = params.get("order", ["asc"])[0]
     page = _safe_int(params.get("page", ["1"])[0], 1)
+    
+    # Task 4: 读取并校验 kind 参数
+    kind = params.get("kind", [""])[0].strip().lower()
+    valid_kinds = {"anime", "movie", "other", "all"}
+    if kind not in valid_kinds:
+        kind = "all"  # 非法值降级为 all（安全行为）
+    # 仅 anime 允许文件名 fallback
+    allow_filename_fallback = (kind == "anime")
 
     # 排序白名单校验
     allowed_fields = _AREA_SORT_FIELDS.get(area, {"local_path"})
@@ -2585,17 +2598,19 @@ def handle_area_detail(handler, area, params) -> None:
         for mid, records in mapping_groups.items():
             mapping_meta = _process_mapping_partition(
                 db, app_service, area, records, mid,
-                sort_field, sort_order, page, handler
+                sort_field, sort_order, page, handler,
+                allow_filename_fallback
             )
             mappings_result.append(mapping_meta)
         
         # 单一 mapping 向后兼容（扁平响应）
+        # Fix R3: 使用 mappings_result[0]["mapping_id"] 而非循环残留变量 mid
         if len(mappings_result) == 1:
             result = mappings_result[0]
             result["area"] = area
             result["media"] = media_name
-            result["mapping_id"] = mid
-            result["index_metadata"] = db.get_index_metadata(mid)
+            result["mapping_id"] = result["mapping_id"]  # 使用分区处理返回的真实 mapping_id
+            result["index_metadata"] = db.get_index_metadata(result["mapping_id"])
             handler._send_json(result)
         else:
             # 多 mapping 返回 mappings 数组
@@ -2611,7 +2626,7 @@ def handle_area_detail(handler, area, params) -> None:
                 "mappings": mappings_result,
             })
     else:
-        # C 区：不按 mapping 分区（保持现有逻辑）
+        # C 区：不按 mapping 分区，但复用分页切片逻辑（Fix R2）
         local_root = ""
         webdav_root = ""
         strm_engine_root = ""
@@ -2625,11 +2640,13 @@ def handle_area_detail(handler, area, params) -> None:
 
         total_pages = max(1, ceil(total / PAGE_SIZE)) if total else 1
         page = max(1, min(page, total_pages))
+        offset = (page - 1) * PAGE_SIZE
+        paged_records = all_records[offset:offset + PAGE_SIZE]
 
-        # 按季分组
+        # 按季分组（使用 allow_filename_fallback）
         seasons_map: dict[str, list[dict]] = {}
-        for rec in all_records:
-            label = _extract_season_from_local_path(rec.get("local_path", "")) or "默认"
+        for rec in paged_records:
+            label = _extract_season_from_local_path(rec.get("local_path", ""), allow_filename_fallback) or "默认"
             seasons_map.setdefault(label, []).append(rec)
 
         # 排序
@@ -2666,6 +2683,7 @@ def _process_mapping_partition(
     sort_order: str,
     page: int,
     handler,
+    allow_filename_fallback: bool = True,
 ) -> dict:
     """处理单个 mapping 分区的数据：独立分页、排序、计算根路径和 index_metadata。"""
     # 计算根路径
@@ -2687,10 +2705,10 @@ def _process_mapping_partition(
     offset = (page - 1) * PAGE_SIZE
     paged_records = records[offset:offset + PAGE_SIZE]
 
-    # 按季分组
+    # 按季分组（使用 allow_filename_fallback）
     seasons_map: dict[str, list[dict]] = {}
     for rec in paged_records:
-        label = _extract_season_from_local_path(rec.get("local_path", "")) or "默认"
+        label = _extract_season_from_local_path(rec.get("local_path", ""), allow_filename_fallback) or "默认"
         seasons_map.setdefault(label, []).append(rec)
 
     # 排序

@@ -171,11 +171,14 @@ async function renderAreaDetail(el, area, params) {
   const order = params.order || 'asc';
   const page = parseInt(params.page) || 1;
   const q = params.q || '';
+  const mappingIdParam = params.mapping_id || '';
 
   let url = `/api/area/${area}/detail?media=${encodeURIComponent(media)}`;
   if (sort) url += '&sort=' + encodeURIComponent(sort);
   if (order) url += '&order=' + encodeURIComponent(order);
+  if (kind) url += '&kind=' + encodeURIComponent(kind);
   url += '&page=' + page;
+  if (mappingIdParam) url += '&mapping_id=' + encodeURIComponent(mappingIdParam);
 
   const d = await api(url);
 
@@ -191,17 +194,18 @@ async function renderAreaDetail(el, area, params) {
   // Task 2: 检测是否为多 mapping 场景
   const isMultiMapping = d.mappings && Array.isArray(d.mappings) && d.mappings.length > 0;
   
+  // Fix R4: expandBtns 提到分支外统一渲染一次
+  const expandBtns = `<div class="detail-actions">
+  <button class="toolbar-btn" id="expand-all-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('expand')} 展开全部</button>
+  <button class="toolbar-btn" id="collapse-all-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('collapse')} 折叠全部</button>
+  </div>`;
+
   let html = `
 <div class="toolbar" style="gap:12px">
   <a href="#area_${area}${kindPart}" class="back-icon-btn" title="返回列表">${icon('back')}</a>
   <span style="color:var(--text-main);font-size:14px;font-weight:600">${esc(media)}</span>
   <span style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px)">· ${d.total} 个文件</span>
-  ${(area === 'a' || area === 'b') ? `<button class="toolbar-btn" id="refresh-media-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button>` : ''}
-</div>`;
-
-  const expandBtns = `<div class="detail-actions">
-  <button class="toolbar-btn" id="expand-all-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('expand')} 展开全部</button>
-  <button class="toolbar-btn" id="collapse-all-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('collapse')} 折叠全部</button>
+  ${(area === 'a' || area === 'b') ? `<button class="toolbar-btn" id="refresh-media-btn" data-mapping-id="${mappingIdParam}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button>` : ''}
 </div>`;
 
   // Task 2: 多 mapping 场景渲染
@@ -229,10 +233,15 @@ async function renderAreaDetail(el, area, params) {
       if (webdavRoot) html += `<div class="path-line"><span class="path-label">WebDAV 根：</span><span class="path-value mono">${esc(webdavRoot)}</span></div>`;
       if (strmEngineRoot) html += `<div class="path-line"><span class="path-label">STRM 入口：</span><span class="path-value mono">${esc(strmEngineRoot)}</span></div>`;
       html += `</div>`;
+      
+      // Fix R5: 多 mapping 模式下每个分区渲染独立刷新按钮
+      if (area === 'a' || area === 'b') {
+        html += `<div class="toolbar" style="margin-top:8px;justify-content:flex-end"><button class="toolbar-btn" id="refresh-media-btn" data-mapping-id="${mappingId}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button></div>`;
+      }
       html += `</div>`;
       
       // 季分组（独立）
-      html += _renderSeasons(area, mapping.seasons || [], sort, order, kind, q, media, localRoot, webdavRoot, expandBtns, mappingId);
+      html += _renderSeasons(area, mapping.seasons || [], sort, order, kind, q, media, localRoot, webdavRoot, mappingId);
       
       // 分页（独立）
       if (mapping.total_pages > 1) {
@@ -275,7 +284,7 @@ async function renderAreaDetail(el, area, params) {
     }
     
     // 季分组
-    html += _renderSeasons(area, d.seasons || [], sort, order, kind, q, media, localRoot, webdavRoot, expandBtns, mappingId);
+    html += _renderSeasons(area, d.seasons || [], sort, order, kind, q, media, localRoot, webdavRoot, mappingId);
     
     // 分页
     if (d.total_pages > 1) {
@@ -310,16 +319,18 @@ async function renderAreaDetail(el, area, params) {
   });
   setDetailToggleState(document.querySelectorAll('.season-details').length > 0);
 
-  // 绑定刷新按钮事件
-  const refreshBtn = document.getElementById('refresh-media-btn');
-  if (refreshBtn) {
+  // 绑定刷新按钮事件（支持多 mapping 模式下的多个刷新按钮）
+  document.querySelectorAll('#refresh-media-btn').forEach(refreshBtn => {
+    const btnMappingId = refreshBtn.dataset.mappingId || '';
     const doRefresh = async () => {
       refreshBtn.disabled = true;
       refreshBtn.innerHTML = `${icon('loading')} 刷新中...`;
       try {
+        const body = { media };
+        if (btnMappingId) body.mapping_id = btnMappingId;
         const result = await api(`/api/area/${area}/refresh`, {
           method: 'POST',
-          body: JSON.stringify({ media })
+          body: JSON.stringify(body)
         });
 
         if (result.ok) {
@@ -346,11 +357,11 @@ async function renderAreaDetail(el, area, params) {
         null
       );
     });
-  }
+  });
 }
 
 // Task 2: 渲染季分组和记录表
-function _renderSeasons(area, seasons, sort, order, kind, q, media, localRoot, webdavRoot, expandBtns, mappingId) {
+function _renderSeasons(area, seasons, sort, order, kind, q, media, localRoot, webdavRoot, mappingId) {
   function stripPath(p, root) {
     if (root && p.startsWith(root)) return p.slice(root.length);
     return p;

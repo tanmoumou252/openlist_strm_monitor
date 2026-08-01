@@ -627,30 +627,58 @@ class Database:
                  parent_webdav_path: str) -> None:
         now = time.time()
         with self.rw_lock.write_locked(), self.connection() as conn:
-            # 先获取旧 rowid（如果存在），删除旧 FTS 行（避免 REPLACE 改变 rowid 后残留孤儿）
+            # 预读现有记录
             old_row = conn.execute(
-                "SELECT rowid FROM a_strm_files WHERE local_path = ?", (local_path,)
+                "SELECT rowid, webdav_path, parent_webdav_path, updated_at "
+                "FROM a_strm_files WHERE local_path = ?",
+                (local_path,),
             ).fetchone()
-            if old_row:
-                conn.execute("DELETE FROM a_strm_files_fts WHERE rowid = ?", (old_row[0],))
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (local_path, webdav_path, parent_webdav_path, now),
-            )
-            # 获取新 rowid，插入新 FTS 行
-            new_row = conn.execute(
-                "SELECT rowid FROM a_strm_files WHERE local_path = ?", (local_path,)
-            ).fetchone()
-            if new_row:
-                # 先删除该 rowid 上可能残留的孤儿 FTS 行（防止 constraint failed）
-                conn.execute("DELETE FROM a_strm_files_fts WHERE rowid = ?", (new_row[0],))
+
+            if old_row is None:
+                # 新增记录
                 conn.execute(
-                    "INSERT INTO a_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
-                    (new_row[0], local_path, webdav_path),
+                    """
+                    INSERT INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (local_path, webdav_path, parent_webdav_path, now),
                 )
+                # 插入 FTS
+                new_row = conn.execute(
+                    "SELECT rowid FROM a_strm_files WHERE local_path = ?", (local_path,)
+                ).fetchone()
+                if new_row:
+                    conn.execute(
+                        "INSERT INTO a_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                        (new_row[0], local_path, webdav_path),
+                    )
+            else:
+                # 现有记录：比较业务字段
+                old_rowid, old_webdav, old_parent, old_updated = old_row
+                fields_changed = (
+                    old_webdav != webdav_path or
+                    old_parent != parent_webdav_path
+                )
+
+                if fields_changed:
+                    # 字段变化：更新记录和时间戳
+                    conn.execute(
+                        """
+                        UPDATE a_strm_files
+                        SET webdav_path = ?, parent_webdav_path = ?, updated_at = ?
+                        WHERE local_path = ?
+                        """,
+                        (webdav_path, parent_webdav_path, now, local_path),
+                    )
+                    # webdav_path 变化时同步 FTS
+                    if old_webdav != webdav_path:
+                        conn.execute("DELETE FROM a_strm_files_fts WHERE rowid = ?", (old_rowid,))
+                        conn.execute(
+                            "INSERT INTO a_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                            (old_rowid, local_path, webdav_path),
+                        )
+                # 字段无变化：保留原 updated_at，不操作 FTS
+
             conn.commit()
 
     def upsert_b(
@@ -667,48 +695,87 @@ class Database:
             raise ValueError("upsert_b: mapping_id must be a non-empty string")
         now = time.time()
         with self.rw_lock.write_locked(), self.connection() as conn:
-            # 先获取旧 rowid(如果存在),删除旧 FTS 行(避免 REPLACE 改变 rowid 后残留孤儿)
+            # 预读现有记录
             old_row = conn.execute(
-                "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
+                "SELECT rowid, webdav_path, parent_webdav_path, source_a_path, "
+                "fingerprint, status, mapping_id, updated_at "
+                "FROM b_strm_files WHERE local_path = ?",
+                (local_path,),
             ).fetchone()
-            if old_row:
-                conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (old_row[0],))
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO b_strm_files(
-                    local_path,
-                    webdav_path,
-                    parent_webdav_path,
-                    source_a_path,
-                    fingerprint,
-                    status,
-                    updated_at,
-                    mapping_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    local_path,
-                    webdav_path,
-                    parent_webdav_path,
-                    source_a_path,
-                    fingerprint,
-                    status,
-                    now,
-                    mapping_id,
-                ),
-            )
-            # 获取新 rowid,插入新 FTS 行
-            new_row = conn.execute(
-                "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
-            ).fetchone()
-            if new_row:
-                # 先删除该 rowid 上可能残留的孤儿 FTS 行(防止 constraint failed)
-                conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (new_row[0],))
+
+            if old_row is None:
+                # 新增记录
                 conn.execute(
-                    "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
-                    (new_row[0], local_path, webdav_path),
+                    """
+                    INSERT INTO b_strm_files(
+                        local_path, webdav_path, parent_webdav_path,
+                        source_a_path, fingerprint, status, updated_at, mapping_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        local_path,
+                        webdav_path,
+                        parent_webdav_path,
+                        source_a_path,
+                        fingerprint,
+                        status,
+                        now,
+                        mapping_id,
+                    ),
                 )
+                # 插入 FTS
+                new_row = conn.execute(
+                    "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
+                ).fetchone()
+                if new_row:
+                    conn.execute(
+                        "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                        (new_row[0], local_path, webdav_path),
+                    )
+            else:
+                # 现有记录：比较业务字段
+                (old_rowid, old_webdav, old_parent, old_source,
+                 old_fp, old_status, old_mapping, old_updated) = old_row
+                fields_changed = (
+                    old_webdav != webdav_path or
+                    old_parent != parent_webdav_path or
+                    old_source != source_a_path or
+                    old_fp != fingerprint or
+                    old_status != status or
+                    old_mapping != mapping_id
+                )
+
+                if fields_changed:
+                    # 字段变化：更新记录和时间戳
+                    conn.execute(
+                        """
+                        UPDATE b_strm_files
+                        SET webdav_path = ?, parent_webdav_path = ?,
+                            source_a_path = ?, fingerprint = ?,
+                            status = ?, mapping_id = ?, updated_at = ?
+                        WHERE local_path = ?
+                        """,
+                        (
+                            webdav_path,
+                            parent_webdav_path,
+                            source_a_path,
+                            fingerprint,
+                            status,
+                            mapping_id,
+                            now,
+                            local_path,
+                        ),
+                    )
+                    # webdav_path 变化时同步 FTS
+                    if old_webdav != webdav_path:
+                        conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (old_rowid,))
+                        conn.execute(
+                            "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                            (old_rowid, local_path, webdav_path),
+                        )
+                # 字段无变化：保留原 updated_at，不操作 FTS
+
             conn.commit()
 
     def upsert_c(
@@ -2039,40 +2106,79 @@ class Database:
         if not records:
             return 0
         now = time.time()
-        data = [(lp, wp, pwp, now) for lp, wp, pwp in records]
         with self.rw_lock.write_locked(), self.connection() as conn:
-            # INSERT OR REPLACE 会改变已存在行的 rowid，先记录旧 rowid 以清理其 FTS 行，
-            # 避免旧 FTS 行成为孤儿（防止孤儿 / rowid 复用冲突）
-            old_rowids: list[int] = []
-            for lp, _wp, _pwp in records:
-                row = conn.execute(
-                    "SELECT rowid FROM a_strm_files WHERE local_path = ?", (lp,)
-                ).fetchone()
-                if row:
-                    old_rowids.append(row[0])
-            conn.executemany(
-                """
-                INSERT OR REPLACE INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                data,
-            )
-            # 同步 FTS：先清理旧 rowid 的 FTS 行，再按新 rowid 重建
-            for rid in old_rowids:
-                conn.execute("DELETE FROM a_strm_files_fts WHERE rowid = ?", (rid,))
-            for lp, wp, _pwp in records:
-                new_row = conn.execute(
-                    "SELECT rowid FROM a_strm_files WHERE local_path = ?", (lp,)
-                ).fetchone()
-                if new_row:
-                    conn.execute(
-                        "DELETE FROM a_strm_files_fts WHERE rowid = ?", (new_row[0],))
-                    conn.execute(
-                        "INSERT INTO a_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
-                        (new_row[0], lp, wp),
-                    )
+            # 预读现有记录
+            local_paths = [r[0] for r in records]
+            placeholders = ','.join('?' * len(local_paths))
+            existing_rows = conn.execute(
+                f"SELECT local_path, webdav_path, parent_webdav_path, updated_at "
+                f"FROM a_strm_files WHERE local_path IN ({placeholders})",
+                local_paths,
+            ).fetchall()
+            existing_map = {row[0]: (row[1], row[2], row[3]) for row in existing_rows}
+
+            # 分类：新增 vs 更新
+            to_insert = []
+            to_update = []
+            for local_path, webdav_path, parent_webdav_path in records:
+                if local_path not in existing_map:
+                    # 新增
+                    to_insert.append((local_path, webdav_path, parent_webdav_path, now))
+                else:
+                    # 现有记录：比较业务字段
+                    old_webdav, old_parent, old_updated = existing_map[local_path]
+                    if old_webdav != webdav_path or old_parent != parent_webdav_path:
+                        # 字段变化
+                        to_update.append((webdav_path, parent_webdav_path, now, local_path,
+                                         old_webdav, webdav_path))
+
+            # 执行 INSERT
+            if to_insert:
+                conn.executemany(
+                    """
+                    INSERT INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    to_insert,
+                )
+
+            # 执行 UPDATE
+            for update_data in to_update:
+                webdav_path, parent_webdav_path, now, local_path, old_webdav, new_webdav = update_data
+                conn.execute(
+                    """
+                    UPDATE a_strm_files
+                    SET webdav_path = ?, parent_webdav_path = ?, updated_at = ?
+                    WHERE local_path = ?
+                    """,
+                    (webdav_path, parent_webdav_path, now, local_path),
+                )
+                # webdav_path 变化时同步 FTS
+                if old_webdav != new_webdav:
+                    row = conn.execute(
+                        "SELECT rowid FROM a_strm_files WHERE local_path = ?", (local_path,)
+                    ).fetchone()
+                    if row:
+                        conn.execute("DELETE FROM a_strm_files_fts WHERE rowid = ?", (row[0],))
+                        conn.execute(
+                            "INSERT INTO a_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                            (row[0], local_path, new_webdav),
+                        )
+
+            # 为新增记录插入 FTS
+            if to_insert:
+                for local_path, webdav_path, _, _ in to_insert:
+                    row = conn.execute(
+                        "SELECT rowid FROM a_strm_files WHERE local_path = ?", (local_path,)
+                    ).fetchone()
+                    if row:
+                        conn.execute(
+                            "INSERT INTO a_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                            (row[0], local_path, webdav_path),
+                        )
+
             conn.commit()
-            return len(data)
+            return len(records)
 
     def rebuild_fts_table(self, main_table: str, fts_table: str) -> None:
         """一次性重建 FTS 表（用于批量操作后）。
@@ -2104,61 +2210,94 @@ class Database:
         if not records:
             return 0
         now = time.time()
-        data = []
-        for r in records:
-            if len(r) != 7:
-                raise ValueError(f"upsert_b_batch: unexpected record length {len(r)}, expected 7 (local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, mapping_id, status)")
-            local_path, webdav_path, parent, source, fp, mapping_id_val, status = r
-            if not mapping_id_val:
-                raise ValueError("upsert_b_batch: mapping_id must be a non-empty string in each record")
-            data.append((
-                local_path,
-                webdav_path,
-                parent,
-                source,
-                fp,
-                mapping_id_val,
-                status,
-                now,
-            ))
         with self.rw_lock.write_locked(), self.connection() as conn:
-            # INSERT OR REPLACE 会改变已存在行的 rowid，先记录旧 rowid 以清理其 FTS 行，
-            # 避免旧 FTS 行成为孤儿（防止孤儿 / rowid 复用冲突）
-            old_rowids: list[int] = []
-            for r in records:
-                row = conn.execute(
-                    "SELECT rowid FROM b_strm_files WHERE local_path = ?", (r[0],)
-                ).fetchone()
-                if row:
-                    old_rowids.append(row[0])
-            conn.executemany(
-                """
-                INSERT OR REPLACE INTO b_strm_files(
-                    local_path, webdav_path, parent_webdav_path,
-                    source_a_path, fingerprint, status, updated_at, mapping_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                data,
-            )
-            # 同步 FTS：先清理旧 rowid 的 FTS 行，再按新 rowid 重建
-            for rid in old_rowids:
-                conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (rid,))
-            for r in records:
-                local_path = r[0]
-                webdav_path = r[1]
-                new_row = conn.execute(
-                    "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
-                ).fetchone()
-                if new_row:
-                    conn.execute(
-                        "DELETE FROM b_strm_files_fts WHERE rowid = ?", (new_row[0],))
-                    conn.execute(
-                        "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
-                        (new_row[0], local_path, webdav_path),
+            # 预读现有记录
+            local_paths = [r[0] for r in records]
+            placeholders = ','.join('?' * len(local_paths))
+            existing_rows = conn.execute(
+                f"SELECT local_path, webdav_path, parent_webdav_path, source_a_path, "
+                f"fingerprint, status, mapping_id, updated_at "
+                f"FROM b_strm_files WHERE local_path IN ({placeholders})",
+                local_paths,
+            ).fetchall()
+            existing_map = {row[0]: (row[1], row[2], row[3], row[4], row[5], row[6], row[7])
+                           for row in existing_rows}
+
+            # 分类：新增 vs 更新
+            to_insert = []
+            to_update = []
+            for record in records:
+                if len(record) != 7:
+                    raise ValueError(f"upsert_b_batch: unexpected record length {len(record)}, expected 7 (local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, mapping_id, status)")
+                local_path, webdav_path, parent, source, fp, mapping_id_val, status = record
+                if not mapping_id_val:
+                    raise ValueError("upsert_b_batch: mapping_id must be a non-empty string in each record")
+
+                if local_path not in existing_map:
+                    # 新增
+                    to_insert.append((local_path, webdav_path, parent, source, fp, status, now, mapping_id_val))
+                else:
+                    # 现有记录：比较业务字段（不包括 updated_at）
+                    old_webdav, old_parent, old_source, old_fp, old_status, old_mapping, old_updated = existing_map[local_path]
+                    if (old_webdav != webdav_path or old_parent != parent or
+                        old_source != source or old_fp != fp or
+                        old_status != status or old_mapping != mapping_id_val):
+                        # 字段变化
+                        to_update.append((webdav_path, parent, source, fp, status, mapping_id_val, now, local_path,
+                                         old_webdav, webdav_path))
+
+            # 执行 INSERT
+            if to_insert:
+                conn.executemany(
+                    """
+                    INSERT INTO b_strm_files(
+                        local_path, webdav_path, parent_webdav_path,
+                        source_a_path, fingerprint, status, updated_at, mapping_id
                     )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    to_insert,
+                )
+
+            # 执行 UPDATE
+            for update_data in to_update:
+                webdav_path, parent, source, fp, status, mapping_id_val, now, local_path, old_webdav, new_webdav = update_data
+                conn.execute(
+                    """
+                    UPDATE b_strm_files
+                    SET webdav_path = ?, parent_webdav_path = ?,
+                        source_a_path = ?, fingerprint = ?,
+                        status = ?, mapping_id = ?, updated_at = ?
+                    WHERE local_path = ?
+                    """,
+                    (webdav_path, parent, source, fp, status, mapping_id_val, now, local_path),
+                )
+                # webdav_path 变化时同步 FTS
+                if old_webdav != new_webdav:
+                    row = conn.execute(
+                        "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
+                    ).fetchone()
+                    if row:
+                        conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (row[0],))
+                        conn.execute(
+                            "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                            (row[0], local_path, new_webdav),
+                        )
+
+            # 为新增记录插入 FTS
+            if to_insert:
+                for local_path, webdav_path, _, _, _, _, _, _ in to_insert:
+                    row = conn.execute(
+                        "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
+                    ).fetchone()
+                    if row:
+                        conn.execute(
+                            "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                            (row[0], local_path, webdav_path),
+                        )
+
             conn.commit()
-            return len(data)
+            return len(records)
 
     def delete_a_batch(self, local_paths: list[str]) -> int:
         """批量删除 A 区记录"""

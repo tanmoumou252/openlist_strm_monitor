@@ -90,7 +90,7 @@ def _make_mock_db(tmp_path: Path) -> MagicMock:
     """构造最小化 Database mock。"""
     db = MagicMock(spec=["db_path", "get_table_counts", "get_b_status_counts",
                          "get_db_file_size", "get_subtitle_by_local",
-                         "read_connection"])
+                         "read_connection", "get_index_metadata"])
     db.db_path = str(tmp_path / "bridge.db")
     db.get_table_counts.return_value = {
         "a_strm_files": 0, "b_strm_files": 0, "c_ghost_files": 0,
@@ -100,6 +100,7 @@ def _make_mock_db(tmp_path: Path) -> MagicMock:
     }
     db.get_db_file_size.return_value = 0
     db.get_subtitle_by_local.return_value = None
+    db.get_index_metadata.return_value = {"mapping_index_generation": 1, "mapping_index_generation_at": 1000.0}
 
     # read_connection 需要返回一个上下文管理器
     mock_conn = MagicMock()
@@ -1432,3 +1433,265 @@ class TestOnboardingAPI:
         # 检查第二个参数（status code）
         if len(call_args) > 1 and call_args[1]:
             assert call_args[1].get("status") == 500
+
+
+# ============================================================
+# Task 4: Area Detail API Tests
+# ============================================================
+
+class TestAreaDetailKindParameter:
+    """测试 /api/area/{area}/detail 的 kind 参数处理。"""
+
+    def _setup_mock_db(self, mock_db, records, total=1, area="b"):
+        """设置 mock 数据库连接，处理多次 execute 调用。"""
+        mock_conn = MagicMock()
+        
+        # 定义列名（根据 area 不同）
+        if area == "a":
+            columns = ["local_path", "webdav_path", "parent_webdav_path", "updated_at"]
+        elif area == "b":
+            columns = ["local_path", "webdav_path", "parent_webdav_path", "source_a_path", "fingerprint", "status", "updated_at", "mapping_id"]
+        else:  # area == "c"
+            columns = ["local_path", "webdav_path", "original_b_path", "ghost_root", "moved_at"]
+        
+        # 将记录转换为字典列表
+        dict_records = [dict(zip(columns, record)) for record in records]
+        
+        # 使用 side_effect 处理多次 execute 调用
+        def execute_side_effect(sql, params=None):
+            mock_result = MagicMock()
+            if "COUNT(*)" in sql:
+                mock_result.fetchone.return_value = (total,)
+            else:
+                mock_result.fetchall.return_value = dict_records
+            return mock_result
+        
+        mock_conn.execute.side_effect = execute_side_effect
+        
+        mock_conn_ctx = MagicMock()
+        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+        mock_db.read_connection.return_value = mock_conn_ctx
+
+    def test_detail_api_without_kind_defaults_to_all(self, webui_server):
+        """详情 API 不传 kind 时按 all 安全行为处理（不按文件名分季）"""
+        server, base, session_token = webui_server
+        # Mock 数据库返回包含文件名 S01E01 的记录
+        mock_db = server._db
+        records = [
+            ("/b/movie/test_movie/Movie.S01E01.strm", "/webdav/movie/test_movie/Movie.S01E01.strm", "/webdav/movie/test_movie", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        # 不传 kind 参数
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_movie", session_token)
+        assert status == 200
+        # 验证返回的季标签为"默认"（因为 movie kind 不允许文件名 fallback）
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "默认", f"movie kind 无 kind 参数时应归入默认，实际: {seasons[0]['label']}"
+
+    def test_detail_api_with_invalid_kind_defaults_to_all(self, webui_server):
+        """详情 API 传非法 kind（如 kind=../etc）降级为 all，不报错"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        records = [
+            ("/b/movie/test_movie/Movie.S01E01.strm", "/webdav/movie/test_movie/Movie.S01E01.strm", "/webdav/movie/test_movie", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        # 传非法 kind
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_movie&kind=../etc", session_token)
+        assert status == 200
+        # 应降级为 all 行为，归入默认
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "默认", f"非法 kind 应降级为 all，实际: {seasons[0]['label']}"
+
+    def test_detail_api_movie_kind_no_filename_fallback(self, webui_server):
+        """movie kind 下文件名 SxxExx 不产生季，落入默认"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        records = [
+            ("/b/movie/test_movie/Movie.S01E01.strm", "/webdav/movie/test_movie/Movie.S01E01.strm", "/webdav/movie/test_movie", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_movie&kind=movie", session_token)
+        assert status == 200
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "默认", f"movie kind 应不从文件名提取季，实际: {seasons[0]['label']}"
+
+    def test_detail_api_anime_kind_filename_fallback_works(self, webui_server):
+        """anime kind 下文件名 SxxExx 仍产生季"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        records = [
+            ("/b/anime/test_anime/Show.S01E01.strm", "/webdav/anime/test_anime/Show.S01E01.strm", "/webdav/anime/test_anime", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_anime&kind=anime", session_token)
+        assert status == 200
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "S01", f"anime kind 应从文件名提取季，实际: {seasons[0]['label']}"
+
+    def test_detail_api_explicit_season_dir_recognized_all_kinds(self, webui_server):
+        """显式 Season 2 / 第二季 目录在所有 kind 下都被识别"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        records = [
+            ("/b/movie/test_movie/Season 2/Movie.S02E01.strm", "/webdav/movie/test_movie/Season 2/Movie.S02E01.strm", "/webdav/movie/test_movie", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        # movie kind 也应识别显式季目录
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_movie&kind=movie", session_token)
+        assert status == 200
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "S02", f"显式 Season 2 目录应被识别，实际: {seasons[0]['label']}"
+
+
+class TestAreaDetailCZonePagination:
+    """测试 C 区详情分页（R2 回归）。"""
+
+    def _setup_mock_db(self, mock_db, records, total):
+        """设置 mock 数据库连接，处理多次 execute 调用。"""
+        mock_conn = MagicMock()
+        
+        columns = ["local_path", "webdav_path", "original_b_path", "ghost_root", "moved_at"]
+        dict_records = [dict(zip(columns, record)) for record in records]
+        
+        def execute_side_effect(sql, params=None):
+            mock_result = MagicMock()
+            if "COUNT(*)" in sql:
+                mock_result.fetchone.return_value = (total,)
+            else:
+                mock_result.fetchall.return_value = dict_records
+            return mock_result
+        
+        mock_conn.execute.side_effect = execute_side_effect
+        
+        mock_conn_ctx = MagicMock()
+        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+        mock_db.read_connection.return_value = mock_conn_ctx
+
+    def test_c_zone_detail_page2_records_not_exceed_page_size(self, webui_server):
+        """C 区详情第 2 页返回的记录数不超过 PAGE_SIZE"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        
+        # 创建 150 条记录（PAGE_SIZE=50，共 3 页）
+        records = []
+        for i in range(150):
+            records.append((
+                f"/c/ghost/movie{i}.strm",
+                f"/webdav/ghost/movie{i}.strm",
+                f"/b/original/movie{i}.strm",
+                "/ghost/root",
+                1000.0 + i,
+            ))
+        
+        self._setup_mock_db(mock_db, records, total=150)
+
+        # 请求第 2 页
+        status, _, resp = _http_get(base, "/api/area/c/detail?media=ghost&page=2", session_token)
+        assert status == 200
+        
+        # 验证第 2 页记录数不超过 PAGE_SIZE (50)
+        total_records = sum(len(s["records"]) for s in resp.get("seasons", []))
+        assert total_records <= 50, f"第 2 页记录数不应超过 PAGE_SIZE，实际: {total_records}"
+        
+        # 验证总页数正确
+        assert resp.get("total_pages") == 3, f"总页数应为 3，实际: {resp.get('total_pages')}"
+
+    def test_c_zone_detail_page1_and_page2_no_overlap(self, webui_server):
+        """C 区详情第 1 页和第 2 页记录不重叠"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        
+        records = []
+        for i in range(150):
+            records.append((
+                f"/c/ghost/movie{i}.strm",
+                f"/webdav/ghost/movie{i}.strm",
+                f"/b/original/movie{i}.strm",
+                "/ghost/root",
+                1000.0 + i,
+            ))
+        
+        self._setup_mock_db(mock_db, records, total=150)
+
+        # 请求第 1 页
+        status1, _, resp1 = _http_get(base, "/api/area/c/detail?media=ghost&page=1", session_token)
+        assert status1 == 200
+        page1_paths = {r["local_path"] for s in resp1.get("seasons", []) for r in s["records"]}
+        
+        # 请求第 2 页
+        status2, _, resp2 = _http_get(base, "/api/area/c/detail?media=ghost&page=2", session_token)
+        assert status2 == 200
+        page2_paths = {r["local_path"] for s in resp2.get("seasons", []) for r in s["records"]}
+        
+        # 验证无重叠
+        overlap = page1_paths & page2_paths
+        assert len(overlap) == 0, f"第 1 页和第 2 页不应重叠，重叠路径: {overlap}"
+
+
+class TestAreaDetailSingleMappingMid:
+    """测试单 mapping 响应的 mapping_id 正确性（R3 回归）。"""
+
+    def _setup_mock_db(self, mock_db, records, total):
+        """设置 mock 数据库连接，处理多次 execute 调用。"""
+        mock_conn = MagicMock()
+        
+        columns = ["local_path", "webdav_path", "parent_webdav_path", "source_a_path", "fingerprint", "status", "updated_at", "mapping_id"]
+        dict_records = [dict(zip(columns, record)) for record in records]
+        
+        def execute_side_effect(sql, params=None):
+            mock_result = MagicMock()
+            if "COUNT(*)" in sql:
+                mock_result.fetchone.return_value = (total,)
+            else:
+                mock_result.fetchall.return_value = dict_records
+            return mock_result
+        
+        mock_conn.execute.side_effect = execute_side_effect
+        
+        mock_conn_ctx = MagicMock()
+        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+        mock_db.read_connection.return_value = mock_conn_ctx
+
+    def test_single_mapping_response_mapping_id_correct(self, webui_server):
+        """单 mapping 响应的 mapping_id 等于该 mapping 的真实 id"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        mock_app_service = server._app_service
+        
+        # 设置单个 mapping - 需要先确保 app_service 不为 None
+        if mock_app_service is None:
+            mock_app_service = MagicMock()
+            server._app_service = mock_app_service
+        
+        mock_mapping = MagicMock()
+        mock_mapping.mapping_id = "real_mapping_123"
+        mock_mapping.a_root = "/a/m1"
+        mock_mapping.b_root = "/b/m1"
+        mock_app_service.a_b_mappings = [mock_mapping]
+        mock_app_service.get_mapping_for_a.return_value = ("real_mapping_123", "/a/m1", "/b/m1")
+        
+        records = [
+            ("/b/m1/movie1.strm", "/webdav/m1/movie1.strm", "/webdav/m1", "/a/m1/movie1.strm", "fingerprint1", "valid", 1000.0, "real_mapping_123"),
+            ("/b/m1/movie2.strm", "/webdav/m1/movie2.strm", "/webdav/m1", "/a/m1/movie2.strm", "fingerprint2", "valid", 1001.0, "real_mapping_123"),
+        ]
+        self._setup_mock_db(mock_db, records, total=2)
+
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=movie", session_token)
+        assert status == 200
+        
+        # 单 mapping 应返回扁平响应，包含正确的 mapping_id
+        assert resp.get("mapping_id") == "real_mapping_123", f"单 mapping 响应的 mapping_id 应为真实 id，实际: {resp.get('mapping_id')}"

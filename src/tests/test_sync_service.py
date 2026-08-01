@@ -6,6 +6,8 @@ Covers: initial_scan_a, scan_a_to_b_full_sync, copy_a_record_to_b_if_needed,
 from __future__ import annotations
 
 import sys
+import tempfile
+import time
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -15,7 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from domain.sync.sync_service import SyncService
-from database import ARecord
+from database import ARecord, Database
 from config import ABMapping
 from _test_helpers import build_mock_app
 
@@ -197,6 +199,8 @@ class TestSyncServiceInitialScanA:
         mock_conn = Mock()
         mock_conn.__enter__ = Mock(return_value=mock_conn)
         mock_conn.__exit__ = Mock(return_value=False)
+        # Mock execute().fetchall() to return empty list (no existing records)
+        mock_conn.execute.return_value.fetchall.return_value = []
         app.db.bulk_connection.return_value = mock_conn
 
         svc.initial_scan_a(use_bulk=True)
@@ -1028,26 +1032,32 @@ class TestSyncServiceBulkUpsertHelpers:
             mapping_id="test_m1",
         )
 
-        # Should have: 1 SELECT old rowid, 0 DELETE old FTS, 1 INSERT base,
-        # 1 SELECT new rowid, 1 DELETE new FTS (cleanup), 1 INSERT FTS
+        # Should have: 1 SELECT old row (None), 1 INSERT base,
+        # 1 SELECT new rowid, 1 INSERT FTS
         calls = conn.execute.call_args_list
         assert len(calls) >= 3
         # First call should be SELECT to check for existing row
-        assert "SELECT rowid FROM b_strm_files" in calls[0][0][0]
+        assert "SELECT" in calls[0][0][0] and "b_strm_files" in calls[0][0][0]
+        # Should insert FTS for new record
+        fts_insert_calls = [c for c in calls if "INSERT INTO b_strm_files_fts" in c[0][0]]
+        assert len(fts_insert_calls) >= 1, "Should insert FTS for new record"
 
     def test_bulk_upsert_b_replaces_existing_record(self, tmp_path):
-        """Replace an existing B record and update FTS."""
+        """Update an existing B record when fields change and update FTS."""
         app = _make_app(tmp_path)
         svc = SyncService(app)
 
         conn = Mock()
-        # Existing record has rowid=42, new insert returns rowid=43
-        conn.execute.return_value.fetchone.side_effect = [(42,), (43,)]
+        # Existing record with old webdav_path (will trigger change detection)
+        conn.execute.return_value.fetchone.side_effect = [
+            (42, "/m/old.mp4", "/m", "/a/file.strm", "abc123", "test_m1"),  # old row
+            (42,),  # rowid after UPDATE (same rowid, no change)
+        ]
 
         svc._bulk_upsert_b(
             conn,
             local_path="/b/file.strm",
-            webdav_path="/m/file.mp4",
+            webdav_path="/m/file.mp4",  # Changed from /m/old.mp4
             parent_webdav_path="/m",
             source_a_path="/a/file.strm",
             fingerprint="abc123",
@@ -1055,9 +1065,11 @@ class TestSyncServiceBulkUpsertHelpers:
         )
 
         calls = conn.execute.call_args_list
-        # Should delete old FTS row
+        # Should delete old FTS row and insert new one (webdav_path changed)
         delete_calls = [c for c in calls if "DELETE FROM b_strm_files_fts" in c[0][0]]
-        assert len(delete_calls) >= 1
+        insert_calls = [c for c in calls if "INSERT INTO b_strm_files_fts" in c[0][0]]
+        assert len(delete_calls) >= 1, "Should delete old FTS row when webdav_path changes"
+        assert len(insert_calls) >= 1, "Should insert new FTS row when webdav_path changes"
 
     def test_bulk_upsert_identity(self, tmp_path):
         """Insert identity record via bulk helper."""
@@ -1083,3 +1095,226 @@ class TestSyncServiceBulkUpsertHelpers:
         assert params[1] == "/m/file.mp4"
         assert params[2] == "/a/file.strm"
         assert params[3] == "/b/file.strm"
+
+
+# ===========================================================================
+# TestBulkUpsertTimestampSemantics
+# 时间语义测试：_upsert_a_batch_bulk 与 _bulk_upsert_b（真实 Database）
+# ===========================================================================
+
+
+class TestBulkUpsertTimestampSemantics:
+    """验证 bulk 路径的两个 upsert 实现只在业务字段变化时更新 updated_at，
+    并保留 _bulk_upsert_b 的既有 status（不 SET status）。"""
+
+    @staticmethod
+    def _new_db() -> Database:
+        tmpdir = tempfile.TemporaryDirectory()
+        db = Database(str(Path(tmpdir.name) / "test.db"))
+        return db, tmpdir  # 调用方持有 tmpdir 防止清理
+
+    @staticmethod
+    def _query_a_updated_at(db: Database, local_path: str):
+        with db.read_connection() as conn:
+            return conn.execute(
+                "SELECT webdav_path, parent_webdav_path, updated_at FROM a_strm_files WHERE local_path = ?",
+                (local_path,),
+            ).fetchone()
+
+    @staticmethod
+    def _query_b(db: Database, local_path: str):
+        with db.read_connection() as conn:
+            return conn.execute(
+                "SELECT webdav_path, parent_webdav_path, source_a_path, fingerprint, "
+                "status, updated_at, mapping_id FROM b_strm_files WHERE local_path = ?",
+                (local_path,),
+            ).fetchone()
+
+    @staticmethod
+    def _sleep():
+        time.sleep(0.005)
+
+    # === _upsert_a_batch_bulk ===
+
+    def test_upsert_a_batch_bulk_unchanged_keeps_updated_at(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                svc._upsert_a_batch_bulk(conn, [("/a/1.strm", "/m/1.mp4", "/m")])
+            first = self._query_a_updated_at(db, "/a/1.strm")
+            assert first is not None
+            self._sleep()
+            with db.bulk_connection() as conn:
+                svc._upsert_a_batch_bulk(conn, [("/a/1.strm", "/m/1.mp4", "/m")])
+            second = self._query_a_updated_at(db, "/a/1.strm")
+            assert second[2] == first[2], "无变化时应保留 updated_at"
+        finally:
+            tmpdir.cleanup()
+
+    def test_upsert_a_batch_bulk_changed_updates_updated_at(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                svc._upsert_a_batch_bulk(conn, [("/a/1.strm", "/m/1.mp4", "/m")])
+            first = self._query_a_updated_at(db, "/a/1.strm")
+            self._sleep()
+            with db.bulk_connection() as conn:
+                svc._upsert_a_batch_bulk(conn, [("/a/1.strm", "/m/1b.mp4", "/m")])
+            second = self._query_a_updated_at(db, "/a/1.strm")
+            assert second[2] > first[2], "webdav_path 变化时应更新 updated_at"
+            assert second[0] == "/m/1b.mp4"
+        finally:
+            tmpdir.cleanup()
+
+    def test_upsert_a_batch_bulk_returns_processed_count(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                n = svc._upsert_a_batch_bulk(conn, [("/a/1.strm", "/m/1.mp4", "/m"),
+                                                     ("/a/2.strm", "/m/2.mp4", "/m")])
+            assert n == 2
+            self._sleep()
+            with db.bulk_connection() as conn:
+                n2 = svc._upsert_a_batch_bulk(conn, [("/a/1.strm", "/m/1.mp4", "/m"),
+                                                      ("/a/2.strm", "/m/2.mp4", "/m")])
+            assert n2 == 2, "返回值不得改为变化条数"
+        finally:
+            tmpdir.cleanup()
+
+    def test_upsert_a_batch_bulk_empty_returns_zero(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                n = svc._upsert_a_batch_bulk(conn, [])
+            assert n == 0
+        finally:
+            tmpdir.cleanup()
+
+    # === _bulk_upsert_b ===
+
+    def test_bulk_upsert_b_unchanged_keeps_updated_at(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            first = self._query_b(db, "/b/1.strm")
+            assert first is not None
+            assert first[4] == "valid"
+            self._sleep()
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            second = self._query_b(db, "/b/1.strm")
+            assert second[5] == first[5], "无变化时应保留 updated_at"
+        finally:
+            tmpdir.cleanup()
+
+    def test_bulk_upsert_b_changed_updates_updated_at(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            first = self._query_b(db, "/b/1.strm")
+            self._sleep()
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1b.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            second = self._query_b(db, "/b/1.strm")
+            assert second[5] > first[5], "业务字段变化时应更新 updated_at"
+        finally:
+            tmpdir.cleanup()
+
+    def test_bulk_upsert_b_preserves_duplicate_status(self):
+        """命中既有 duplicate 行时 status 不被改回 valid（ON CONFLICT 不 SET status）。"""
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            # 先用 upsert_b 写入一条 duplicate 记录
+            db.upsert_b("/b/1.strm", "/m/1.mp4", "/m", "/a/1.strm", "m1", "fp1", "duplicate")
+            assert self._query_b(db, "/b/1.strm")[4] == "duplicate"
+            # _bulk_upsert_b 用相同业务字段再次写入（A→B 同步路径）
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            row = self._query_b(db, "/b/1.strm")
+            # status 必须仍为 duplicate，不得被改回 valid
+            assert row[4] == "duplicate", "_bulk_upsert_b 不得把既有 duplicate 改回 valid"
+        finally:
+            tmpdir.cleanup()
+
+    def test_bulk_upsert_b_preserves_quarantined_status(self):
+        """命中既有 quarantined 行时 status 不被改回 valid。"""
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            db.upsert_b("/b/2.strm", "/m/2.mp4", "/m", "/a/2.strm", "m1", "fp2", "quarantined")
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/2.strm", "/m/2.mp4", "/m",
+                                   "/a/2.strm", "fp2", "m1")
+            row = self._query_b(db, "/b/2.strm")
+            assert row[4] == "quarantined", "_bulk_upsert_b 不得把既有 quarantined 改回 valid"
+        finally:
+            tmpdir.cleanup()
+
+    def test_bulk_upsert_b_mapping_id_required(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                with pytest.raises(ValueError):
+                    svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                       "/a/1.strm", "fp1", "")
+        finally:
+            tmpdir.cleanup()
+
+    def test_bulk_upsert_b_no_duplicate_fts(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            self._sleep()
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            with db.read_connection() as conn:
+                main = conn.execute("SELECT COUNT(*) FROM b_strm_files").fetchone()[0]
+                fts = conn.execute("SELECT COUNT(*) FROM b_strm_files_fts").fetchone()[0]
+            assert main == 1 and fts == 1
+        finally:
+            tmpdir.cleanup()
+
+    def test_bulk_upsert_b_webdav_change_fts_swaps(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/old.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            self._sleep()
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/new.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            with db.read_connection() as conn:
+                row = conn.execute("SELECT rowid FROM b_strm_files WHERE local_path = ?", ("/b/1.strm",)).fetchone()
+                rid = row[0]
+                new_hit = conn.execute(
+                    "SELECT rowid FROM b_strm_files_fts WHERE rowid = ? AND webdav_path MATCH 'new'",
+                    (rid,),
+                ).fetchone()
+                old_hit = conn.execute(
+                    "SELECT rowid FROM b_strm_files_fts WHERE rowid = ? AND webdav_path MATCH 'old'",
+                    (rid,),
+                ).fetchone()
+            assert new_hit is not None and old_hit is None
+        finally:
+            tmpdir.cleanup()

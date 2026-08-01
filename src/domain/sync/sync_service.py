@@ -161,22 +161,58 @@ class SyncService:
         性能优化：
         - 使用单个连接（不获取 rw_lock）
         - 跳过 FTS 同步（延迟到扫描完成后由 rebuild_fts_table 一次性重建）
-        - 使用 INSERT OR REPLACE（简化逻辑，延迟 FTS 重建不关心中间 rowid 变化）
+        - 变化检测：只在业务字段变化时更新 updated_at
         """
         if not records:
             return 0
         now = time.time()
-        data = [(lp, wp, pwp, now) for lp, wp, pwp in records]
 
-        conn.executemany(
-            """
-            INSERT OR REPLACE INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            data,
-        )
+        # 预读现有记录
+        local_paths = [r[0] for r in records]
+        placeholders = ','.join('?' * len(local_paths))
+        existing_rows = conn.execute(
+            f"SELECT local_path, webdav_path, parent_webdav_path "
+            f"FROM a_strm_files WHERE local_path IN ({placeholders})",
+            local_paths,
+        ).fetchall()
+        existing_map = {row[0]: (row[1], row[2]) for row in existing_rows}
 
-        return len(data)
+        # 分类：新增 vs 更新
+        to_insert = []
+        to_update = []
+        for local_path, webdav_path, parent_webdav_path in records:
+            if local_path not in existing_map:
+                # 新增
+                to_insert.append((local_path, webdav_path, parent_webdav_path, now))
+            else:
+                # 现有记录：比较业务字段
+                old_webdav, old_parent = existing_map[local_path]
+                if old_webdav != webdav_path or old_parent != parent_webdav_path:
+                    # 字段变化
+                    to_update.append((webdav_path, parent_webdav_path, now, local_path))
+
+        # 执行 INSERT
+        if to_insert:
+            conn.executemany(
+                """
+                INSERT INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                to_insert,
+            )
+
+        # 执行 UPDATE
+        if to_update:
+            conn.executemany(
+                """
+                UPDATE a_strm_files
+                SET webdav_path = ?, parent_webdav_path = ?, updated_at = ?
+                WHERE local_path = ?
+                """,
+                to_update,
+            )
+
+        return len(records)
 
     def scan_a_to_b_full_sync(
             self, valid_engine_paths: list[str] | None = None,
@@ -593,51 +629,79 @@ class SyncService:
         与 database.py:upsert_b() 逻辑相同，但：
         - 直接使用传入的 conn（不获取 rw_lock）
         - 不单独 commit（由 bulk_connection 统一管理）
-        - 正确处理 FTS 孤儿行（与 upsert_b 一致的 rowid 管理）
+        - 变化检测：只在业务字段变化时更新 updated_at
+        - 保留既有 status（duplicate/quarantined 不被改回 valid）
 
-        FTS 孤儿行处理流程：
-        1. 获取旧 rowid（如果存在）
-        2. 删除旧 rowid 的 FTS 行（避免 REPLACE 改变 rowid 后残留孤儿）
-        3. INSERT OR REPLACE 基表
-        4. 获取新 rowid
-        5. 删除新 rowid 上可能残留的孤儿 FTS 行（防止 constraint failed）
-        6. 插入新 FTS 行
+        FTS 同步流程：
+        1. 新增记录：插入 FTS
+        2. 更新记录且 webdav_path 变化：删除旧 FTS 行，插入新 FTS 行
+        3. 更新记录但 webdav_path 未变：不操作 FTS
+        4. 无变化：不操作
         """
         if not mapping_id:
             raise ValueError("_bulk_upsert_b: mapping_id must be a non-empty string")
         now = time.time()
 
-        # 步骤 1-2：获取旧 rowid，删除旧 FTS 行
+        # 预读现有记录
         old_row = conn.execute(
-            "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
+            "SELECT rowid, webdav_path, parent_webdav_path, source_a_path, "
+            "fingerprint, mapping_id FROM b_strm_files WHERE local_path = ?",
+            (local_path,),
         ).fetchone()
-        if old_row:
-            conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (old_row[0],))
 
-        # 步骤 3：INSERT OR REPLACE 基表
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO b_strm_files(
-                local_path, webdav_path, parent_webdav_path,
-                source_a_path, fingerprint, status, updated_at, mapping_id
-            ) VALUES (?, ?, ?, ?, ?, 'valid', ?, ?)
-            """,
-            (local_path, webdav_path, parent_webdav_path,
-             source_a_path, fingerprint, now, mapping_id),
-        )
-
-        # 步骤 4-6：获取新 rowid，清理残留，插入新 FTS 行
-        new_row = conn.execute(
-            "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
-        ).fetchone()
-        if new_row:
-            # 先删除该 rowid 上可能残留的孤儿 FTS 行（防止 constraint failed）
-            conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (new_row[0],))
-            # 插入新 FTS 行
+        if old_row is None:
+            # 新增记录
             conn.execute(
-                "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
-                (new_row[0], local_path, webdav_path),
+                """
+                INSERT INTO b_strm_files(
+                    local_path, webdav_path, parent_webdav_path,
+                    source_a_path, fingerprint, status, updated_at, mapping_id
+                ) VALUES (?, ?, ?, ?, ?, 'valid', ?, ?)
+                """,
+                (local_path, webdav_path, parent_webdav_path,
+                 source_a_path, fingerprint, now, mapping_id),
             )
+            # 插入 FTS
+            new_row = conn.execute(
+                "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
+            ).fetchone()
+            if new_row:
+                conn.execute(
+                    "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                    (new_row[0], local_path, webdav_path),
+                )
+        else:
+            # 现有记录：比较业务字段（不包括 status）
+            old_rowid, old_webdav, old_parent, old_source, old_fp, old_mapping = old_row
+            fields_changed = (
+                old_webdav != webdav_path or
+                old_parent != parent_webdav_path or
+                old_source != source_a_path or
+                old_fp != fingerprint or
+                old_mapping != mapping_id
+            )
+
+            if fields_changed:
+                # 字段变化：更新记录和时间戳（不更新 status）
+                conn.execute(
+                    """
+                    UPDATE b_strm_files
+                    SET webdav_path = ?, parent_webdav_path = ?,
+                        source_a_path = ?, fingerprint = ?,
+                        mapping_id = ?, updated_at = ?
+                    WHERE local_path = ?
+                    """,
+                    (webdav_path, parent_webdav_path, source_a_path,
+                     fingerprint, mapping_id, now, local_path),
+                )
+                # webdav_path 变化时同步 FTS
+                if old_webdav != webdav_path:
+                    conn.execute("DELETE FROM b_strm_files_fts WHERE rowid = ?", (old_rowid,))
+                    conn.execute(
+                        "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
+                        (old_rowid, local_path, webdav_path),
+                    )
+            # 字段无变化：保留原 updated_at 和 status，不操作 FTS
 
     def _bulk_upsert_identity(self, conn, fingerprint, webdav_path,
                               source_a_path, current_b_path) -> None:

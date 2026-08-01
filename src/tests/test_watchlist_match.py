@@ -20,6 +20,7 @@ from watchlist_match import (
     _strip_noise_tokens,
     _split_aliases,
     _normalize_text,
+    _extract_season_from_local_path,
 )
 
 
@@ -447,3 +448,62 @@ class TestEdgeStructural:
         # last_ep_season=1 < season_num=2 → future_season（先检查）
         assert status == "fuzzy"
         assert "tv_future_season" in reason
+
+
+# ============================================================
+# Task 4: _extract_season_from_local_path with allow_filename_fallback
+# ============================================================
+
+class TestExtractSeasonFromLocalPath:
+    """测试 _extract_season_from_local_path 的 allow_filename_fallback 参数。"""
+
+    def test_movie_kind_no_filename_fallback(self):
+        """movie kind 下文件名 SxxExx 不产生季，落入默认"""
+        # 文件名包含 S01E01，但没有显式季目录
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        # allow_filename_fallback=False (movie kind)
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"movie kind 应不从文件名提取季，实际得到: {season}"
+
+    def test_anime_kind_filename_fallback_works(self):
+        """anime kind 下文件名 SxxExx 仍产生季"""
+        path = "/b/番剧/某番剧/Show.S01E01.strm"
+        # allow_filename_fallback=True (anime kind)
+        season = _extract_season_from_local_path(path, allow_filename_fallback=True)
+        assert season == "S01", f"anime kind 应从文件名提取季，实际得到: {season}"
+
+    def test_explicit_season_dir_recognized_all_kinds(self):
+        """显式 Season 2 / 第二季 目录在所有 kind 下都被识别"""
+        # Season 2 目录
+        path1 = "/b/电影/某电影/Season 2/Movie.S02E01.strm"
+        season1 = _extract_season_from_local_path(path1, allow_filename_fallback=False)
+        assert season1 == "S02", f"显式 Season 2 目录应被识别，实际得到: {season1}"
+
+        # 第二季 目录
+        path2 = "/b/番剧/某番剧/第二季/Show.S02E01.strm"
+        season2 = _extract_season_from_local_path(path2, allow_filename_fallback=False)
+        assert season2 == "S02", f"显式 第二季 目录应被识别，实际得到: {season2}"
+
+        # S02 目录
+        path3 = "/b/电影/某电影/S02/Movie.S02E01.strm"
+        season3 = _extract_season_from_local_path(path3, allow_filename_fallback=False)
+        assert season3 == "S02", f"显式 S02 目录应被识别，实际得到: {season3}"
+
+    def test_default_allow_filename_fallback_true(self):
+        """默认参数保持向后兼容（allow_filename_fallback=True）"""
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        # 不传参数时默认 True，保持原有行为
+        season = _extract_season_from_local_path(path)
+        assert season == "S01", f"默认参数应允许文件名 fallback，实际得到: {season}"
+
+    def test_other_kind_no_filename_fallback(self):
+        """other kind 下文件名 SxxExx 不产生季"""
+        path = "/b/其他/某内容/Content.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"other kind 应不从文件名提取季，实际得到: {season}"
+
+    def test_all_kind_no_filename_fallback(self):
+        """all kind 下文件名 SxxExx 不产生季（安全行为）"""
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"all kind 应不从文件名提取季，实际得到: {season}"
