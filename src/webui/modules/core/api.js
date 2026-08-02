@@ -46,7 +46,9 @@ export async function api(path, options = {}) {
     }
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
-      throw new Error(err.error || `HTTP ${resp.status}`);
+      // 回退链：部分端点用 error 承载原因，命令型端点用 message；
+      // 两者都缺失时才退化为状态码，避免真实原因在传输层被丢弃。
+      throw new Error(err.error || err.message || `HTTP ${resp.status}`);
     }
     return resp.json();
   } finally {

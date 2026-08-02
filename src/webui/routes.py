@@ -808,7 +808,11 @@ from watchlist_match import refresh_watchlist_match_state  # noqa: E402
 
 
 def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
-    """处理 TMDB 配置更新请求。"""
+    """处理 TMDB 配置更新请求。
+    
+    注意：本函数只持久化「实际生效的值」（applied 字典），不是原始请求体。
+    调用方负责过滤与归一化，_save_tmdb_to_db 负责写入 DB。
+    """
     try:
         data = json.loads(body)
     except json.JSONDecodeError:
@@ -820,15 +824,16 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
         return
     try:
         changed = False
+        applied = {}  # 只记录实际生效的值
         for key in ("access_token", "api_key", "language", "host",
                     "watchlist_db", "csv_watchlist_file",
                     "fuzzy_threshold", "anime_min_ep_ratio",
                     "anime_max_season_diff", "watchlist_cache_ttl", "anime_min_season_ratio"):
             if key in data and data[key] is not None:
                 val = data[key]
-                # 安全防护：空 token 且已配置时跳过，避免前端截断预览覆盖
-                if key == "access_token" and not val:
-                    if getattr(tmdb_cfg, "access_token", ""):
+                # 空值守卫：access_token/api_key 已配置时跳过，避免空串覆盖
+                if key in ("access_token", "api_key") and not val:
+                    if getattr(tmdb_cfg, key, ""):
                         continue
                 if key == "watchlist_db" and val:
                     val = str(val).strip()
@@ -845,6 +850,7 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
                                     str(Path.cwd()))
                             val = str(Path(base_dir) / val)
                 setattr(tmdb_cfg, key, val)
+                applied[key] = val  # 记录实际生效的值
                 changed = True
         # Proxy settings — 前端发送扁平字段
         if "proxy_http" in data:
@@ -853,6 +859,7 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
             proxy_cfg = getattr(tmdb_cfg, "proxy", None)
             if proxy_cfg:
                 proxy_cfg.http = data["proxy_http"] or ""
+            applied["proxy_http"] = tmdb_cfg.proxy_http  # 归一化后的值
             changed = True
         if "proxy_enabled" in data:
             # 正确转换布尔值：支持字符串 "true"/"false"、数字 1/0、布尔值
@@ -865,20 +872,19 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
             proxy_cfg = getattr(tmdb_cfg, "proxy", None)
             if proxy_cfg:
                 proxy_cfg.enabled = proxy_enabled
+            applied["proxy_enabled"] = "true" if proxy_enabled else "false"  # 归一化
             changed = True
         # Watchlist enabled setting
         if "watchlist_enabled" in data:
             watchlist_enabled = str(data["watchlist_enabled"]).lower() in ("true", "1", "yes")
-            # 保存到 DB
-            _wdb = getattr(webui_server, '_watchlist_db', None)
-            if _wdb:
-                _wdb.set_config("tmdb", "watchlist_enabled", "true" if watchlist_enabled else "false")
+            # 只记录归一化后的值，由统一的 _save_tmdb_to_db 落库
+            applied["watchlist_enabled"] = "true" if watchlist_enabled else "false"
             changed = True
         if changed:
             # 重新初始化 TMDB 客户端
             _handler_reinit_tmdb(webui_server, tmdb_cfg)
-            # 保存到 DB（webui_config 表）
-            _save_tmdb_to_db(webui_server, data)
+            # 保存到 DB（webui_config 表）——传实际生效值，不是原始请求体
+            _save_tmdb_to_db(webui_server, applied)
             configured = bool(getattr(webui_server, '_tmdb_client', None))
             _wdb = getattr(webui_server, '_watchlist_db', None)
             if _wdb:
@@ -952,7 +958,10 @@ def _handler_reinit_tmdb(webui_server, tmdb_cfg) -> None:
 
 
 def _save_tmdb_to_db(webui_server, changes: dict) -> None:
-    """保存 TMDB 配置到 DB webui_config 表（scope="tmdb"）。"""
+    """保存 TMDB 配置到 DB webui_config 表（scope="tmdb"）。
+    
+    入参是「实际生效值」，不是原始请求体；调用方负责过滤与归一化。
+    """
     _wdb = getattr(webui_server, '_watchlist_db', None)
     if not _wdb:
         logging.warning("[TMDB] 无法保存配置到 DB: watchlist_db 未初始化")
@@ -3444,25 +3453,33 @@ def _handle_main_status(handler, webui_server) -> bool:
 
 
 def _handle_main_start(handler, webui_server, body: bytes) -> bool:
-    """POST /api/main/start — 启动主程序"""
+    """POST /api/main/start — 启动主程序
+    
+    业务失败（未配置/fail-safe/登录失败等）返回 200 + success:false，
+    与 _handle_openlist_test_connection 的约定一致；
+    仅服务层未预期异常返回 500 + error_type: "exception"。
+    """
     if not webui_server:
         handler._send_json({"success": False, "message": "WebUI 服务器未初始化"}, 500)
         return True
 
     result = webui_server.start_main()
-    status_code = 200 if result.get("success") else 500
+    status_code = 500 if result.get("error_type") == "exception" else 200
     handler._send_json(result, status_code)
     return True
 
 
 def _handle_main_stop(handler, webui_server) -> bool:
-    """POST /api/main/stop — 停止主程序"""
+    """POST /api/main/stop — 停止主程序
+    
+    同 _handle_main_start：业务失败 200，内部异常 500。
+    """
     if not webui_server:
         handler._send_json({"success": False, "message": "WebUI 服务器未初始化"}, 500)
         return True
 
     result = webui_server.stop_main()
-    status_code = 200 if result.get("success") else 500
+    status_code = 500 if result.get("error_type") == "exception" else 200
     handler._send_json(result, status_code)
     return True
 

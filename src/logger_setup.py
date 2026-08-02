@@ -27,6 +27,42 @@ class MaxLevelFilter(logging.Filter):
         return record.levelno <= self.max_level
 
 
+class EncodingSafeStreamHandler(logging.StreamHandler):
+    """控制台 handler：写出前把目标编码无法表示的字符降级为替代符。
+
+    Windows 中文控制台默认 GBK，emoji（如启动横幅的 🚀）或韩文等字符会让
+    StreamHandler.emit 抛 UnicodeEncodeError，logging 随即调用 handleError
+    打印 traceback，整条记录从控制台消失。文件 handler 已用 utf-8，不受影响。
+
+    刻意不调用 stream.reconfigure()：sys.stdout / sys.stderr 的全局 errors
+    策略必须保持原样，否则会连带改变 print() 等其它写入方的行为。
+
+    写-刷用 self.lock 包住，保证 write + flush 的原子性。Handler.handle()
+    调用 emit() 时其实已持有该锁，这里是防御直接调用 emit() 绕过 handle()
+    的路径；logging.Handler 的 lock 是 RLock（Python 3.14 实测同线程可重入），
+    所以重复获取不会死锁。
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record)
+        except Exception:
+            self.handleError(record)
+            return
+        encoding = getattr(self.stream, "encoding", None) or "utf-8"
+        try:
+            message.encode(encoding)
+        except (UnicodeEncodeError, LookupError):
+            message = message.encode(encoding, errors="replace").decode(
+                encoding, errors="replace")
+        try:
+            with self.lock:
+                self.stream.write(message + self.terminator)
+                self.flush()
+        except Exception:
+            self.handleError(record)
+
+
 def _has_available_windows_drive(path: Path) -> bool:
     """Return False only when an absolute Windows path uses a missing drive."""
     if os.name != "nt" or not path.is_absolute():
@@ -107,13 +143,13 @@ def setup_logging(
     )
 
     # stdout: DEBUG/INFO/WARNING
-    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler = EncodingSafeStreamHandler(sys.stdout)
     stdout_handler.setLevel(log_level)
     stdout_handler.addFilter(MaxLevelFilter(logging.WARNING))
     stdout_handler.setFormatter(formatter)
 
     # stderr: ERROR/CRITICAL
-    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler = EncodingSafeStreamHandler(sys.stderr)
     stderr_handler.setLevel(logging.ERROR)
     stderr_handler.setFormatter(formatter)
 

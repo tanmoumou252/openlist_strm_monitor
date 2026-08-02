@@ -2,8 +2,14 @@
 完整业务流程端到端测试。
 
 覆盖场景：
-1. 成功路径：登录 → 配置 TMDB → 配置 OpenList → 启动 Bridge → 查看 A/B 区 → 刷新待看列表 → 验证收录状态
-2. 失败场景：不可达 OpenList 地址、预检失败
+1. 成功路径（分两个层次）：
+   - test_complete_new_user_flow：最小冒烟，覆盖 ①登录 ②配置 TMDB
+     ③配置 OpenList ⑤查看 A/B 区 + 配置状态校验（不含启动引擎 /
+     待看刷新 / 收录检测）
+   - test_complete_seven_step_onboarding：##26 七步全链路正向测试
+2. 失败场景：不可达 OpenList 地址、预检失败、非法 scope、空 engine
+3. 七步失败原因与成功条件：TestSevenStepFailureReasons
+4. 分页与搜索：TestAreaSearchE2E / TestPaginationAndSearch
 """
 
 import json
@@ -219,7 +225,11 @@ class TestSuccessfulFlow:
     """测试完整新用户成功路径"""
 
     def test_complete_new_user_flow(self, webui_server):
-        """完整新用户流程：登录 → 配置 TMDB → 配置 OpenList → 启动 Bridge → 查看 A/B 区 → 刷新待看列表 → 验证收录状态"""
+        """最小冒烟：登录 → 配置 TMDB → 配置 OpenList → 查看 A/B 区 → 配置状态校验。
+
+        注意：本用例**不**覆盖 ##26 的步骤④（引擎启动）、⑥（待看刷新）、
+        ⑦（收录检测）；完整七步见 test_complete_seven_step_onboarding。
+        """
         server, base, session_token = webui_server
 
         # 1. 登录（已在 fixture 中完成）
@@ -272,9 +282,432 @@ class TestSuccessfulFlow:
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert resp["view_ab_completed"] is True
 
+    @staticmethod
+    def _wait_for_flag(flag_getter, timeout=10.0):
+        """轮询布尔标志直到为 False（后台线程完成）。"""
+        deadline = time.time() + timeout
+        while flag_getter():
+            if time.time() > deadline:
+                raise TimeoutError(f"后台任务未在 {timeout}s 内完成")
+            time.sleep(0.1)
+
+    @staticmethod
+    def _wait_for_poll(poll_fn, condition, timeout=10.0):
+        """轮询 HTTP 端点直到 condition(body) 为真。"""
+        deadline = time.time() + timeout
+        while True:
+            status, _, body = poll_fn()
+            if status == 200 and condition(body):
+                return body
+            if time.time() > deadline:
+                raise TimeoutError(f"轮询未在 {timeout}s 内满足条件")
+            time.sleep(0.2)
+
+    def _refresh_match(self, server, base, token):
+        """触发一次收录检测刷新并返回 result 字典。"""
+        with server._match_refresh_lock:
+            server._match_refresh_running = False
+            server._match_refresh_result = None
+
+        status, _, resp = _http_post(
+            base, "/api/tmdb/watchlist/match/refresh", {}, token)
+        assert status == 200
+        assert resp.get("success") is True
+
+        body = self._wait_for_poll(
+            lambda: _http_get(
+                base, "/api/tmdb/watchlist/match/status", token),
+            lambda b: b.get("result") is not None,
+            timeout=10.0,
+        )
+        return body["result"]
+
+    def test_complete_seven_step_onboarding(self, real_webui_server, tmp_path):
+        """##26 全新用户模拟：七步正向链路（Q1 — 每一步是否成功）。
+
+        步骤：①登录 ②设置 TMDb ③设置 OpenList ④Bridge 主程序启动
+              ⑤查看 AB 分区 ⑥TMDb 待看列表刷新 ⑦TMDb 列表收录状态检测
+
+        联动代码（Q4，按步骤）：
+          ① webui.server 的 _init_admin_password / _hash_password / _check_auth，
+             webui.routes 的 _handle_login
+          ② webui.routes 的 _handle_tmdb_configure / _save_tmdb_to_db，
+             secret_manager 的加密写入，tmdb_watchlist_db 的 set_config
+          ③ webui.routes 的 _handle_webui_config_post / _validate_a_b_mappings /
+             _hot_reload_openlist_config，config 的 update_from_db
+          ④ webui.server 的 start_main / stop_main，app_service_core 的
+             AppService.start / get_config_status
+          ⑤ webui.routes 的 handle_area / _get_media_groups_paginated
+          ⑥ webui.routes 的 _handle_tmdb_watchlist_bg_sync / _bg_sync_refresh，
+             tmdb_watchlist_db 的 sync
+          ⑦ webui.routes 的 _handle_tmdb_watchlist_match_refresh，
+             watchlist_match 的 refresh_watchlist_match_state /
+             collect_b_media_snapshot / _media_info / score_watchlist_item，
+             media_renamer 的 detect_media_type_from_path
+
+        成功所需条件（Q3）：LAN/回环 IP + 已建 DB（①）；TMDB 凭据可保存（②）；
+        A/B mapping 每项有非空唯一 mapping_id 且根路径非空（③④）；
+        引擎 start() 完整收尾使 _running 置真（④）；待看列表有数据 +
+        B 区有同 mapping_id 记录（⑥⑦）。
+
+        边界说明：步骤④用 AppService 替身，只验证 WebUI 的启动契约
+        （门禁 + _app_running + stop 收尾）。引擎侧「start() 成功必须置
+        _running=True」的不变式由 test_app_service_lifecycle.py 的
+        TestStartMarksRunningWhenReady 锁死，两者分工互补。
+        """
+        from config import ABMapping
+        server, base, token, db = real_webui_server
+
+        # ── 步骤①：登录（fixture 已完成） ──
+        assert token is not None
+        status, _, resp = _http_get(base, "/api/dashboard", token)
+        assert status == 200, "带 token 应可访问受保护接口"
+        status, _, resp = _http_get(base, "/api/dashboard")
+        assert status == 401, "不带 token 必须 401"
+        assert resp.get("need_login") is True
+
+        # ── 步骤②：设置 TMDb ──
+        status, _, resp = _http_post(base, "/api/tmdb/configure", {
+            "access_token": "test_tmdb_token_e2e",
+            "api_key": "test_tmdb_key_e2e",
+            "language": "zh-CN",
+        }, token)
+        assert status == 200
+        assert resp.get("success") is True
+        assert server._tmdb_client is not None
+        assert server._watchlist_db is not None
+        
+        # 空值守卫：再传空 access_token 不得覆盖 DB 中已有值（缺陷②回归）
+        status, _, resp = _http_post(base, "/api/tmdb/configure", {
+            "access_token": "", "language": "zh-CN",
+        }, token)
+        assert status == 200
+        assert server._watchlist_db.get_config("tmdb", "access_token") != "", (
+            "空 access_token 覆盖了 DB 中的已有凭据（内存/DB 分叉）")
+
+        # ── 步骤③：设置 OpenList ──
+        a_dir = tmp_path / "a"
+        a_dir.mkdir(exist_ok=True)
+        a_root = str(a_dir)
+        b_root = server._config.paths.b_root
+        status, _, resp = _http_post(base, "/api/webui/config/openlist", {
+            "webdav_host": "http://127.0.0.1:15244",
+            "webdav_user": "admin",
+            "webdav_password": "password",
+            "a_b_mappings": json.dumps([{
+                "a_root": a_root, "b_root": b_root, "label": "e2e"
+            }]),
+        }, token)
+        assert status == 200
+        assert resp.get("success") is True
+        status, _, cfg_resp = _http_get(base, "/api/config/status", token)
+        assert status == 200
+        assert cfg_resp.get("openlist_configured") is True
+        assert cfg_resp.get("tmdb_configured") is True
+        assert cfg_resp.get("main_running") is False
+        # 前端保存体不含 mapping_id，由读取侧 update_from_db 补齐
+        saved = json.loads(
+            server._watchlist_db.get_config("openlist", "a_b_mappings"))
+        assert "mapping_id" not in saved[0]
+
+        # ── 步骤④：Bridge 主程序启动 ──
+        mapping_id = ABMapping.generate_mapping_id(a_root)
+        server._config.a_b_mappings = [ABMapping(
+            mapping_id=mapping_id, a_root=a_root, b_root=b_root)]
+
+        mock_client = MagicMock()
+        mock_client.login.return_value = True
+        fake_app = MagicMock()
+        fake_app._running = False
+        fake_app.get_config_status.return_value = {
+            "status": "ready", "reason": "mapping 配置有效"}
+        fake_app.start.side_effect = lambda: setattr(fake_app, "_running", True)
+
+        with patch("webdav_client.OpenListAdminClient", return_value=mock_client), \
+             patch("app_service.AppService", return_value=fake_app), \
+             patch("logger_setup.setup_logging"):
+            status, _, resp = _http_post(base, "/api/main/start", {}, token)
+        assert status == 200
+        assert resp.get("success") is True, f"启动应成功: {resp}"
+        assert resp.get("message") == "主程序已启动"
+        assert server._app_running is True
+        fake_app.start.assert_called_once()
+
+        status, _, resp = _http_get(base, "/api/main/status", token)
+        assert status == 200
+        assert resp.get("running") is True
+
+        # 立即收尾，避免残留状态影响后续步骤与其它用例
+        status, _, resp = _http_post(base, "/api/main/stop", {}, token)
+        assert status == 200
+        assert resp.get("success") is True
+        assert server._app_running is False
+
+        # ── 步骤⑤：查看 AB 分区（空库表现） ──
+        for area in ("a", "b", "c"):
+            status, _, resp = _http_get(
+                base, f"/api/area/{area}?kind=all&page=1&page_size=50", token)
+            assert status == 200, f"{area} 区应 200 而非 500/no such table"
+            assert resp.get("total") == 0
+            assert resp.get("media_items") == []
+            assert resp.get("total_pages") == 1
+
+        # ── 步骤⑥：TMDb 待看列表刷新 ──
+        mock_tmdb = MagicMock()
+        mock_tmdb.get_watchlist_movies.return_value = (
+            [{"id": 1001, "title": "测试电影", "media_type": "movie"}], False)
+        mock_tmdb.get_watchlist_tv.return_value = (
+            [{"id": 2001, "name": "测试番剧", "media_type": "tv"}], False)
+        server._tmdb_client = mock_tmdb
+        with server._sync_lock:
+            server._sync_running = False
+
+        status, _, resp = _http_post(base, "/api/tmdb/watchlist/sync", {}, token)
+        assert status == 200
+        assert resp.get("success") is True
+        self._wait_for_flag(lambda: server._sync_running, timeout=10.0)
+
+        movies = server._watchlist_db.get_all(media_type="movie")
+        tv_shows = server._watchlist_db.get_all(media_type="tv")
+        assert len(movies) >= 1, f"同步后电影为空: {movies}"
+        assert len(tv_shows) >= 1, f"同步后番剧为空: {tv_shows}"
+        watchlist_total = len(movies) + len(tv_shows)
+
+        # ── 步骤⑦：TMDb 列表收录状态检测（两阶段相对断言） ──
+        # 阶段 1：B 区为空 ⇒ 全部 unmatched（确定行为）
+        baseline = self._refresh_match(server, base, token)
+        assert baseline.get("total") == watchlist_total
+        assert baseline.get("unmatched") == watchlist_total, (
+            f"B 区为空时应全部未收录: {baseline}")
+
+        # 阶段 2：播种带显式分类目录的 B 记录 ⇒ unmatched 必须下降
+        # webdav_path 必须含真正的分类目录段（番剧/电影）：
+        # _media_info 优先取 webdav_path，经 detect_media_type_from_path 逐段
+        # 子串匹配判类；不得依赖「媒体名恰好含番剧/电影」的巧合（见计划 2.3）。
+        seeds = [
+            # 番剧：季目录 + SxxExx，media_name 取季目录的上一级 =「测试番剧」
+            (f"{b_root}/番剧/测试番剧/Season 01/测试番剧 - S01E01.strm",
+             "/strm/番剧/测试番剧/Season 01/测试番剧 - S01E01.strm",
+             "/strm/番剧/测试番剧/Season 01",
+             "fp_e2e_tv1"),
+            # 电影：media_name 取 parts[-2] =「测试电影」
+            (f"{b_root}/电影/测试电影/测试电影.strm",
+             "/strm/电影/测试电影/测试电影.strm",
+             "/strm/电影/测试电影",
+             "fp_e2e_mv1"),
+        ]
+        for local_path, webdav_path, parent_webdav_path, fp in seeds:
+            db.upsert_b(
+                local_path=local_path,
+                webdav_path=webdav_path,
+                parent_webdav_path=parent_webdav_path,
+                source_a_path=None,
+                mapping_id=mapping_id,
+                fingerprint=fp,
+                status="valid",
+            )
+
+        seeded = self._refresh_match(server, base, token)
+        assert seeded.get("total") == watchlist_total
+        assert seeded.get("unmatched") < baseline.get("unmatched"), (
+            f"播种 B 记录后未收录数应下降: baseline={baseline} seeded={seeded}")
+
 
 # ============================================================
-# 场景 2：失败场景
+# 场景 2：七步失败原因与成功条件（Q2/Q3）
+# ============================================================
+
+class TestSevenStepFailureReasons:
+    """##26 七步的失败模式与失败原因（Q2 失败原因 / Q3 成功条件）。
+
+    每个用例断言「条件不满足时接口如实报出失败原因」，
+    其对照面即为该步骤的成功条件。
+    """
+
+    def test_step1_missing_token_reports_need_login(self, webui_server):
+        """①失败原因：无会话 token。成功条件：先 POST /api/login 取得 token。"""
+        server, base, token = webui_server
+        status, _, resp = _http_get(base, "/api/dashboard")
+        assert status == 401
+        assert resp.get("error") == "unauthorized"
+        assert resp.get("need_login") is True
+
+    def test_step3_mapping_missing_b_root_rejected(self, webui_server):
+        """③失败原因：mapping 缺 b_root。成功条件：A/B 根均非空。"""
+        server, base, token = webui_server
+        status, _, resp = _http_post(base, "/api/webui/config/openlist", {
+            "webdav_host": "http://127.0.0.1:15244",
+            "a_b_mappings": json.dumps([{"a_root": "x", "b_root": ""}]),
+        }, token)
+        assert status == 400
+
+    def test_step4_not_configured_reports_status(self, webui_server, tmp_path):
+        """④失败原因：未配置 A/B mapping。成功条件：至少一项有效 mapping。
+
+        _make_mock_config 的 a_b_mappings 是 MagicMock（真值），
+        显式置空以复现「全新用户尚未配置」的真实状态。
+        """
+        server, base, token = webui_server
+        server._config.a_b_mappings = []
+        status, _, resp = _http_post(base, "/api/main/start", {}, token)
+        # 业务失败应返回 200 + success:false（与 _handle_openlist_test_connection 一致）
+        assert status == 200
+        assert resp.get("success") is False
+        assert resp.get("status") == "not_configured"
+
+    def test_step4_fail_safe_reports_status(self, webui_server, tmp_path):
+        """④失败原因：引擎门禁未过（mapping 缺唯一 ID 或根路径）→ fail-safe。
+
+        成功条件：AppService.start() 完整收尾并置 _running=True。
+        这是 D3 门禁的 HTTP 层守卫——引擎未真起来时不得对外报成功。
+        """
+        from config import ABMapping
+        server, base, token = webui_server
+        server._config.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+
+        mock_client = MagicMock()
+        mock_client.login.return_value = True
+        fake_app = MagicMock()
+        fake_app._running = False  # 模拟 fail-safe 早退：start() 不置位
+        fake_app.get_config_status.return_value = {
+            "status": "fail_safe_active",
+            "reason": "mapping 缺少唯一 ID 或根路径"}
+
+        with patch("webdav_client.OpenListAdminClient", return_value=mock_client), \
+             patch("app_service.AppService", return_value=fake_app), \
+             patch("logger_setup.setup_logging"):
+            status, _, resp = _http_post(base, "/api/main/start", {}, token)
+        # 业务失败应返回 200 + success:false
+        assert status == 200
+        assert resp.get("success") is False
+        assert resp.get("status") == "fail_safe_active"
+        assert server._app_running is False
+
+    def test_step4_openlist_login_failure_reports_reason(self, webui_server, tmp_path):
+        """④失败原因：OpenList 登录失败。成功条件：可达 OpenList + 正确凭据。"""
+        from config import ABMapping
+        server, base, token = webui_server
+        server._config.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+
+        mock_client = MagicMock()
+        mock_client.login.return_value = False
+        mock_client.last_error_message = "用户名或密码错误"
+
+        with patch("webdav_client.OpenListAdminClient", return_value=mock_client), \
+             patch("logger_setup.setup_logging"):
+            status, _, resp = _http_post(base, "/api/main/start", {}, token)
+        # 业务失败应返回 200 + success:false + 原因
+        assert status == 200
+        assert resp.get("success") is False
+        assert "OpenList 登录失败" in resp.get("message", "")
+        assert server._app_running is False
+
+    def test_step5_invalid_area_rejected(self, webui_server):
+        """⑤失败原因：非法分区名。成功条件：area ∈ {a,b,c}。"""
+        server, base, resp_token = webui_server
+        status, _, resp = _http_get(base, "/api/area/x", resp_token)
+        assert status in (400, 404)
+
+    def test_step6_disabled_watchlist_reports_reason(self, webui_server):
+        """⑥失败原因：watchlist_enabled=false。成功条件：开关未显式关闭。"""
+        server, base, token = webui_server
+        status, _, resp = _http_post(base, "/api/tmdb/configure", {
+            "api_key": "k", "language": "zh-CN",
+        }, token)
+        assert status == 200
+        server._watchlist_db.set_config("tmdb", "watchlist_enabled", "false")
+
+        status, _, resp = _http_post(base, "/api/tmdb/watchlist/sync", {}, token)
+        assert status == 400
+        assert "禁用" in json.dumps(resp, ensure_ascii=False)
+
+
+class TestTmdbConfigPersistence:
+    """缺陷②补充回归：验证 TMDB 配置持久化的各种边界情况。
+    
+    1. 空 api_key 不覆盖已有值
+    2. watchlist_enabled 归一化存储
+    3. 禁用 watchlist 后门禁正确拦截
+    4. 白名单外键不落库
+    """
+    
+    def test_empty_api_key_does_not_clobber_db(self, webui_server):
+        """空 api_key 不覆盖 DB 中的已有值。"""
+        server, base, token = webui_server
+        # 先写入有效值
+        status, _, resp = _http_post(base, "/api/tmdb/configure", {
+            "api_key": "my_tmdb_key",
+            "language": "zh-CN",
+        }, token)
+        assert status == 200
+        
+        # 再传空值
+        status, _, resp = _http_post(base, "/api/tmdb/configure", {
+            "api_key": "", "language": "zh-CN",
+        }, token)
+        assert status == 200
+        
+        # DB 值不变
+        assert server._watchlist_db.get_config("tmdb", "api_key") != "", (
+            "空 api_key 覆盖了 DB 中的已有凭据")
+    
+    def test_watchlist_enabled_persists_normalized_value(self, webui_server):
+        """watchlist_enabled 归一化为 'true'/'false'，不是原始的 '0'/'1'。"""
+        server, base, token = webui_server
+        status, _, resp = _http_post(base, "/api/tmdb/configure", {
+            "api_key": "k", "language": "zh-CN",
+        }, token)
+        assert status == 200
+        
+        # 发送 "0" → 归一化为 "false"
+        status, _, resp = _http_post(base, "/api/tmdb/configure", {
+            "watchlist_enabled": "0",
+        }, token)
+        assert status == 200
+        
+        val = server._watchlist_db.get_config("tmdb", "watchlist_enabled")
+        assert val == "false", f"归一化值应为 'false'，实际 {val!r}"
+    
+    def test_disabled_watchlist_gate_reads_normalized_value(self, webui_server):
+        """禁用 watchlist 后，bg_sync 门禁正确拦截（而非依赖原始值）。"""
+        server, base, token = webui_server
+        # 先让 TMDB 处于已配置状态
+        status, _, resp = _http_post(base, "/api/tmdb/configure", {
+            "api_key": "k", "language": "zh-CN",
+        }, token)
+        assert status == 200
+        
+        # 设置禁用（归一化值）
+        server._watchlist_db.set_config("tmdb", "watchlist_enabled", "false")
+        
+        # 调用 sync 端点 → 应返回 400 + "禁用"
+        status, _, resp = _http_post(base, "/api/tmdb/watchlist/sync", {}, token)
+        assert status == 400
+        assert "禁用" in json.dumps(resp, ensure_ascii=False), (
+            f"预期错误包含 '禁用'，实际: {resp}")
+    
+    def test_unlisted_key_not_persisted(self, webui_server):
+        """白名单外的键不会写入 DB。"""
+        server, base, token = webui_server
+        status, _, resp = _http_post(base, "/api/tmdb/configure", {
+            "language": "zh-CN",
+            "not_a_real_key": "should_not_appear",
+        }, token)
+        assert status == 200
+        
+        cfg = server._watchlist_db.get_all_config("tmdb")
+        assert "not_a_real_key" not in cfg, (
+            f"白名单外键被写入了 DB: {cfg.keys()}")
+
+
+# ============================================================
+# 场景 3：原有失败场景
 # ============================================================
 
 class TestFailureScenarios:
@@ -322,7 +755,7 @@ class TestFailureScenarios:
 
 
 # ============================================================
-# 场景 3：分页与搜索功能测试
+# 场景 4：分页与搜索功能测试
 # ============================================================
 
 

@@ -48,7 +48,7 @@ db_file = "./bridge.db"          # 核心数据库路径
  c_root = "./测试c"               # 全局 C 区幽灵目录
 
 # 生产映射在 WebUI/DB 中显式配置：
-# [{mapping_id="m1", a_root="./测试a1", b_root="./测试b1"}]
+# [{a_root="./测试a1", b_root="./测试b1"}]   # mapping_id 自动生成，无需手写
 
 
 [webdav]

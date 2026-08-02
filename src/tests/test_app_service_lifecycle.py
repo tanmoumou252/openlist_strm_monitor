@@ -21,6 +21,7 @@ _running = False、join timeout 或通用异常回滚；start() 也没有部分�
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import sys
 import tempfile
@@ -639,3 +640,69 @@ class TestWebUiSavedMappingReachesReady:
         # 空 mapping_id 会被 __init__ 的 _a_to_b_map 推导过滤掉 → 空 dict
         assert app._a_to_b_map != {}
         assert app._current_mapping_ids() != []
+
+
+# ============================================================
+# start() _running 不变式
+# ============================================================
+
+class TestStartMarksRunningWhenReady(_LifecycleBase):
+    """start() 成功走完必须把 _running 置 True（start_main 门禁依赖的不变式）。
+
+    历史回归：AppService 从未把 _running 置为 True（该字段只在 __init__ 和
+    fail-safe 早退分支被赋 False），而 WebUIServer.start_main() 用它判断引擎
+    是否真的起来了。结果 ready 配置也被判为 fail-safe：前端显示"未启动"，
+    而 watcher / refresh 线程已在后台运行且因 _app_service 被置 None 而无法停止。
+
+    本类是该不变式的唯一守卫。test_webui_http.py 的 start_main 用例使用替身，
+    只能验证门禁逻辑，验证不了引擎是否真的置位。
+    """
+
+    def test_running_is_true_after_successful_start(self):
+        ctx, _ = self._patch_phases()
+        with ctx:
+            self.app.start()
+
+        assert self.app._running is True
+
+    def test_running_and_refresh_service_do_not_fork(self):
+        """"_running 为真" 与 "refresh service 已启动" 必须同时成立。"""
+        ctx, _ = self._patch_phases()
+        with ctx:
+            self.app.start()
+
+        self.app.refresh_service.start.assert_called_once()
+        assert self.app._running is True
+
+
+# ============================================================
+# 启动期日志格式化
+# ============================================================
+
+class TestStartupLogFormatting(_LifecycleBase):
+    """启动期日志必须可被格式化，否则记录在控制台与日志文件里双双丢失。
+
+    回归：索引代次日志曾用 %d 占位符，而 Database.get_control 的签名是 -> str。
+
+    为何长期潜伏：pytest 默认 root level 为 WARNING，logging.info 直接短路、
+    根本不做格式化，所以整套测试都看不见 %d 与 str 的不匹配。本用例用
+    caplog.at_level(logging.INFO) 强制放行 INFO，让格式化真正发生。
+
+    红灯形态：修复前该用例 FAILED，报
+    TypeError: %d format: a real number is required, not str，
+    失败点在 self.app.start() 调用处。
+    生产环境不会中止：logging 默认的 handleError 只打 traceback 不重抛，
+    complete_index_generation / set_mapping_version 都已在此之前完成（见计划 F1）。
+    """
+
+    def test_index_generation_log_is_formattable(self, caplog):
+        self.db.get_control.return_value = "7"
+        ctx, _ = self._patch_phases()
+        with ctx, caplog.at_level(logging.INFO):
+            # 修复前：格式化在此处真正发生并抛 TypeError
+            self.app.start()
+
+        # 用 str(record.msg) 过滤，避免在筛选阶段就触发格式化
+        target = [r for r in caplog.records if "索引代次推进到" in str(r.msg)]
+        assert target, "未捕获到索引代次日志"
+        assert target[0].getMessage() == "[启动] 索引代次推进到 7"

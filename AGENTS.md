@@ -20,6 +20,7 @@ This file provides guidance to AI coding assistants when working with code in th
 14. **Three gates, each needs explicit user confirmation**: plan approved → execution authorized (执行/go/开始) → commit authorized. Plan approval ≠ execution authorization.
 15. **In plan mode** ("先写计划" / "不许执行"): write only to `.kilo/plans/`, read code for reference, no tests/builds/source edits.
 16. **`todo.md` is off-limits** — user's personal memo, not part of the workspace. Never read, audit, or edit it.
+17. **Do NOT use Linux commands** — the development environment is Windows; design commands accordingly.
 
 ## Configuration
 

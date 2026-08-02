@@ -532,7 +532,7 @@ class AppService:
                 if mapping_ids:
                     self.db.complete_index_generation(mapping_ids)
                     generation_pushed = True
-                    logging.info("[启动] 索引代次推进到 %d", 
+                    logging.info("[启动] 索引代次推进到 %s", 
                                  self.db.get_control("index_generation", "0"))
                     
                     # 同步 mapping 版本摘要（仅当变化时更新时间）
@@ -559,6 +559,10 @@ class AppService:
         self._scan_a_subtitles_on_startup()
         logging.info("[启动] A 区字幕扫描耗时: %.1fs", time.time() - t_sub)
         self.refresh_service.start()
+        # start() 能走到这里说明配置 ready 且所有启动阶段已完成。
+        # WebUIServer.start_main() 用该标志判断引擎是否真的起来了；
+        # 缺这一行会让 ready 配置被误判为 fail-safe（引擎在跑但对外报未启动）。
+        self._running = True
         logging.info("嗨嗨，应用启动成功咯！(总耗时 %.1fs)", time.time() - t_start)
 
     def stop(self) -> None:

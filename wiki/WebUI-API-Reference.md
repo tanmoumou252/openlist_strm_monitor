@@ -47,6 +47,16 @@
 ### `POST /api/main/start` / `POST /api/main/stop`
 启动/停止主程序。需要会话 Token。
 
+响应字段：
+
+- `success`（bool）— 是否真正启动/停止。
+- `message`（str）— 面向用户的说明。
+- `status`（str，可选）— 仅失败时出现，取值如 `not_configured`（未配置 A/B mapping）、`fail_safe_active`（配置未通过 `AppService.get_config_status` 门禁）。
+
+启动成功要求引擎完整走完 `AppService.start()`；配置未就绪时引擎进入 fail-safe 且不启动 watcher，此时接口返回 `success: false` 并带上 `status`，`_app_running` 保持 false。
+
+**状态码语义**：业务失败（未配置 A/B mapping、fail-safe 门禁未过、OpenList 登录失败、重复启动、主程序未在运行）均返回 **200 + `success: false`**，与 `POST /api/openlist/test-connection` 的约定一致。仅服务层未预期异常（`start_main` / `stop_main` 的 `except Exception` 兜底分支）返回 **500 + `error_type: "exception"`**。
+
 ### `GET /api/dashboard`
 返回仪表盘汇总数据：A/B/C 区记录数、B 区状态分布（valid/duplicate/quarantined）、数据库文件大小、TMDB 配置状态、服务运行时长。
 

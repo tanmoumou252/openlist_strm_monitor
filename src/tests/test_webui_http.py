@@ -1866,7 +1866,14 @@ class TestStartMainFailSafe:
         assert server._app_running is False
 
     def test_start_main_succeeds_when_ready(self, tmp_path):
-        """配置 ready 时行为不变，避免修复把正常启动路径一起堵死。"""
+        """配置 ready 时行为不变，避免修复把正常启动路径一起堵死。
+
+        替身必须忠实模拟真实契约：AppService.start() 成功收尾时才置
+        _running=True（不变式由 test_app_service_lifecycle.py 的
+        TestStartMarksRunningWhenReady 锁死）。
+        禁止预先把 _running 设为 True——那会让本用例在引擎根本不置位时也变绿，
+        正是这一点让 start_main 门禁选错信号的回归漏过了测试。
+        """
         from config import ABMapping
         cfg = _make_mock_config(tmp_path)
         cfg.a_b_mappings = [ABMapping(
@@ -1878,8 +1885,9 @@ class TestStartMainFailSafe:
         fake_client = MagicMock()
         fake_client.login.return_value = True
         fake_app = MagicMock()
-        fake_app._running = True
+        fake_app._running = False
         fake_app.get_config_status.return_value = {"status": "ready", "reason": "ok"}
+        fake_app.start.side_effect = lambda: setattr(fake_app, "_running", True)
 
         with patch("webui.server.PROJECT_ROOT", tmp_path), \
              patch("webui.server.STATIC_DIR", tmp_path / "static"), \
@@ -1890,3 +1898,4 @@ class TestStartMainFailSafe:
 
         assert result["success"] is True
         assert server._app_running is True
+        fake_app.start.assert_called_once()

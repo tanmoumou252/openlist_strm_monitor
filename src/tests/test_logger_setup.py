@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import io
 import os
 import sys
 import tempfile
@@ -447,3 +448,48 @@ class TestTemporaryDirectoryCleanup:
             setup_logging(level="INFO", log_file=str(tmp_path / name))
         assert len(logging.getLogger().handlers) == 3
         assert len(list(tmp_path.glob("*.log"))) == 4
+
+
+# ============================================================
+# 窄编码控制台编码兜底
+# ============================================================
+
+class TestConsoleEncodingFallback:
+    """窄编码控制台（GBK）下，无法编码的字符不得让整条日志丢失。
+
+    回归：启动横幅含 🚀（U+1F680），在 GBK 控制台触发 UnicodeEncodeError，
+    logging 吞异常并打 traceback，该条记录从控制台消失。
+    文件 handler 有 encoding="utf-8" 所以文件里是好的——既有的
+    test_writes_startup_banner 读的正是文件，因此抓不到这个问题。
+    """
+
+    def test_stdout_handler_tolerates_unencodable_char(self, tmp_path, monkeypatch):
+        raw = io.BytesIO()
+        narrow = io.TextIOWrapper(
+            raw, encoding="gbk", errors="strict", write_through=True)
+        monkeypatch.setattr(sys, "stdout", narrow)
+
+        setup_logging(level="INFO", log_file=str(tmp_path / "app.log"))
+        logging.info("probe \U0001f680 tail")
+        for handler in _stream_handlers():
+            handler.flush()
+        narrow.flush()
+
+        console = raw.getvalue().decode("gbk", errors="replace")
+        assert "probe" in console and "tail" in console, console
+
+    def test_global_stream_error_policy_is_untouched(self, tmp_path, monkeypatch):
+        """兜底只作用于本 handler，不得改写流的全局 errors 策略。
+
+        生产代码大量用 print() 直写控制台（首启密码、启动菜单、用法提示），
+        全局改写 errors 会连带改变这些输出的行为。
+        """
+        raw = io.BytesIO()
+        narrow = io.TextIOWrapper(
+            raw, encoding="gbk", errors="strict", write_through=True)
+        monkeypatch.setattr(sys, "stdout", narrow)
+
+        setup_logging(level="INFO", log_file=str(tmp_path / "app.log"))
+
+        assert narrow.errors == "strict"
+        assert any(h.stream is narrow for h in _stream_handlers())

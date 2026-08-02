@@ -1133,7 +1133,8 @@ class WebUIServer:
 
             except Exception as e:
                 logging.error("[Main] 启动失败: %s", e)
-                return {"success": False, "message": f"启动失败: {e}"}
+                return {"success": False, "message": f"启动失败: {e}",
+                        "error_type": "exception"}
 
     def stop_main(self) -> dict:
         """停止主程序（AppService）
@@ -1157,7 +1158,8 @@ class WebUIServer:
 
             except Exception as e:
                 logging.error("[Main] 停止失败: %s", e)
-                return {"success": False, "message": f"停止失败: {e}"}
+                return {"success": False, "message": f"停止失败: {e}",
+                        "error_type": "exception"}
 
     def get_main_status(self) -> dict:
         """获取主程序状态

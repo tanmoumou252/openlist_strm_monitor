@@ -25,7 +25,7 @@ python -m pytest src/tests/ -v
 | `test_lineage_snapshot_production.py` | 真实 `AppService` 的 mapping-scoped lineage snapshot 验收：覆盖未变更复用、内容修改、删除、同 mapping 重命名、跨 mapping/非法目录移动、无指纹、同/跨 mapping 重复指纹、A 源缺失 boundary 放行、同名不同根、mapping/lineage 版本变化、snapshot 缺失或损坏、stat/DB 写异常及扫描期间文件修改。 |
 | `test_app_service_helpers.py` | AppService 辅助方法：锁工厂、mapping 路径解析、WebDAV 辅助、引擎内部标记与日志去重。 |
 | `test_app_service_roots.py` | 保护根目录同步、移除根目录扫描与当前根目录快照持久化。 |
-| `test_app_service_lifecycle.py` | `AppService` 生命周期编排：配置未就绪 fail-safe、启动阶段顺序、`start_watchers()` 的 A/B/C schedule（mock Observer，不启动真实 watchdog）、`stop()` 的定时器取消与 observer 停止、重复 stop 以及当前未提供的生命周期保证记录。**D1 回归**：WebUI 真实保存体经 DB 往返后引擎门禁 ready（`TestWebUiSavedMappingReachesReady`）。 |
+| `test_app_service_lifecycle.py` | `AppService` 生命周期编排：配置未就绪 fail-safe、启动阶段顺序、`start_watchers()` 的 A/B/C schedule（mock Observer，不启动真实 watchdog）、`stop()` 的定时器取消与 observer 停止、重复 stop 以及当前未提供的生命周期保证记录。**D1 回归**：WebUI 真实保存体经 DB 往返后引擎门禁 ready（`TestWebUiSavedMappingReachesReady`）。**start() 不变式**：成功启动后 `_running` 置真（`TestStartMarksRunningWhenReady`）；启动期日志可格式化（`TestStartupLogFormatting`）。 |
 | `test_multi_mapping_production_acceptance.py` | 多 mapping 生产验收与跨根隔离测试。 |
 
 ### 数据库 / FTS
@@ -61,7 +61,7 @@ python -m pytest src/tests/ -v
 | `test_subtitle_multi_bug_repro.py` | 番剧多字幕场景 NameError 回归测试 |
 | `test_boundary_conditions.py` | 边界条件与异常输入健壮性测试 |
 | `test_error_translator.py` | 错误码到用户可读信息的翻译测试 |
-| `test_subset_font.py` | 字体子集化脚本单元测试：参数解析、Unicode 集合运算、网页字符扫描、缺字来源区分、CSS 一致性校验、icon-preview 与 icons.js 一致性 |
+| `test_subset_font.py` | 字体子集化脚本单元测试：参数解析、Unicode 集合运算、网页字符扫描、缺字来源区分、CSS 一致性校验、icon-preview 与 icons.js 一致性（**icon-preview 副标题图标总数与 `ICONS` 键数一致**（`TestIconPreviewParity`））。 |
 
 ### API 客户端
 
@@ -80,7 +80,7 @@ python -m pytest src/tests/ -v
 | `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试（含 `TestAreaDetailKindParameter`、`TestAreaDetailCZonePagination`、`TestAreaDetailSingleMappingMid`）。**D2 回归**：全新安装 `/api/config` 不抛异常（`TestConfigApiFreshInstall`）；**D3 回归**：fail-safe 时 `start_main` 返回失败（`TestStartMainFailSafe`）。 |
 | `test_call_coverage.py` | 路由调用覆盖率测试 |
 | `test_logging_system.py` | TMDB 操作日志表、日志读取接口与轮转产物测试 |
-| `test_logger_setup.py` | logger_setup 模块单元测试：handler 装配、重复初始化（热更新）、回退路径、级别过滤、启动分隔标记、临时目录清理 |
+| `test_logger_setup.py` | logger_setup 模块单元测试：handler 装配、重复初始化（热更新）、回退路径、级别过滤、启动分隔标记、临时目录清理（**窄编码控制台下无法编码字符不丢日志、且不改写流的全局 errors 策略**（`TestConsoleEncodingFallback`））。 |
 | `test_concurrency.py` | 并发请求与锁竞争测试 |
 
 ### 匹配 / 监视
@@ -96,7 +96,7 @@ python -m pytest src/tests/ -v
 |------|------|
 | `test_index_metadata_api.py` | 索引元数据 API 测试 |
 | `test_multi_mapping_partition.py` | 多 mapping 分区测试 |
-| `test_e2e_full_flow.py` | 完整业务流程端到端测试（登录→配置→A/B 区→状态校验） |
+| `test_e2e_full_flow.py` | 完整业务流程端到端测试（登录→配置→A/B 区→状态校验）。**##26 七步链路**：`test_complete_seven_step_onboarding` 覆盖七步正向 HTTP 全链路（登录→TMDb→OpenList→启动→分区→待看同步→收录检测）；`TestSevenStepFailureReasons` 覆盖每步的失败原因与成功条件（未授权、mapping 校验、`not_configured`、`fail_safe_active`、OpenList 登录失败、非法分区、待看开关关闭）。引擎侧 `start()` 置 `_running` 的不变式由 `test_app_service_lifecycle.py` 守卫，本文件用替身只验证 WebUI 启动契约。 |
 | `test_onboarding_e2e.py` | 新手引导流程端到端测试 |
 
 ### 性能基准门禁

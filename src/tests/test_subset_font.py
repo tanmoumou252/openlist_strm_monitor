@@ -804,6 +804,19 @@ class TestIconPreviewParity:
         assert text.count("<svg") == len(_icons_js_keys())
 
     @pytest.mark.parametrize("preview", _preview_paths(), ids=lambda p: p.parent.name)
+    def test_preview_headline_count_matches_icon_count(self, preview):
+        """副标题里的图标总数必须等于 ICONS 实际键数。
+
+        回归：该文案曾被从正确的 47 单方面改成 49（依据一份误判"新增了
+        loading/lock/arrow_back 所以是 49"的人工审计，而这三个图标本就在 47 之内）。
+        test_svg_count_matches_icon_count 只比对 <svg> 数量，抓不到人工文案里的数字。
+        """
+        text = preview.read_text(encoding="utf-8")
+        match = re.search(r"共\s*(\d+)\s*个图标", text)
+        assert match is not None, f"{preview} 缺少「共 N 个图标」文案"
+        assert int(match.group(1)) == len(_icons_js_keys())
+
+    @pytest.mark.parametrize("preview", _preview_paths(), ids=lambda p: p.parent.name)
     def test_filled_icons_are_tagged(self, preview):
         text = preview.read_text(encoding="utf-8")
         for key in _js_set("FILLED_ICONS"):

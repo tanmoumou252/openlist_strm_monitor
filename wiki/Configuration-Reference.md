@@ -33,7 +33,7 @@ b_root = ""
 c_root = "./测试c"
 
 # 生产 B 归属通过 WebUI/DB 的 a_b_mappings 显式配置：
-# [{mapping_id="m1", a_root="./测试a1", b_root="./测试b1"}]
+# [{a_root="./测试a1", b_root="./测试b1"}]   # mapping_id 自动生成，无需手写
 ```
 
 
@@ -145,7 +145,7 @@ totp_secret = ""
 | `openlist` | `webdav_totp_secret` | TOTP 密钥（加密存储） |
 | `openlist` | `b_root` | B 区根目录 |
 | `openlist` | `c_root` | C 区根目录 |
-| `openlist` | `a_b_mappings` | A↔B 映射列表（JSON 数组，元素含 `mapping_id`、`a_root`、`b_root`、`label`；由 `openlist.js` 提交，替代旧 `b_root` 单值输入） |
+| `openlist` | `a_b_mappings` | A↔B 映射列表（JSON 数组，元素含 `a_root`、`b_root`、`label`；由 `openlist.js` 提交，替代旧 `b_root` 单值输入）。`mapping_id` **不由前端提交**，读取侧 `AppConfig.update_from_db` 按 A 根规范化路径调用 `ABMapping.generate_mapping_id` 自动补齐；显式写入的 `mapping_id` 不会被覆盖 |
 | `openlist` | `strm_engines` | 引擎配置（从 WebUI 写入，派生 `a_folders` 和 `strm_engine_paths`） |
 | `openlist` | `engines_initialized` | 引擎初始化标志（迁移时设为 `true`） |
 | `openlist` | `refresh_paths` | 刷新路径 |
