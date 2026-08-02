@@ -31,6 +31,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from webui.server import WebUIServer, _WebUIHandler  # noqa: E402
+from _test_helpers import FakeConfigDb  # noqa: E402
 
 
 # ============================================================
@@ -1790,3 +1791,102 @@ class TestAreaDetailSingleMappingMid:
         
         # 单 mapping 应返回扁平响应，包含正确的 mapping_id
         assert resp.get("mapping_id") == "real_mapping_123", f"单 mapping 响应的 mapping_id 应为真实 id，实际: {resp.get('mapping_id')}"
+
+
+class TestConfigApiFreshInstall:
+    """全新安装（webui_config 无 openlist 作用域）时 /api/config 不得抛异常。
+
+    关键：必须用**真实** AppConfig。本文件的 _make_mock_config 返回 MagicMock，
+    而 MagicMock.__iter__ 默认返回空迭代器，会把 cfg.a_b_mappings 未赋值
+    的问题完全掩盖掉——这也是这个 bug 至今没有被任何测试发现的原因。
+    """
+
+    def _fresh_handler(self, tmp_path: Path):
+        from config import AppConfig
+        toml_path = tmp_path / "config.toml"
+        toml_path.write_text('[local]\ndb_file = "bridge.db"\n', encoding="utf-8")
+        cfg = AppConfig.from_file(str(toml_path))
+        handler = MagicMock()
+        handler.webui._config = cfg
+        handler.webui._tmdb_client = None
+        handler.webui._watchlist_db = FakeConfigDb()  # 空 DB = 首次运行
+        return handler
+
+    def test_from_file_initializes_mapping_fields(self, tmp_path):
+        """from_file 必须给出可安全读取的默认值，而不是留下未赋值的 slot。"""
+        from config import AppConfig
+        toml_path = tmp_path / "config.toml"
+        toml_path.write_text('[local]\ndb_file = "bridge.db"\n', encoding="utf-8")
+        cfg = AppConfig.from_file(str(toml_path))
+        assert cfg.a_b_mappings == []
+        assert cfg.engines_initialized is False
+
+    def test_config_api_survives_fresh_install(self, tmp_path):
+        from webui.routes import handle_config_api
+        handler = self._fresh_handler(tmp_path)
+        handle_config_api(handler)  # 修复前抛 AttributeError
+        handler._send_json.assert_called_once()
+        payload = handler._send_json.call_args[0][0]
+        assert payload["a_b_mappings"] == []
+        assert payload["webdav_host"] == ""
+
+
+class TestStartMainFailSafe:
+    """引擎落入 fail-safe 时，start_main 必须返回失败且不置 _app_running。
+
+    start_main 此前在 src/tests/ 下零引用——这是 D3 未被发现的原因。
+    """
+
+    def test_start_main_reports_fail_safe(self, tmp_path):
+        from config import ABMapping
+        cfg = _make_mock_config(tmp_path)
+        cfg.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+        db = _make_mock_db(tmp_path)
+
+        fake_client = MagicMock()
+        fake_client.login.return_value = True
+        fake_app = MagicMock()
+        fake_app._running = False
+        fake_app.get_config_status.return_value = {
+            "status": "fail_safe_active",
+            "reason": "mapping 缺少唯一 ID 或根路径"}
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"), \
+             patch("webdav_client.OpenListAdminClient", return_value=fake_client), \
+             patch("app_service.AppService", return_value=fake_app):
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            result = server.start_main()
+
+        assert result["success"] is False
+        assert result.get("status") == "fail_safe_active"
+        assert server._app_running is False
+
+    def test_start_main_succeeds_when_ready(self, tmp_path):
+        """配置 ready 时行为不变，避免修复把正常启动路径一起堵死。"""
+        from config import ABMapping
+        cfg = _make_mock_config(tmp_path)
+        cfg.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+        db = _make_mock_db(tmp_path)
+
+        fake_client = MagicMock()
+        fake_client.login.return_value = True
+        fake_app = MagicMock()
+        fake_app._running = True
+        fake_app.get_config_status.return_value = {"status": "ready", "reason": "ok"}
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"), \
+             patch("webdav_client.OpenListAdminClient", return_value=fake_client), \
+             patch("app_service.AppService", return_value=fake_app):
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            result = server.start_main()
+
+        assert result["success"] is True
+        assert server._app_running is True

@@ -20,6 +20,7 @@ _running = False、join timeout 或通用异常回滚；start() 也没有部分�
 """
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tempfile
@@ -34,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app_service_core import AppService  # noqa: E402
 from config import ABMapping, AppConfig  # noqa: E402
 from database import Database  # noqa: E402
+from _test_helpers import FakeConfigDb  # noqa: E402
 
 
 # ============================================================
@@ -595,6 +597,45 @@ class TestIndexGenerationPush:
             
             with pytest.raises(RuntimeError, match="boom"):
                 self.app.start()
-            
+
             # 验证 complete_index_generation 未被调用
             mock_db.complete_index_generation.assert_not_called()
+
+
+class TestWebUiSavedMappingReachesReady:
+    """WebUI 真实保存体经 DB 往返后，引擎门禁必须 ready（D1 端到端回归）。
+
+    这是"前端保存 → webui_config → update_from_db → get_config_status"
+    整条接缝的唯一守卫；现有用例都手写 mapping_id，覆盖不到这里。
+    """
+
+    def test_gate_ready_and_a_to_b_map_built(self, tmp_path):
+        a_dir = tmp_path / "a"
+        b_dir = tmp_path / "b"
+        c_dir = tmp_path / "c"
+        for d in (a_dir, b_dir, c_dir):
+            d.mkdir()
+        toml_path = tmp_path / "config.toml"
+        toml_path.write_text(
+            "[local]\n"
+            'db_file = "bridge.db"\n'
+            "[paths]\n"
+            f'b_root = "{b_dir.as_posix()}"\n'
+            f'c_root = "{c_dir.as_posix()}"\n',
+            encoding="utf-8")
+
+        cfg = AppConfig.from_file(str(toml_path))
+        cfg.update_from_db(FakeConfigDb({"openlist": {
+            "a_b_mappings": json.dumps([
+                {"a_root": str(a_dir), "b_root": str(b_dir), "label": ""},
+            ])}}))
+
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            app = AppService(cfg, MagicMock(spec=Database), Mock())
+
+        assert app.get_config_status()["status"] == "ready"
+        # 空 mapping_id 会被 __init__ 的 _a_to_b_map 推导过滤掉 → 空 dict
+        assert app._a_to_b_map != {}
+        assert app._current_mapping_ids() != []

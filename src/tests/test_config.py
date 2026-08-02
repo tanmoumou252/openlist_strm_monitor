@@ -285,16 +285,17 @@ class TestAppConfigFromFile:
         with pytest.raises(AttributeError):
             _ = cfg.definitely_not_a_config_field
 
-    def test_from_file_leaves_mapping_fields_unset(self, tmp_path):
-        """from_file 使用 __new__ 构造，a_b_mappings 由 update_from_db 填充。
+    def test_from_file_initializes_mapping_fields(self, tmp_path):
+        """from_file 必须初始化 a_b_mappings / engines_initialized。
 
-        这是当前实现的真实行为：读取者必须用 getattr(cfg, 'a_b_mappings', [])
-        而不是直接属性访问，否则会拿到 AttributeError。
+        旧行为是留下未赋值的 slot（访问抛 AttributeError），导致
+        routes.handle_config_api 在全新安装时整页 500。现改为与 dataclass
+        默认值对齐；读取侧仍建议 getattr 兜底。
         """
         cfg = AppConfig.from_file(_write_toml(tmp_path, _MINIMAL_TOML))
-        with pytest.raises(AttributeError):
-            _ = cfg.a_b_mappings
-        assert getattr(cfg, "a_b_mappings", []) == []
+        assert cfg.a_b_mappings == []
+        assert cfg.engines_initialized is False
+        assert getattr(cfg, "a_b_mappings", None) == []
 
     def test_b_root_and_c_root_propagate_to_local(self, tmp_path):
         b_root = tmp_path / "b"
@@ -480,6 +481,41 @@ class TestUpdateFromDb:
                 {"mapping_id": "no_a", "a_root": "", "b_root": "C:/b3"},
             ])}}))
         assert [m.mapping_id for m in cfg.a_b_mappings] == ["ok"]
+
+    def test_a_b_mappings_backfills_missing_mapping_id(self, tmp_path):
+        """前端保存体不含 mapping_id（openlist.js 的真实形态），读取侧必须补齐稳定 ID。
+
+        回归防护：mapping_id 为空会让 AppService.get_config_status() 返回
+        fail_safe_active，引擎静默不同步、A→B 永不落地。
+        """
+        cfg = self._cfg(tmp_path)
+        cfg.update_from_db(FakeWatchlistDb({"openlist": {
+            "a_b_mappings": json.dumps([
+                {"a_root": "C:/a1", "b_root": "C:/b1", "label": ""},
+            ])}}))
+        assert len(cfg.a_b_mappings) == 1
+        assert cfg.a_b_mappings[0].mapping_id == ABMapping.generate_mapping_id("C:/a1")
+
+    def test_a_b_mappings_backfill_keeps_explicit_mapping_id(self, tmp_path):
+        """已存在的 mapping_id 不得被覆盖（B 根变更不改 mapping_id 的既有契约）。"""
+        cfg = self._cfg(tmp_path)
+        cfg.update_from_db(FakeWatchlistDb({"openlist": {
+            "a_b_mappings": json.dumps([
+                {"mapping_id": "legacy", "a_root": "C:/a1", "b_root": "C:/b1"},
+            ])}}))
+        assert cfg.a_b_mappings[0].mapping_id == "legacy"
+
+    def test_a_b_mappings_backfill_unique_per_a_root(self, tmp_path):
+        """不同 A 根补齐后必须得到不同 mapping_id，否则门禁会判为重复 ID。"""
+        cfg = self._cfg(tmp_path)
+        cfg.update_from_db(FakeWatchlistDb({"openlist": {
+            "a_b_mappings": json.dumps([
+                {"a_root": "C:/a1", "b_root": "C:/b1"},
+                {"a_root": "C:/a2", "b_root": "C:/b2"},
+            ])}}))
+        ids = [m.mapping_id for m in cfg.a_b_mappings]
+        assert "" not in ids
+        assert len(set(ids)) == 2
 
     def test_invalid_a_b_mappings_json_fails_closed(self, tmp_path):
         cfg = self._cfg(tmp_path)

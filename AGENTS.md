@@ -192,6 +192,7 @@ The Vite config groups modules into chunks:
 - `ABMapping` (config) and the `a_b_mappings` config key in `webui_config` (scope=`openlist`) define each A root ↔ B root relationship; every mapping needs a unique non-empty `mapping_id` and non-empty A/B roots, otherwise `get_config_status()` returns `fail_safe_active` / `not_configured` and startup refuses to launch watchers.
 - `mapping_id` is the isolation boundary for B/C records, fingerprints, lineage, boundary snapshots, and identity projections. Never deduplicate across mappings, never share lineage, and never reuse another mapping's projection.
 - `get_mapping_for_a()` / `get_mapping_for_b()` fail closed: zero or multiple matches both return `None`. Any destructive path (cleanup, C-zone migration, dedup) must keep the source untouched when the mapping cannot be uniquely resolved or when the record's `mapping_id` disagrees with the resolved mapping.
+- When `mapping_id` is missing, `update_from_db` backfills it based on the A-root normalized path (the WebUI save payload does not contain `mapping_id`).
 
 ### Frontend State Management
 - Global state in `state.js` (singleton module pattern, not a framework)

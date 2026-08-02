@@ -3409,7 +3409,7 @@ def handle_config_api(handler) -> None:
         "a_folders": a_folders,
         "a_b_mappings": [
             {"a_root": m.a_root, "b_root": m.b_root, "label": m.label}
-            for m in cfg.a_b_mappings
+            for m in getattr(cfg, "a_b_mappings", [])
         ],
         "strm_engine_paths": strm_engine_paths,
         "refresh_paths": refresh_paths_val,

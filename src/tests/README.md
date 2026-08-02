@@ -25,7 +25,7 @@ python -m pytest src/tests/ -v
 | `test_lineage_snapshot_production.py` | 真实 `AppService` 的 mapping-scoped lineage snapshot 验收：覆盖未变更复用、内容修改、删除、同 mapping 重命名、跨 mapping/非法目录移动、无指纹、同/跨 mapping 重复指纹、A 源缺失 boundary 放行、同名不同根、mapping/lineage 版本变化、snapshot 缺失或损坏、stat/DB 写异常及扫描期间文件修改。 |
 | `test_app_service_helpers.py` | AppService 辅助方法：锁工厂、mapping 路径解析、WebDAV 辅助、引擎内部标记与日志去重。 |
 | `test_app_service_roots.py` | 保护根目录同步、移除根目录扫描与当前根目录快照持久化。 |
-| `test_app_service_lifecycle.py` | `AppService` 生命周期编排：配置未就绪 fail-safe、启动阶段顺序、`start_watchers()` 的 A/B/C schedule（mock Observer，不启动真实 watchdog）、`stop()` 的定时器取消与 observer 停止、重复 stop 以及当前未提供的生命周期保证记录。 |
+| `test_app_service_lifecycle.py` | `AppService` 生命周期编排：配置未就绪 fail-safe、启动阶段顺序、`start_watchers()` 的 A/B/C schedule（mock Observer，不启动真实 watchdog）、`stop()` 的定时器取消与 observer 停止、重复 stop 以及当前未提供的生命周期保证记录。**D1 回归**：WebUI 真实保存体经 DB 往返后引擎门禁 ready（`TestWebUiSavedMappingReachesReady`）。 |
 | `test_multi_mapping_production_acceptance.py` | 多 mapping 生产验收与跨根隔离测试。 |
 
 ### 数据库 / FTS
@@ -43,7 +43,7 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_config.py` | 配置模块单元测试：ABMapping、mapping_version、AppConfig.from_file、update_from_db、load_strm_storage_from_api、migrate_config_to_db、配置 fail-closed |
+| `test_config.py` | 配置模块单元测试：ABMapping、mapping_version、AppConfig.from_file、update_from_db、load_strm_storage_from_api、migrate_config_to_db、配置 fail-closed。**D1 回归**：`update_from_db` 补齐缺失 `mapping_id`（`test_a_b_mappings_backfills_missing_mapping_id` 等）；**D2 回归**：`from_file` 初始化 `a_b_mappings` / `engines_initialized`（`test_from_file_initializes_mapping_fields`）。 |
 | `test_password_security.py` | 管理员密码 PBKDF2 哈希与校验安全测试 |
 | `test_secret_manager.py` | 密钥/凭据安全管理测试 |
 | `test_migrate_encryption.py` | 加密方案迁移测试 |
@@ -77,7 +77,7 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试（含 `TestAreaDetailKindParameter`、`TestAreaDetailCZonePagination`、`TestAreaDetailSingleMappingMid`） |
+| `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试（含 `TestAreaDetailKindParameter`、`TestAreaDetailCZonePagination`、`TestAreaDetailSingleMappingMid`）。**D2 回归**：全新安装 `/api/config` 不抛异常（`TestConfigApiFreshInstall`）；**D3 回归**：fail-safe 时 `start_main` 返回失败（`TestStartMainFailSafe`）。 |
 | `test_call_coverage.py` | 路由调用覆盖率测试 |
 | `test_logging_system.py` | TMDB 操作日志表、日志读取接口与轮转产物测试 |
 | `test_logger_setup.py` | logger_setup 模块单元测试：handler 装配、重复初始化（热更新）、回退路径、级别过滤、启动分隔标记、临时目录清理 |

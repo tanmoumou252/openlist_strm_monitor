@@ -92,3 +92,24 @@ def build_mock_app(
         app.get_mapping_for_b = lambda _p, _ar=a_root, _br=b_root: ("test-mapping", _br, _ar)
 
     return app
+
+
+class FakeConfigDb:
+    """最小 webui_config 替身：只实现 AppConfig.update_from_db 所需的接口。
+
+    与 TmdbWatchlistDb 的 scope/key 语义一致，不落任何磁盘文件。
+    """
+
+    def __init__(self, store: dict[str, dict[str, str]] | None = None) -> None:
+        self.store: dict[str, dict[str, str]] = {
+            scope: dict(kv) for scope, kv in (store or {}).items()
+        }
+
+    def get_config(self, scope: str, key: str, default: str = "") -> str:
+        return self.store.get(scope, {}).get(key, default)
+
+    def set_config(self, scope: str, key: str, value: str) -> None:
+        self.store.setdefault(scope, {})[key] = value
+
+    def get_all_config(self, scope: str) -> dict[str, str]:
+        return dict(self.store.get(scope, {}))

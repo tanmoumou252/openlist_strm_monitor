@@ -1111,6 +1111,20 @@ class WebUIServer:
                 self._app_service = AppService(
                     self._config, self._db, admin_client)
                 self._app_service.start()
+
+                # 引擎可能在配置未就绪时进入 fail-safe（只 return，不抛异常）。
+                # 此时 watcher / 同步全部未启动，不能对外报"已启动"。
+                cfg_status = self._app_service.get_config_status()
+                if not getattr(self._app_service, "_running", False):
+                    reason = cfg_status.get("reason", "配置未就绪")
+                    logging.error("[Main] 启动被 fail-safe 拦截: %s", cfg_status)
+                    self._app_service = None
+                    return {
+                        "success": False,
+                        "status": str(cfg_status.get("status", "fail_safe_active")),
+                        "message": f"主程序未启动：{reason}",
+                    }
+
                 self._app_running = True
                 self._app_start_time = time.time()
 

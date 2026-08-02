@@ -384,16 +384,24 @@ class AppConfig:
             if "a_b_mappings" in db_cfg:
                 try:
                     mappings_data = json.loads(db_cfg["a_b_mappings"])
-                    self.a_b_mappings = [
-                        ABMapping(
-                            mapping_id=m.get("mapping_id", ""),
-                            a_root=m.get("a_root", ""),
-                            b_root=m.get("b_root", ""),
+                    parsed: list[ABMapping] = []
+                    for m in mappings_data:
+                        a_root = m.get("a_root")
+                        b_root = m.get("b_root")
+                        if not a_root or not b_root:
+                            continue
+                        # WebUI 保存体不含 mapping_id：按 A 根规范化路径补齐稳定 ID。
+                        # 缺 ID 会让 get_config_status() 判 fail_safe_active，引擎静默不同步。
+                        mapping_id = str(m.get("mapping_id", "") or "").strip()
+                        if not mapping_id:
+                            mapping_id = ABMapping.generate_mapping_id(a_root)
+                        parsed.append(ABMapping(
+                            mapping_id=mapping_id,
+                            a_root=a_root,
+                            b_root=b_root,
                             label=m.get("label", "")
-                        )
-                        for m in mappings_data
-                        if m.get("a_root") and m.get("b_root")
-                    ]
+                        ))
+                    self.a_b_mappings = parsed
                 except (json.JSONDecodeError, TypeError) as e:
                     logging.warning("[Config] 解析 a_b_mappings 失败: %s", e)
                     self.a_b_mappings = []
@@ -518,6 +526,10 @@ class AppConfig:
         instance.strm_storage_map = {}
         instance.openlist_strm_engines = []
         instance.openlist_refresh_paths = []
+        # 与 dataclass 默认值对齐：DB 未写入时也必须可安全读取，
+        # 否则 routes.handle_config_api 在全新安装时整页 AttributeError。
+        instance.a_b_mappings = []
+        instance.engines_initialized = False
 
         return instance
 
