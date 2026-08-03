@@ -98,7 +98,14 @@
 ```
 
 ### `GET /api/area/{area}/detail`
-获取文件详情。参数：`media`（文件路径）。
+获取文件详情。参数：`media`（文件路径）、`sort`（排序字段）、`order`（asc/desc）、`page`（分页）、`kind`（anime/movie/other/all）、`mapping_id`（指定 mapping 分区）。
+
+**响应字段**（按 area 类型）：
+- **A 区**：`local_path`、`webdav_path`、`parent_webdav_path`、`updated_at`（最后变更）、`last_verified_at`（最后核对，单剧目刷新/全量审计后更新）
+- **B 区**：A 区字段 + `source_a_path`、`fingerprint`、`status`、`mapping_id` + `last_verified_at`
+- **C 区**：`local_path`、`webdav_path`、`original_b_path`、`ghost_root`、`moved_at`
+
+**排序键**：A/B 区支持 `local_path`、`webdav_path`、`updated_at`、`last_verified_at`；C 区支持 `local_path`、`webdav_path`、`moved_at`。
 
 ### `POST /api/area/{area}/refresh`
 触发指定区域的 WebDAV 路径刷新。需要会话 Token。
@@ -108,6 +115,19 @@
 - 主程序未运行返回 503 `{"error": "主程序未运行", "status": "not_running"}`；已有刷新进行中返回 409「刷新进行中，请稍后再试」。
 
 成功返回 `{"ok": true, "message": "...", "refresh_dir": "...", "synced": N, "skipped": N, "failed": N}`（注意此处信封键为 `ok`，非 `success`）。
+
+### `POST /api/index/audit`
+触发手动全量审计（初始扫描 + A→B 全量同步 + 索引代次推进）。需要会话 Token。
+
+- 与周期审计（`_maybe_run_full_audit`）共享互斥锁，任一方进行中另一方返回 `{"ok": true, "status": "already_running", "message": "审计已在进行中"}`。
+- 审计完成后重置周期审计时钟（`_last_full_audit_at` + `set_control`），避免周期审计立即再跑一遍。
+- 重操作，耗时取决于 A 区库大小，会扫描全部 A 区根目录（含机械硬盘）。
+- 成功返回 `{"ok": true, "status": "started", "message": "审计已启动"}`（异步触发，立即返回）。
+
+### `GET /api/index/audit/status`
+查询手动审计状态。需要会话 Token。
+
+- 返回 `{"running": bool, "result": {"index_generation"?: int, "index_generation_at"?: float, "error"?: str} | null}`。
 
 ## 配置
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +22,9 @@ from media_renamer import (
     _build_standard_name,
     extract_season_from_path,
 )
+# 已替换 shutil.copyfile：copy_subtitle_utf8 将字幕标准化为无 BOM 的 UTF-8，
+# 解决 GBK/Big5/UTF-16 等编码字幕在跨平台播放器中乱码的问题。
+from utils.encoding_utils import copy_subtitle_utf8
 
 
 class SubtitleHandler:
@@ -151,7 +153,8 @@ class SubtitleHandler:
             return
 
         try:
-            shutil.copyfile(sub_file, target)
+            # 替代 shutil.copyfile：UTF-8 编码标准化，防止字幕乱码（已验证 GB18030/Big5/UTF-16）
+            copy_subtitle_utf8(sub_file, target)
             logging.info("[字幕复制] 电影字幕: %s -> %s", sub_file, target)
 
             self.db.upsert_subtitle(
@@ -290,7 +293,8 @@ class SubtitleHandler:
             return
 
         try:
-            shutil.copyfile(sub_file, target)
+            # 替代 shutil.copyfile：UTF-8 编码标准化，防止字幕乱码（已验证 GB18030/Big5/UTF-16）
+            copy_subtitle_utf8(sub_file, target)
             logging.info("[字幕复制] 番剧字幕: %s -> %s", sub_file, target)
 
             self.db.upsert_subtitle(

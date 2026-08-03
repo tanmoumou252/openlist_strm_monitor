@@ -468,6 +468,29 @@ class TestAreaRoutes:
         assert isinstance(body, dict)
         assert "error" in body
 
+    def test_area_detail_a_returns_last_verified_at(self, webui_server):
+        """A 区详情每条记录应包含 last_verified_at 字段"""
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/area/a/detail?media=test", session_token)
+        assert status == 200
+        assert isinstance(body, dict)
+        # 如果有记录，检查 last_verified_at 字段存在
+        if "records" in body:
+            for rec in body.get("records", []):
+                assert "last_verified_at" in rec, \
+                    f"记录应包含 last_verified_at 字段: {rec}"
+
+    def test_area_detail_b_returns_last_verified_at(self, webui_server):
+        """B 区详情每条记录应包含 last_verified_at 字段"""
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/area/b/detail?media=test", session_token)
+        assert status == 200
+        assert isinstance(body, dict)
+        if "records" in body:
+            for rec in body.get("records", []):
+                assert "last_verified_at" in rec, \
+                    f"记录应包含 last_verified_at 字段: {rec}"
+
 
 # ============================================================
 # OpenList 路由
@@ -1541,7 +1564,7 @@ class TestAreaDetailKindParameter:
     def _setup_mock_db(self, mock_db, records, total=1, area="b"):
         """设置 mock 数据库连接，处理多次 execute 调用。"""
         mock_conn = MagicMock()
-        
+
         # 定义列名（根据 area 不同）
         if area == "a":
             columns = ["local_path", "webdav_path", "parent_webdav_path", "updated_at"]
@@ -1549,10 +1572,10 @@ class TestAreaDetailKindParameter:
             columns = ["local_path", "webdav_path", "parent_webdav_path", "source_a_path", "fingerprint", "status", "updated_at", "mapping_id"]
         else:  # area == "c"
             columns = ["local_path", "webdav_path", "original_b_path", "ghost_root", "moved_at"]
-        
+
         # 将记录转换为字典列表
         dict_records = [dict(zip(columns, record)) for record in records]
-        
+
         # 使用 side_effect 处理多次 execute 调用
         def execute_side_effect(sql, params=None):
             mock_result = MagicMock()
@@ -1561,9 +1584,9 @@ class TestAreaDetailKindParameter:
             else:
                 mock_result.fetchall.return_value = dict_records
             return mock_result
-        
+
         mock_conn.execute.side_effect = execute_side_effect
-        
+
         mock_conn_ctx = MagicMock()
         mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn_ctx.__exit__ = MagicMock(return_value=False)
@@ -1634,8 +1657,8 @@ class TestAreaDetailKindParameter:
         assert len(seasons) == 1
         assert seasons[0]["label"] == "S01", f"anime kind 应从文件名提取季，实际: {seasons[0]['label']}"
 
-    def test_detail_api_explicit_season_dir_recognized_all_kinds(self, webui_server):
-        """显式 Season 2 / 第二季 目录在所有 kind 下都被识别"""
+    def test_detail_api_movie_kind_skips_explicit_season_dir(self, webui_server):
+        """movie kind 下显式 Season 2 目录不识别，落入默认"""
         server, base, session_token = webui_server
         mock_db = server._db
         records = [
@@ -1643,12 +1666,42 @@ class TestAreaDetailKindParameter:
         ]
         self._setup_mock_db(mock_db, records, total=1, area="b")
 
-        # movie kind 也应识别显式季目录
+        # movie kind 不识别目录级季节
         status, _, resp = _http_get(base, "/api/area/b/detail?media=test_movie&kind=movie", session_token)
         assert status == 200
         seasons = resp.get("seasons", [])
         assert len(seasons) == 1
-        assert seasons[0]["label"] == "S02", f"显式 Season 2 目录应被识别，实际: {seasons[0]['label']}"
+        assert seasons[0]["label"] == "默认", f"movie kind 应跳过显式 Season 目录，实际: {seasons[0]['label']}"
+
+    def test_detail_api_anime_kind_explicit_season_dir_recognized(self, webui_server):
+        """anime kind 下显式 Season 2 目录被正确识别为 S02"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        records = [
+            ("/b/anime/test_anime/Season 2/Show.S02E01.strm", "/webdav/anime/test_anime/Season 2/Show.S02E01.strm", "/webdav/anime/test_anime", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_anime&kind=anime", session_token)
+        assert status == 200
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "S02", f"anime kind 应识别显式 Season 2 目录，实际: {seasons[0]['label']}"
+
+    def test_detail_api_movie_kind_season1_dir_to_default(self, webui_server):
+        """movie kind 下 Season 1 目录不识别，落入默认"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        records = [
+            ("/b/movie/test_movie/Season 1/Movie.S01E01.strm", "/webdav/movie/test_movie/Season 1/Movie.S01E01.strm", "/webdav/movie/test_movie", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_movie&kind=movie", session_token)
+        assert status == 200
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "默认", f"movie kind 应跳过 Season 1 目录，实际: {seasons[0]['label']}"
 
 
 class TestAreaDetailCZonePagination:
@@ -1657,10 +1710,10 @@ class TestAreaDetailCZonePagination:
     def _setup_mock_db(self, mock_db, records, total):
         """设置 mock 数据库连接，处理多次 execute 调用。"""
         mock_conn = MagicMock()
-        
+
         columns = ["local_path", "webdav_path", "original_b_path", "ghost_root", "moved_at"]
         dict_records = [dict(zip(columns, record)) for record in records]
-        
+
         def execute_side_effect(sql, params=None):
             mock_result = MagicMock()
             if "COUNT(*)" in sql:
@@ -1668,9 +1721,9 @@ class TestAreaDetailCZonePagination:
             else:
                 mock_result.fetchall.return_value = dict_records
             return mock_result
-        
+
         mock_conn.execute.side_effect = execute_side_effect
-        
+
         mock_conn_ctx = MagicMock()
         mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn_ctx.__exit__ = MagicMock(return_value=False)
@@ -1680,7 +1733,7 @@ class TestAreaDetailCZonePagination:
         """C 区详情第 2 页返回的记录数不超过 PAGE_SIZE"""
         server, base, session_token = webui_server
         mock_db = server._db
-        
+
         # 创建 150 条记录（PAGE_SIZE=50，共 3 页）
         records = []
         for i in range(150):
@@ -1691,17 +1744,17 @@ class TestAreaDetailCZonePagination:
                 "/ghost/root",
                 1000.0 + i,
             ))
-        
+
         self._setup_mock_db(mock_db, records, total=150)
 
         # 请求第 2 页
         status, _, resp = _http_get(base, "/api/area/c/detail?media=ghost&page=2", session_token)
         assert status == 200
-        
+
         # 验证第 2 页记录数不超过 PAGE_SIZE (50)
         total_records = sum(len(s["records"]) for s in resp.get("seasons", []))
         assert total_records <= 50, f"第 2 页记录数不应超过 PAGE_SIZE，实际: {total_records}"
-        
+
         # 验证总页数正确
         assert resp.get("total_pages") == 3, f"总页数应为 3，实际: {resp.get('total_pages')}"
 
@@ -1709,7 +1762,7 @@ class TestAreaDetailCZonePagination:
         """C 区详情第 1 页和第 2 页记录不重叠"""
         server, base, session_token = webui_server
         mock_db = server._db
-        
+
         records = []
         for i in range(150):
             records.append((
@@ -1719,19 +1772,19 @@ class TestAreaDetailCZonePagination:
                 "/ghost/root",
                 1000.0 + i,
             ))
-        
+
         self._setup_mock_db(mock_db, records, total=150)
 
         # 请求第 1 页
         status1, _, resp1 = _http_get(base, "/api/area/c/detail?media=ghost&page=1", session_token)
         assert status1 == 200
         page1_paths = {r["local_path"] for s in resp1.get("seasons", []) for r in s["records"]}
-        
+
         # 请求第 2 页
         status2, _, resp2 = _http_get(base, "/api/area/c/detail?media=ghost&page=2", session_token)
         assert status2 == 200
         page2_paths = {r["local_path"] for s in resp2.get("seasons", []) for r in s["records"]}
-        
+
         # 验证无重叠
         overlap = page1_paths & page2_paths
         assert len(overlap) == 0, f"第 1 页和第 2 页不应重叠，重叠路径: {overlap}"
@@ -1743,10 +1796,10 @@ class TestAreaDetailSingleMappingMid:
     def _setup_mock_db(self, mock_db, records, total):
         """设置 mock 数据库连接，处理多次 execute 调用。"""
         mock_conn = MagicMock()
-        
+
         columns = ["local_path", "webdav_path", "parent_webdav_path", "source_a_path", "fingerprint", "status", "updated_at", "mapping_id"]
         dict_records = [dict(zip(columns, record)) for record in records]
-        
+
         def execute_side_effect(sql, params=None):
             mock_result = MagicMock()
             if "COUNT(*)" in sql:
@@ -1754,9 +1807,9 @@ class TestAreaDetailSingleMappingMid:
             else:
                 mock_result.fetchall.return_value = dict_records
             return mock_result
-        
+
         mock_conn.execute.side_effect = execute_side_effect
-        
+
         mock_conn_ctx = MagicMock()
         mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn_ctx.__exit__ = MagicMock(return_value=False)
@@ -1767,19 +1820,19 @@ class TestAreaDetailSingleMappingMid:
         server, base, session_token = webui_server
         mock_db = server._db
         mock_app_service = server._app_service
-        
+
         # 设置单个 mapping - 需要先确保 app_service 不为 None
         if mock_app_service is None:
             mock_app_service = MagicMock()
             server._app_service = mock_app_service
-        
+
         mock_mapping = MagicMock()
         mock_mapping.mapping_id = "real_mapping_123"
         mock_mapping.a_root = "/a/m1"
         mock_mapping.b_root = "/b/m1"
         mock_app_service.a_b_mappings = [mock_mapping]
         mock_app_service.get_mapping_for_a.return_value = ("real_mapping_123", "/a/m1", "/b/m1")
-        
+
         records = [
             ("/b/m1/movie1.strm", "/webdav/m1/movie1.strm", "/webdav/m1", "/a/m1/movie1.strm", "fingerprint1", "valid", 1000.0, "real_mapping_123"),
             ("/b/m1/movie2.strm", "/webdav/m1/movie2.strm", "/webdav/m1", "/a/m1/movie2.strm", "fingerprint2", "valid", 1001.0, "real_mapping_123"),
@@ -1788,7 +1841,7 @@ class TestAreaDetailSingleMappingMid:
 
         status, _, resp = _http_get(base, "/api/area/b/detail?media=movie", session_token)
         assert status == 200
-        
+
         # 单 mapping 应返回扁平响应，包含正确的 mapping_id
         assert resp.get("mapping_id") == "real_mapping_123", f"单 mapping 响应的 mapping_id 应为真实 id，实际: {resp.get('mapping_id')}"
 
@@ -1899,3 +1952,125 @@ class TestStartMainFailSafe:
         assert result["success"] is True
         assert server._app_running is True
         fake_app.start.assert_called_once()
+
+
+# ============================================================
+# Task A: 手动全量审计端点测试
+# ============================================================
+
+
+class TestManualFullIndexAuditAPI:
+    """测试 POST /api/index/audit 和 GET /api/index/audit/status 端点"""
+
+    def test_audit_endpoint_requires_auth(self, webui_server):
+        """审计端点需要鉴权（不在免鉴权白名单）"""
+        server, base, session_token = webui_server
+
+        # 不传 token
+        body = {}
+        status, _, resp = _http_post(base, "/api/index/audit", body, session_token=None)
+        assert status == 401
+        assert resp.get("need_login") is True
+
+    def test_audit_when_app_service_is_none(self, webui_server):
+        """当 app_service 为 None 时，审计应返回 not_configured"""
+        server, base, session_token = webui_server
+        server._app_service = None
+
+        body = {}
+        status, _, resp = _http_post(base, "/api/index/audit", body, session_token)
+        assert status == 400
+        assert resp.get("ok") is False
+        assert resp.get("status") == "not_configured"
+
+    def test_audit_when_engine_not_ready(self, webui_server):
+        """当引擎未 ready 时，审计应返回 not_configured"""
+        server, base, session_token = webui_server
+
+        mock_app = MagicMock()
+        mock_app._running = False
+        server._app_service = mock_app
+
+        body = {}
+        status, _, resp = _http_post(base, "/api/index/audit", body, session_token)
+        assert status == 400
+        assert resp.get("ok") is False
+        assert resp.get("status") == "not_configured"
+
+    def test_audit_concurrent_request_returns_already_running(self, webui_server):
+        """并发请求应返回 200 + already_running，不启动第二个线程"""
+        server, base, session_token = webui_server
+
+        mock_app = MagicMock()
+        mock_app._running = True
+        mock_app.refresh_service = MagicMock()
+        mock_app.refresh_service._maybe_run_full_audit = MagicMock()
+        server._app_service = mock_app
+
+        # 模拟正在进行中
+        server._index_audit_running = True
+
+        body = {}
+        status, _, resp = _http_post(base, "/api/index/audit", body, session_token)
+        assert status == 200
+        assert resp.get("ok") is True
+        assert resp.get("status") == "already_running"
+
+        # 验证没有调用审计方法
+        mock_app.refresh_service._maybe_run_full_audit.assert_not_called()
+
+    def test_audit_status_endpoint_returns_running_and_result(self, webui_server):
+        """GET /api/index/audit/status 应返回 {running, result} 可轮询"""
+        server, base, session_token = webui_server
+
+        # 默认状态
+        status, _, resp = _http_get(base, "/api/index/audit/status", session_token)
+        assert status == 200
+        assert "running" in resp
+        assert "result" in resp
+        assert resp["running"] is False
+        assert resp["result"] is None
+
+
+# ============================================================
+# Task B: TMDB override 端点一致性收口测试
+# ============================================================
+
+
+class TestTMDBWatchlistMatchOverrideConsistency:
+    """测试 TMDB override 端点的一致性校验（与 clear/refresh 对齐）"""
+
+    def test_override_when_watchlist_disabled_returns_400(self, webui_server):
+        """watchlist_enabled 为 'false' 时 POST override 应返回 400"""
+        server, base, session_token = webui_server
+
+        # 设置 watchlist_enabled = "false"（通过 watchlist_db）
+        wdb = server._watchlist_db
+        if not wdb:
+            pytest.skip("watchlist_db not initialized")
+        wdb.set_config("tmdb", "watchlist_enabled", "false")
+
+        body = {"media_type": "movie", "id": 1, "status": "matched"}
+        status, _, resp = _http_post(
+            base, "/api/tmdb/watchlist/match/override", body, session_token)
+        assert status == 400
+        assert resp.get("success") is False
+        assert "禁用" in resp.get("message", "")
+
+    def test_override_with_id_zero_returns_400(self, webui_server):
+        """id=0 应返回 400（无效 ID）"""
+        server, base, session_token = webui_server
+
+        body = {"media_type": "movie", "id": 0, "status": "matched"}
+        status, _, resp = _http_post(base, "/api/tmdb/watchlist/match/override", body, session_token)
+        assert status == 400
+        assert resp.get("success") is False
+
+    def test_override_with_negative_id_returns_400(self, webui_server):
+        """id=-1 应返回 400（无效 ID）"""
+        server, base, session_token = webui_server
+
+        body = {"media_type": "movie", "id": -1, "status": "matched"}
+        status, _, resp = _http_post(base, "/api/tmdb/watchlist/match/override", body, session_token)
+        assert status == 400
+        assert resp.get("success") is False

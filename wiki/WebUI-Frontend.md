@@ -92,12 +92,12 @@ npx vite          # 开发服务器（HMR）
 OpenList 配置页（`openlist.js`）实现了结构化的帮助文本系统，用于在表单控件下方显示上下文相关的帮助说明：
 
 - **`_openlistHelpTexts`** — 常量对象，定义所有帮助文本的键值对。键名对应控件的 `helpKey`，值为帮助文本字符串。
-- **`helpKey`** — 表单字段配置对象中的可选属性。当 `createField()` 创建浮动标签输入框时，若存在 `helpKey`，自动从 `_openlistHelpTexts` 中查找对应的帮助文本，并在输入框下方渲染为 `<p class="form-help">` 元素。
-- **`helperText`** — 表单字段配置对象中的可选属性。与 `helpKey` 类似，但直接指定帮助文本内容（不通过字典查找）。
-- **关系**：`helpKey` 用于从 `_openlistHelpTexts` 查找帮助文本，查找结果作为 `helperText` 传递给 `createField`。两者互补，非竞争关系。若同时指定，`helpKey` 的查找结果生效。
-- **渲染位置**：帮助文本显示在浮动标签输入框的外层容器内，紧接输入框之后、下一个字段之前。
+- **`helpKey`** — `olField()` / `olSelect()` / `olToggle()` 的形参（非 `createField` 配置项）。当渲染 OpenList 表单时，`helpKey` 用于从 `_openlistHelpTexts` 查找帮助文本，查找结果作为 `helperText` 传递给底层 `createField`。
+- **`helperText`** — `olField()` / `olSelect()` / `olToggle()` 的形参。与 `helpKey` 互补：`helpKey` 通过字典查找，`helperText` 直接指定文本。两者非竞争关系，`helpKey` 的查找结果优先。
+- **帮助图标（tooltip）**：`_olHelpIcon(key)` 根据 `helpKey` 查 `_openlistHelpTexts` 生成 `<span class="ol-help-icon">` tooltip 图标，与下方 `.field-helper-text` div 并存，前者为 hover 提示，后者为常驻文本。
+- **渲染位置**：帮助文本渲染为 `<div class="field-helper-text">` 元素，显示在浮动标签输入框的外层容器内，紧接输入框之后。
 
-`utils.js` 的 `createField()` 函数负责解析 `helpKey`/`helperText` 并生成对应的 DOM 结构。
+`utils.js` 的 `createField()` 函数接收 `helperText` 参数并生成对应的 `.field-helper-text` div DOM 结构。`olField()` / `olSelect()` / `olToggle()` 是 OpenList 页面的封装函数，负责 `helpKey`→`_openlistHelpTexts` 查找后再调用 `createField`。
 
 ### `theme.js` — 双主题系统
 - `syncTheme()` — 应用 `data-system`、`data-color`、`data-font` 到 `<html>`，持久化到 localStorage
@@ -117,6 +117,15 @@ Canvas 水墨鼠标擦除效果（`destination-out` 合成模式）。5 种笔�
 - IP 白名单（仅局域网）— `_is_lan_ip()` 为后端 `routes.py` 中定义的工具函数，`server.py` 导入并复用，前端不涉及。
 
 免 Token 路径：`/api/config`、`/api/webui/config/ui`、`/api/tmdb/avatar`、`/api/tmdb/poster`、`/api/openlist/status`、`/api/openlist/ping`、`/api/admin/status`、`/api/login`、静态资源
+
+## 仪表盘
+
+仪表盘由 `modules/pages/dashboard.js`（`renderDashboard(el)`）负责，对应后端 `GET /api/dashboard`。展示两组统计卡片：
+
+- **A/B/C 区记录数卡**：A 区 STRM 数、B 区 STRM 数、C 区幽灵数、B 区 valid/duplicate/quarantined 分布、TMDB 配置状态、WebUI 运行时间。
+- **索引元数据卡（四卡）**：索引代次（`index_generation`）、最近索引时间（`last_full_index_at`，hover 显示精确时间）、映射版本（`mapping_version`，hover 显示完整哈希）、映射版本生成时间（`mapping_version_generated_at`，hover 显示精确时间）。
+
+此外提供 **『立即全量审计』** 按钮：点击后异步触发 `POST /api/index/audit`，按钮进入「审计中...」状态并通过 `GET /api/index/audit/status` 轮询进度，完成后显示「审计完成，索引代次 #N」，失败时显示错误信息。
 
 ## 新手引导（Onboarding）
 

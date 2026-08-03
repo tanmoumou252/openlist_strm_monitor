@@ -78,10 +78,11 @@ python src/webui/scripts/subset_font.py --source-kr C:\path\to\NotoSansKR-VF.ttf
 
 ### 网页字符扫描（自动发现）
 
-扫描 `index.html`、`main.js`、`public/*.html`、`modules/**/*.js`、`styles/**/*.css` 中实际出现的可显示 Unicode 字符（排除控制字符、格式字符和变体选择符）。例如：
+扫描 `index.html`、`main.js`、`public/*.html`、`modules/**/*.js`、`styles/**/*.css` 以及 `*.py`（后端 Python 源文件）中实际出现的可显示 Unicode 字符（排除控制字符、格式字符和变体选择符）。例如：
 
 - `openlist.js` 中的 `A↔B 目录映射` 会自动发现 U+2194 (`↔`)
 - `index.html` 中的 `<span class="dropdown-arrow">▾</span>` 会自动发现 U+25BE (`▾`)
+- `routes.py` / `server.py` 中的 `showToast` / dialog 中文文案会自动发现后端用户可见的 CJK 字符
 
 扫描发现的码位与静态区块合并后统一子集化，确保网页实际使用的所有字符都有字形（或明确标注源字体缺失的 WARNING）。
 

@@ -42,6 +42,9 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 | `webdav_path` | TEXT NOT NULL | 规范化后的 WebDAV 路径 |
 | `parent_webdav_path` | TEXT NOT NULL | 父级 WebDAV 目录 |
 | `updated_at` | REAL NOT NULL | 最后更新时间戳 |
+| `last_verified_at` | REAL NOT NULL DEFAULT 0 | 最后核对时间戳（单剧目刷新/全量审计后更新，与 `updated_at` 语义不同：`updated_at`=最后变更，`last_verified_at`=最后核对） |
+
+**注意**：`last_verified_at` 不在 upsert 热路径写入（保护 ##29 启动性能），仅在单剧目刷新和全量审计后由 `touch_verified_a`/`touch_verified_by_mapping` 有界批量更新。
 
 **索引**：`idx_a_strm_webdav_path`（webdav_path）、`idx_a_strm_updated_at`（updated_at）
 
@@ -57,6 +60,7 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 | `fingerprint` | TEXT | SHA-256 指纹 |
 | `status` | TEXT DEFAULT 'valid' | 状态：valid/duplicate/quarantined/invalid/ghost |
 | `updated_at` | REAL NOT NULL | 更新时间戳 |
+| `last_verified_at` | REAL NOT NULL DEFAULT 0 | 最后核对时间戳（语义同 A 区；通过 `source_a_path` 或 `mapping_id` 关联更新） |
 
 **索引**：`idx_b_strm_webdav_path`、`idx_b_strm_fingerprint`、`idx_b_strm_status`、`idx_b_strm_mapping_id`、`idx_b_strm_mapping_fp`、`idx_b_strm_updated_at`。指纹去重和 projection 查询均限定 mapping。
 

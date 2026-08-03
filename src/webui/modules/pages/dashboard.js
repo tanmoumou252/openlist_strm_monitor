@@ -445,8 +445,15 @@ export async function renderDashboard(el) {
 <!-- 索引元数据（Task 2） -->
 <div class="stat-grid" style="margin-top:16px">
   <div class="stat-card"><div class="label">${icon('update')} 索引代次</div><div class="value stat-value-primary">#${d.index_metadata?.index_generation || 0}</div></div>
-  <div class="stat-card"><div class="label">${icon('schedule')} 最近索引</div><div class="value">${d.index_metadata?.last_full_index_at ? _formatTimestamp(d.index_metadata.last_full_index_at) : '暂无记录'}</div></div>
+  <div class="stat-card"><div class="label">${icon('schedule')} 最近索引</div><div class="value" title="${_formatExact(d.index_metadata?.last_full_index_at)}">${d.index_metadata?.last_full_index_at ? _formatTimestamp(d.index_metadata.last_full_index_at) : '暂无记录'}</div></div>
   <div class="stat-card"><div class="label">${icon('link')} 映射版本</div><div class="value" title="${esc(d.index_metadata?.mapping_version || '')}">${d.index_metadata?.mapping_version ? d.index_metadata.mapping_version.substring(0, 8) + '...' : '-'}</div></div>
+  <div class="stat-card"><div class="label">映射版本生成</div><div class="value" title="${_formatExact(d.index_metadata?.mapping_version_generated_at)}">${d.index_metadata?.mapping_version_generated_at ? _formatTimestamp(d.index_metadata.mapping_version_generated_at) : '暂无记录'}</div></div>
+</div>
+
+<!-- A'.3: 立即全量审计按钮 -->
+<div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+  <button class="toolbar-btn secondary" id="btn-run-full-audit" style="font-size:calc(var(--font-base) - 1px)">${icon('play_arrow')} 立即全量审计</button>
+  <span id="audit-status-text" style="font-size:calc(var(--font-base) - 1px);color:var(--text-muted)"></span>
 </div>
 
 <!-- Mapping 列表（Task 2） -->
@@ -465,7 +472,7 @@ ${d.mappings && d.mappings.length > 0 ? `
           <div>B: ${esc(_shortenPath(m.b_root))}</div>
         </div>
         <div style="font-size:11px;color:var(--text-muted)">
-          索引时间: ${m.index_generation_at ? _formatTimestamp(m.index_generation_at) : '未索引'}
+          索引时间: <span title="${_formatExact(m.index_generation_at)}">${m.index_generation_at ? _formatTimestamp(m.index_generation_at) : '未索引'}</span>
         </div>
       </div>
     `).join('')}
@@ -506,6 +513,18 @@ function _formatTimestamp(timestamp) {
   }
 }
 
+/** 将 Unix 时间戳转为精确的 YYYY-MM-DD HH:mm:ss 格式（用于 title tooltip） */
+function _formatExact(timestamp) {
+  if (!timestamp || timestamp === 0) return '暂无记录';
+  try {
+    const d = new Date(timestamp * 1000);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  } catch (e) {
+    return '暂无记录';
+  }
+}
+
 function _shortenPath(path) {
   if (!path) return '/';
   const parts = path.split('/').filter(Boolean);
@@ -526,10 +545,65 @@ function _shortenPath(path) {
           method: 'POST',
           body: JSON.stringify({ onboarding_completed: '0' })
         });
-      } catch (e) {
+      } catch ( e) {
         console.error('Failed to reset onboarding:', e);
       }
       await _loadOnboarding();
+    });
+  }
+
+  // A'.3: 立即全量审计按钮 + 轮询
+  const auditBtn = document.getElementById('btn-run-full-audit');
+  const auditStatusText = document.getElementById('audit-status-text');
+  if (auditBtn) {
+    auditBtn.addEventListener('click', async () => {
+      if (!confirm('确定要执行全量审计吗？\n\n这是一个重操作，耗时取决于 A 区库大小，会扫描全部 A 区根目录（含机械硬盘）。不会删除任何文件。')) return;
+      auditBtn.disabled = true;
+      auditBtn.innerHTML = '审计中...';
+      if (auditStatusText) auditStatusText.textContent = '正在启动审计...';
+      try {
+        const resp = await api('/api/index/audit', { method: 'POST' });
+        if (resp.status === 'already_running') {
+          if (auditStatusText) auditStatusText.textContent = '审计已在进行中';
+          auditBtn.disabled = false;
+          auditBtn.innerHTML = `${icon('play_arrow')} 立即全量审计`;
+          return;
+        }
+        // 轮询状态
+        const maxPolls = 300;
+        for (let i = 0; i < maxPolls; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          try {
+            const st = await api('/api/index/audit/status');
+            if (!st.running && st.result) {
+              if (st.result.error) {
+                if (auditStatusText) auditStatusText.textContent = '审计失败: ' + st.result.error;
+              } else {
+                if (auditStatusText) auditStatusText.textContent = '审计完成，索引代次 #' + (st.result.index_generation || 0);
+              }
+              auditBtn.disabled = false;
+              auditBtn.innerHTML = `${icon('play_arrow')} 立即全量审计`;
+              // 局部刷新索引卡片
+              try {
+                const dashResp = await api('/api/dashboard');
+                if (dashResp && dashResp.index_metadata) {
+                  const genEl = document.querySelector('.stat-value-primary');
+                  if (genEl) genEl.textContent = '#' + (dashResp.index_metadata.index_generation || 0);
+                }
+              } catch (e) { /* 忽略刷新失败 */ }
+              return;
+            }
+            if (auditStatusText) auditStatusText.textContent = '审计进行中... (' + (i * 2) + 's)';
+          } catch (e) { /* 轮询失败继续 */ }
+        }
+        if (auditStatusText) auditStatusText.textContent = '审计超时，请稍后重试';
+        auditBtn.disabled = false;
+        auditBtn.innerHTML = `${icon('play_arrow')} 立即全量审计`;
+      } catch (e) {
+        if (auditStatusText) auditStatusText.textContent = '审计请求失败: ' + e.message;
+        auditBtn.disabled = false;
+        auditBtn.innerHTML = `${icon('play_arrow')} 立即全量审计`;
+      }
     });
   }
 

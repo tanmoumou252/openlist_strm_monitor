@@ -419,8 +419,11 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
         
         if (response.success) {
           showToast('收录状态已更新', 'success');
-          // 刷新页面数据
-          setTimeout(() => window.location.reload(), 800);
+          // B'.2: 局部刷新：通过 hash 跳转触发 SPA 重新渲染当前页（与 clear 分支一致）
+          const cur = window.location.hash;
+          window.location.hash = '#tmdb';
+          if (cur !== '#tmdb') window.location.hash = cur;
+          else window.dispatchEvent(new HashChangeEvent('hashchange'));
         } else {
           showToast('更新失败: ' + (response.message || '未知错误'), 'error');
         }

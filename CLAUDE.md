@@ -26,6 +26,7 @@ This file provides guidance to AI coding assistants when working with the `openl
 
 - **Sync engine only**: `python src/main.py` — starts the A/B/C zone sync engine, no WebUI.
 - **WebUI**: `python src/webui/server.py` — starts the management panel with an interactive menu to optionally launch the sync engine.
+- **WebUI headless (background)**: `BRIDGE_HEADLESS=1` environment variable triggers headless mode in `main()` — auto-starts the sync engine (skips interactive menu) and enters silent wait (no stdin). The repository ships `后台带Bridge启动webui.vbs` which sets this variable and launches `server.py` with a hidden console window.
 
 > Do NOT use `python src/main.py --webui-only` or `--webui` — those flags do not exist (both are rejected by `main.py`).
 
@@ -55,6 +56,7 @@ This file provides guidance to AI coding assistants when working with the `openl
 - IP whitelist (LAN only) + token check on every request
 - Whitelisted paths (no token): `/api/config`, `/api/webui/config/ui`, `/api/tmdb/avatar`, `/api/tmdb/poster`, `/api/openlist/status`, `/api/openlist/ping`, `/api/admin/status`, `/api/login`, `/login` (SPA route), `/api/page`, `/`, static assets (`/assets/*`, `/favicon.ico`, `/logo.png`, `/openlist_strm_bridge.png`, `/fonts/*`, `.woff2`/`.woff`/`.ttf`)
 - `/login` is a token-free SPA GET route served from `dist/index.html`; `/api/login` is the POST authentication endpoint. Do not confuse the two.
+- **Audit endpoints**: `POST /api/index/audit` (trigger manual full audit) and `GET /api/index/audit/status` (poll audit progress) — both require authentication, share `_full_audit_in_progress` mutex with periodic audit, not in the auth whitelist.
 
 ### Frontend API Calls
 - ALWAYS use the `api()` function from `src/webui/modules/core/api.js` — it auto-attaches the auth token
@@ -155,3 +157,4 @@ openlist_strm_bridge/
 - Duplicate scoring: Standard `S01E01` naming ranks highest, inferior names get `.duplicate` suffix
 - Config layering: DB config overrides config.toml. If toml changes don't take effect, check DB `webui_config` table.
 - A↔B mapping isolation: `ABMapping` / the `a_b_mappings` table define each A root ↔ B root pair. `mapping_id` is the isolation boundary for B/C records, fingerprints, lineage, boundary snapshots, and identity projections — never deduplicate or share lineage across mappings. `get_mapping_for_a()` / `get_mapping_for_b()` fail closed on zero or multiple matches, and destructive paths must keep the source when the mapping cannot be uniquely resolved or the record's `mapping_id` disagrees. When `mapping_id` is missing, `update_from_db` backfills it from the A-root normalized path — the WebUI save payload does not contain `mapping_id`.
+- **`a_strm_files` / `b_strm_files` tables**: include `last_verified_at` column (timestamp of last full-audit verification; distinct from `mtime`/`updated_at`, not on the upsert hot path).

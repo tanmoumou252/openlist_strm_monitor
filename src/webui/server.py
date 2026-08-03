@@ -567,6 +567,9 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             _handle_main_status(self, self.webui)
         elif path == "/api/admin/status":
             self._send_json({"has_password": self.webui._has_password})
+        elif path == "/api/index/audit/status":
+            from webui.routes import handle_index_audit_status
+            handle_index_audit_status(self)
         # 通用静态文件处理（.js / .css / .svg / .png / .jpg / .ico / .woff2 等）
         elif self._try_serve_static(path):
             pass
@@ -634,6 +637,9 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
                 _handle_webui_config_post(self, self.webui, scope, body)
             else:
                 self._send_json({"error": "scope required"}, 400)
+        elif path == "/api/index/audit":
+            from webui.routes import handle_index_audit
+            handle_index_audit(self, body)
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -684,6 +690,9 @@ class WebUIServer:
         self._match_refresh_lock = threading.Lock()
         self._match_refresh_running = False
         self._match_refresh_result: dict | None = None
+        self._index_audit_lock = threading.Lock()
+        self._index_audit_running = False
+        self._index_audit_result: dict | None = None
 
         # 尝试查找日志文件（独立运行模式使用）
         self._log_file: str | None = None
@@ -1275,17 +1284,24 @@ def main():
     logger.info("  管理面板已就绪: http://127.0.0.1:%d", port)
     logger.info("=" * 50)
 
-    # 询问是否自动启动主程序
+    # VBS 启动脚本（后台带Bridge启动webui.vbs）设置 BRIDGE_HEADLESS=1 环境变量，
+    # 触发无头模式：自动启动主程序（跳过交互选择），静默运行不读 stdin。
+    # BAT 启动（嵌入式启动.bat / 环境变量启动.bat）不设此变量，走交互菜单。
+    headless = os.environ.get("BRIDGE_HEADLESS") == "1"
     auto_start_main = False
-    print("\n请选择启动模式:")
-    print("  1. 自动启动主程序 (AppService)")
-    print("  2. 仅启动 WebUI")
-    try:
-        choice = input("请输入选项 [1/2] (默认 2): ").strip().lower()
-        if choice == "1":
-            auto_start_main = True
-    except (EOFError, KeyboardInterrupt):
-        pass
+    if headless:
+        logger.info("[Headless] 检测到无头模式，自动启动主程序（等效选 1）")
+        auto_start_main = True
+    else:
+        print("\n请选择启动模式:")
+        print("  1. 自动启动主程序 (AppService)")
+        print("  2. 仅启动 WebUI")
+        try:
+            choice = input("请输入选项 [1/2] (默认 2): ").strip().lower()
+            if choice == "1":
+                auto_start_main = True
+        except (EOFError, KeyboardInterrupt):
+            pass
 
     # 如果选择自动启动主程序
     if auto_start_main:
@@ -1296,15 +1312,23 @@ def main():
         else:
             logger.error("主程序启动失败: %s", result.get("message"))
 
-    logger.info("按 Ctrl+C 或输入 q 退出")
-
-    try:
-        while True:
-            cmd = input().strip().lower()
-            if cmd in ("q", "quit", "exit"):
-                break
-    except (KeyboardInterrupt, EOFError):
-        pass
+    if headless:
+        # 无头模式：静默等待，不读 stdin，除非手动 WebUI 停止主程序，否则始终运行
+        logger.info("[Headless] 已进入静默等待模式（终止请用任务管理器结束 python.exe）")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+    else:
+        logger.info("按 Ctrl+C 或输入 q 退出")
+        try:
+            while True:
+                cmd = input().strip().lower()
+                if cmd in ("q", "quit", "exit"):
+                    break
+        except (KeyboardInterrupt, EOFError):
+            pass
 
     # 退出时停止主程序（如果在运行）
     if server._app_running:

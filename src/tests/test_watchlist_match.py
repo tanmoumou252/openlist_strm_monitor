@@ -472,8 +472,8 @@ class TestExtractSeasonFromLocalPath:
         season = _extract_season_from_local_path(path, allow_filename_fallback=True)
         assert season == "S01", f"anime kind 应从文件名提取季，实际得到: {season}"
 
-    def test_explicit_season_dir_recognized_all_kinds(self):
-        """显式 Season 2 / 第二季 目录在所有 kind 下都被识别"""
+    def test_explicit_season_dir_recognized_when_is_anime_true(self):
+        """显式 Season 2 / 第二季 目录在 is_anime=True 时被识别"""
         # Season 2 目录
         path1 = "/b/电影/某电影/Season 2/Movie.S02E01.strm"
         season1 = _extract_season_from_local_path(path1, allow_filename_fallback=False)
@@ -545,8 +545,7 @@ class TestMovieSeasonMisclassification:
             assert "movie_" in reason, f"电影匹配原因应以 movie_ 开头，实际: {reason}"
 
     def test_movie_with_explicit_season_dir_recognized(self):
-        """电影路径包含显式 Season 目录时，所有 kind 都会识别季（现有行为）"""
-        # 显式 Season 目录在所有 kind 下都被识别（这是现有行为，由 test_explicit_season_dir_recognized_all_kinds 验证）
+        """电影路径包含显式 Season 目录时，is_anime=True 仍识别季（默认行为）"""
         path = "/b/电影/某电影/Season 2/Movie.S02E01.strm"
         season = _extract_season_from_local_path(path, allow_filename_fallback=False)
         assert season == "S02", f"显式 Season 2 目录应被识别，实际得到: {season}"
@@ -562,3 +561,47 @@ class TestMovieSeasonMisclassification:
         path = "/b/电影/某电影/Movie.S01E01.strm"
         season = _extract_season_from_local_path(path, allow_filename_fallback=False)
         assert season == "", f"all kind 下文件名 S01E01 不应产生季，实际得到: {season}"
+
+
+# ============================================================
+# Task 3: is_anime=False 目录级季节提取跳过
+# ============================================================
+
+class TestIsAnimeFalseDirectorySeasonSkip:
+    """测试 is_anime=False 时跳过目录级季节提取（电影路径含 S01 目录不产生分组）。"""
+
+    def test_movie_s01_dir_no_season(self):
+        """电影路径含 S01 目录 + is_anime=False → 无季节提取"""
+        path = "/b/电影/合集/S01/电影.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False, is_anime=False)
+        assert season == "", f"电影 is_anime=False 时 S01 目录不应产生季节，实际得到: {season}"
+
+    def test_movie_season2_dir_no_season(self):
+        """电影路径含 Season 2 目录 + is_anime=False → 无季节提取"""
+        path = "/b/电影/合集/Season 2/电影.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False, is_anime=False)
+        assert season == "", f"电影 is_anime=False 时 Season 2 目录不应产生季节，实际得到: {season}"
+
+    def test_movie_cn_season_dir_no_season(self):
+        """电影路径含 第二季 目录 + is_anime=False → 无季节提取"""
+        path = "/b/电影/合集/第二季/电影.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False, is_anime=False)
+        assert season == "", f"电影 is_anime=False 时 第二季 目录不应产生季节，实际得到: {season}"
+
+    def test_anime_s01_dir_with_is_anime_true(self):
+        """番剧路径含 S01 目录 + is_anime=True → 正常提取季节"""
+        path = "/b/番剧/某番剧/S01/Show.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=True, is_anime=True)
+        assert season == "S01", f"番剧 is_anime=True 时 S01 目录应提取季节，实际得到: {season}"
+
+    def test_movie_no_dir_season_only_filename(self):
+        """电影路径无目录级季节 + is_anime=False + allow_filename_fallback=False → 空"""
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False, is_anime=False)
+        assert season == "", f"电影 is_anime=False 时不应提取任何季节，实际得到: {season}"
+
+    def test_movie_list_card_filename_s01_no_season(self):
+        """列表卡片路径：movie + Movie.S01E01.strm → allow_filename_fallback=False, is_anime=False → 空（不显示 S01）"""
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False, is_anime=False)
+        assert season == "", f"电影列表卡片不应从文件名 S01E01 提取季节（is_anime=False, allow_filename_fallback=False），实际得到: {season}"

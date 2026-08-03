@@ -886,3 +886,74 @@ class TestDistStaticPages:
             pytest.skip("dist/ 尚未构建")
         text = preview.read_text(encoding="utf-8")
         assert "assets/" not in text
+
+
+# ============================================================
+# Task G: 字体子集扫描集补全测试
+# ============================================================
+
+
+class TestBackendScanSources:
+    """测试后端 Python 源文件被纳入字体扫描集"""
+
+    def test_scan_sources_include_backend_python(self):
+        """iter_web_source_files 的默认 SCAN_GLOBS 应覆盖 webui/routes.py 和 webui/server.py"""
+        webui_dir = Path(__file__).resolve().parent.parent / "webui"
+        files = sf.iter_web_source_files(webui_dir)
+        file_names = {f.name for f in files}
+        # 至少 routes.py 和 server.py 应在扫描范围内
+        assert "routes.py" in file_names, \
+            f"SCAN_GLOBS 未覆盖后端 Python: 找到 {file_names}"
+        assert "server.py" in file_names, \
+            f"SCAN_GLOBS 未覆盖后端 Python: 找到 {file_names}"
+
+    def test_scan_sources_include_backend_in_webui_subdir(self):
+        """后端 Python 文件在 webui/ 子目录下，SCAN_GLOBS 应递归找到"""
+        webui_dir = Path(__file__).resolve().parent.parent / "webui"
+        files = sf.iter_web_source_files(webui_dir)
+        backend_files = [f for f in files if f.suffix == ".py" and f.parent.name == "webui"]
+        assert len(backend_files) >= 2, \
+            f"应至少找到 routes.py 和 server.py，实际: {backend_files}"
+
+
+class TestUnicodeRangeCoverage:
+    """测试扫描得到的码点与 CSS unicode-range 的反向覆盖"""
+
+    def test_scanned_codepoints_within_css_range(self):
+        """扫描后端 Python 文件得到的 CJK 码点应落在 CSS unicode-range 内"""
+        webui_dir = Path(__file__).resolve().parent.parent / "webui"
+        css_file = webui_dir / "styles" / "main.css"
+        if not css_file.exists():
+            pytest.skip("main.css 不存在")
+
+        # 收集后端 Python 文件中的 CJK 码点
+        backend_files = [f for f in sf.iter_web_source_files(webui_dir)
+                         if f.suffix == ".py" and "webui" in str(f)]
+        backend_codepoints = set()
+        for f in backend_files:
+            try:
+                content = f.read_text(encoding="utf-8")
+                for ch in content:
+                    if sf.is_scannable_char(ch):
+                        backend_codepoints.add(ord(ch))
+            except Exception:
+                pass
+
+        # 过滤出 CJK 基本区码点（0x4E00-0x9FFF）
+        cjk_codepoints = {cp for cp in backend_codepoints if 0x4E00 <= cp <= 0x9FFF}
+        if not cjk_codepoints:
+            pytest.skip("后端 Python 中无 CJK 基本区码点")
+
+        # 直接解析 CSS unicode-range（不依赖 extract_css_unicode_range，该函数需要 font_file 参数）
+        import re as _re
+        css_content = css_file.read_text(encoding="utf-8")
+        range_pattern = _re.compile(r'unicode-range:\s*([^;]+);', _re.IGNORECASE)
+        raw_ranges = range_pattern.findall(css_content)
+        css_codepoints = set()
+        for rng in raw_ranges:
+            css_codepoints.update(sf.parse_unicode_range_str(rng))
+
+        # 反向断言：每个 CJK 码点都在 CSS 声明的范围内
+        missing = cjk_codepoints - css_codepoints
+        assert not missing, \
+            f"后端 Python 的 CJK 码点未被 CSS unicode-range 覆盖: {sorted(missing)[:10]}"

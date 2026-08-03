@@ -373,7 +373,8 @@ class Database:
                     local_path TEXT PRIMARY KEY,
                     webdav_path TEXT NOT NULL,
                     parent_webdav_path TEXT NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at REAL NOT NULL,
+                    last_verified_at REAL NOT NULL DEFAULT 0
                 )
                 """)
 
@@ -386,7 +387,8 @@ class Database:
                     fingerprint TEXT,
                     status TEXT DEFAULT 'valid',
                     updated_at REAL NOT NULL,
-                    mapping_id TEXT NOT NULL DEFAULT ''
+                    mapping_id TEXT NOT NULL DEFAULT '',
+                    last_verified_at REAL NOT NULL DEFAULT 0
                 )
                 """)
 
@@ -396,6 +398,16 @@ class Database:
             }
             if existing_b_columns and "mapping_id" not in existing_b_columns:
                 cur.execute("ALTER TABLE b_strm_files ADD COLUMN mapping_id TEXT NOT NULL DEFAULT ''")
+
+            if existing_b_columns and "last_verified_at" not in existing_b_columns:
+                cur.execute("ALTER TABLE b_strm_files ADD COLUMN last_verified_at REAL NOT NULL DEFAULT 0")
+
+            # A 区也需要迁移
+            existing_a_columns = {
+                row[1] for row in cur.execute("PRAGMA table_info(a_strm_files)").fetchall()
+            }
+            if existing_a_columns and "last_verified_at" not in existing_a_columns:
+                cur.execute("ALTER TABLE a_strm_files ADD COLUMN last_verified_at REAL NOT NULL DEFAULT 0")
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS strm_identity (
@@ -638,10 +650,10 @@ class Database:
                 # 新增记录
                 conn.execute(
                     """
-                    INSERT INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at, last_verified_at)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    (local_path, webdav_path, parent_webdav_path, now),
+                    (local_path, webdav_path, parent_webdav_path, now, now),
                 )
                 # 插入 FTS（先清理可能残留的同 rowid 孤儿行）
                 new_row = conn.execute(
@@ -710,9 +722,9 @@ class Database:
                     """
                     INSERT INTO b_strm_files(
                         local_path, webdav_path, parent_webdav_path,
-                        source_a_path, fingerprint, status, updated_at, mapping_id
+                        source_a_path, fingerprint, status, updated_at, mapping_id, last_verified_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         local_path,
@@ -723,6 +735,7 @@ class Database:
                         status,
                         now,
                         mapping_id,
+                        now,
                     ),
                 )
                 # 插入 FTS（先清理可能残留的同 rowid 孤儿行）
@@ -1170,19 +1183,19 @@ class Database:
     ) -> dict:
         """
         一次成功完成全量索引后调用，递增全局 generation 并记录时间戳。
-        
+
         所有控制键写入在同一事务中完成。mapping_ids 必须去重、非空。
         """
         if not mapping_ids:
             raise ValueError("mapping_ids must be non-empty")
-        
+
         # 去重并过滤空字符串
         unique_ids = list({mid.strip() for mid in mapping_ids if mid.strip()})
         if not unique_ids:
             raise ValueError("mapping_ids must contain at least one non-empty string")
-        
+
         now = completed_at or time.time()
-        
+
         with self.rw_lock.write_locked(), self.connection() as conn:
             # 读取当前 generation
             cur = conn.execute(
@@ -1192,22 +1205,22 @@ class Database:
             row = cur.fetchone()
             current_gen = int(row[0]) if row else 0
             new_gen = current_gen + 1
-            
+
             # 批量写入所有控制键
             controls = [
                 ("index_generation", str(new_gen)),
                 ("index_generation_at", str(now)),
                 ("last_full_index_at", str(now)),
             ]
-            
+
             # 为每个 mapping 写入独立的 generation 和时间戳
             for mapping_id in unique_ids:
                 controls.append((f"index_generation:{mapping_id}", str(new_gen)))
                 controls.append((f"index_generation_at:{mapping_id}", str(now)))
-            
+
             self._set_controls_conn(conn, controls)
             conn.commit()
-        
+
         return {
             "index_generation": new_gen,
             "index_generation_at": now,
@@ -1218,7 +1231,7 @@ class Database:
     def get_index_metadata(self, mapping_id: str | None = None) -> dict:
         """
         获取索引元数据。
-        
+
         不传 mapping_id 时返回全局元数据；传 mapping_id 时附加该 mapping 的元数据。
         缺失的键返回默认值（generation=0, time=0），不伪造历史。
         """
@@ -1231,13 +1244,13 @@ class Database:
                 )
                 row = cur.fetchone()
                 return row[0] if row else default
-            
+
             gen = int(_get_control("index_generation", "0"))
             gen_at = float(_get_control("index_generation_at", "0"))
             last_full = float(_get_control("last_full_index_at", "0"))
             mv = _get_control("mapping_version", "")
             mv_at = float(_get_control("mapping_version_generated_at", "0"))
-            
+
             result = {
                 "index_generation": gen,
                 "index_generation_at": gen_at,
@@ -1245,7 +1258,7 @@ class Database:
                 "mapping_version": mv,
                 "mapping_version_generated_at": mv_at,
             }
-            
+
             # 附加指定 mapping 的元数据
             if mapping_id is not None and mapping_id.strip():
                 mapping_gen = int(_get_control(f"index_generation:{mapping_id}", "0"))
@@ -1258,7 +1271,7 @@ class Database:
                 result["mapping_id"] = mapping_id or ""
                 result["mapping_index_generation"] = 0
                 result["mapping_index_generation_at"] = 0
-            
+
             return result
 
     def set_mapping_version(
@@ -1268,11 +1281,11 @@ class Database:
     ) -> None:
         """
         设置 mapping 版本摘要。
-        
+
         仅当版本变化时更新时间戳，避免将首次观察时间冒充历史生成时间。
         """
         now = version_generated_at or time.time()
-        
+
         with self.rw_lock.write_locked(), self.connection() as conn:
             # 读取当前版本
             cur = conn.execute(
@@ -1281,7 +1294,7 @@ class Database:
             )
             row = cur.fetchone()
             current_version = row[0] if row else ""
-            
+
             # 仅当版本变化时更新
             if version != current_version:
                 conn.execute(
@@ -2138,10 +2151,10 @@ class Database:
             if to_insert:
                 conn.executemany(
                     """
-                    INSERT INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at, last_verified_at)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    to_insert,
+                    [(lp, wp, pp, uat, now) for lp, wp, pp, uat in to_insert],
                 )
 
             # 执行 UPDATE
@@ -2237,7 +2250,7 @@ class Database:
 
                 if local_path not in existing_map:
                     # 新增
-                    to_insert.append((local_path, webdav_path, parent, source, fp, status, now, mapping_id_val))
+                    to_insert.append((local_path, webdav_path, parent, source, fp, status, now, mapping_id_val, now))
                 else:
                     # 现有记录：比较业务字段（不包括 updated_at）
                     old_webdav, old_parent, old_source, old_fp, old_status, old_mapping, old_updated = existing_map[local_path]
@@ -2254,11 +2267,11 @@ class Database:
                     """
                     INSERT INTO b_strm_files(
                         local_path, webdav_path, parent_webdav_path,
-                        source_a_path, fingerprint, status, updated_at, mapping_id
+                        source_a_path, fingerprint, status, updated_at, mapping_id, last_verified_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    to_insert,
+                    [(lp, wp, pp, src, fp, st, uat, mid, lva) for lp, wp, pp, src, fp, st, uat, mid, lva in to_insert],
                 )
 
             # 执行 UPDATE
@@ -2288,7 +2301,7 @@ class Database:
 
             # 为新增记录插入 FTS
             if to_insert:
-                for local_path, webdav_path, _, _, _, _, _, _ in to_insert:
+                for local_path, webdav_path, _, _, _, _, _, _, _ in to_insert:
                     row = conn.execute(
                         "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
                     ).fetchone()
@@ -2300,6 +2313,66 @@ class Database:
 
             conn.commit()
             return len(records)
+
+    # ========== last_verified_at 触碰方法 (Task D) ==========
+
+    def touch_verified_a(self, local_paths: list[str], now: float) -> None:
+        """批量更新 A 区记录的 last_verified_at 字段。
+
+        用于单剧目刷新和全量审计后标记记录已核对。
+        只更新 last_verified_at，不触碰业务字段和 updated_at。
+        """
+        if not local_paths:
+            return
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            # 分批处理，每批最多 900 个占位符（SQLite 限制）
+            for i in range(0, len(local_paths), 900):
+                batch = local_paths[i:i + 900]
+                placeholders = ','.join('?' * len(batch))
+                conn.execute(
+                    f"UPDATE a_strm_files SET last_verified_at = ? WHERE local_path IN ({placeholders})",
+                    [now] + batch,
+                )
+            conn.commit()
+
+    def touch_verified_b(self, source_a_paths: list[str], now: float) -> None:
+        """批量更新 B 区记录的 last_verified_at 字段。
+
+        用于单剧目刷新后标记相关 B 记录已核对。
+        通过 source_a_path 关联更新，不触碰业务字段和 updated_at。
+        """
+        if not source_a_paths:
+            return
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            for i in range(0, len(source_a_paths), 900):
+                batch = source_a_paths[i:i + 900]
+                placeholders = ','.join('?' * len(batch))
+                conn.execute(
+                    f"UPDATE b_strm_files SET last_verified_at = ? WHERE source_a_path IN ({placeholders})",
+                    [now] + batch,
+                )
+            conn.commit()
+
+    def touch_verified_by_mapping(self, mapping_id: str, a_root: str, now: float) -> None:
+        """按 mapping 批量更新 last_verified_at 字段（全量审计用）。
+
+        A 区：按 local_path LIKE a_root||'%' 更新（A 表无 mapping_id 列）。
+        B 区：按 mapping_id = ? 更新（B 表有 mapping_id 列，比 LIKE 根前缀更精确）。
+        """
+        if not mapping_id or not a_root:
+            return
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            # A 区：按路径前缀更新
+            conn.execute(
+                "UPDATE a_strm_files SET last_verified_at = ? WHERE local_path LIKE ?",
+                (now, f"{a_root}%",),
+            )
+            # B 区：按 mapping_id 更新
+            conn.execute(
+                "UPDATE b_strm_files SET last_verified_at = ? WHERE mapping_id = ?",
+                (now, mapping_id),
+            )
+            conn.commit()
 
     def delete_a_batch(self, local_paths: list[str]) -> int:
         """批量删除 A 区记录"""

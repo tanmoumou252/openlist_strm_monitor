@@ -1601,6 +1601,14 @@ def _handle_tmdb_watchlist_match_override(
         handler._send_json(
             {"success": False, "message": "TMDB 待看数据库未启用"}, 400)
         return
+    # 检查 watchlist_enabled 开关（只有明确设为 "false" 才禁用）
+    _wdb_enabled_check = getattr(webui_server, '_watchlist_db', None)
+    if _wdb_enabled_check:
+        enabled_raw = _wdb_enabled_check.get_config("tmdb", "watchlist_enabled")
+        if str(enabled_raw).lower() == "false":
+            handler._send_json(
+                {"success": False, "message": "TMDB 待看列表已禁用"}, 400)
+            return
     try:
         data = json.loads(body)
     except json.JSONDecodeError:
@@ -1615,6 +1623,10 @@ def _handle_tmdb_watchlist_match_override(
         item_id = int(data.get("id") or 0)
     except (TypeError, ValueError):
         handler._send_json({"success": False, "message": "无效的 id"}, 400)
+        return
+    if item_id <= 0:
+        handler._send_json(
+            {"success": False, "message": "id 必须大于 0"}, 400)
         return
     status = str(data.get("status") or "").strip()
     if status not in {"matched", "fuzzy", "unmatched", "uncomputed"}:
@@ -2464,7 +2476,8 @@ def handle_area(handler, area, params) -> None:
                         (f"%{escape_like(media_name)}%",)
                     ).fetchone()
                     if row:
-                        season = _extract_season_from_local_path(row[0])
+                        # 电影/other/all: is_anime=False，防止路径中的 S01/Season 目录被误提取为季分组
+                        season = _extract_season_from_local_path(row[0], allow_filename_fallback=(kind_filter == "anime"), is_anime=(kind_filter == "anime"))
                         item["season"] = season
             except Exception:
                 pass
@@ -2486,8 +2499,8 @@ def handle_area(handler, area, params) -> None:
 
 # 各区可排序字段白名单
 _AREA_SORT_FIELDS: dict[str, set[str]] = {
-    "a": {"local_path", "webdav_path", "updated_at"},
-    "b": {"local_path", "webdav_path", "updated_at", "status", "fingerprint"},
+    "a": {"local_path", "webdav_path", "updated_at", "last_verified_at"},
+    "b": {"local_path", "webdav_path", "updated_at", "last_verified_at", "status", "fingerprint"},
     "c": {"local_path", "webdav_path", "moved_at"},
 }
 _AREA_SORT_ORDERS = {"asc", "desc"}
@@ -2608,10 +2621,10 @@ def handle_area_detail(handler, area, params) -> None:
     try:
         # 构建列列表和 COUNT（Task 2: B 区添加 mapping_id 列）
         if area == "a":
-            columns = "local_path, webdav_path, parent_webdav_path, updated_at"
+            columns = "local_path, webdav_path, parent_webdav_path, updated_at, last_verified_at"
             table = "a_strm_files"
         elif area == "b":
-            columns = "local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id"
+            columns = "local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, last_verified_at, mapping_id"
             table = "b_strm_files"
         else:  # area == "c"
             columns = "local_path, webdav_path, original_b_path, ghost_root, moved_at"
@@ -2676,10 +2689,11 @@ def handle_area_detail(handler, area, params) -> None:
         # 对每个 mapping 分区独立计算分页和排序
         mappings_result = []
         for mid, records in mapping_groups.items():
+            # 电影/other/all: is_anime=False，防止路径中的 S01/Season 目录被误提取为季分组
             mapping_meta = _process_mapping_partition(
                 db, app_service, area, records, mid,
                 sort_field, sort_order, page, handler,
-                allow_filename_fallback
+                allow_filename_fallback, is_anime=(kind == "anime")
             )
             mappings_result.append(mapping_meta)
         
@@ -2733,10 +2747,11 @@ def handle_area_detail(handler, area, params) -> None:
         offset = (page - 1) * PAGE_SIZE
         paged_records = all_records[offset:offset + PAGE_SIZE]
 
-        # 按季分组（使用 allow_filename_fallback）
+        # 按季分组（使用 allow_filename_fallback + is_anime）
         seasons_map: dict[str, list[dict]] = {}
         for rec in paged_records:
-            label = _extract_season_from_local_path(rec.get("local_path", ""), allow_filename_fallback) or "默认"
+            # 电影/other/all: is_anime=False，防止路径中的 S01/Season 目录被误提取为季分组
+            label = _extract_season_from_local_path(rec.get("local_path", ""), allow_filename_fallback, is_anime=(kind == "anime")) or "默认"
             seasons_map.setdefault(label, []).append(rec)
 
         # 排序
@@ -2774,6 +2789,7 @@ def _process_mapping_partition(
     page: int,
     handler,
     allow_filename_fallback: bool = True,
+    is_anime: bool = True,
 ) -> dict:
     """处理单个 mapping 分区的数据：独立分页、排序、计算根路径和 index_metadata。"""
     # 计算根路径
@@ -2795,10 +2811,10 @@ def _process_mapping_partition(
     offset = (page - 1) * PAGE_SIZE
     paged_records = records[offset:offset + PAGE_SIZE]
 
-    # 按季分组（使用 allow_filename_fallback）
+    # 按季分组（使用 allow_filename_fallback + is_anime）
     seasons_map: dict[str, list[dict]] = {}
     for rec in paged_records:
-        label = _extract_season_from_local_path(rec.get("local_path", ""), allow_filename_fallback) or "默认"
+        label = _extract_season_from_local_path(rec.get("local_path", ""), allow_filename_fallback, is_anime) or "默认"
         seasons_map.setdefault(label, []).append(rec)
 
     # 排序
@@ -2809,6 +2825,9 @@ def _process_mapping_partition(
     elif sort_field == "updated_at":
         for recs in seasons_map.values():
             recs.sort(key=lambda r: r.get("updated_at", 0) or 0, reverse=rev)
+    elif sort_field == "last_verified_at":
+        for recs in seasons_map.values():
+            recs.sort(key=lambda r: r.get("last_verified_at", 0) or 0, reverse=rev)
 
     seasons = [{"label": lbl, "records": recs} for lbl, recs in seasons_map.items()]
 
@@ -2903,6 +2922,7 @@ def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str |
     """
     db = app_service.db
     admin_api = app_service.admin_api
+    now_verified = time.time()  # D'.3: 默认时间戳，成功路径会在 step 5.1 更新
 
     # 读取刷新日志级别
     app_config = getattr(app_service, 'config', None)
@@ -3045,6 +3065,18 @@ def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str |
                  "[Refresh] 同步到 B 区完成 耗时=%.2fs 成功=%d 跳过=%d 失败=%d",
                  time.monotonic() - phase_start, synced, skipped, failed)
 
+    # 5.1 标记 last_verified_at（单剧目刷新后推进核对时间）
+    now_verified = time.time()
+    try:
+        a_local_paths = [r.get("local_path", "") for r in a_records if r.get("local_path")]
+        source_a_paths = [r.get("local_path", "") for r in a_records if r.get("local_path")]
+        if a_local_paths:
+            db.touch_verified_a(a_local_paths, now_verified)
+        if source_a_paths:
+            db.touch_verified_b(source_a_paths, now_verified)
+    except Exception as e:
+        logging.warning("[Refresh] 更新 last_verified_at 失败: %s", e)
+
     # 6. 局部冗余检查：清理该媒体目录下的 B 区僵尸文件（云端已删除但本地残留）
     # 设计原则：冗余清理永远只在局部触发，不做全盘扫描
     if app_service and common_parent:
@@ -3062,6 +3094,7 @@ def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str |
         "synced": synced,
         "skipped": skipped,
         "failed": failed,
+        "verified_at": now_verified,
     }
 
 
@@ -3708,4 +3741,96 @@ def _handle_onboarding_complete_step(handler, webui_server, body: bytes) -> None
             return
 
     handler._send_json({"ok": True})
+
+
+# ============================================================
+# Task A: 手动全量审计端点
+# ============================================================
+
+
+def handle_index_audit(handler, body: bytes) -> None:
+    """POST /api/index/audit — 触发手动全量审计（异步）"""
+    webui_server = handler.webui
+
+    # 检查主程序是否在运行
+    app_service = getattr(webui_server, '_app_service', None)
+    if app_service is None:
+        handler._send_json({
+            "ok": False,
+            "status": "not_configured",
+            "message": "主程序未运行，无法执行审计"
+        }, 400)
+        return
+
+    # 检查引擎是否 ready
+    if not getattr(app_service, '_running', False):
+        handler._send_json({
+            "ok": False,
+            "status": "not_configured",
+            "message": "引擎未就绪，无法执行审计"
+        }, 400)
+        return
+
+    # 检查并发互斥
+    with webui_server._index_audit_lock:
+        if webui_server._index_audit_running:
+            handler._send_json({
+                "ok": True,
+                "status": "already_running",
+                "message": "审计已在进行中"
+            })
+            return
+        # 设置进行中标记
+        webui_server._index_audit_running = True
+        webui_server._index_audit_result = None
+
+    # 后台线程执行审计
+    def _do_audit():
+        try:
+            refresh_service = getattr(app_service, 'refresh_service', None)
+            if refresh_service is None:
+                with webui_server._index_audit_lock:
+                    webui_server._index_audit_result = {"error": "刷新服务未初始化"}
+                return
+
+            # A'.1: 调用 RefreshService.run_full_audit_now()，不再内联审计逻辑
+            result = refresh_service.run_full_audit_now()
+
+            with webui_server._index_audit_lock:
+                webui_server._index_audit_result = result
+
+        except Exception as e:
+            logging.error("[IndexAudit] 审计失败: %s", e, exc_info=True)
+            with webui_server._index_audit_lock:
+                webui_server._index_audit_result = {"error": str(e)}
+
+        finally:
+            # 清除进行中标记
+            with webui_server._index_audit_lock:
+                webui_server._index_audit_running = False
+
+    # 启动后台线程
+    import threading
+    audit_thread = threading.Thread(target=_do_audit, daemon=True)
+    audit_thread.start()
+
+    handler._send_json({
+        "ok": True,
+        "status": "started",
+        "message": "审计已启动"
+    })
+
+
+def handle_index_audit_status(handler) -> None:
+    """GET /api/index/audit/status — 查询审计进度"""
+    webui_server = handler.webui
+
+    with webui_server._index_audit_lock:
+        running = webui_server._index_audit_running
+        result = webui_server._index_audit_result
+
+    handler._send_json({
+        "running": running,
+        "result": result
+    })
 

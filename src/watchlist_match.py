@@ -159,7 +159,8 @@ def _media_info(record: dict) -> tuple[str, str]:
     return kind, media_name or (Path(parts[-1]).stem if parts else "未分类")
 
 
-def _extract_season_from_local_path(local_path: str, allow_filename_fallback: bool = True) -> str:
+def _extract_season_from_local_path(local_path: str, allow_filename_fallback: bool = True,
+                                    is_anime: bool = True) -> str:
     """从本地路径中提取季信息，返回如 'S01' 或 '第一季' 的字符串
 
     Args:
@@ -167,18 +168,23 @@ def _extract_season_from_local_path(local_path: str, allow_filename_fallback: bo
         allow_filename_fallback: 是否允许从文件名提取季信息（SxxExx 格式）。
             - True (默认): 保持原有行为，允许从文件名提取
             - False: 仅从目录名提取，不从文件名提取（用于 movie/other/all kind）
+        is_anime: 是否为番剧类型。
+            - True (默认): 允许从目录名提取季节（S01/Season 1 等）
+            - False: 跳过目录级季节提取（电影路径中的 S01 目录不应产生分组）
     """
     parts = _path_parts(local_path)
-    for part in reversed(parts[:-1]):  # 不看文件名本身
-        sn = _extract_season_int(part)
-        if sn is not None:
-            return f"S{sn:02d}"
-        # 也检查中文季名
-        m = re.match(r"^第([一二三四五六七八九十\d]+)季$", part.strip())
-        if m:
-            num = _cn_to_int(m.group(1))
-            if num:
-                return f"S{num:02d}"
+    # 目录级季节提取：仅番剧（is_anime=True）时执行
+    if is_anime:
+        for part in reversed(parts[:-1]):  # 不看文件名本身
+            sn = _extract_season_int(part)
+            if sn is not None:
+                return f"S{sn:02d}"
+            # 也检查中文季名
+            m = re.match(r"^第([一二三四五六七八九十\d]+)季$", part.strip())
+            if m:
+                num = _cn_to_int(m.group(1))
+                if num:
+                    return f"S{num:02d}"
     # 从文件名提取（仅当 allow_filename_fallback=True 时）
     if allow_filename_fallback:
         stem = Path(parts[-1]).stem if parts else ""

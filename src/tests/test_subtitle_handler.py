@@ -590,5 +590,218 @@ class TestProcessAnimeSubtitle:
         assert target.exists()
 
 
+# ============================================================
+# 字幕编码转换测试 (Task F)
+# ============================================================
+
+
+class TestSubtitleEncodingConversion:
+    """测试字幕从各种编码转换为 UTF-8 的功能"""
+
+    @pytest.fixture
+    def app(self, tmp_path: Path):
+        """创建测试用 app 和 B 区目录"""
+        return _make_app(tmp_path)
+
+    def test_gb18030_to_utf8_movie(self, app, tmp_path: Path):
+        """GB18030 编码的 .srt 电影字幕 → 目标可被 UTF-8 严格解码，无 BOM"""
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        a_root.mkdir(exist_ok=True)
+        b_root.mkdir(exist_ok=True)
+
+        # 创建 GB18030 编码的字幕文件
+        gb18030_content = "测试字幕内容".encode("gb18030")
+        src = a_root / "电影.srt"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(gb18030_content)
+
+        # 同目录放置 STRM 文件，识别为电影
+        strm = a_root / "电影.strm"
+        strm.write_text("http://example.com/movie.strm", encoding="utf-8")
+
+        handler = SubtitleHandler(app)
+        handler._process_movie_subtitle(src, a_root, "fp_test")
+
+        # 验证目标文件
+        call_kwargs = app.db.upsert_subtitle.call_args
+        target_path = call_kwargs[1].get("target_path") or call_kwargs[0][1]
+        target = Path(target_path)
+
+        assert target.exists()
+        target_bytes = target.read_bytes()
+        # 可被 UTF-8 严格解码
+        decoded = target_bytes.decode("utf-8", errors="strict")
+        # 不以 UTF-8 BOM 开头
+        assert not target_bytes.startswith(b'\xef\xbb\xbf')
+        assert "测试字幕内容" in decoded
+
+    def test_big5_to_utf8_anime(self, app, tmp_path: Path):
+        """Big5 编码的 .ass 番剧字幕 → 目标可被 UTF-8 严格解码，无 BOM"""
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        a_root.mkdir(exist_ok=True)
+        b_root.mkdir(exist_ok=True)
+
+        # 创建 Big5 编码的字幕文件
+        big5_content = "測試字幕內容".encode("big5")
+        src = a_root / "番剧" / "Show" / "Season 01" / "S01E01.ass"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(big5_content)
+
+        handler = SubtitleHandler(app)
+        handler._process_anime_subtitle(src, a_root, "fp_test")
+
+        # 验证目标文件
+        call_kwargs = app.db.upsert_subtitle.call_args
+        target_path = call_kwargs[1].get("target_path") or call_kwargs[0][1]
+        target = Path(target_path)
+
+        assert target.exists()
+        target_bytes = target.read_bytes()
+        # 可被 UTF-8 严格解码
+        decoded = target_bytes.decode("utf-8", errors="strict")
+        # 不以 UTF-8 BOM 开头
+        assert not target_bytes.startswith(b'\xef\xbb\xbf')
+        assert "測試字幕內容" in decoded
+
+    def test_utf16_with_bom_to_utf8(self, app, tmp_path: Path):
+        """UTF-16 LE 带 BOM 的 .ssa 字幕 → 目标是 UTF-8 无 BOM"""
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        a_root.mkdir(exist_ok=True)
+        b_root.mkdir(exist_ok=True)
+
+        # 创建 UTF-16 LE 带 BOM 的字幕文件
+        utf16_content = "UTF-16 测试字幕".encode("utf-16-le")
+        utf16_with_bom = b'\xff\xfe' + utf16_content  # UTF-16 LE BOM
+        src = a_root / "番剧" / "Show" / "Season 01" / "S01E01.ssa"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(utf16_with_bom)
+
+        handler = SubtitleHandler(app)
+        handler._process_anime_subtitle(src, a_root, "fp_test")
+
+        # 验证目标文件
+        call_kwargs = app.db.upsert_subtitle.call_args
+        target_path = call_kwargs[1].get("target_path") or call_kwargs[0][1]
+        target = Path(target_path)
+
+        assert target.exists()
+        target_bytes = target.read_bytes()
+        # 可被 UTF-8 严格解码
+        decoded = target_bytes.decode("utf-8", errors="strict")
+        # 不以 UTF-8 BOM 开头
+        assert not target_bytes.startswith(b'\xef\xbb\xbf')
+        assert "UTF-16 测试字幕" in decoded
+
+    def test_already_utf8_no_bom_unchanged(self, app, tmp_path: Path):
+        """已是无 BOM 的 UTF-8 → 字节完全不变（幂等）"""
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        a_root.mkdir(exist_ok=True)
+        b_root.mkdir(exist_ok=True)
+
+        # 创建已是 UTF-8 无 BOM 的字幕文件
+        utf8_content = "UTF-8 字幕内容".encode("utf-8")
+        src = a_root / "电影.srt"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(utf8_content)
+
+        # 同目录放置 STRM 文件，识别为电影
+        strm = a_root / "电影.strm"
+        strm.write_text("http://example.com/movie.strm", encoding="utf-8")
+
+        handler = SubtitleHandler(app)
+        handler._process_movie_subtitle(src, a_root, "fp_test")
+
+        # 验证目标文件
+        call_kwargs = app.db.upsert_subtitle.call_args
+        target_path = call_kwargs[1].get("target_path") or call_kwargs[0][1]
+        target = Path(target_path)
+
+        assert target.exists()
+        target_bytes = target.read_bytes()
+        # 字节完全一致
+        assert target_bytes == utf8_content
+
+    def test_unrecognizable_encoding_fallback(self, app, tmp_path: Path):
+        """不可识别编码的随机字节 → fail-safe 原样复制，不抛异常"""
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        a_root.mkdir(exist_ok=True)
+        b_root.mkdir(exist_ok=True)
+
+        # 创建包含无法识别字节的文件
+        random_bytes = b'\x00\x01\x02\x03\x80\x81\xfe\xff' * 100
+        src = a_root / "电影.srt"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(random_bytes)
+
+        # 同目录放置 STRM 文件，识别为电影
+        strm = a_root / "电影.strm"
+        strm.write_text("http://example.com/movie.strm", encoding="utf-8")
+
+        handler = SubtitleHandler(app)
+        # 不应抛异常
+        handler._process_movie_subtitle(src, a_root, "fp_test")
+
+        # 验证目标文件
+        call_kwargs = app.db.upsert_subtitle.call_args
+        target_path = call_kwargs[1].get("target_path") or call_kwargs[0][1]
+        target = Path(target_path)
+
+        assert target.exists()
+        target_bytes = target.read_bytes()
+        # 字节完全一致（fail-safe 原样复制）
+        assert target_bytes == random_bytes
+
+    def test_movie_and_anime_paths_both_covered(self, app, tmp_path: Path):
+        """确保电影路径和番剧路径都使用编码转换"""
+        a_root = tmp_path / "a"
+        b_root = tmp_path / "b"
+        a_root.mkdir(exist_ok=True)
+        b_root.mkdir(exist_ok=True)
+
+        # 测试电影路径
+        movie_content = "电影字幕".encode("gb18030")
+        movie_src = a_root / "电影.srt"
+        movie_src.parent.mkdir(parents=True, exist_ok=True)
+        movie_src.write_bytes(movie_content)
+        strm = a_root / "电影.strm"
+        strm.write_text("http://example.com/movie.strm", encoding="utf-8")
+
+        movie_handler = SubtitleHandler(app)
+        movie_handler._process_movie_subtitle(movie_src, a_root, "fp_movie")
+
+        # 测试番剧路径 - 使用能被 Big5 编码的字符
+        # 注意: 不是所有 GBK 字符都能被 Big5 编码
+        anime_content = "中文測試字幕".encode("big5")
+        anime_src = a_root / "番剧" / "Show" / "Season 01" / "S01E01.ass"
+        anime_src.parent.mkdir(parents=True, exist_ok=True)
+        anime_src.write_bytes(anime_content)
+
+        anime_handler = SubtitleHandler(app)
+        anime_handler._process_anime_subtitle(anime_src, a_root, "fp_anime")
+
+        # 验证两个调用都执行了
+        assert app.db.upsert_subtitle.call_count == 2
+
+    def test_structural_no_shutil_copyfile_in_subtitle_handler(self):
+        """结构性断言：subtitle_handler.py 源码中不再有对字幕目标的 shutil.copyfile 调用"""
+        subtitle_handler_path = Path(__file__).parent.parent / "domain" / "media" / "subtitle_handler.py"
+        content = subtitle_handler_path.read_text(encoding="utf-8")
+
+        # 检查是否还有对字幕目标的 shutil.copyfile 调用
+        # (排除 encoding_utils.py 中的兼容性回退调用)
+        import re
+        # 查找所有 shutil.copyfile 调用
+        copyfile_calls = re.findall(r'shutil\.copyfile\([^)]+\)', content)
+        # 应该没有调用（全部替换为 copy_subtitle_utf8）
+        assert len(copyfile_calls) == 0, (
+            f"subtitle_handler.py still has shutil.copyfile calls: {copyfile_calls}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

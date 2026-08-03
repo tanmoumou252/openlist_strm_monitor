@@ -36,6 +36,7 @@ This file provides guidance to AI coding assistants when working with code in th
 
 - **Sync engine only**: `python src/main.py` — starts the A/B/C zone sync engine, no WebUI.
 - **WebUI**: `python src/webui/server.py` — starts the management panel with an interactive menu to optionally launch the sync engine.
+- **WebUI headless (background)**: `BRIDGE_HEADLESS=1` environment variable triggers headless mode in `main()` — auto-starts the sync engine (skips interactive menu) and enters silent wait (no stdin). The repository ships `后台带Bridge启动webui.vbs` which sets this variable and launches `server.py` with a hidden console window.
 
 > Do NOT use `python src/main.py --webui-only` or `--webui` — those flags do not exist (both are rejected by `main.py`).
 
@@ -182,12 +183,14 @@ The Vite config groups modules into chunks:
 - `do_GET` / `do_POST` dispatch in `server.py` → delegates to handlers in `routes.py`
 - Every request goes through `_guard_request()` (IP check) → `_check_auth()` (token check) → route handler
 - Route handlers live in `routes.py`, organized by domain (TMDB, OpenList, Dashboard, Area, Config)
+- `POST /api/index/audit` triggers a full manual audit (single-run, non-overlapping via `_full_audit_in_progress`); `GET /api/index/audit/status` returns progress; both require authentication (not in the whitelist)
 
 ### Database
 - Two SQLite databases, both in WAL mode
 - `bridge.db`: A/B/C zone file records, fingerprints, ghost protection, subtitles, sync state
 - `tmdb_watchlist.db`: TMDB cache, webui_config (scopes: tmdb, openlist, ui, migration), operation logs
 - `Database` class uses read/write connection managers with `ReadWriteLock`
+- `a_strm_files` / `b_strm_files` tables include `last_verified_at` (last verification timestamp, meaning "last checked" not "last changed"; only advanced by single-show refresh / periodic+manual full audit, not written in the upsert hot path to protect startup performance)
 
 ### A↔B Mapping Isolation (`mapping_id`)
 - `ABMapping` (config) and the `a_b_mappings` config key in `webui_config` (scope=`openlist`) define each A root ↔ B root relationship; every mapping needs a unique non-empty `mapping_id` and non-empty A/B roots, otherwise `get_config_status()` returns `fail_safe_active` / `not_configured` and startup refuses to launch watchers.

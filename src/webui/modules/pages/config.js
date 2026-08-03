@@ -154,11 +154,11 @@ html += field('cfg-tmdb-token', 'Access Token', tokenValue, '输入 TMDB Access 
   html += field('cfg-tmdb-host', '反代 Host', hostValue, '留空则使用官方 API');
   html += field('cfg-tmdb-proxy', 'HTTP 代理', proxyValue, '例: http://127.0.0.1:7890', 'text', true);
 html += field('cfg-tmdb-wldb', 'Watchlist DB', watchlistDbValue, '留空默认 tmdb_watchlist.db', 'text', true);
-	  html += field('cfg-tmdb-fuzzy', '模糊匹配阈值', cfg.tmdb_fuzzy_threshold || '0.60', '0.0~1.0', 'text');
-	  html += field('cfg-tmdb-ep-ratio', '番剧最少集数比例', cfg.tmdb_anime_min_ep_ratio || '0.30', '0.0~1.0', 'text');
-	  html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '1', '', 'text');
-	  html += field('cfg-tmdb-min-season-ratio', '番剧最少季数比例', cfg.tmdb_anime_min_season_ratio || '0.30', '0.0~1.0', 'text');
-	  html += field('cfg-tmdb-cache-ttl', '缓存 TTL（秒）', cfg.tmdb_cache_ttl || '43200', '', 'text');
+	  html += field('cfg-tmdb-fuzzy', '模糊匹配阈值', cfg.tmdb_fuzzy_threshold || '0.60', '0.0~1.0', 'text', false, false, '', '模糊匹配相似度阈值（0.0~1.0）。越高要求越严格，建议 0.60。');
+	  html += field('cfg-tmdb-ep-ratio', '番剧最少集数比例', cfg.tmdb_anime_min_ep_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少集数占总集数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。');
+	  html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '1', '', 'text', false, false, '', '番剧最大允许季数差。超过此差值视为未收录，建议 1。');
+	  html += field('cfg-tmdb-min-season-ratio', '番剧最少季数比例', cfg.tmdb_anime_min_season_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少季数占总季数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。');
+	  html += field('cfg-tmdb-cache-ttl', '缓存 TTL（秒）', cfg.tmdb_cache_ttl || '43200', '', 'text', false, false, '', 'TMDB 缓存有效期（秒）。过期后重新从 TMDB 拉取数据，建议 43200（12 小时）。');
 	  html += `</div>`;
   html += `<div class="config-form-actions"><button class="toolbar-btn primary" id="cfg-tmdb-save">${icon('save')} 保存 TMDB 配置</button><button class="toolbar-btn" id="cfg-tmdb-refresh"> 刷新待看列表</button><button class="toolbar-btn" id="cfg-tmdb-match-refresh" style="background:color-mix(in srgb,var(--primary) 15%,var(--bg-card));border-color:color-mix(in srgb,var(--primary) 30%,var(--border-color))"> 刷新收录状态</button><button class="toolbar-btn secondary" id="cfg-tmdb-restart" style="color:#e37400;border-color:#e37400">${icon('refresh')} 重启 WebUI</button></div>`;
   html += `<div class="toggle-row"><span>关闭全屏 TMDB 缓存过期提醒</span><div class="segmented-switch" data-key="tmdb_cache_never_remind"><button type="button" data-value="off" class="active">否</button><button type="button" data-value="on">是</button></div></div>`;
@@ -242,7 +242,7 @@ function _renderConfigHelp() {
     {
       label: 'OpenList 配置',
       cards: [
-        { icon: 'globe', title: 'OpenList 连接配置', body: 'WebDAV 地址通常格式为 <code>http://127.0.0.1:5244/dav</code>。如果使用主动刷新功能，必须使用 <strong>admin 权限账户</strong>以调用 API 刷新路径。配置已从 <code>config.toml</code> 迁移到数据库，保存后即时生效，无需重启。2FA 密钥（TOTP）在 OpenList 开启二次验证时才需要填写。' },
+        { icon: 'globe', title: 'OpenList 连接配置', body: 'WebDAV 地址通常格式为 <code>http://127.0.0.1:5244/dav</code>。如果使用主动刷新功能，必须使用 <strong>admin 权限账户</strong>以调用 API 刷新路径。配置已从 <code>config.toml</code> 迁移到数据库。<p><strong>即时生效</strong>：连接信息（地址/用户名/密码/2FA）、刷新配置（开关/间隔/深度/审计周期）、行为配置（删除动作/回收站/ghost 保护/恢复延迟）、日志配置（级别/大小/路径）保存后无需重启。</p><p><strong>需重启主程序</strong>：STRM 引擎映射（引擎入口/监控目录）、A↔B 目录映射、C 区根目录变更。这些在启动期由 <code>start_watchers()</code> 读取，热更新不会重挂 watcher。</p><p>2FA 密钥（TOTP）在 OpenList 开启二次验证时才需要填写。</p>' },
         { icon: 'area_a', title: 'STRM 引擎配置表格', body: '第 1 列选择 STRM 引擎入口（如 <code>/strm</code>），第 2 列自动从 API 获取该引擎下的监控目录并显示为 tag。<p><strong>交互方式：</strong></p><ol><li>点击「测试连接」验证 API 可用性</li><li>选择引擎入口 → 自动填充监控目录 tag</li><li>可删除不需要的 tag（不监控某些目录）</li><li>点击「添加行」添加更多引擎</li></ol><p>A 区文件夹从 API 的 <code>SaveStrmLocalPath</code> 自动获取，配置页底部只读展示。</p>' },
         { icon: 'refresh', title: '主动刷新机制', body: 'OpenList 的 STRM 引擎有时需要有人去"点"一下目录，才会触发文件的生成。启用主动刷新后，程序会每隔几分钟去"模拟点击"（调用 API 获取列表），从而唤醒 OpenList 强制生成或更新最新的 STRM 文件到 A 区。<p><strong>刷新路径填写注意：</strong>不要填网盘的"真实路径"，要填 STRM 引擎映射出来的"虚拟路径"。例如真实路径 <code>/天翼云/家庭/电影</code>，引擎挂载在 <code>/strm</code>，则应填 <code>/strm/电影</code>。</p><p><strong>深度清理：</strong>如果填写的路径属于引擎管辖范围，程序刷新完后会对比本地，把云端已不存在的废弃 STRM 文件删掉。如果填错路径（不在引擎白名单），程序只会"只读刷新"，绝不清理本地文件。</p>' },
         { icon: 'settings', title: '行为配置说明', body: '<p><strong>删除动作：</strong>B 区 STRM 被删除后对 WebDAV 源文件的动作。<code>MOVE</code> = 移动到回收站目录（推荐），<code>DELETE</code> = 直接删除（危险）。</p><p><strong>Ghost 保护：</strong>B 区删除 STRM 后，A 区可能因同步延迟又短暂生成同一 STRM。Ghost 保护阻止刚删除的内容被立刻重新同步回 B 区。建议至少 300 秒。</p><p><strong>A→B 恢复延迟：</strong>等待 OpenList / STRM 引擎 / 文件系统事件落地的时间。</p>' }

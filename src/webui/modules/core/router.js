@@ -38,6 +38,15 @@ export function navigate(hash) {
   location.hash = hash;
 }
 
+function normalizeSpaEntryPath() {
+  if (location.pathname !== '/login' && location.pathname !== '/login/') {
+    return;
+  }
+  const url = new URL(location.href);
+  url.pathname = '/';
+  history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+}
+
 /**
  * 渲染代际（F-3）：每次 router() 调用递增。
  * 页面渲染函数可在其内部 await 后调用 isRenderStale() 判断是否已被更新导航取代。
@@ -50,6 +59,7 @@ export function isRenderStale() {
 }
 
 export async function router() {
+  normalizeSpaEntryPath();
   const { page } = parseHash();
   const mainEl = document.getElementById('app-main');
   const navEl = document.getElementById('main-nav');

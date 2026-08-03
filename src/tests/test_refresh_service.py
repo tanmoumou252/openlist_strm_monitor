@@ -703,3 +703,119 @@ class TestPersistSnapshotFailClosed:
         )
         app.persist_current_roots_snapshot.assert_called_once_with(
             valid_engine_paths=["/strm_m1"])
+
+
+class TestFullAuditTouchVerified:
+    """D'.1: 测试 _maybe_run_full_audit 成功后 touch_verified_by_mapping 被调用"""
+
+    def test_full_audit_calls_touch_verified_by_mapping(self):
+        """全量审计完成后，每个 mapping 应调用 touch_verified_by_mapping"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        app._current_mapping_ids.return_value = ["m1", "m2"]
+        # 提供 mock mapping 对象（需有 mapping_id 和 a_root 属性）
+        mock_m1 = MagicMock()
+        mock_m1.mapping_id = "m1"
+        mock_m1.a_root = "/a_root_m1"
+        mock_m2 = MagicMock()
+        mock_m2.mapping_id = "m2"
+        mock_m2.a_root = "/a_root_m2"
+        app.a_b_mappings = [mock_m1, mock_m2]
+        svc = RefreshService(app)
+
+        with patch("refresh_service.time.time", return_value=8 * 86400), \
+             patch.object(app, "initial_scan_a"), \
+             patch.object(app, "scan_a_to_b_full_sync"), \
+             patch.object(app.db, "touch_verified_by_mapping") as m_touch:
+            svc._maybe_run_full_audit()
+
+        # 应对每个 mapping 调用一次 touch_verified_by_mapping
+        assert m_touch.call_count == 2
+        calls = {c.args[0] for c in m_touch.call_args_list}
+        assert calls == {"m1", "m2"}
+
+    def test_full_audit_touch_uses_current_timestamp(self):
+        """touch_verified_by_mapping 应使用当前时间戳"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        app._current_mapping_ids.return_value = ["m1"]
+        mock_m1 = MagicMock()
+        mock_m1.mapping_id = "m1"
+        mock_m1.a_root = "/a_root_m1"
+        app.a_b_mappings = [mock_m1]
+        svc = RefreshService(app)
+
+        with patch("refresh_service.time.time", return_value=8 * 86400), \
+             patch.object(app, "initial_scan_a"), \
+             patch.object(app, "scan_a_to_b_full_sync"), \
+             patch.object(app.db, "touch_verified_by_mapping") as m_touch:
+            svc._maybe_run_full_audit()
+
+        call_args = m_touch.call_args
+        # 第三个参数应该是当前时间戳（8 * 86400）
+        assert call_args.args[2] == 8 * 86400
+
+
+class TestRunFullAuditNow:
+    """A'.1: 测试 RefreshService.run_full_audit_now() 薄封装"""
+
+    def test_run_full_audit_now_calls_correct_sequence(self):
+        """run_full_audit_now 应按序调用 initial_scan_a → scan_a_to_b_full_sync → complete_index_generation"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        app._current_mapping_ids.return_value = ["m1"]
+        app.db.get_index_metadata.return_value = {"index_generation": 2, "index_generation_at": 999.0}
+        svc = RefreshService(app)
+
+        with patch("refresh_service.time.time", return_value=8 * 86400), \
+             patch.object(app, "initial_scan_a") as m_scan, \
+             patch.object(app, "scan_a_to_b_full_sync") as m_sync:
+            result = svc.run_full_audit_now()
+
+        m_scan.assert_called_once_with(use_bulk=False, a_roots=None)
+        m_sync.assert_called_once_with(valid_engine_paths=None, use_bulk=False)
+        app.db.complete_index_generation.assert_called_once()
+        app.db.set_control.assert_called_once_with("last_full_audit_at", str(8 * 86400))
+        assert result["ok"] is True
+        assert result["status"] == "completed"
+        assert result["index_generation"] == 2
+
+    def test_run_full_audit_now_resets_last_full_audit_at(self):
+        """run_full_audit_now 必须重置 _last_full_audit_at 以对齐周期审计"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        app._current_mapping_ids.return_value = []
+        app.db.get_index_metadata.return_value = {}
+        svc = RefreshService(app)
+
+        assert svc._last_full_audit_at == 0.0
+
+        with patch("refresh_service.time.time", return_value=8 * 86400), \
+             patch.object(app, "initial_scan_a"), \
+             patch.object(app, "scan_a_to_b_full_sync"):
+            svc.run_full_audit_now()
+
+        assert svc._last_full_audit_at == 8 * 86400
+
+    def test_run_full_audit_now_returns_already_running_if_periodic_in_progress(self):
+        """如果周期审计正在进行，run_full_audit_now 应返回 already_running"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        svc = RefreshService(app)
+        svc._full_audit_in_progress = True  # 模拟周期审计正在进行
+
+        result = svc.run_full_audit_now()
+        assert result["status"] == "already_running"
+        assert result["ok"] is False
+
+    def test_periodic_skips_if_manual_in_progress(self):
+        """如果手动审计正在进行，_maybe_run_full_audit 应跳过（返回 False）"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        svc = RefreshService(app)
+        svc._full_audit_in_progress = True  # 模拟手动审计正在进行
+
+        with patch.object(app, "initial_scan_a") as m_scan:
+            result = svc._maybe_run_full_audit()
+
+        assert result is False
+        m_scan.assert_not_called()

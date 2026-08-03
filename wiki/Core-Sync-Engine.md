@@ -259,6 +259,42 @@ def notify_config_changed(self) -> None:
 
 > **设计原则：冗余清理永远只在局部触发，不做全盘扫描。** 定期刷新不再调用 `_cleanup_a_for_update_mode()`（该方法会对全量 A 区记录逐条调用 `check_exists`，导致 OpenList 挂载被扫挂）。冗余清理改为运行时按需触发：WebUI 手动刷新媒体时、watchdog 检测到 A/B 区文件删除时（通过 `trigger_delayed_cleanup`）。
 
+### 全量审计（周期 + 手动）
+
+除了常规的 8 步刷新周期，`RefreshService` 还提供**全量审计**能力，用于周期性或按需对 A 区进行完整扫描、同步并推进代次。
+
+#### 周期全量审计（`_maybe_run_full_audit`）
+
+- 由配置 `refresh.full_audit_interval_days` 控制（设为 `0` 关闭）。
+- 在常规刷新周期的第 7 步（`_scan_and_sync`）之后、第 8 步（`_persist_snapshot`）之前判断是否到达周期窗口。
+- 到达时执行完整序列：
+  1. `initial_scan_a()` — 多线程并发读取 A 区 `.strm`，批量写入数据库
+  2. `scan_a_to_b_full_sync()` — A→B 全量同步（`use_bulk=False` 分批提交模式）
+  3. `complete_index_generation()` — 推进代次计数器（`_restoring_generation`）
+  4. `touch_verified_by_mapping()` — 为本次审计覆盖的所有 mapping 写入 `last_verified_at`
+  5. 记录 `last_full_audit_at` 控制键（`set_control`），供下一轮周期判断使用
+
+#### 手动全量审计（`run_full_audit_now`）
+
+- WebUI「立即全量审计」按钮触发 → `POST /api/index/audit` → `RefreshService.run_full_audit_now()`。
+- 执行**与周期审计完全相同的序列**（上述 1-5 步），并在完成后**重置 `_last_full_audit_at` + `set_control`**，使周期时钟对齐到本次手动审计时间点，避免紧接着再次触发周期审计。
+
+#### 互斥保护（`_full_audit_in_progress`）
+
+- 周期审计与手动审计共享同一布尔标志 `_full_audit_in_progress`。
+- 任一方正在进行时，另一方尝试进入将**跳过执行**（周期审计静默跳过；手动审计返回 `already_running` 供前端轮询）。
+- 避免并发全量扫描导致的数据库写入竞争与资源争用。
+
+#### 代次推进（`complete_index_generation`）三种触发时机
+
+| 时机 | 说明 |
+|------|------|
+| **首启** | `AppService.start()` 中首次建立索引时 |
+| **周期审计** | `_maybe_run_full_audit` 周期窗口到达时 |
+| **手动审计** | `run_full_audit_now()` 手动触发时 |
+
+三者均调用 `complete_index_generation()` 推进 `_restoring_generation`，作为 B→C 恢复、幽灵保护等机制判断"当前代次"的依据。
+
 ### 三层验证清理
 
 每个候选清理文件必须通过三层检查，任一层通过即保留：

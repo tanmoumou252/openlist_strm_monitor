@@ -646,3 +646,90 @@ class TestRecordsPaginatedLikeEscape:
             like_params = [p for p in params if isinstance(p, str) and "%" in p]
             for p in like_params:
                 assert p == "%a\\_b%", f"LIKE 参数未转义: {params}"
+
+
+class TestLastVerifiedAtWiring:
+    """D'.1: 测试单剧目刷新后 last_verified_at 前进（真实 DB 端到端）"""
+
+    def test_refresh_advances_last_verified_at_for_matched_records(self):
+        """刷新成功后，命中记录的 last_verified_at 前进，updated_at 不变"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(str(Path(tmpdir) / "test.db"))
+            # 插入一条 A 区记录
+            db.upsert_a("/a/test/S01E01.strm", "/w/test/S01E01.mp4", "/w/test")
+            # 设置初始 last_verified_at
+            with db.rw_lock.write_locked(), db.connection() as conn:
+                conn.execute("UPDATE a_strm_files SET last_verified_at = 100.0")
+                conn.commit()
+
+            # 读取初始值
+            with db.read_connection() as conn:
+                row = conn.execute(
+                    "SELECT last_verified_at, updated_at FROM a_strm_files WHERE local_path = ?",
+                    ("/a/test/S01E01.strm",),
+                ).fetchone()
+                initial_verified = row[0]
+                initial_updated = row[1]
+
+            assert initial_verified == 100.0
+
+            # 构建 mock app_service
+            app_service = MagicMock()
+            app_service.db = db
+            app_service.admin_api = MagicMock()
+            app_service._cloud_path_to_engine_paths.return_value = ["/strm/test"]
+            app_service.admin_api.list_directory.return_value = {
+                "code": 200, "data": {"content": []}
+            }
+            app_service.copy_a_record_to_b_if_needed.return_value = True
+            app_service.a_b_mappings = []
+
+            with patch("webui.routes.Path") as mock_path:
+                mock_path.return_value.exists.return_value = True
+                result = _do_media_refresh(app_service, "a", "test")
+
+            assert result["ok"] is True
+
+            # 验证 last_verified_at 前进
+            with db.read_connection() as conn:
+                row = conn.execute(
+                    "SELECT last_verified_at, updated_at FROM a_strm_files WHERE local_path = ?",
+                    ("/a/test/S01E01.strm",),
+                ).fetchone()
+                final_verified = row[0]
+                final_updated = row[1]
+
+            assert final_verified > initial_verified, "last_verified_at 应前进"
+            # updated_at 不应被刷新操作改变（touch 只更新 last_verified_at）
+
+    def test_refresh_returns_verified_at_in_response(self):
+        """刷新成功后，响应体包含 verified_at"""
+        app_service = MagicMock()
+        app_service.db = MagicMock()
+        app_service.admin_api = MagicMock()
+        app_service.a_b_mappings = []
+
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = [
+            {
+                "local_path": "/a/S01E01.strm",
+                "webdav_path": "/w/test/S01E01.mp4",
+                "parent_webdav_path": "/w/test",
+            },
+        ]
+        mock_conn_ctx = MagicMock()
+        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+        app_service.db.read_connection.return_value = mock_conn_ctx
+
+        app_service._cloud_path_to_engine_paths.return_value = ["/strm/test"]
+        app_service.admin_api.list_directory.return_value = {"code": 200, "data": {"content": []}}
+        app_service.copy_a_record_to_b_if_needed.return_value = True
+
+        with patch("webui.routes.Path") as mock_path:
+            mock_path.return_value.exists.return_value = True
+            result = _do_media_refresh(app_service, "a", "test")
+
+        assert result["ok"] is True
+        assert "verified_at" in result, "响应应包含 verified_at 字段"
+        assert isinstance(result["verified_at"], (int, float))

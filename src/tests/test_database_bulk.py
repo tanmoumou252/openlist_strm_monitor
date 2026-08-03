@@ -438,7 +438,7 @@ class TestIndexGenerationControl:
     def test_get_index_metadata_for_unknown_mapping_returns_defaults(self, db: Database):
         """查询未知 mapping 返回该 mapping 的默认值（generation=0, time=0），不伪造历史。"""
         db.complete_index_generation(["m1"], completed_at=1000.0)
-        
+
         meta_unknown = db.get_index_metadata("unknown_mapping")
         # 全局 generation 仍然被返回
         assert meta_unknown["index_generation"] == 1
@@ -447,7 +447,7 @@ class TestIndexGenerationControl:
         assert meta_unknown["mapping_id"] == "unknown_mapping"
         assert meta_unknown["mapping_index_generation"] == 0
         assert meta_unknown["mapping_index_generation_at"] == 0
-        
+
         # 已存在的 mapping 仍然正确
         meta_known = db.get_index_metadata("m1")
         assert meta_known["mapping_index_generation"] == 1
@@ -782,3 +782,210 @@ class TestUpsertTimestampSemantics:
             b_fts = conn.execute("SELECT COUNT(*) FROM b_strm_files_fts").fetchone()[0]
             assert a_fts == a_main == 1
             assert b_fts == b_main == 1
+
+
+# ============================================================
+# last_verified_at 列测试 (Task D)
+# ============================================================
+
+
+class TestLastVerifiedAtColumn:
+    """测试 last_verified_at 列的 schema 迁移、bump 方法和回归保护"""
+
+    def test_a_strm_files_has_last_verified_at_column(self, db: Database):
+        """a_strm_files 表存在 last_verified_at 列"""
+        with db.read_connection() as conn:
+            cur = conn.execute("PRAGMA table_info(a_strm_files)")
+            columns = [row[1] for row in cur.fetchall()]
+        assert "last_verified_at" in columns
+
+    def test_b_strm_files_has_last_verified_at_column(self, db: Database):
+        """b_strm_files 表存在 last_verified_at 列"""
+        with db.read_connection() as conn:
+            cur = conn.execute("PRAGMA table_info(b_strm_files)")
+            columns = [row[1] for row in cur.fetchall()]
+        assert "last_verified_at" in columns
+
+    def test_old_database_auto_adds_last_verified_at_column(self, db: Database):
+        """旧数据库（无 last_verified_at 列）打开后自动加列且不丢数据"""
+        # 直接使用 db fixture 创建的数据库
+        # 验证列存在且数据正常
+        with db.read_connection() as conn:
+            # 检查列信息
+            columns = [row[1] for row in conn.execute("PRAGMA table_info(a_strm_files)").fetchall()]
+            assert "last_verified_at" in columns
+
+            # 插入数据
+            db.upsert_a("/a/test.strm", "/m/test.mp4", "/m")
+
+            # 验证 last_verified_at 已初始化
+            row = conn.execute(
+                "SELECT last_verified_at FROM a_strm_files WHERE local_path = ?",
+                ("/a/test.strm",)
+            ).fetchone()
+            assert row is not None
+            assert row[0] > 0  # 应该初始化为 now，而不是 0
+
+    def test_upsert_a_unchanged_business_fields_preserves_last_verified_at(self, db: Database):
+        """upsert_a 业务字段未变时不 bump last_verified_at（回归保护）"""
+        # 插入记录
+        db.upsert_a("/a/test.strm", "/m/test.mp4", "/m")
+        time.sleep(0.1)
+
+        # 手动设置 last_verified_at 为非零值
+        db.touch_verified_a(["/a/test.strm"], 999999.0)
+
+        # 再次 upsert，业务字段无变化
+        db.upsert_a("/a/test.strm", "/m/test.mp4", "/m")
+
+        # 验证 last_verified_at 保持不变（回归保护）
+        with db.read_connection() as conn:
+            row = conn.execute(
+                "SELECT last_verified_at FROM a_strm_files WHERE local_path = ?",
+                ("/a/test.strm",)
+            ).fetchone()
+            assert row[0] == 999999.0
+
+    def test_upsert_b_unchanged_business_fields_preserves_last_verified_at(self, db: Database):
+        """upsert_b 业务字段未变时不 bump last_verified_at（回归保护）"""
+        # 插入记录
+        db.upsert_b(
+            "/b/test.strm", "/m/test.mp4", "/m", "/a/test.strm",
+            "m1", "fp_test", "valid"
+        )
+        time.sleep(0.1)
+
+        # 手动设置 last_verified_at 为非零值
+        db.touch_verified_b(["/a/test.strm"], 999999.0)
+
+        # 再次 upsert，业务字段无变化
+        db.upsert_b(
+            "/b/test.strm", "/m/test.mp4", "/m", "/a/test.strm",
+            "m1", "fp_test", "valid"
+        )
+
+        # 验证 last_verified_at 保持不变（回归保护）
+        with db.read_connection() as conn:
+            row = conn.execute(
+                "SELECT last_verified_at FROM b_strm_files WHERE local_path = ?",
+                ("/b/test.strm",)
+            ).fetchone()
+            assert row[0] == 999999.0
+
+    def test_touch_verified_a_updates_only_specified_paths(self, db: Database):
+        """touch_verified_a 只更新指定路径的 last_verified_at"""
+        db.upsert_a_batch([
+            ("/a/1.strm", "/m/1.mp4", "/m"),
+            ("/a/2.strm", "/m/2.mp4", "/m"),
+            ("/a/3.strm", "/m/3.mp4", "/m"),
+        ])
+
+        # 记录插入时的初始值
+        with db.read_connection() as conn:
+            initial_rows = dict(conn.execute(
+                "SELECT local_path, last_verified_at FROM a_strm_files"
+            ).fetchall())
+            initial_time_2 = initial_rows["/a/2.strm"]  # 未 touched 的记录初始值
+
+        now = time.time()
+        db.touch_verified_a(["/a/1.strm", "/a/3.strm"], now)
+
+        with db.read_connection() as conn:
+            rows = dict(conn.execute(
+                "SELECT local_path, last_verified_at FROM a_strm_files"
+            ).fetchall())
+            assert rows["/a/1.strm"] == now
+            # 未 touched 的记录保持插入时的初始值
+            assert rows["/a/2.strm"] == initial_time_2
+            assert rows["/a/3.strm"] == now
+
+    def test_touch_verified_b_updates_only_specified_paths(self, db: Database):
+        """touch_verified_b 只更新指定 source_a_path 的 B 记录"""
+        db.upsert_b_batch([
+            ("/b/1.strm", "/m/1.mp4", "/m", "/a/1.strm", "m1", "fp1", "valid"),
+            ("/b/2.strm", "/m/2.mp4", "/m", "/a/2.strm", "m1", "fp2", "valid"),
+            ("/b/3.strm", "/m/3.mp4", "/m", "/a/3.strm", "m1", "fp3", "valid"),
+        ])
+
+        # 记录插入时的初始值
+        with db.read_connection() as conn:
+            initial_rows = dict(conn.execute(
+                "SELECT source_a_path, last_verified_at FROM b_strm_files"
+            ).fetchall())
+            initial_time_2 = initial_rows["/a/2.strm"]  # 未 touched 的记录初始值
+
+        now = time.time()
+        db.touch_verified_b(["/a/1.strm", "/a/3.strm"], now)
+
+        with db.read_connection() as conn:
+            rows = dict(conn.execute(
+                "SELECT source_a_path, last_verified_at FROM b_strm_files"
+            ).fetchall())
+            assert rows["/a/1.strm"] == now
+            # 未 touched 的记录保持插入时的初始值
+            assert rows["/a/2.strm"] == initial_time_2
+            assert rows["/a/3.strm"] == now
+
+    def test_touch_verified_by_mapping_updates_all_paths_under_root(self, db: Database):
+        """touch_verified_by_mapping 更新所有在根路径下的记录"""
+        db.upsert_a_batch([
+            ("/a/root1/file1.strm", "/m/1.mp4", "/m"),
+            ("/a/root1/file2.strm", "/m/2.mp4", "/m"),
+            ("/a/root2/file3.strm", "/m/3.mp4", "/m"),
+        ])
+        # 注意参数顺序：(local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, mapping_id, status)
+        db.upsert_b_batch([
+            ("/b/root1/file1.strm", "/m/1.mp4", "/m", "/a/root1/file1.strm",
+             "fp1", "m1", "valid"),
+            ("/b/root1/file2.strm", "/m/2.mp4", "/m", "/a/root1/file2.strm",
+             "fp2", "m1", "valid"),
+            ("/b/root2/file3.strm", "/m/3.mp4", "/m", "/a/root2/file3.strm",
+             "fp3", "m2", "valid"),
+        ])
+
+        # 记录插入时的初始值
+        with db.read_connection() as conn:
+            a_initial = dict(conn.execute(
+                "SELECT local_path, last_verified_at FROM a_strm_files"
+            ).fetchall())
+            b_initial = dict(conn.execute(
+                "SELECT source_a_path, last_verified_at FROM b_strm_files"
+            ).fetchall())
+            initial_a_root2 = a_initial["/a/root2/file3.strm"]
+            initial_b_m2 = b_initial["/a/root2/file3.strm"]
+
+        now = time.time()
+        db.touch_verified_by_mapping("m1", "/a/root1", now)
+
+        with db.read_connection() as conn:
+            a_rows = dict(conn.execute(
+                "SELECT local_path, last_verified_at FROM a_strm_files"
+            ).fetchall())
+            b_rows = dict(conn.execute(
+                "SELECT source_a_path, last_verified_at FROM b_strm_files"
+            ).fetchall())
+
+            # A 区：root1 下的被更新
+            assert a_rows["/a/root1/file1.strm"] == now
+            assert a_rows["/a/root1/file2.strm"] == now
+            # A 区：root2 下的未受影响，保持初始值
+            assert a_rows["/a/root2/file3.strm"] == initial_a_root2
+
+            # B 区：m1 mapping 的被更新
+            assert b_rows["/a/root1/file1.strm"] == now
+            assert b_rows["/a/root1/file2.strm"] == now
+            # B 区：m2 mapping 的未受影响，保持初始值
+            assert b_rows["/a/root2/file3.strm"] == initial_b_m2
+
+    def test_insert_new_record_initializes_last_verified_at(self, db: Database):
+        """插入新记录时 last_verified_at 初始化为 now"""
+        now = time.time()
+        db.upsert_a("/a/new.strm", "/m/new.mp4", "/m")
+
+        with db.read_connection() as conn:
+            row = conn.execute(
+                "SELECT last_verified_at FROM a_strm_files WHERE local_path = ?",
+                ("/a/new.strm",)
+            ).fetchone()
+            # 新记录的 last_verified_at 应该接近 now
+            assert abs(row[0] - now) < 2.0

@@ -53,6 +53,9 @@ class RefreshService:
         self._consecutive_failures: int = 0
         self._last_error_summary: str = ""
         self._last_full_audit_at = self._load_last_full_audit_at()
+        # A'.2: 全量审计互斥锁（手动 vs 周期不能并发）
+        self._full_audit_lock = threading.Lock()
+        self._full_audit_in_progress = False
 
     def _load_last_full_audit_at(self) -> float:
         try:
@@ -76,21 +79,91 @@ class RefreshService:
         now = time.time()
         if now - self._last_full_audit_at < interval:
             return False
-        logging.warning("[主动刷新] 触发兜底全量审计，可能访问所有 A 区磁盘")
-        self.app.initial_scan_a(use_bulk=False, a_roots=None)
-        self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
-        self._last_full_audit_at = now
-        mapping_ids = self.app._current_mapping_ids()
-        if mapping_ids:
-            try:
-                self.app.db.complete_index_generation(mapping_ids)
-            except Exception:
-                logging.warning("[主动刷新] 推进索引代次失败", exc_info=True)
+        # A'.2: 与 run_full_audit_now 互斥，任一方进行中另一方跳过
+        with self._full_audit_lock:
+            if self._full_audit_in_progress:
+                return False
+            self._full_audit_in_progress = True
         try:
-            self.app.db.set_control("last_full_audit_at", str(now))
-        except (AttributeError, OSError):
-            logging.warning("[主动刷新] 保存全量审计时间失败")
-        return True
+            logging.warning("[主动刷新] 触发兜底全量审计，可能访问所有 A 区磁盘")
+            self.app.initial_scan_a(use_bulk=False, a_roots=None)
+            self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
+            self._last_full_audit_at = now
+            mapping_ids = self.app._current_mapping_ids()
+            if mapping_ids:
+                try:
+                    self.app.db.complete_index_generation(mapping_ids)
+                except Exception:
+                    logging.warning("[主动刷新] 推进索引代次失败", exc_info=True)
+                # D'.3: 标记 last_verified_at（全量审计后推进核对时间）
+                try:
+                    for m in getattr(self.app, 'a_b_mappings', []):
+                        mid = str(getattr(m, 'mapping_id', '')).strip()
+                        a_root = getattr(m, 'a_root', '')
+                        if mid and a_root:
+                            self.app.db.touch_verified_by_mapping(mid, a_root, now)
+                except Exception:
+                    logging.warning("[主动刷新] 更新 last_verified_at 失败", exc_info=True)
+            try:
+                self.app.db.set_control("last_full_audit_at", str(now))
+            except (AttributeError, OSError):
+                logging.warning("[主动刷新] 保存全量审计时间失败")
+            return True
+        finally:
+            with self._full_audit_lock:
+                self._full_audit_in_progress = False
+
+    def run_full_audit_now(self) -> dict:
+        """A'.1: 手动触发全量审计的薄封装。
+
+        完整镜像 _maybe_run_full_audit 的后置状态：
+        initial_scan_a → scan_a_to_b_full_sync → complete_index_generation
+        → touch_verified_by_mapping → _last_full_audit_at → set_control。
+        忽略 interval/时间门槛，沿用现有异常捕获。
+        与 _maybe_run_full_audit 共享 _full_audit_in_progress 互斥标志。
+        """
+        with self._full_audit_lock:
+            if self._full_audit_in_progress:
+                return {"ok": False, "status": "already_running", "message": "审计已在进行中"}
+            self._full_audit_in_progress = True
+        try:
+            now = time.time()
+            logging.warning("[手动审计] 触发全量审计，可能访问所有 A 区磁盘")
+            self.app.initial_scan_a(use_bulk=False, a_roots=None)
+            self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
+            self._last_full_audit_at = now
+            mapping_ids = self.app._current_mapping_ids()
+            if mapping_ids:
+                try:
+                    self.app.db.complete_index_generation(mapping_ids)
+                except Exception:
+                    logging.warning("[手动审计] 推进索引代次失败", exc_info=True)
+                # D'.3: 标记 last_verified_at
+                try:
+                    for m in getattr(self.app, 'a_b_mappings', []):
+                        mid = str(getattr(m, 'mapping_id', '')).strip()
+                        a_root = getattr(m, 'a_root', '')
+                        if mid and a_root:
+                            self.app.db.touch_verified_by_mapping(mid, a_root, now)
+                except Exception:
+                    logging.warning("[手动审计] 更新 last_verified_at 失败", exc_info=True)
+            try:
+                self.app.db.set_control("last_full_audit_at", str(now))
+            except (AttributeError, OSError):
+                logging.warning("[手动审计] 保存全量审计时间失败")
+            meta = self.app.db.get_index_metadata()
+            return {
+                "ok": True,
+                "status": "completed",
+                "index_generation": meta.get("index_generation", 0) if isinstance(meta, dict) else 0,
+                "index_generation_at": meta.get("index_generation_at", 0) if isinstance(meta, dict) else 0,
+            }
+        except Exception as e:
+            logging.error("[手动审计] 审计失败: %s", e, exc_info=True)
+            return {"ok": False, "status": "error", "error": str(e)}
+        finally:
+            with self._full_audit_lock:
+                self._full_audit_in_progress = False
 
     def _refresh_audit_enabled(self) -> bool:
         return self._full_audit_interval_seconds() > 0

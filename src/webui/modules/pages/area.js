@@ -379,9 +379,9 @@ function _renderSeasons(area, seasons, sort, order, kind, q, media, localRoot, w
     html += '<div class="table-wrap"><table><thead><tr><th>序号</th>';
 
     if (area === 'a') {
-      html += `<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>${sortLink('时间', 'updated_at')}</th>`;
+      html += `<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>${sortLink('时间', 'updated_at')}</th><th>${sortLink('最后核对', 'last_verified_at')}</th>`;
     } else if (area === 'b') {
-      html += `<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>指纹</th><th>状态</th><th>${sortLink('时间', 'updated_at')}</th>`;
+      html += `<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>指纹</th><th>状态</th><th>${sortLink('时间', 'updated_at')}</th><th>${sortLink('最后核对', 'last_verified_at')}</th>`;
     } else if (area === 'c') {
       html += `<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>原 B 路径</th><th>幽灵根</th><th>${sortLink('时间', 'moved_at')}</th>`;
     }
@@ -393,10 +393,10 @@ function _renderSeasons(area, seasons, sort, order, kind, q, media, localRoot, w
       let row = '<tr>';
       row += `<td>${i + 1}</td>`;
       if (area === 'a') {
-        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td>${fmtTime(r.updated_at)}</td>`;
+        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td>${fmtTime(r.updated_at)}</td><td>${fmtTime(r.last_verified_at)}</td>`;
       } else if (area === 'b') {
         const fp = r.fingerprint || '-'; const fpShort = fp.length > 5 ? fp.substring(0, 5) + '...' : fp;
-        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono" style="font-size:calc(var(--font-base) - 2px);cursor:default" title="${esc(fp)}">${esc(fpShort)}</td><td class="${_statusClass(r.status || '-')}">${esc(r.status || '-')}</td><td>${fmtTime(r.updated_at)}</td>`;
+        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono" style="font-size:calc(var(--font-base) - 2px);cursor:default" title="${esc(fp)}">${esc(fpShort)}</td><td class="${_statusClass(r.status || '-')}">${esc(r.status || '-')}</td><td>${fmtTime(r.updated_at)}</td><td>${fmtTime(r.last_verified_at)}</td>`;
       } else if (area === 'c') {
         row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono">${esc(r.original_b_path || '-')}</td><td class="mono">${esc(r.ghost_root || '-')}</td><td>${fmtTime(r.moved_at)}</td>`;
       }

@@ -93,7 +93,7 @@ openlist_strm_bridge/
 │   ├── utils/file_utils.py      # 文件 I/O 操作
 │   ├── utils/webdav_utils.py    # WebDAV 路径工具
 │   ├── utils/error_translator.py # 错误信息翻译
-│   ├── utils/encoding_utils.py  # 编码规范化（NFC/NFD、URL、全角/连续空格）
+│   ├── utils/encoding_utils.py  # 字幕编码转 UTF-8（copy_subtitle_utf8、_normalize_to_utf8 等）
 │   ├── utils/bootstrap.py       # 启动引导辅助
 │   ├── webui/                   # WebUI 服务端 + 前端源码
 │   ├── tests/                   # 测试（见 src/tests/README.md，pytest --collect-only -q 获取实时数量）

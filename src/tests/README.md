@@ -17,8 +17,8 @@ python -m pytest src/tests/ -v
 | `test_app_service_core.py` | 核心同步引擎 `AppService` 主流程与状态机测试 |
 | `test_sync_service.py` | A→B 同步服务（`initial_scan_a` 批量索引、`scan_a_to_b_full_sync` 双模式同步、`_bulk_upsert_b` FTS 孤儿行处理）测试 |
 | `test_area_watchers.py` | A/B/C 三区文件系统监视器事件处理测试 |
-| `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试 |
-| `test_refresh_service.py` | 周期性 WebDAV 刷新服务测试 |
+| `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试（含 `TestLastVerifiedAtWiring`） |
+| `test_refresh_service.py` | 周期性 WebDAV 刷新服务测试（含 `TestFullAuditTouchVerified`、`TestRunFullAuditNow`） |
 | `test_refresh_service_helpers.py` | RefreshService 辅助委托、路径分析日志、WebDAV 刷新与 update 模式清理测试。 |
 | `test_bootstrap.py` | 启动路径工具（`ensure_base_dir_first`、`load_local_module`）测试 |
 | `test_log_issues_simulation.py` | 八类真实日志问题的沙盒实验与修复回归（SQLite 锁竞争、padding 路径碰撞、B 区血统清理健康度、B 区事件洪泛、重复实例隔离、字幕路由、WebDAV 假阴性、Unicode 路径） |
@@ -33,7 +33,7 @@ python -m pytest src/tests/ -v
 | 文件 | 说明 |
 |------|------|
 | `test_integration.py` | 数据库重构与核心流程集成测试（含 A/B/C 区 FTS 完整性回归） |
-| `test_database_bulk.py` | bulk_connection 批量写入、只读 getter 读锁与并发数据库行为测试 |
+| `test_database_bulk.py` | bulk_connection 批量写入、只读 getter 读锁与并发数据库行为测试（含 `TestLastVerifiedAtColumn`） |
 | `test_fts5_search.py` | FTS5 全文检索查询与匹配测试（含 simple 分词器加载、版本可读、`黑暗`/`暗黑` 按词分词语义断言） |
 | `test_fts5_escape_and_tmdb_search.py` | FTS5 查询转义函数（`_escape_fts5_query`）与 TMDB 搜索路由测试（含 `进击的巨人[限制级]`、`电影：测试*`、`Spy×Family` 真实媒体名转义） |
 | `test_fts_orphan_cleanup.py` | FTS 孤儿行清理与一致性测试 |
@@ -45,6 +45,7 @@ python -m pytest src/tests/ -v
 |------|------|
 | `test_config.py` | 配置模块单元测试：ABMapping、mapping_version、AppConfig.from_file、update_from_db、load_strm_storage_from_api、migrate_config_to_db、配置 fail-closed。**D1 回归**：`update_from_db` 补齐缺失 `mapping_id`（`test_a_b_mappings_backfills_missing_mapping_id` 等）；**D2 回归**：`from_file` 初始化 `a_b_mappings` / `engines_initialized`（`test_from_file_initializes_mapping_fields`）。 |
 | `test_password_security.py` | 管理员密码 PBKDF2 哈希与校验安全测试 |
+| `test_auth_security.py` | 认证安全测试：登录限流字典逻辑（5 次失败后限流）、密码哈希格式（salt$iterations$hash 三段式，iterations=600000）、首启密码生成与哈希验证往返 |
 | `test_secret_manager.py` | 密钥/凭据安全管理测试 |
 | `test_migrate_encryption.py` | 加密方案迁移测试 |
 | `test_integration_security.py` | 跨模块安全边界与鉴权测试 |
@@ -55,9 +56,9 @@ python -m pytest src/tests/ -v
 | 文件 | 说明 |
 |------|------|
 | `test_utils.py` | 通用工具函数测试 |
-| `test_encoding_utils.py` | 编码规范化工具（NFC/NFD、斜杠、URL、全角/连续空格归一）测试 |
+| `test_encoding_utils.py` | 字幕编码转 UTF-8 工具测试（空字节、UTF-8 带/不带 BOM、GB18030→UTF-8、Big5→UTF-8、UTF-16 LE/BE 带 BOM、UTF-16 LE 无 BOM、不可识别编码 fail-safe、真实字幕样本往返） |
 | `test_media_renamer.py` | 媒体重命名与季/集号提取测试 |
-| `test_subtitle_handler.py` | 字幕同步与规范化测试 |
+| `test_subtitle_handler.py` | 字幕同步与规范化测试（含 `TestSubtitleEncodingConversion`） |
 | `test_subtitle_multi_bug_repro.py` | 番剧多字幕场景 NameError 回归测试 |
 | `test_boundary_conditions.py` | 边界条件与异常输入健壮性测试 |
 | `test_error_translator.py` | 错误码到用户可读信息的翻译测试 |
@@ -77,7 +78,8 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试（含 `TestAreaDetailKindParameter`、`TestAreaDetailCZonePagination`、`TestAreaDetailSingleMappingMid`）。**D2 回归**：全新安装 `/api/config` 不抛异常（`TestConfigApiFreshInstall`）；**D3 回归**：fail-safe 时 `start_main` 返回失败（`TestStartMainFailSafe`）。 |
+| `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试（含 `TestAreaDetailKindParameter`、`TestAreaDetailCZonePagination`、`TestAreaDetailSingleMappingMid`、`TestTMDBWatchlistMatchOverrideConsistency`、`TestManualFullIndexAuditAPI`）。**D2 回归**：全新安装 `/api/config` 不抛异常（`TestConfigApiFreshInstall`）；**D3 回归**：fail-safe 时 `start_main` 返回失败（`TestStartMainFailSafe`）。 |
+| `test_webui_help_texts.py` | WebUI 帮助文案系统测试：`createField` 输出 `.field-helper-text`、`_openlistHelpTexts` 键完整性、`log_file` 不含「重启」、`refresh_*` 含「即时生效」、TMDB 阈值字段 helperText、孤儿键标注 |
 | `test_call_coverage.py` | 路由调用覆盖率测试 |
 | `test_logging_system.py` | TMDB 操作日志表、日志读取接口与轮转产物测试 |
 | `test_logger_setup.py` | logger_setup 模块单元测试：handler 装配、重复初始化（热更新）、回退路径、级别过滤、启动分隔标记、临时目录清理（**窄编码控制台下无法编码字符不丢日志、且不改写流的全局 errors 策略**（`TestConsoleEncodingFallback`））。 |
@@ -94,7 +96,7 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_index_metadata_api.py` | 索引元数据 API 测试 |
+| `test_index_metadata_api.py` | 索引元数据 API 测试（含 `TestManualFullIndexAudit`，验证 `last_verified_at` 推进） |
 | `test_multi_mapping_partition.py` | 多 mapping 分区测试 |
 | `test_e2e_full_flow.py` | 完整业务流程端到端测试（登录→配置→A/B 区→状态校验）。**##26 七步链路**：`test_complete_seven_step_onboarding` 覆盖七步正向 HTTP 全链路（登录→TMDb→OpenList→启动→分区→待看同步→收录检测）；`TestSevenStepFailureReasons` 覆盖每步的失败原因与成功条件（未授权、mapping 校验、`not_configured`、`fail_safe_active`、OpenList 登录失败、非法分区、待看开关关闭）。引擎侧 `start()` 置 `_running` 的不变式由 `test_app_service_lifecycle.py` 守卫，本文件用替身只验证 WebUI 启动契约。 |
 | `test_onboarding_e2e.py` | 新手引导流程端到端测试 |

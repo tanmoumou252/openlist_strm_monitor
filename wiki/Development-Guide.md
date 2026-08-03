@@ -44,7 +44,7 @@ src/
 │   ├── file_utils.py       # 文件系统工具
 │   ├── webdav_utils.py      # WebDAV 路径工具
 │   ├── error_translator.py  # 错误信息翻译
-│   ├── encoding_utils.py   # 编码规范化（NFC/NFD、URL、全角/连续空格）
+│   ├── encoding_utils.py   # 字幕编码转 UTF-8（copy_subtitle_utf8、_normalize_to_utf8 等）
 │   └── bootstrap.py        # 启动引导工具
 ├── webui/                   # SPA 前端 + HTTP 服务器
 └── tests/                   # 测试文件（见 src/tests/README.md）

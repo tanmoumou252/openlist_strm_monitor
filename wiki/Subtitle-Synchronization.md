@@ -160,6 +160,53 @@ S01E01.jpn.日语.ass            # 日语
 
 `subtitles` 表记录已处理的字幕，避免重复处理。由 `Database.__init__()` 中调用 `init_subtitle_table()` 初始化（非 `AppService.__init__()`）。
 
+## 编码归一化
+
+字幕文件在复制到 B 区时自动进行 UTF-8 编码标准化处理，确保所有字幕文件均为无 BOM 的 UTF-8 格式，提升播放器和媒体库的兼容性。
+
+### 触发时机
+
+`SubtitleHandler` 在 `_process_movie_subtitle()` 和 `_process_anime_subtitle()` 中调用 `copy_subtitle_utf8()` 函数（来自 `utils.encoding_utils`）替代原有的 `shutil.copyfile()`。
+
+### 支持的编码转换
+
+| 源编码 | 转换目标 | 识别方式 |
+|--------|----------|----------|
+| UTF-8 with BOM | UTF-8 without BOM | 移除 BOM 前缀 |
+| UTF-8 without BOM | 不变（幂等） | 验证通过 + NUL 检查 |
+| UTF-16 LE with BOM | UTF-8 without BOM | 检测 BOM `\xff\xfe` |
+| UTF-16 BE with BOM | UTF-8 without BOM | 检测 BOM `\xfe\xff` |
+| UTF-16 LE without BOM | UTF-8 without BOM | 启发式检测 |
+| UTF-16 BE without BOM | UTF-8 without BOM | 启发式检测 |
+| GB18030/GBK | UTF-8 without BOM | CJK 字符命中率消歧 |
+| Big5 | UTF-8 without BOM | CJK 字符命中率消歧 |
+| 无法识别 | 原样复制（fail-safe） | UnicodeError 捕获 |
+
+### Fail-safe 回退语义
+
+1. **识别失败**：当编码无法识别或转换失败时，回退为原样字节复制，确保不丢失字幕文件
+2. **警告日志**：所有编码转换操作均会记录详细的 DEBUG/WARNING 日志，便于问题追踪
+3. **不引入 BOM**：所有转换结果均为无 BOM 的 UTF-8，避免播放器兼容性问题
+4. **幂等性**：已经是无 BOM 的 UTF-8 文件，复制后字节完全一致
+
+### 编码检测逻辑
+
+检测顺序（`_normalize_to_utf8()`）：
+1. 检查是否为 UTF-8 BOM（`\xef\xbb\xbf`）→ 移除 BOM
+2. 严格验证是否为有效 UTF-8 + NUL 字符检查 → 直接使用
+3. 尝试 UTF-16 LE/BE BOM 检测 → 转换为 UTF-8
+4. 尝试 UTF-16 无 BOM 启发式检测 → 转换为 UTF-8
+5. 尝试 GB18030/Big5 并使用 CJK 字符命中率判断 → 转换为 UTF-8
+6. 以上全部失败 → 抛出 UnicodeError，由外层捕获后原样复制
+
+### SRT/ASS/SSA 兼容性
+
+所有字幕格式（`.srt`、`.ass`、`.ssa`）均统一处理为无 BOM 的 UTF-8。这是事实标准，兼容 VLC、mpv、Emby、Jellyfin 等主流播放器。保留 BOM 或保留 GBK 原样字节反而可能导致兼容性问题。
+
+### Shift-JIS 技术债务
+
+日语 Shift-JIS/cp932 编码的字幕文件会走 fail-safe 原样复制路径（与连接前行为一致）。这是因为 Shift-JIS 与 GB18030/Big5 存在字节冲突，难以自动区分。此项登记为技术债务，待后续优化。
+
 ## 与同步引擎的协作
 
 字幕处理集成在 A 区事件处理器中：
