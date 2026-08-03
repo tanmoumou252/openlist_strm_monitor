@@ -226,7 +226,7 @@ pip install -r src/tests/requirements-dev.txt
 
 - `pytest` (测试框架)
 - `pytest-cov` (测试覆盖率)
-- `flask` (测试用 Mock 服务器)
+- `flask` (Mock 服务器，仅 `test_tmdb_api.py` 使用)
 
 ### 2. 运行程序
 
@@ -247,7 +247,15 @@ python -m pytest src/tests/ -v
 
 # 日志风险模拟专项测试（Issue1–Issue8，55+ 个测试）
 python -m pytest src/tests/test_log_issues_simulation.py -v
+
+# ##26 全新用户模拟 E2E（七步全链路正向测试）
+python -m pytest src/tests/test_e2e_full_flow.py::TestSuccessfulFlow::test_complete_seven_step_onboarding -v
+
+# 新手引导单步跟踪与预检
+python -m pytest src/tests/test_onboarding_e2e.py -v
 ```
+
+> 七步全链路与新手引导步骤跟踪分别覆盖不同层面，详见 §新手引导 章节。
 
 日志风险模拟测试（`test_log_issues_simulation.py`）针对 `strm_bridge.log` 中出现的八类真实问题进行沙盒实验，生成 100+ 虚拟 strm/图片/字幕文件于 `src/tests/strm.test.A/`（幂等保留），经真实 `AppService` 同步到 `src/tests/strm.test.B/`（测试后清理），日志留存于 `test_logs/`。
 

@@ -21,7 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -174,6 +174,81 @@ def real_webui_server(tmp_path):
 
         yield server, base_url, session_token, db
         server.stop()
+
+
+@pytest.fixture
+def real_config_webui_server(tmp_path):
+    """启动真实 WebUIServer + 真实 AppConfig + 真实 SQLite Database。
+
+    与 real_webui_server 的区别：AppConfig 使用真实 AppConfig.from_file 创建
+    （而非 MagicMock），确保 update_from_db 等方法在真实对象上执行。
+    用于测试"HTTP POST → 真实 DB → update_from_db → mapping_id 自动生成"
+    等需要真实 config 对象的全链路接线场景。
+    """
+    from config import AppConfig
+    from database import Database
+    from webui.server import WebUIServer
+    from webui.routes import _login_attempts
+    _login_attempts.clear()
+
+    # 最小 TOML：from_file 会补全 log/webdav/paths/webui/tmdb 默认值
+    b_dir = tmp_path / "b"
+    c_dir = tmp_path / "c"
+    b_dir.mkdir(exist_ok=True)
+    c_dir.mkdir(exist_ok=True)
+    toml_path = tmp_path / "config.toml"
+    toml_path.write_text(
+        "[local]\n"
+        'db_file = "bridge.db"\n'
+        "[paths]\n"
+        f'b_root = "{b_dir.as_posix()}"\n'
+        f'c_root = "{c_dir.as_posix()}"\n',
+        encoding="utf-8")
+
+    cfg = AppConfig.from_file(str(toml_path))
+    db = Database(str(tmp_path / "bridge.db"))
+    port = _free_port()
+    cfg.webui.port = port
+
+    with patch("webui.server.PROJECT_ROOT", tmp_path), \
+         patch("webui.server.STATIC_DIR", tmp_path / "static"):
+        (tmp_path / "static").mkdir(exist_ok=True)
+        (tmp_path / "static" / "index.html").write_text(
+            "<html><body>test</body></html>", encoding="utf-8")
+        (tmp_path / "static" / "assets").mkdir(exist_ok=True)
+        (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
+
+        # 防止 _hot_reload_openlist_config 触发真实网络调用
+        mock_admin_client = MagicMock()
+        mock_admin_client.login.return_value = True
+        # 显式声明"OpenList 端无 STRM 存储"（全新用户 onboarding 场景），
+        # 令 get_strm_storages_full_info 返回空列表，load_strm_storage_from_api
+        # 走无网络的提前返回分支，不再依赖 MagicMock.__iter__ 的默认空迭代。
+        mock_admin_client.get_strm_storages_full_info.return_value = []
+        # 注意：不 patch load_strm_storage_from_api（AppConfig 使用 slots=True，
+        # patch.object 不支持实例方法）。startup 阶段 update_from_db 不调用它，
+        # HTTP handler 内部调用时由 _reinit_admin_client 的 mock 保护。
+        with patch("webdav_client.OpenListAdminClient",
+                    return_value=mock_admin_client):
+
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            test_password = "test_password_123"
+            os.environ["WEBUI_TEST_MODE"] = "1"
+            os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
+            server.start()
+            deadline = time.time() + 2.0
+            while not server._server and time.time() < deadline:
+                time.sleep(0.05)
+
+            base_url = f"http://127.0.0.1:{port}"
+            login_status, _, login_body = _http_post(
+                base_url, "/api/login", {"password": test_password})
+            assert login_status == 200
+            session_token = login_body.get("token")
+            assert session_token is not None
+
+            yield server, base_url, session_token, db
+            server.stop()
 
 
 def _http_get(base_url, path, session_token=None, timeout=3.0):
@@ -705,10 +780,133 @@ class TestTmdbConfigPersistence:
         assert "not_a_real_key" not in cfg, (
             f"白名单外键被写入了 DB: {cfg.keys()}")
 
+    def test_tmdb_config_reinitializes_client(self, webui_server):
+        """TMDB 配置保存后 _handler_reinit_tmdb 确实重建客户端。
+
+        本用例补"reinit 路径被执行"的接线回归。与 test_complete_seven_step_onboarding
+        步骤②的 'server._tmdb_client is not None' 断言不同：后者只确认非空，本用例
+        验证 create_tmdb_client 被调用且 _tmdb_client 被替换为新实例。
+
+        交叉引用：_handler_reinit_tmdb（routes.py）内部使用局部
+        'from tmdb_client import create_tmdb_client'，因此 patch 目标必须是
+        tmdb_client 模块（而非 webui.server 模块）。
+        """
+        sentinel = object()  # 可辨识的哨兵对象
+        server, base, token = webui_server
+
+        with patch("tmdb_client.create_tmdb_client",
+                    return_value=sentinel) as mock_create:
+            status, _, resp = _http_post(base, "/api/tmdb/configure", {
+                "access_token": "test_reinit_token",
+                "api_key": "test_reinit_key",
+                "language": "zh-CN",
+            }, token)
+
+        assert status == 200
+        assert resp.get("success") is True
+        mock_create.assert_called_once()
+        # _tmdb_client 被替换为 create_tmdb_client 的返回值
+        assert server._tmdb_client is sentinel, (
+            "server._tmdb_client 应为 create_tmdb_client 返回的 sentinel，"
+            f"实际: {server._tmdb_client!r}")
+
 
 # ============================================================
 # 场景 3：原有失败场景
 # ============================================================
+
+
+class TestConfigurationLinkage:
+    """配置保存→读取→引擎门禁的全链路接线回归。
+
+    覆盖 HTTP POST → _save_openlist_to_db → 真实 SQLite → update_from_db
+    回读 → mapping_id 自动生成 → get_config_status()==ready 等唯一未被
+    任何现有测试触及的全链路接线 seam。
+
+    交叉引用（片段归属，非冗余标注）：
+    - update_from_db 补齐逻辑：test_config.py::test_a_b_mappings_backfills_missing_mapping_id
+    - 内存 FakeConfigDb → 服务 ready：TestWebUiSavedMappingReachesReady
+    本类是两者之上的 **HTTP→真实 DB→config→service** 全链路守卫。
+    """
+
+    def test_mapping_id_autogenerated_on_config_save(self, real_config_webui_server):
+        """保存不含 mapping_id 的 A/B mapping 后，真实 AppConfig 自动补齐 ID。
+
+        步骤：
+        1. POST /api/webui/config/openlist（不含 mapping_id）
+        2. 回读 DB 断言保存体不含 mapping_id（前端形态）
+        3. 断言 server._config.a_b_mappings[0].mapping_id 自动生成且非空
+        4. 断言 get_config_status() == ready（引擎门禁通过）
+        5. GET /api/config/status → openlist_configured is True
+        """
+        from config import ABMapping
+        from database import Database as RealDatabase
+        server, base, token, db = real_config_webui_server
+
+        # 初始状态：未配置
+        status, _, resp = _http_get(base, "/api/config/status", token)
+        assert status == 200
+        assert resp.get("openlist_configured") is False
+
+        # 准备 A 区目录（使用临时目录确保可清理）
+        a_dir = Path(os.environ.get("TEMP", ".")) / "e2e_test_a"
+        a_dir.mkdir(parents=True, exist_ok=True)
+        a_root = str(a_dir)
+        b_root = server._config.paths.b_root
+
+        # ── 步骤 1：POST 保存（不含 mapping_id） ──
+        status, _, resp = _http_post(base, "/api/webui/config/openlist", {
+            "webdav_host": "http://127.0.0.1:15244",
+            "webdav_user": "admin",
+            "webdav_password": "password",
+            "a_b_mappings": json.dumps([{
+                "a_root": a_root, "b_root": b_root, "label": "e2e_test"
+            }]),
+        }, token)
+        assert status == 200
+        assert resp.get("success") is True
+
+        # 配置状态应显示 openlist_configured
+        status, _, cfg_resp = _http_get(base, "/api/config/status", token)
+        assert status == 200
+        assert cfg_resp.get("openlist_configured") is True
+
+        # ── 步骤 2：回读 DB 断言不含 mapping_id（前端形态） ──
+        saved = json.loads(
+            server._watchlist_db.get_config("openlist", "a_b_mappings"))
+        assert len(saved) == 1
+        assert "mapping_id" not in saved[0], (
+            "DB 保存体不应含 mapping_id（由 update_from_db 回读补齐）")
+
+        # ── 步骤 3：断言 in-memory config 已自动生成 mapping_id ──
+        # _hot_reload_openlist_config → cfg.update_from_db(_wdb) 在 POST handler
+        # 内部已执行（routes.py _handle_webui_config_post → _hot_reload_openlist_config），
+        # 此处直接断言回读结果。
+        assert isinstance(server._config.a_b_mappings[0], ABMapping), (
+            "应为 ABMapping 实例，否则 update_from_db 未正确解析")
+        assert server._config.a_b_mappings[0].mapping_id, (
+            "mapping_id 不应为空")
+        expected_mid = ABMapping.generate_mapping_id(a_root)
+        assert server._config.a_b_mappings[0].mapping_id == expected_mid, (
+            f"mapping_id 应由 generate_mapping_id 自动生成: "
+            f"expected={expected_mid}, "
+            f"actual={server._config.a_b_mappings[0].mapping_id}")
+
+        # ── 步骤 4：引擎门禁 ready ──
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            from app_service_core import AppService
+            app = AppService(
+                server._config, MagicMock(spec=RealDatabase), Mock())
+        assert app.get_config_status()["status"] == "ready", (
+            "从真实 SQLite 回读后引擎门禁应为 ready")
+
+        # ── 步骤 5：HTTP 端点断言 ──
+        status, _, final_resp = _http_get(base, "/api/config/status", token)
+        assert status == 200
+        assert final_resp.get("openlist_configured") is True
+
 
 class TestFailureScenarios:
     """测试失败场景"""
@@ -752,6 +950,35 @@ class TestFailureScenarios:
             "strm_engines": json.dumps([{"engine": "", "monitored_paths": []}]),
         }, session_token)
         assert status == 400
+
+    def test_openlist_config_triggers_storage_reload(self, webui_server):
+        """POST /api/webui/config/openlist 确实路由到 _hot_reload_openlist_config。
+
+        仅验证 HTTP→hotreload 的接线（wiring），逻辑覆盖见
+        test_openlist_hotreload.py::TestHotReloadOpenlistConfig。
+        本用例不验证 hotreload 的内部行为（异常吞咽、刷新服务重配等），
+        只确认 reload 方法在 HTTP 保存后被调用。
+        """
+        server, base, token = webui_server
+        # 替换实例属性为 MagicMock（对齐 test_openlist_hotreload 的方式）
+        server._config.load_strm_storage_from_api = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.login.return_value = True
+
+        with patch("webdav_client.OpenListAdminClient",
+                    return_value=mock_client):
+            # POST 保存 openlist 配置（含 webdav_host 变更以触发 reinit 分支）
+            status, _, resp = _http_post(base, "/api/webui/config/openlist", {
+                "webdav_host": "http://127.0.0.1:15244",
+                "webdav_user": "admin",
+                "webdav_password": "password",
+            }, token)
+
+        assert status == 200
+        assert resp.get("success") is True
+        # load_strm_storage_from_api 应在 _hot_reload_openlist_config 内被调用
+        server._config.load_strm_storage_from_api.assert_called()
 
 
 # ============================================================
