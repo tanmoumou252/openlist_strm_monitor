@@ -19,8 +19,18 @@ def copy_file(src: str | Path, dst: str | Path) -> None:
 
 
 def move_file(src: str | Path, dst: str | Path) -> None:
+    """Move file, handling cross-device (EXDEV) errors by copying then removing."""
     ensure_parent(dst)
-    shutil.move(str(src), str(dst))
+    try:
+        shutil.move(str(src), str(dst))
+    except OSError as e:
+        # Handle cross-device move (EXDEV): copy + remove instead
+        import errno
+        if hasattr(e, 'errno') and e.errno == errno.EXDEV:
+            shutil.copy2(str(src), str(dst))
+            os.remove(str(src))
+        else:
+            raise
 
 
 def safe_remove_file(path: str | Path) -> bool:
@@ -76,16 +86,6 @@ def normalize_path(path: str | Path) -> str:
         result = result[:-1]
     return result
 
-    for current_root, dirs, files in os.walk(root_folder, topdown=False):
-        current = Path(current_root)
-        if current == root_folder:
-            continue
-        try:
-            if not any(current.iterdir()):
-                current.rmdir()
-        except OSError:
-            pass
-
 
 def local_relative(root: str | Path, target: str | Path) -> Path:
     return Path(target).resolve().relative_to(Path(root).resolve())
@@ -119,7 +119,11 @@ def quarantine_file(path: str | Path, suffix: str = ".invalid") -> Path | None:
 
 def remove_file_strict(path: str | Path) -> bool:
     """
-    严格删除文件。
+    严格删除文件（已废弃，请使用 safe_remove_file）。
+    
+    Deprecated: Use safe_remove_file instead, which handles permission errors.
+    This function is kept for backwards compatibility only.
+    
     返回 True 表示文件不存在或删除成功。
     返回 False 表示删除失败。
     """

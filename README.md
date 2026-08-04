@@ -383,6 +383,21 @@ python -m pytest src/tests/test_onboarding_e2e.py -v
 
 ---
 
+## 📚 项目文档导航
+
+项目文档分为多个层次，按需查阅：
+
+| 文档 | 说明 |
+| :--- | :--- |
+| [部署指南](docs/部署指南.md) | 完整的部署流程、系统要求、常见问题 |
+| [用户手册](docs/用户手册.md) | 功能说明、操作指南、使用技巧 |
+| [工作流程](docs/工作流程.md) | A/B/C 三区同步流程详解、字幕处理 |
+| [设计思路](docs/设计思路.md) | 架构决策、安全机制设计理念 |
+| [接入文档](docs/ink-reveal/接入文档.md) | 面向开发者的 API 对接与集成说明 |
+| [Wiki 首页](https://github.com/tanmoumou252/openlist_strm_monitor/wiki) | 社区维护的 FAQ、最佳实践 |
+
+---
+
 ## 📄 License
 
 本项目采用 [MIT License](LICENSE) 协议。

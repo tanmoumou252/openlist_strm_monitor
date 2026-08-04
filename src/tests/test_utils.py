@@ -4,8 +4,7 @@ Unit tests for utils/ submodules:
                            make_strm_fingerprint, read_strm_webdav_path
   - utils/file_utils.py  — ensure_parent, copy_file, move_file,
                            safe_remove_file, remove_empty_dirs,
-                           local_relative, local_join, quarantine_file,
-                           remove_file_strict
+                           local_relative, local_join, quarantine_file
   - utils/webdav_utils.py — webdav_parent, webdav_root_name,
                             build_webdav_trash_path,
                             _canonicalize_webdav_path_for_cloud
@@ -38,7 +37,6 @@ from utils.file_utils import (
     move_file,
     quarantine_file,
     remove_empty_dirs,
-    remove_file_strict,
     safe_remove_file,
 )
 from utils.webdav_utils import (
@@ -384,25 +382,6 @@ class TestQuarantineFile:
         assert result is not None
         assert result.name.endswith(".quarantined")
 
-
-class TestRemoveFileStrict:
-    def test_removes_existing_file(self, tmp_path):
-        f = tmp_path / "file.txt"
-        f.write_text("x")
-        result = remove_file_strict(f)
-        assert result is True
-        assert not f.exists()
-
-    def test_returns_true_when_file_not_exist(self, tmp_path):
-        result = remove_file_strict(tmp_path / "gone.txt")
-        assert result is True
-
-    def test_returns_false_on_oserror(self, tmp_path):
-        f = tmp_path / "file.txt"
-        f.write_text("x")
-        with patch("utils.file_utils.Path.unlink", side_effect=OSError):
-            result = remove_file_strict(f)
-        assert result is False
 
 
 # ===========================================================================

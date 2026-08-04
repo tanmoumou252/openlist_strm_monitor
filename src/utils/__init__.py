@@ -21,7 +21,6 @@ from .file_utils import (
     local_relative,
     local_join,
     quarantine_file,
-    remove_file_strict,
 )
 from .webdav_utils import (
     webdav_parent,
@@ -53,7 +52,6 @@ __all__ = [
     "local_relative",
     "local_join",
     "quarantine_file",
-    "remove_file_strict",
     # WebDAV
     "webdav_parent",
     "webdav_root_name",

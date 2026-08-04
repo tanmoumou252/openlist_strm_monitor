@@ -2158,7 +2158,7 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
         try:
             parts = stored.split("$", 2)
             if len(parts) != 3:
-                handler._send_json({"error": "密码格式错误"}, 500)
+                handler._send_json({"error": "密码格式损坏，请用 python reset_admin.py 重置"}, 500)
                 return
             salt, iterations_str, stored_hash = parts
             iterations = int(iterations_str)

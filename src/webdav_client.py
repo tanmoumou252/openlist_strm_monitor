@@ -84,6 +84,7 @@ class OpenListAdminClient:
         # True/False=权威存在/不存在；None=列表不可信（fail-closed，不得当「不存在」）
         self._check_exists_cache: dict[str, tuple[float, bool | None]] = {}
         self._check_exists_cache_ttl: int = 60  # 缓存 60 秒
+        self._check_exists_cache_max: int = 5000  # 缓存容量上限，超出时淘汰最旧项
 
         # 最近一次登录的错误详情（调用方可通过属性访问）
         self.last_error_message: str | None = None
@@ -681,6 +682,12 @@ class OpenListAdminClient:
                 result = None
 
         self._check_exists_cache[cache_key] = (now, result)
+        # 淘汰最旧项以保持容量上限
+        if len(self._check_exists_cache) > self._check_exists_cache_max:
+            # 找到最旧的项（按时间戳排序）
+            oldest_key = min(self._check_exists_cache.keys(), 
+                           key=lambda k: self._check_exists_cache[k][0])
+            del self._check_exists_cache[oldest_key]
         return result
 
     # 8. 获取兼容格式的内容列表 (逻辑方法)

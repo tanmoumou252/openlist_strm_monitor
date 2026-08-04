@@ -1,3 +1,11 @@
+"""
+Compatibility re-export layer.
+
+This module provides backward-compatible imports for AppService and related classes.
+All actual implementation lives in app_service_core.py. This wrapper exists solely
+for import path compatibility with older code that imports from 'app_service'.
+"""
+
 # autopep8: off
 # isort: off
 
