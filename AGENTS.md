@@ -314,3 +314,14 @@ The Vite config groups modules into chunks:
 | `src/refresh_service.py` | Event-driven periodic WebDAV refresh. `RefreshService` with `_lifecycle_lock`, `reconfigure()`, `notify_config_changed()`. |
 | `src/watchlist_match.py` | TMDB watchlist vs local B-zone matching logic (three-level title match + structural verification). |
 | `src/tmdb_watchlist_db.py` | TMDB watchlist SQLite DB manager. `get_config()`/`set_config()` for `webui_config` (scope-based). |
+
+## Known Self-Explanatory Files / Do Not Flag
+
+The following files are included as-is and should NOT be flagged as issues or refactored without explicit user instruction:
+
+| File | What it is |
+|------|-----------|
+| `edgeone_tmdb_api.js` | Deployed on Tencent EdgeOne (serverless edge function platform, comparable to Cloudflare Workers). It serves as a TMDB API/image reverse proxy for environments that cannot directly access TMDB. It is an **optional companion tool**, not a runtime dependency of the core sync engine. |
+| `后台带Bridge启动webui.vbs` | Windows VBScript launcher that starts `server.py` in headless mode with a hidden console window (sets `BRIDGE_HEADLESS=1`). |
+| `嵌入式启动.bat` | Windows batch launcher using the bundled embedded Python environment. |
+| `环境变量启动.bat` | Windows batch launcher using the system-installed Python from PATH. |

@@ -45,7 +45,7 @@ python -m pytest src/tests/ -v
 |------|------|
 | `test_config.py` | 配置模块单元测试：ABMapping、mapping_version、AppConfig.from_file、update_from_db、load_strm_storage_from_api、migrate_config_to_db、配置 fail-closed。**D1 回归**：`update_from_db` 补齐缺失 `mapping_id`（`test_a_b_mappings_backfills_missing_mapping_id` 等）；**D2 回归**：`from_file` 初始化 `a_b_mappings` / `engines_initialized`（`test_from_file_initializes_mapping_fields`）。 |
 | `test_password_security.py` | 管理员密码 PBKDF2 哈希与校验安全测试 |
-| `test_auth_security.py` | 认证安全测试：登录限流字典逻辑（5 次失败后限流）、密码哈希格式（salt$iterations$hash 三段式，iterations=600000）、首启密码生成与哈希验证往返 |
+| `test_auth_security.py` | 认证安全测试：登录限流字典逻辑（5 次失败后限流）、密码哈希格式（salt$iterations$hash 三段式，iterations=600000）、首启密码生成与哈希验证往返、损坏密码格式提示（含 `reset_admin.py` 重置指令） |
 | `test_secret_manager.py` | 密钥/凭据安全管理测试 |
 | `test_migrate_encryption.py` | 加密方案迁移测试 |
 | `test_integration_security.py` | 跨模块安全边界与鉴权测试 |
@@ -55,7 +55,7 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_utils.py` | 通用工具函数测试 |
+| `test_utils.py` | 通用工具函数测试（含 `TestMoveFile` EXDEV 跨设备回退测试、`quarantine_file` 时间戳重名、WebDAV 路径规范化） |
 | `test_encoding_utils.py` | 字幕编码转 UTF-8 工具测试（空字节、UTF-8 带/不带 BOM、GB18030→UTF-8、Big5→UTF-8、UTF-16 LE/BE 带 BOM、UTF-16 LE 无 BOM、不可识别编码 fail-safe、真实字幕样本往返） |
 | `test_media_renamer.py` | 媒体重命名与季/集号提取测试 |
 | `test_subtitle_handler.py` | 字幕同步与规范化测试（含 `TestSubtitleEncodingConversion`） |
@@ -69,7 +69,7 @@ python -m pytest src/tests/ -v
 | 文件 | 说明 |
 |------|------|
 | `test_openlist_hotreload.py` | OpenList 热重载/配置刷新测试 |
-| `test_webdav_client.py` | WebDAV 协议客户端测试 |
+| `test_webdav_client.py` | WebDAV 协议客户端测试（含 `_check_exists_cache` 容量淘汰验证） |
 | `test_tmdb_client.py` | TMDB API v3 客户端测试 |
 | `test_openlist_login_shared.py` | OpenList 登录错误消息解析（`parse_login_error`）测试 |
 | `test_main_entry.py` | `main.py` 入口参数拒绝路径测试（禁止使用 `--webui-only` / `--webui`）。 |

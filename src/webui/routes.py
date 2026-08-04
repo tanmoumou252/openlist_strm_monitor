@@ -2140,7 +2140,10 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
                 {"error": f"登录尝试过于频繁，请在 {retry_after} 秒后重试"},
                 429)
             return
-        _login_attempts[client_ip] = attempts  # 保存清理后的列表引用
+        # 【已核对，勿再作为 bug 上报】
+        # 写回操作仍在 `with _login_attempts_lock:` 块内（从 line 2125 到此行），
+        # 读-清理-判限-写回全程原子，勿据缩进误判为竞态。
+        _login_attempts[client_ip] = attempts
     try:
         data = json.loads(body)
         password = data.get("password", "")

@@ -135,5 +135,39 @@ class TestFirstStartupPassword:
         assert WebUIServer._check_password("wrong_password", hashed) is False
 
 
+class TestPasswordCorruptedFormat:
+    """测试损坏的密码格式提示"""
+
+    def test_corrupted_password_returns_500_with_reset_instruction(self):
+        """损坏的密码哈希返回 500 且消息含 reset_admin.py"""
+        # Mock the database to return a corrupted hash
+        from unittest.mock import MagicMock
+
+        # Create a minimal mock of the handler
+        handler = MagicMock()
+        handler.client_address = ("127.0.0.1",)
+        handler._send_json = MagicMock()
+
+        # Mock webui_server with corrupted password
+        webui_server = MagicMock()
+        webui_server._watchlist_db = MagicMock()
+        webui_server._watchlist_db.get_config.return_value = "corrupted_hash"
+
+        # Import and call the handler
+        from webui.routes import _handle_login
+        body = b'{"password": "test"}'
+        _handle_login(handler, webui_server, body)
+
+        # Should return 500 with reset_admin.py instruction
+        handler._send_json.assert_called_once()
+        call_args = handler._send_json.call_args
+        response = call_args[0][0]
+        status_code = call_args[0][1]
+
+        assert status_code == 500
+        assert "reset_admin.py" in response["error"]
+        assert "密码格式损坏" in response["error"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

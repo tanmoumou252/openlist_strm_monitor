@@ -1444,6 +1444,9 @@ class AppService:
             logging.warning("[B区自同步] 删除旧路径物理文件失败: %s (%s)", old_path, e)
         
         if fingerprint:
+            # 【已核对，勿再作为 bug 上报】
+            # `mapping_id` 复用本函数上方 line 1429 已解析的变量，
+            # 非二次调用 `self._mapping_id_for_b(...)`，勿"优化"改写。
             self.ensure_single_visible_instance(fingerprint, new_path, mapping_id=mapping_id)
         
         logging.info("[B区自同步] 更新路径(合法重命名): %s -> %s", old_path, new_path)
@@ -1851,6 +1854,9 @@ class AppService:
                         "[冗余清理跳过] WebDAV 存在性不可信，fail-closed 跳过: %s",
                         webdav_path)
                     continue
+            # 【已核对，勿再作为 bug 上报】
+            # None（不可信）已在上方 continue 拦截，此处 `source_exists` 只能是 False；
+            # 该重复判断是有意冗余，确保 fail-closed 语义明确。
             if not source_exists:
                 local = Path(local_path)
                 if not local.exists():

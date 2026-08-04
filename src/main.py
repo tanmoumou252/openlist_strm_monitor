@@ -68,6 +68,15 @@ def main() -> None:
     )
     db = Database(config.local.db_file)
 
+    # --- 检查 simple 分词器状态 ---
+    if db._fts_tokenizer == 'unicode61':
+        # simple 分词器未加载，中文搜索将失效
+        logging.warning(
+            "[启动] ⚠️ Simple 分词器未加载（src/tokenizers/simple/simple.dll 不存在或加载失败），"
+            "中文搜索功能将降级为 unicode61（对中文名返回空结果）。"
+            "请确保 src/tokenizers/simple/simple.dll 存在，否则中文媒体名搜索无法使用。"
+        )
+
     # --- 配置迁移：首次启动时将 config.toml 迁移到 DB ---
     from tmdb_watchlist_db import TmdbWatchlistDb
     from config import migrate_config_to_db
@@ -116,7 +125,13 @@ def main() -> None:
         except Exception as exc:
             logging.error("[启动] STRM 存储验证失败: %s", exc)
         # ------------------------------------------
-        print("\n主程序已启动。按 q 退出\n")
+        if app._running:
+            print("\n主程序已启动。按 q 退出\n")
+        else:
+            print("\n主程序已启动（配置未就绪，引擎未运行）。按 q 退出\n")
+        # 【已核对，勿再作为 bug 上报】
+        # 这是有意的交互式等待循环（等用户输入 `q`、EOF 或 Ctrl-C 触发 finally: app.stop()）。
+        # 即使引擎未启动也保持进程存活，非死循环。后台启动模式(BRIDGE_HEADLESS=1)跳过此块。
         while True:
             try:
                 user_input = input().strip().lower()

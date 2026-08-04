@@ -11,7 +11,10 @@ Unit tests for utils/ submodules:
 """
 from __future__ import annotations
 
+import errno
 import hashlib
+import os
+import shutil
 import sys
 import unicodedata
 from pathlib import Path
@@ -287,6 +290,31 @@ class TestMoveFile:
         dst = tmp_path / "dst.txt"
         move_file(src, dst)
         assert dst.read_text() == "data"
+
+    def test_move_cross_device_fallback(self, tmp_path):
+        """EXDEV error triggers copy+remove fallback."""
+        src = tmp_path / "cross_device.txt"
+        src.write_text("test_content")
+        dst = tmp_path / "dest.txt"
+
+        with patch("shutil.move", side_effect=OSError(errno.EXDEV, "Invalid cross-device link")):
+            # Allow copy2 and os.remove to work normally
+            move_file(src, dst)
+
+            assert dst.exists()
+            assert not src.exists()
+            assert dst.read_text() == "test_content"
+
+    def test_move_non_exdev_oserror_propagates(self, tmp_path):
+        """Non-EXDEV OSError should be re-raised."""
+        src = tmp_path / "src.txt"
+        src.write_text("content")
+        dst = tmp_path / "dst.txt"
+
+        with patch("shutil.move", side_effect=OSError(errno.EACCES, "Permission denied")):
+            with pytest.raises(OSError) as exc_info:
+                move_file(src, dst)
+            assert exc_info.value.errno == errno.EACCES
 
 
 class TestSafeRemoveFile:

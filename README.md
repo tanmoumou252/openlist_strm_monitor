@@ -398,6 +398,12 @@ python -m pytest src/tests/test_onboarding_e2e.py -v
 
 ---
 
+## 📎 其他文件
+
+**`edgeone_tmdb_api.js`**：这是一个部署在腾讯 EdgeOne（边缘函数平台，对标 Cloudflare Workers）上的 **TMDB API/图片反代**脚本，专供无法直接访问 TMDB 的网络环境使用。该文件是本项目的**可选配套工具**，不是核心引擎运行时依赖，可按需自行部署到 EdgeOne 上。
+
+---
+
 ## 📄 License
 
 本项目采用 [MIT License](LICENSE) 协议。

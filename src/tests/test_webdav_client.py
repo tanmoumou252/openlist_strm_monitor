@@ -902,6 +902,32 @@ class TestAdminCheckExists:
             if "per_page" in call_kwargs:
                 assert call_kwargs["per_page"] == 100
 
+    def test_check_exists_cache_eviction(self, tmp_path):
+        """Cache eviction keeps size within max limit and drops oldest entry."""
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        # Set small max for testing
+        client._check_exists_cache_max = 10
+
+        # Add 10 entries
+        for i in range(10):
+            path = f"/test/file{i}.txt"
+            client._check_exists_cache[path] = (time.time() - (10 - i), True)  # Oldest first
+
+        # Add one more to trigger eviction
+        new_path = "/test/new.txt"
+        client.session.request.return_value = _make_response(
+            {"code": 200, "data": {"content": [{"name": "new.txt"}], "total": 1}}
+        )
+        client.check_exists(new_path)
+
+        # Should have exactly max entries
+        assert len(client._check_exists_cache) == 10
+        # Oldest entry should have been evicted
+        assert "/test/file0.txt" not in client._check_exists_cache
+        # Newest entry should exist
+        assert new_path in client._check_exists_cache
+
 
 class TestAdminListContents:
     def test_separates_folders_and_files(self, tmp_path):
