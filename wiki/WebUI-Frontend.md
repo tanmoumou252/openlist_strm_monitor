@@ -112,7 +112,7 @@ Canvas 水墨鼠标擦除效果（`destination-out` 合成模式）。5 种笔�
 
 > 注意：以下两项均为后端函数，不属于前端代码。
 
-- **PBKDF2-HMAC-SHA256** 密码哈希（600,000 次迭代）— `_hash_password()` 为后端 `server.py` 中 `WebUIServer` 的方法（`routes.py` 另有等价的 `_hash_password_pbkdf2()` 供配置写入场景使用，前端不直接调用）。
+- **PBKDF2-HMAC-SHA256** 密码哈希（600,000 次迭代）— `server.py` 中 `WebUIServer._hash_password()` 和 `routes.py` 中的配置写入路径均统一调用 `utils.password_utils.hash_password()`，前端不直接调用。
 
 - IP 白名单（仅局域网）— `_is_lan_ip()` 为后端 `routes.py` 中定义的工具函数，`server.py` 导入并复用，前端不涉及。
 

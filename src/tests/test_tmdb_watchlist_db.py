@@ -534,6 +534,9 @@ class TestOperationLog:
             (time.time() - 8 * 86400,))
         conn.commit()
         conn.close()
+        # M-14: 清理在写侧（log_tmdb_operation / _prune_tmdb_logs）完成，
+        # 而非读侧 get_tmdb_logs。直接插入 DB 的旧记录需显式触发清理。
+        db._prune_tmdb_logs()
         ops = {log["op"] for log in db.get_tmdb_logs(limit=100)}
         assert "ancient" not in ops
         assert "recent" in ops
@@ -542,7 +545,7 @@ class TestOperationLog:
         capped = TmdbWatchlistDb(tmp_path / "capped.db", tmdb_log_max_rows=3)
         for i in range(6):
             capped.log_tmdb_operation(f"op{i}", "info", str(i))
-        capped.get_tmdb_logs(limit=100)  # 触发清理
+        capped.get_tmdb_logs(limit=100)  # M-14: 清理已在 log_tmdb_operation 写侧完成，此处仅读取
         remaining = _raw_rows(capped, "SELECT COUNT(*) FROM tmdb_operation_log")
         assert remaining[0][0] == 3
 

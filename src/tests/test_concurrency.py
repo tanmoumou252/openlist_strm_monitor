@@ -75,8 +75,8 @@ class TestConcurrency:
         server._has_password = True
         # Set password on the server's actual watchlist_db
         if server._watchlist_db:
-            from webui.routes import _hash_password_pbkdf2
-            server._watchlist_db.set_config("ui", "admin_password", _hash_password_pbkdf2("test_password"))
+            from utils.password_utils import hash_password
+            server._watchlist_db.set_config("ui", "admin_password", hash_password("test_password"))
 
         port = _free_port()
         server._port = port

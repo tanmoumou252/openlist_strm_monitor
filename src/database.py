@@ -1500,9 +1500,15 @@ class Database:
         使用 INSERT OR REPLACE 实现原子操作，避免先 DELETE 再 INSERT
         时中间失败导致的数据丢失。
         """
+        # H-6: 同路径时直接返回，避免 INSERT OR REPLACE + DELETE 导致记录被删除
+        if old_local_path == new_local_path:
+            return True
+        
         with self.rw_lock.write_locked(), self.connection() as conn:
             # 显式开启事务（B-8）：确保 conflict 检测与 INSERT/DELETE 在同一原子事务内，
             # 避免 SELECT 与写入之间被其它写连接插入目标行（TOCTOU）。
+            # [AUDIT-NOTE] 此 BEGIN IMMEDIATE 与 connection() 探针模式一致且安全：它是
+            # 上下文 yield 后第一条语句，不会触发 "transaction within a transaction"。勿标记。
             conn.execute("BEGIN IMMEDIATE")
             try:
                 cur = conn.execute(
@@ -2147,6 +2153,9 @@ class Database:
                         to_update.append((webdav_path, parent_webdav_path, now, local_path,
                                          old_webdav, webdav_path))
 
+            # [AUDIT-NOTE] INSERT 写 last_verified_at=now 与单条 upsert_a 一致，且被
+            # test_insert_new_record_initializes_last_verified_at 断言。仅 UPDATE 分支
+            # 有意不触碰该列（保护 ##29 启动性能）。此处写 now 是预期，勿标记。
             # 执行 INSERT
             if to_insert:
                 conn.executemany(

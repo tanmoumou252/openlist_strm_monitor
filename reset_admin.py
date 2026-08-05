@@ -2,20 +2,19 @@
 """
 WebUI 管理员密码重置脚本。
 
-用法:
-  python reset_admin.py              → 生成随机新密码并打印
-  python reset_admin.py 我的密码     → 使用指定密码
-
-该脚本会直接操作数据库，对密码加盐 PBKDF2-HMAC-SHA256 哈希（600000 次迭代）后写入 webui_config 表。
-登录验证实时读取数据库，无需重启 WebUI 即可使用新密码。
+# [AUDIT-NOTE] 已接受：本地交互式维护 CLI。密码走 argv、手写参数解析、cwd rglob 回退
+# 对本地管理工具可接受。除非用户要求，不迁移 argparse/getpass。
 """
 
-import hashlib
 import os
 import secrets
 import sqlite3
 import sys
 from pathlib import Path
+
+# 确保 src/ 在 sys.path 中，以便导入 utils.password_utils
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+from utils.password_utils import hash_password  # noqa: E402
 
 
 def find_db_path() -> str:
@@ -55,14 +54,6 @@ def find_db_path() -> str:
     print("错误: 找不到数据库文件 (tmdb_watchlist.db)")
     print("请指定数据库路径: python reset_admin.py --db /path/to/tmdb_watchlist.db")
     sys.exit(1)
-
-
-def hash_password(password: str) -> str:
-    """对密码加盐 PBKDF2-HMAC-SHA256 哈希，返回 salt$iterations$hash 格式。"""
-    salt = secrets.token_hex(16)
-    iterations = 600000
-    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iterations)
-    return f"{salt}${iterations}${h.hex()}"
 
 
 def main():

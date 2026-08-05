@@ -52,6 +52,7 @@ This file provides guidance to AI coding assistants when working with the `openl
 
 ### Authentication
 - Password (PBKDF2-HMAC-SHA256, 600k iterations) → session token (64 hex chars, 7-day sliding expiry)
+- **Session IP binding (M-4)**: Each token is bound to the client IP at login. Requests from a different IP are rejected with 401, preventing stolen token reuse.
 - Token sent as `X-Session-Token` header via `api()` wrapper in `api.js`
 - IP whitelist (LAN only) + token check on every request
 - Whitelisted paths (no token): `/api/config`, `/api/webui/config/ui`, `/api/tmdb/avatar`, `/api/tmdb/poster`, `/api/openlist/status`, `/api/openlist/ping`, `/api/admin/status`, `/api/login`, `/login` (SPA route), `/api/page`, `/`, static assets (`/assets/*`, `/favicon.ico`, `/logo.png`, `/openlist_strm_bridge.png`, `/fonts/*`, `.woff2`/`.woff`/`.ttf`)
@@ -112,7 +113,7 @@ openlist_strm_bridge/
 │   ├── domain/media/            # subtitle_handler.py
 │   ├── domain/sync/             # sync_service.py
 │   ├── domain/storage/          # Placeholder (reserved, currently only __init__.py)
-│   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py, encoding_utils.py
+│   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py, encoding_utils.py, password_utils.py
 │   ├── tools/                   # 维护工具
 │   ├── tokenizers/              # simple/ (cppjieba wrapper for Chinese search)
 │   └── tests/                   # Test files: see src/tests/README.md for live count
@@ -148,6 +149,7 @@ openlist_strm_bridge/
 | `src/config.py` | AppConfig dataclass, configuration loading |
 | `src/webdav_client.py` | OpenList Admin API + WebDAV client |
 | `src/tmdb_watchlist_db.py` | TMDB watchlist + webui_config storage |
+| `src/utils/password_utils.py` | Unified password hashing/verification (PBKDF2-HMAC-SHA256) |
 | `reset_admin.py` | Password reset utility |
 
 ## Safety Notes

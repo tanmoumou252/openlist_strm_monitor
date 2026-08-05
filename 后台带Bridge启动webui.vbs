@@ -9,9 +9,13 @@ If pythonPath = "%PYTHON_EXE%" Then
     pythonPath = "python"
 End If
 
+' H-9: 用双引号包裹路径，防止路径含空格时命令断裂
+Dim quotedPythonPath
+quotedPythonPath = """" & pythonPath & """"
+
 ' Test if python command is valid
 Dim testExec
-Set testExec = WshShell.Exec("cmd /c " & pythonPath & " --version")
+Set testExec = WshShell.Exec("cmd /c " & quotedPythonPath & " --version")
 Dim output
 output = ""
 Do While Not testExec.StdOut.AtEndOfStream
@@ -29,7 +33,7 @@ End If
 
 ' Launch in background with stderr redirected to log file
 Dim execCommand
-execCommand = "cmd /c " & pythonPath & " src\webui\server.py 2>strm_bridge_boot.log"
+execCommand = "cmd /c " & quotedPythonPath & " src\webui\server.py 2>strm_bridge_boot.log"
 WshShell.Run execCommand, 0, False
 
 Set WshShell = Nothing

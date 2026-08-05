@@ -323,7 +323,10 @@ class TmdbWatchlistDb:
                     "SELECT value FROM meta WHERE key=?", (key,)
                 ).fetchone()
                 return row[0] if row else default
-        except Exception:
+        except Exception as e:
+            # [AUDIT-NOTE] 静默回退 default 是有意设计（meta 读取失败不应阻塞 TMDB 功能）。
+            # 下方已加 logging.debug。勿改为 re-raise。
+            logging.debug("[meta] 读取 %s 失败，回退默认: %s", key, e)
             return default
 
     def _set_meta(self, key: str, value: str) -> None:
@@ -945,9 +948,16 @@ class TmdbWatchlistDb:
                 (time.time(), op, level, msg, detail),
             )
             conn.commit()
+        # M-14: 在写侧清理过期日志，避免读侧 DELETE 锁竞争
+        self._prune_tmdb_logs()
 
-    def get_tmdb_logs(self, limit: int = 100) -> list[dict]:
-        """获取最近的 TMDB 操作日志（按时间倒序），超过 7 天或超过行数限制的自动清理"""
+    def _prune_tmdb_logs(self) -> None:
+        """清理过期 TMDB 操作日志（7 天前 + 超出行数限制）。
+
+        M-14: 原先在 get_tmdb_logs（读方法）内执行 DELETE，导致读方法
+        携带写锁，与并发写入产生锁竞争。现将清理逻辑下沉到写侧
+        （log_tmdb_operation 调用），读方法仅执行 SELECT。
+        """
         seven_days_ago = time.time() - 7 * 86400
         with self._conn() as conn:
             # 清理 7 天前的日志
@@ -963,7 +973,15 @@ class TmdbWatchlistDb:
                     LIMIT ?
                 )
             """, (self._tmdb_log_max_rows,))
+            conn.commit()
 
+    def get_tmdb_logs(self, limit: int = 100) -> list[dict]:
+        """获取最近的 TMDB 操作日志（按时间倒序）。
+
+        M-14: 仅执行 SELECT，不再在读方法内执行 DELETE。
+        过期日志清理由 _prune_tmdb_logs() 在写侧完成。
+        """
+        with self._conn() as conn:
             cur = conn.execute(
                 "SELECT id, ts, op, level, msg, detail FROM tmdb_operation_log ORDER BY ts DESC LIMIT ?",
                 (limit,),

@@ -99,8 +99,11 @@ export async function router() {
           return;
         }
       } catch (e) {
-        // 网络错误/超时时放行（后端仍会保护 API）
-        console.warn('[Auth] 无法验证登录状态，往后端 API 调用将受限:', e.message);
+        // M-17: 网络错误/超时时拒绝放行（fail-closed），跳转登录页
+        console.warn('[Auth] 无法验证登录状态，跳转至登录页:', e.message);
+        localStorage.removeItem('session_token');
+        navigate('#login');
+        return;
       }
     }
   }

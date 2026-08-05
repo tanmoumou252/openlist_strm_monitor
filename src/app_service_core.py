@@ -1193,8 +1193,10 @@ class AppService:
         if len(matches) == 1 and total_a > 1:
             bad_file = matches[0]
             logging.warning("[B区清理] 审判结果：确认单兵脱离集体，执行物理删除: %s", bad_file)
-            safe_remove_file(bad_file)
-            self.db.delete_b_by_local(str(bad_file))
+            if safe_remove_file(bad_file):
+                self.db.delete_b_by_local(str(bad_file))
+            else:
+                logging.warning("[B区清理] 单兵脱离审判：物理删除失败，保留 DB 记录: %s", bad_file)
             self.cleanup_local_empty_dirs()
         else:
             logging.info("[单兵审判] 审判结果：判定为合法的批量操作或单集作品，予以保留。")
@@ -1366,9 +1368,11 @@ class AppService:
                         logging.warning("[B区历史核对] lineage 校验耗时 %.1fs: %s", op_elapsed, db_local_path)
                     logging.warning("[B区历史越界清理] 物理删除历史遗留越界文件: %s", db_local_path)
                     logging.debug("[B区历史核对] 物理删除: %s", db_local_path)
-                    safe_remove_file(db_local_path)
-                    logging.debug("[B区历史核对] DB删除: %s", db_local_path)
-                    self.db.delete_b_by_local(db_local_path)
+                    if safe_remove_file(db_local_path):
+                        logging.debug("[B区历史核对] DB删除: %s", db_local_path)
+                        self.db.delete_b_by_local(db_local_path)
+                    else:
+                        logging.warning("[B区历史核对] 物理删除失败，保留 DB 记录: %s", db_local_path)
                     logging.debug("[B区历史核对] 身份刷新 fp=%s", db_fingerprint)
                     if row_mapping_id:
                         self.refresh_identity_current_b_path(db_fingerprint, row_mapping_id)
@@ -1404,7 +1408,8 @@ class AppService:
                     if op_elapsed > B_SCAN_SLOW_OPERATION_SECONDS:
                         logging.warning("[B区历史核对] lineage 校验耗时 %.1fs: %s", op_elapsed, candidate_path)
                     logging.warning("[B区越界清理] 发现非法跨目录移动，物理删除: %s", candidate_path)
-                    safe_remove_file(candidate_path)
+                    if not safe_remove_file(candidate_path):
+                        logging.warning("[B区越界清理] 物理删除失败: %s", candidate_path)
                     processed.add(candidate_path)
             
             if valid_new_path:
@@ -1438,8 +1443,10 @@ class AppService:
         try:
             old_path_obj = Path(old_path)
             if old_path_obj.exists() and str(old_path_obj.resolve()) != str(Path(new_path).resolve()):
-                safe_remove_file(old_path_obj)
-                logging.debug("[B区自同步] 删除旧路径物理文件: %s", old_path)
+                if safe_remove_file(old_path_obj):
+                    logging.debug("[B区自同步] 删除旧路径物理文件: %s", old_path)
+                else:
+                    logging.warning("[B区自同步] 删除旧路径物理文件失败: %s", old_path)
         except Exception as e:
             logging.warning("[B区自同步] 删除旧路径物理文件失败: %s (%s)", old_path, e)
         
@@ -1465,7 +1472,8 @@ class AppService:
                 
                 if not self._verify_b_path_lineage(disk_path, webdav_path):
                     logging.warning("[B区越界清理] 发现非法新增跨区复制文件，物理删除: %s", disk_path)
-                    safe_remove_file(disk_path)
+                    if not safe_remove_file(disk_path):
+                        logging.warning("[B区越界清理] 物理删除失败: %s", disk_path)
                     continue
                 
                 mapping_id = self._mapping_id_for_b(disk_path)
@@ -1568,8 +1576,10 @@ class AppService:
         for rec in trusted_a_records:
             if rec.webdav_path in redundant_paths:
                 try:
-                    safe_remove_file(rec.local_path)
-                    self.db.delete_a_by_local(rec.local_path)
+                    if safe_remove_file(rec.local_path):
+                        self.db.delete_a_by_local(rec.local_path)
+                    else:
+                        logging.warning("[初始化] A 区冗余清理：物理删除失败，保留 DB 记录: %s", rec.local_path)
                     self.db.set_ghost_protection(
                         rec.webdav_path,
                         self.config.behavior.ghost_protect_seconds,
@@ -1925,15 +1935,17 @@ class AppService:
                         "[冗余清理跳过] WebDAV 存在性不可信，fail-closed 跳过: %s",
                         webdav_path)
                 continue
-            safe_remove_file(local_path)
-            self.db.delete_b_by_local(local_path)
-            if fingerprint:
-                self.refresh_identity_current_b_path(fingerprint, mapping_id)
-            removed_count += 1
-            logging.info(
-                "[冗余清理] 已移除失效STRM(WebDAV不存在): %s -> %s",
-                local_path,
-                webdav_path)
+            if safe_remove_file(local_path):
+                self.db.delete_b_by_local(local_path)
+                if fingerprint:
+                    self.refresh_identity_current_b_path(fingerprint, mapping_id)
+                removed_count += 1
+                logging.info(
+                    "[冗余清理] 已移除失效STRM(WebDAV不存在): %s -> %s",
+                    local_path,
+                    webdav_path)
+            else:
+                logging.warning("[冗余清理] 物理删除失败，跳过DB删除: %s", local_path)
         if migrated_count:
             logging.warning(
                 "[冗余清理→C区] 共迁移 %s 个 A 区源已删除的 STRM 到 C 区",
@@ -1977,13 +1989,15 @@ class AppService:
                     local_path,
                     webdav_path,
                 )
-                safe_remove_file(local_path)
-                self.db.delete_a_by_local(local_path)
-                self.db.set_ghost_protection(
-                    webdav_path,
-                    self.config.behavior.ghost_protect_seconds,
-                    reason="cloud_deleted",
-                )
+                if safe_remove_file(local_path):
+                    self.db.delete_a_by_local(local_path)
+                    self.db.set_ghost_protection(
+                        webdav_path,
+                        self.config.behavior.ghost_protect_seconds,
+                        reason="cloud_deleted",
+                    )
+                else:
+                    logging.warning("[A区清理] 物理删除失败，跳过DB删除: %s", local_path)
 
     def validate_strm_storages(self) -> dict:
         """验证 STRM 存储状态，返回验证结果"""
@@ -2043,12 +2057,15 @@ class AppService:
                 return
             if exists is False:
                 logging.warning("[A区即时清理] WebDAV 已不存在，删除本地冗余 STRM: %s", local)
-                safe_remove_file(str(local))
-                self.db.delete_a_by_local(str(local))
-                self.db.set_ghost_protection(
-                    webdav_path,
-                    self.config.behavior.ghost_protect_seconds,
-                    reason="webdav_not_exists")
+                # M-8: 检查物理删除结果，避免物理/DB不一致
+                if safe_remove_file(str(local)):
+                    self.db.delete_a_by_local(str(local))
+                    self.db.set_ghost_protection(
+                        webdav_path,
+                        self.config.behavior.ghost_protect_seconds,
+                        reason="webdav_not_exists")
+                else:
+                    logging.warning("[A区清理] 物理删除失败，跳过DB删除: %s", local)
                 return
             old_identity = self.db.get_identity_by_fingerprint(fingerprint)
             current_b_path = old_identity.current_b_path if old_identity else None
@@ -2112,15 +2129,19 @@ class AppService:
                         webdav_path)
                     a_local_path = str(local)
                     if local.exists():
-                        safe_remove_file(a_local_path)
-                        logging.info("[A区清理] 删除冗余STRM: %s", a_local_path)
-                    self.db.delete_a_by_local(a_local_path)
-                    self.db.set_ghost_protection(
-                        webdav_path,
-                        self.config.behavior.ghost_protect_seconds,
-                        reason="webdav_not_exists")
+                        # M-8: 检查物理删除结果，避免物理/DB不一致
+                        if safe_remove_file(a_local_path):
+                            logging.info("[A区清理] 删除冗余STRM: %s", a_local_path)
+                            self.db.delete_a_by_local(a_local_path)
+                            self.db.set_ghost_protection(
+                                webdav_path,
+                                self.config.behavior.ghost_protect_seconds,
+                                reason="webdav_not_exists")
+                        else:
+                            logging.warning("[A区清理] 物理删除失败，跳过DB删除: %s", a_local_path)
                     return
-        self.copy_a_record_to_b(str(local), webdav_path, parent)
+            # H-1: 把 copy_a_record_to_b 移入 fp_lock 块内，避免 TOCTOU 竞争
+            self.copy_a_record_to_b(str(local), webdav_path, parent, mapping_id=mapping_id)
 
     def handle_a_deleted(self, local_path: str) -> None:
         if Path(local_path).exists():
@@ -2219,8 +2240,8 @@ class AppService:
                         webdav_path)
                     webdav_parts = [
                         part for part in canonical_webdav.strip("/").split("/") if part]
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug("[文件评分] webdav_parts 解析失败: %s", e)
         if not webdav_parts:
             match_count = len(b_rel_parts)
         else:
@@ -2410,9 +2431,12 @@ class AppService:
             if not self._verify_a_source_exists(
                     str(local), webdav_path, fingerprint):
                 logging.warning("[B区拦截] A区无对应源文件，拒绝非法strm: %s", local)
-                safe_remove_file(local)
-                if row:
-                    self.db.delete_b_by_local(str(local))
+                # M-8: 检查物理删除结果，避免物理/DB不一致
+                if safe_remove_file(local):
+                    if row:
+                        self.db.delete_b_by_local(str(local))
+                else:
+                    logging.warning("[B区拦截] 物理删除失败，保留DB记录: %s", local)
                 return
             if row:
                 self._handle_existing_b_file(
@@ -2424,6 +2448,29 @@ class AppService:
     def _restore_b_from_a_after_violation(
             self, local: Path, webdav_path: str, fingerprint: str) -> None:
         local_path = str(local)
+        # M-18: 优先使用 C 区隔离而非直接删除（保留历史追溯能力）
+        try:
+            # 检查是否有 mapping_id 和 root 信息可用于 C 区迁移
+            mapping = self.get_mapping_for_b(local_path)
+            if mapping:
+                mapping_id, a_root, b_root = mapping
+                # M-18: 尝试迁移文件到 C 区（而非直接删除）
+                try:
+                    c_target = self.get_c_path_for_b(mapping_id, local_path, b_root)
+                    c_target.parent.mkdir(parents=True, exist_ok=True)
+                    # [AUDIT-NOTE] copyfile 在恢复锁外是有意设计：marker 在锁内设置，消费侧
+                    # handle_b_deleted 在锁内检查，_restoring_generation 计数器防并发恢复竞争。勿把 copyfile 移入锁内。
+                    move_file(local, c_target)
+                    self.db.move_b_record(local_path, str(c_target))
+                    self.db.mark_b_instance_status(str(c_target), "quarantined")
+                    logging.info("[B区越界恢复] 已将越界文件移入C区隔离: %s -> %s", local_path, c_target)
+                    return  # C区迁移成功，不删除DB记录
+                except Exception as e:
+                    logging.warning("[B区越界恢复] C区迁移失败，回退到直接删除: %s", e)
+        except Exception as e:
+            logging.warning("[B区越界恢复] C区迁移失败，回退到直接删除: %s", e)
+        
+        # C区迁移失败时，回退到直接删除（原逻辑）
         deleted = self._force_delete_and_verify(local)
         self.db.delete_b_by_local(local_path)
         if not deleted:
@@ -2860,10 +2907,11 @@ class AppService:
         a_record = self.db.get_a_by_webdav(webdav_path)
         if a_record:
             a_path = a_record.local_path
-            if Path(a_path).exists():
-                safe_remove_file(a_path)
+            if safe_remove_file(a_path):
                 logging.info("[A区删除] B区删除联动，清理A区: %s", a_path)
-            self.db.delete_a_by_local(a_path)
+                self.db.delete_a_by_local(a_path)
+            else:
+                logging.warning("[A区删除] 物理删除失败，跳过DB删除: %s", a_path)
 
     def _perform_webdav_action(self, webdav_path: str) -> bool:
         cloud_path = webdav_path
@@ -3105,7 +3153,8 @@ class AppService:
                     break
             if physical_media_folder_name is None and local_rel.parts:
                 physical_media_folder_name = local_rel.parts[-1]
-        except Exception:
+        except Exception as e:
+            logging.debug("[边界映射] %s: %s", local, e)
             return
 
         cloud_parts = [p for p in webdav_path.rstrip("/").split("/") if p]
@@ -3156,6 +3205,8 @@ class AppService:
         if not local_path:
             return
         local = Path(local_path)
+        # [AUDIT-NOTE] 先删 DB 再删文件（B-7 反序）是设计如此：避免 watchdog 级联；
+        # 物理删除为尽力而为。勿当作 M-8 未守卫删除标记。
         # B-7 删除归因：先删 DB 记录，再删物理文件。
         # 反序原顺序以消除竞态窗口：若先 safe_remove_file，其触发的 on_deleted
         # 事件会让 handle_b_deleted 在 DB 行仍存在时找到记录并误判为用户删除，

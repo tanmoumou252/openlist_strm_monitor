@@ -110,7 +110,7 @@ openlist_strm_bridge/
 │   ├── domain/media/            # subtitle_handler.py
 │   ├── domain/sync/             # sync_service.py
 │   ├── domain/storage/          # Placeholder (reserved, currently only __init__.py)
-│   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py, encoding_utils.py
+│   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py, encoding_utils.py, password_utils.py
 │   ├── tools/                   # 维护工具
 │   ├── tokenizers/              # simple/ (cppjieba wrapper for Chinese search)
 │   └── tests/                   # Test files: see src/tests/README.md for live count
@@ -173,6 +173,7 @@ The Vite config groups modules into chunks:
 ### Authentication (WebUI)
 - Password-based login with PBKDF2-HMAC-SHA256 (600k iterations)
 - Session tokens stored in server memory dict, 7-day sliding expiry
+- **Session IP binding (M-4)**: Each session token is bound to the client IP at login time. Subsequent requests from a different IP are rejected with 401. Prevents stolen token reuse across IPs.
 - Token transmitted via `X-Session-Token` header
 - Frontend `api()` wrapper in `api.js` auto-attaches token from localStorage
 - IP whitelist (LAN only) as first defense layer
@@ -314,6 +315,7 @@ The Vite config groups modules into chunks:
 | `src/refresh_service.py` | Event-driven periodic WebDAV refresh. `RefreshService` with `_lifecycle_lock`, `reconfigure()`, `notify_config_changed()`. |
 | `src/watchlist_match.py` | TMDB watchlist vs local B-zone matching logic (three-level title match + structural verification). |
 | `src/tmdb_watchlist_db.py` | TMDB watchlist SQLite DB manager. `get_config()`/`set_config()` for `webui_config` (scope-based). |
+| `src/utils/password_utils.py` | Unified password hashing/verification (PBKDF2-HMAC-SHA256, `hash_password`/`verify_password`). |
 
 ## Known Self-Explanatory Files / Do Not Flag
 

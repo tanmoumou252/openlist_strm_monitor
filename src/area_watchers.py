@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
@@ -12,6 +13,10 @@ from utils import make_strm_fingerprint, read_strm_webdav_path
 class AAreaEventHandler(FileSystemEventHandler):
     def __init__(self, app) -> None:
         self.app = app
+        # M-9: 健康信号 - 失败计数
+        self._failure_count = 0
+        self._last_failure_time = 0
+        self._HEALTH_THRESHOLD = 10  # 连续失败阈值
 
     def _run_async(self, func, *args) -> None:
         """在独立线程中执行可能阻塞的处理函数，避免阻塞 watchdog 线程。"""
@@ -24,8 +29,25 @@ class AAreaEventHandler(FileSystemEventHandler):
     def _safe_call(self, func, *args) -> None:
         try:
             func(*args)
+            # 成功时重置失败计数
+            self._failure_count = 0
         except Exception:
-            logging.exception("[A区事件处理异常] %s args=%s", func.__name__, args)
+            # [AUDIT-NOTE] 此处吞异常是有意设计：抛出会杀死 watchdog 观察线程。M-9 已在上方
+            # 加失败计数 + _watchers_healthy 健康信号。勿改为 re-raise 或移除 try/except。
+            # M-9: 记录失败并监控健康状态
+            self._failure_count += 1
+            self._last_failure_time = time.time()
+            logging.exception("[A区事件处理异常] %s args=%s (连续失败: %d)", func.__name__, args, self._failure_count)
+            
+            # 超过阈值时发出警告并标记健康状态
+            if self._failure_count >= self._HEALTH_THRESHOLD:
+                logging.warning(
+                    "[A区] 连续失败 %d 次，可能存在系统性问题，请检查日志",
+                    self._failure_count
+                )
+                # 标记 fail-safe 激活
+                if hasattr(self.app, '_watchers_healthy'):
+                    self.app._watchers_healthy = False
 
     def on_created(self, event) -> None:
         # 不过滤扩展名：字幕文件（.ass/.ssa/.srt）由 handle_a_created_or_modified
@@ -45,6 +67,10 @@ class AAreaEventHandler(FileSystemEventHandler):
 class BAreaEventHandler(FileSystemEventHandler):
     def __init__(self, app) -> None:
         self.app = app
+        # M-9: 健康信号 - 失败计数
+        self._failure_count = 0
+        self._last_failure_time = 0
+        self._HEALTH_THRESHOLD = 10  # 连续失败阈值
 
     def _run_async(self, func, *args) -> None:
         threading.Thread(
@@ -56,8 +82,23 @@ class BAreaEventHandler(FileSystemEventHandler):
     def _safe_call(self, func, *args) -> None:
         try:
             func(*args)
+            # 成功时重置失败计数
+            self._failure_count = 0
         except Exception:
-            logging.exception("[B区事件处理异常] %s args=%s", func.__name__, args)
+            # M-9: 记录失败并监控健康状态
+            self._failure_count += 1
+            self._last_failure_time = time.time()
+            logging.exception("[B区事件处理异常] %s args=%s (连续失败: %d)", func.__name__, args, self._failure_count)
+            
+            # 超过阈值时发出警告并标记健康状态
+            if self._failure_count >= self._HEALTH_THRESHOLD:
+                logging.warning(
+                    "[B区] 连续失败 %d 次，可能存在系统性问题，请检查日志",
+                    self._failure_count
+                )
+                # 标记 fail-safe 激活
+                if hasattr(self.app, '_watchers_healthy'):
+                    self.app._watchers_healthy = False
 
     def on_created(self, event) -> None:
         # 移除: if getattr(self.app, '_b_watcher_paused', False): return

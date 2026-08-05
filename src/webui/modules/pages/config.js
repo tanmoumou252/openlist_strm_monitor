@@ -158,7 +158,7 @@ html += field('cfg-tmdb-wldb', 'Watchlist DB', watchlistDbValue, '留空默认 t
 	  html += field('cfg-tmdb-ep-ratio', '番剧最少集数比例', cfg.tmdb_anime_min_ep_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少集数占总集数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。');
 	  html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '1', '', 'text', false, false, '', '番剧最大允许季数差。超过此差值视为未收录，建议 1。');
 	  html += field('cfg-tmdb-min-season-ratio', '番剧最少季数比例', cfg.tmdb_anime_min_season_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少季数占总季数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。');
-	  html += field('cfg-tmdb-cache-ttl', '缓存 TTL（秒）', cfg.tmdb_cache_ttl || '43200', '', 'text', false, false, '', 'TMDB 缓存有效期（秒）。过期后重新从 TMDB 拉取数据，建议 43200（12 小时）。');
+	  html += field('cfg-tmdb-cache-ttl', '缓存 TTL（秒）', cfg.tmdb_cache_ttl || '604800', '', 'text', false, false, '', 'TMDB 缓存有效期（秒）。过期后重新从 TMDB 拉取数据，建议 604800（7 天）。');
 	  html += `</div>`;
   html += `<div class="config-form-actions"><button class="toolbar-btn primary" id="cfg-tmdb-save">${icon('save')} 保存 TMDB 配置</button><button class="toolbar-btn" id="cfg-tmdb-refresh"> 刷新待看列表</button><button class="toolbar-btn" id="cfg-tmdb-match-refresh" style="background:color-mix(in srgb,var(--primary) 15%,var(--bg-card));border-color:color-mix(in srgb,var(--primary) 30%,var(--border-color))"> 刷新收录状态</button><button class="toolbar-btn secondary" id="cfg-tmdb-restart" style="color:#e37400;border-color:#e37400">${icon('refresh')} 重启 WebUI</button></div>`;
   html += `<div class="toggle-row"><span>关闭全屏 TMDB 缓存过期提醒</span><div class="segmented-switch" data-key="tmdb_cache_never_remind"><button type="button" data-value="off" class="active">否</button><button type="button" data-value="on">是</button></div></div>`;
@@ -353,7 +353,7 @@ const body = {
 	        anime_min_ep_ratio: document.getElementById('cfg-tmdb-ep-ratio').value || '0.30',
 	        anime_max_season_diff: document.getElementById('cfg-tmdb-season-diff').value || '1',
 	        anime_min_season_ratio: document.getElementById('cfg-tmdb-min-season-ratio').value || '0.30',
-	        watchlist_cache_ttl: document.getElementById('cfg-tmdb-cache-ttl').value || '43200',
+	        watchlist_cache_ttl: document.getElementById('cfg-tmdb-cache-ttl').value || '604800',
 	      };
       // token 已配置时若输入框为空则不上传，避免截断预览覆盖真实 token
       if (tokenInput.value.trim()) body.access_token = tokenInput.value;

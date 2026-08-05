@@ -334,7 +334,9 @@ python -m pytest src/tests/test_onboarding_e2e.py -v
 | `[webui] bind` | `0.0.0.0` | 监听地址（仅本地和局域网） |
 | `access_token` | — | TMDB API 访问令牌（通过 WebUI 配置页填写，存储在 `tmdb_watchlist.db`） |
 
-> 🔐 **登录密码**：WebUI 访问需要管理员密码。**首次启动** WebUI 时，程序会自动生成一个随机密码，并**仅打印一次到控制台**（不写入日志文件），请务必记下；之后再次启动不会再显示该密码。密码以 PBKDF2-HMAC-SHA256 加盐哈希后存储在 `tmdb_watchlist.db` 的 `webui_config` 表（`scope='ui'`、`key='admin_password'`），明文不落盘。
+> 🔐 **登录密码**：WebUI 访问需要管理员密码。**首次启动** WebUI 时，程序会自动生成一个随机密码，并**仅打印一次到控制台**（不写入日志文件），请务必记下；之后再次启动不会再显示该密码。密码通过 `src/utils/password_utils.py` 统一管理，使用 PBKDF2-HMAC-SHA256 加盐哈希（`salt$iterations$hash` 格式，600k 次迭代），存储在 `tmdb_watchlist.db` 的 `webui_config` 表（`scope='ui'`、`key='admin_password'`），明文不落盘。
+>
+> **会话安全（M-4）**：登录成功后，服务端将客户端 IP 与会话 token 绑定。后续请求若来自不同 IP，服务端返回 401 拒绝，防止被盗 token 跨 IP 使用。
 >
 > **忘记密码 / 自定义密码**：运行项目根目录的 `reset_admin.py`：
 > - `python reset_admin.py` —— 生成随机新密码并打印。

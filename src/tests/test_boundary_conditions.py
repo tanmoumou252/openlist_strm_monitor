@@ -4,7 +4,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from tmdb_watchlist_db import TmdbWatchlistDb
-from webui.routes import _validate_strm_engines, _hash_password_pbkdf2
+from webui.routes import _validate_strm_engines
+from utils.password_utils import hash_password
 
 
 class TestBoundaryConditions:
@@ -82,7 +83,7 @@ class TestBoundaryConditions:
     def test_password_hash_length(self):
         """测试密码哈希格式"""
         password = "test_password"
-        hashed = _hash_password_pbkdf2(password)
+        hashed = hash_password(password)
 
         # 格式：salt$iterations$hash
         parts = hashed.split("$")

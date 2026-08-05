@@ -200,6 +200,10 @@ class RefreshService:
         with self._lifecycle_lock:
             if self._running:
                 return
+            # M-11: 检查旧线程是否还在运行，避免双 worker 并发
+            if self._thread and self._thread.is_alive():
+                logging.warning("[主动刷新] 旧线程仍在运行，推迟启动新线程")
+                return
             if not self.app.config.refresh.enabled:
                 logging.info("[主动刷新] 已关闭")
                 return
@@ -217,7 +221,10 @@ class RefreshService:
             old_thread = self._thread
             self._thread = None
         if old_thread and old_thread.is_alive():
-            old_thread.join(timeout=2)
+            # M-11: 增加 join 超时到 5 秒，并检查是否仍然存活
+            old_thread.join(timeout=5)
+            if old_thread.is_alive():
+                logging.warning("[主动刷新] 旧线程 join 超时，线程仍在运行（PID: %d）", old_thread.ident or 0)
 
     def _worker(self) -> None:
         # 兜底：任何未捕获异常不得杀死刷新线程，记录后继续下一轮。

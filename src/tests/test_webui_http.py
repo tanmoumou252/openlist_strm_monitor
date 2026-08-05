@@ -1880,8 +1880,8 @@ class TestConfigApiFreshInstall:
         handle_config_api(handler)  # 修复前抛 AttributeError
         handler._send_json.assert_called_once()
         payload = handler._send_json.call_args[0][0]
-        assert payload["a_b_mappings"] == []
-        assert payload["webdav_host"] == ""
+        assert payload["a_b_mappings_count"] == 0
+        assert payload["webdav_configured"] is False
 
 
 class TestStartMainFailSafe:
@@ -2074,3 +2074,54 @@ class TestTMDBWatchlistMatchOverrideConsistency:
         status, _, resp = _http_post(base, "/api/tmdb/watchlist/match/override", body, session_token)
         assert status == 400
         assert resp.get("success") is False
+
+
+# ============================================================
+# 回归测试：M-4 Session IP 绑定 + C-2 DB失败 fail-closed
+# ============================================================
+
+
+class TestSessionIPBinding:
+    """测试 M-4 Session IP 绑定功能。"""
+
+    def test_session_ip_binding_rejects_different_ip(self, webui_server):
+        """登录后使用不同IP的token应被拒绝（401）"""
+        server, base, session_token = webui_server
+
+        # 直接修改 _sessions 中的 IP，模拟 token 被盗用到不同 IP
+        with server._sessions_lock:
+            for tok, (exp, _ip) in server._sessions.items():
+                if tok == session_token:
+                    server._sessions[tok] = (exp, "10.99.99.99")
+                    break
+
+        # 用原 token 从 127.0.0.1 请求 → 应被拒绝
+        status, _, resp = _http_get(base, "/api/area/a", session_token)
+        assert status == 401
+        assert resp.get("error") == "unauthorized"
+
+    def test_session_ip_binding_allows_original_ip(self, webui_server):
+        """登录后使用相同IP的token应被接受（200）"""
+        server, base, session_token = webui_server
+
+        # 用原 token 从 127.0.0.1 请求 → 应成功
+        status, _, resp = _http_get(base, "/api/area/a", session_token)
+        assert status == 200
+
+
+class TestDBInitFailure:
+    """测试 C-2 DB初始化失败时 fail-closed。"""
+
+    def test_db_init_failure_returns_503(self, webui_server):
+        """模拟 _db_init_failed=True 时 POST 应返回 503"""
+        server, base, session_token = webui_server
+
+        server._db_init_failed = True
+        try:
+            status, _, resp = _http_post(
+                base, "/api/webui/config/ui",
+                {"theme": "dark"}, session_token)
+            assert status == 503
+            assert resp.get("error") == "server_error"
+        finally:
+            server._db_init_failed = False

@@ -303,13 +303,24 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             return False
         return True
 
-    def _check_auth(self) -> bool:
+    def _check_auth(self, method: str = "GET") -> bool:
         """检查请求是否已通过密码认证。
 
         如果未设置密码 → 放行（向后兼容）
         如果已设置密码 → 检查 X-Session-Token 头
+        
+        Args:
+            method: HTTP 方法（GET/POST 等）。敏感路径（/api/config, /api/webui/config/ui）
+                    的白名单仅对 GET 生效，POST 必须认证。
         """
         webui = self.webui
+        # C-2: DB/密码初始化失败时 fail-closed（拒绝请求而非放行）
+        if webui._db_init_failed:
+            self._send_json(
+                {"error": "server_error", "message": "数据库初始化失败，请检查数据库文件权限"},
+                503,
+            )
+            return False
         if not webui._has_password:
             return True
         # 标准化路径，匹配路由分发逻辑
@@ -330,12 +341,18 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
                 or path.endswith(".woff2") or path.endswith(".woff") or path.endswith(".ttf"):
             return True
         # API 白名单：登录前初始化和图片代理（非敏感数据）
-        if path in ("/api/config", "/api/webui/config/ui",
-                    "/api/tmdb/avatar", "/api/tmdb/poster",
+        # [SECURITY-FIX] C-1: 敏感路径（/api/config, /api/webui/config/ui）仅对 GET 生效
+        # POST 请求必须认证，防止未授权密码重置和配置泄露
+        if path in ("/api/tmdb/avatar", "/api/tmdb/poster",
                     "/api/openlist/status", "/api/openlist/ping"):
+            return True
+        # [AUDIT-NOTE] C-1 已修复：本白名单仅对 GET 生效（method.upper()=="GET" 门控）。
+        # POST /api/webui/config/* 需有效会话，无法未鉴权重置 admin_password。勿再标记为未鉴权改密。
+        if method.upper() == "GET" and path in ("/api/config", "/api/webui/config/ui"):
             return True
         # 验证 session token
         token = self.headers.get("X-Session-Token", "")
+        client_ip = self.client_address[0]
         now = time.time()
         with webui._sessions_lock:
             # 使用常量时间比较防止时序攻击
@@ -346,10 +363,13 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
                     matched_token = stored_token
                     break
 
-            if matched_token and now < webui._sessions[matched_token]:
-                # 滑动过期：刷新 7 天
-                webui._sessions[matched_token] = now + 604800
-                return True
+            if matched_token:
+                expiry, stored_ip = webui._sessions[matched_token]
+                # M-4: 验证 IP 匹配（防止被盗 token 跨 IP 使用）
+                if now < expiry and (stored_ip == "" or stored_ip == client_ip):
+                    # 滑动过期：刷新 7 天
+                    webui._sessions[matched_token] = (now + 604800, client_ip)
+                    return True
         self._send_json({"error": "unauthorized", "need_login": True}, 401)
         return False
 
@@ -472,7 +492,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         if not self._guard_request():
             return
 
-        if not self._check_auth():
+        if not self._check_auth("GET"):
             return
 
         # TMDB 路由（复用 webui.routes 的增强版）
@@ -581,7 +601,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/") or "/"
         if not self._guard_request():
             return
-        if not self._check_auth():
+        if not self._check_auth("POST"):
             return
         content_length = int(self.headers.get("Content-Length", 0))
         # 防止恶意超大请求体耗尽内存（DoS）— 配置类 JSON 载荷不会超过此值
@@ -706,9 +726,11 @@ class WebUIServer:
                 break
 
         # 认证 & Session
-        self._sessions: dict[str, float] = {}
+        # M-4: Session 改为 dict[str, tuple[float, str]]（token -> (expiry, ip)）
+        self._sessions: dict[str, tuple[float, str]] = {}
         self._sessions_lock = threading.Lock()
         self._has_password = False
+        self._db_init_failed = False  # C-2: DB/密码初始化失败时 fail-closed
 
         # 1) 无条件创建 DB（存储配置 + 待看列表数据）
         self._reinit_watchlist_db()
@@ -838,6 +860,10 @@ class WebUIServer:
         except Exception as e:
             logging.warning("[WebUI] 待看列表数据库初始化失败: %s", e)
             self._watchlist_db = None
+            # C-2: DB 初始化失败时设置 fail-closed 标志
+            # _has_password 会在 _init_admin_password 中被置为 False，
+            # 但此时需要让 _check_auth 拒绝请求而非放行
+            self._db_init_failed = True
 
     def get_watchlist_cached(self) -> list[dict]:
         """获取待看列表。缓存过期时直接返回旧数据，不自动同步。"""
@@ -883,6 +909,15 @@ class WebUIServer:
 
         if bind not in ("127.0.0.1", "0.0.0.0") and not _is_lan_ip(bind):
             logging.warning("[WebUI] 绑定地址 %s 可能不是局域网地址", bind)
+
+        # C-3: 启动时检查解密健康状态
+        try:
+            from secret_manager import check_decryption_health
+            health = check_decryption_health()
+            if not health["healthy"]:
+                logging.warning("[WebUI] %s", health["message"])
+        except Exception as e:
+            logging.debug("[WebUI] 解密健康检查失败: %s", e)
 
         # 端口预检
         if not _try_bind_port(bind, port):
@@ -931,7 +966,7 @@ class WebUIServer:
                 now = time.time()
                 with self._sessions_lock:
                     self._sessions = {
-                        k: v for k, v in self._sessions.items() if v > now}
+                        k: v for k, v in self._sessions.items() if v[0] > now}
                 self._session_cleanup_event.wait(timeout=3600)
 
         threading.Thread(target=_cleanup_sessions, daemon=True).start()
@@ -954,37 +989,27 @@ class WebUIServer:
 
     @staticmethod
     def _hash_password(password: str) -> str:
-        """对密码加盐 PBKDF2-HMAC-SHA256 哈希，返回 salt$iterations$hash 格式。"""
-        salt = secrets.token_hex(16)
-        iterations = 600000
-        h = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode(),
-            salt.encode(),
-            iterations)
-        return f"{salt}${iterations}${h.hex()}"
+        """对密码加盐 PBKDF2-HMAC-SHA256 哈希，返回 salt$iterations$hash 格式。
+        
+        M-1: 使用统一的 password_utils 模块。
+        """
+        from utils.password_utils import hash_password
+        return hash_password(password)
 
     @staticmethod
     def _check_password(password: str, stored: str) -> bool:
-        """验证密码是否与存储的 salt$iterations$hash 匹配。"""
-        try:
-            parts = stored.split("$", 2)
-            if len(parts) != 3:
-                return False
-            salt, iterations_str, stored_hash = parts
-            iterations = int(iterations_str)
-            h = hashlib.pbkdf2_hmac(
-                "sha256",
-                password.encode(),
-                salt.encode(),
-                iterations)
-            return h.hex() == stored_hash
-        except (ValueError, AttributeError):
-            return False
+        """验证密码是否与存储的 salt$iterations$hash 匹配。
+        
+        M-2: 使用统一的 password_utils 模块。
+        """
+        from utils.password_utils import verify_password
+        return verify_password(password, stored)
 
     def _init_admin_password(self) -> None:
         """检查或生成管理员密码。"""
         if not self._watchlist_db:
+            # C-2: DB 未初始化时设置 fail-closed 标志
+            self._db_init_failed = True
             self._has_password = False
             return
         stored = self._watchlist_db.get_config("ui", "admin_password", "")

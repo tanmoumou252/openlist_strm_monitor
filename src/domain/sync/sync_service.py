@@ -87,6 +87,7 @@ class SyncService:
         # 根据模式选择连接：bulk_connection 绕过 rw_lock，仅启动时单线程安全
         conn = None
         bulk_ctx = None
+        _exc_info = (None, None, None)  # M-6: 追踪异常信息
         if use_bulk:
             bulk_ctx = self.db.bulk_connection()
             conn = bulk_ctx.__enter__()
@@ -135,10 +136,14 @@ class SyncService:
 
                 # 刷新当前 a_root 的剩余记录
                 flush_batch()
+        except Exception:
+            # M-6: 捕获异常信息，以便在 __exit__ 时正确 rollback
+            _exc_info = sys.exc_info()
+            raise
         finally:
             # bulk_connection 在 __exit__ 时自动 commit（正常退出）或 rollback（异常）
             if bulk_ctx is not None:
-                bulk_ctx.__exit__(None, None, None)
+                bulk_ctx.__exit__(*_exc_info)
 
         # 以下操作使用 self.connection()（独立连接），必须在 bulk_connection 提交后执行
         if parent_set:
@@ -565,21 +570,26 @@ class SyncService:
         if b_local.exists():
             existing_webdav = read_strm_webdav_path(b_local)
             if existing_webdav == webdav_path:
-                # 使用 bulk_connection 写入数据库
-                self._bulk_upsert_b(conn, str(b_local), webdav_path,
-                                    parent, local_path, fingerprint, mapping_id)
-                self._bulk_upsert_identity(conn, fingerprint, webdav_path,
-                                           local_path, str(b_local))
-                self._cache_b_fp.add((mapping_id, fingerprint))
-                # 去重延迟到事务提交后执行
-                if dedup_queue is not None:
-                    dedup_queue.append((mapping_id, fingerprint, str(b_local)))
-                else:
-                    try:
-                        self.app.ensure_single_visible_instance(fingerprint, str(b_local), mapping_id=mapping_id)
-                    except Exception as e:
-                        logging.warning("[A->B] 去重失败 %s: %s", b_local, e)
-                return "success"
+                # M-7: 捕获异常并返回 "fail"，与其他分支对齐
+                try:
+                    # 使用 bulk_connection 写入数据库
+                    self._bulk_upsert_b(conn, str(b_local), webdav_path,
+                                        parent, local_path, fingerprint, mapping_id)
+                    self._bulk_upsert_identity(conn, fingerprint, webdav_path,
+                                               local_path, str(b_local))
+                    self._cache_b_fp.add((mapping_id, fingerprint))
+                    # 去重延迟到事务提交后执行
+                    if dedup_queue is not None:
+                        dedup_queue.append((mapping_id, fingerprint, str(b_local)))
+                    else:
+                        try:
+                            self.app.ensure_single_visible_instance(fingerprint, str(b_local), mapping_id=mapping_id)
+                        except Exception as e:
+                            logging.warning("[A->B] 去重失败 %s: %s", b_local, e)
+                    return "success"
+                except Exception as e:
+                    logging.warning("[A->B] B已存在但数据库写入失败 %s: %s", b_local, e)
+                    return "fail"
             else:
                 # B 区文件已存在但 WebDAV 路径不同 — 不覆盖，保护用户操作
                 logging.warning(
@@ -786,6 +796,12 @@ class SyncService:
                 except Exception as e:
                     logging.error("[A->B跳过失败] %s", e)
                     return False
+            # H-2: 如果文件存在但 webdav 路径不同，拒绝覆写（保护用户编排成果）
+            logging.warning(
+                "[A->B跳过] B区文件已存在但webdav源不同，拒绝覆写: %s (现有: %s, 请求: %s)",
+                b_local, existing_webdav_path, webdav_path
+            )
+            return "skip_exists_diff"
         # 如果 WebDAV 源文件已不存在，说明 A 区是冗余文件，清理掉。
         # 三态：仅权威 False 才删；None=不可信 → fail-closed 跳过。
         exists = self.app.admin_api.check_exists(webdav_path)
@@ -800,10 +816,13 @@ class SyncService:
                 "[A->B跳过] WebDAV源文件已不存在，跳过复制并清理A区: %s",
                 webdav_path,
             )
-            # 清理 A 区冗余文件
+            # M-8: 清理 A 区冗余文件，检查返回值避免物理/DB不一致
             if Path(a_local_path).exists():
-                safe_remove_file(a_local_path)
-                logging.info("[A区清理] 删除冗余STRM: %s", a_local_path)
+                if safe_remove_file(a_local_path):
+                    logging.info("[A区清理] 删除冗余STRM: %s", a_local_path)
+                else:
+                    logging.warning("[A区清理] 物理删除失败，跳过DB删除以保持一致性: %s", a_local_path)
+                    return False  # 物理删除失败，不删DB记录
             self.db.delete_a_by_local(a_local_path)
             # 设置 ghost 保护，防止再次同步
             self.db.set_ghost_protection(
@@ -851,5 +870,7 @@ class SyncService:
                 "[A->B复制失败] DB错误: %s | b_local=%s webdav=%s parent=%s fingerprint=%s",
                 e, b_local, webdav_path, parent, fingerprint,
             )
+            # [AUDIT-NOTE] 有意忽略返回值：这是 except 块内的尽力回滚清理（DB 写已失败），
+            # 非“删文件后删 DB”路径。勿当作 M-8 未守卫删除标记。
             safe_remove_file(b_local)
             return False

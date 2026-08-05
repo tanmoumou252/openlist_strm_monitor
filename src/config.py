@@ -148,6 +148,9 @@ class TmdbConfig:
     fuzzy_threshold: float = 0.60
     anime_min_ep_ratio: float = 0.3
     anime_max_season_diff: float = 0.3  # 新增：动漫最大季度差异阈值
+    # [AUDIT-NOTE] anime_max_season_diff 有意保留但 watchlist_match.py 未读取（季数检查硬编码
+    # > total_seasons + 1）。已在 wiki/Configuration-Reference.md 注明运行时无效。为配置兼容保留。
+    # 除非同时移除 WebUI 字段与文档，否则勿当死代码删除。
     anime_min_season_ratio: float = 0.3  # 新增：动漫最少季数比例阈值
     proxy: TmdbProxyConfig = field(default_factory=TmdbProxyConfig)
     # 扁平化代理字段（供前端/测试 WebUI 直接读写，与嵌套 proxy 双向同步）

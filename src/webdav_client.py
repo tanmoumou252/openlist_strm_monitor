@@ -194,8 +194,18 @@ class OpenListAdminClient:
 
             # HTTP 200，检查业务响应
             data = res.json()
-            # 诊断日志：记录实际响应内容
-            log.debug("登录响应内容: %r", data)
+            # H-3: 诊断日志：记录实际响应内容，但脱敏 token 字段
+            log_data = data.copy() if isinstance(data, dict) else data
+            if isinstance(log_data, dict):
+                # 脱敏 data.token
+                if "data" in log_data and isinstance(log_data["data"], dict):
+                    log_data["data"] = log_data["data"].copy()
+                    if "token" in log_data["data"]:
+                        log_data["data"]["token"] = "***REDACTED***"
+                # 脱敏顶层 token
+                if "token" in log_data:
+                    log_data["token"] = "***REDACTED***"
+            log.debug("登录响应内容（已脱敏）: %r", log_data)
             # OpenList API 在某些情况下可能返回 null（None）
             if not isinstance(data, dict):
                 log.error("登录响应格式异常（非 JSON 对象）: %r", data)
@@ -681,13 +691,15 @@ class OpenListAdminClient:
                 log.error("check_exists 异常: %s - %s", path, e)
                 result = None
 
-        self._check_exists_cache[cache_key] = (now, result)
-        # 淘汰最旧项以保持容量上限
-        if len(self._check_exists_cache) > self._check_exists_cache_max:
-            # 找到最旧的项（按时间戳排序）
-            oldest_key = min(self._check_exists_cache.keys(), 
-                           key=lambda k: self._check_exists_cache[k][0])
-            del self._check_exists_cache[oldest_key]
+        # H-4: 不缓存 None 结果（不可信应重新查询），只缓存 True/False
+        if result is not None:
+            self._check_exists_cache[cache_key] = (now, result)
+            # 淘汰最旧项以保持容量上限
+            if len(self._check_exists_cache) > self._check_exists_cache_max:
+                # 找到最旧的项（按时间戳排序）
+                oldest_key = min(self._check_exists_cache.keys(), 
+                               key=lambda k: self._check_exists_cache[k][0])
+                del self._check_exists_cache[oldest_key]
         return result
 
     # 8. 获取兼容格式的内容列表 (逻辑方法)

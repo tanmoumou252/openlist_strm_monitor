@@ -130,5 +130,8 @@ def escape_like(value: str) -> str:
     用于构建 LIKE 模式时，确保路径/媒体名中的下划线、百分号不被当作通配符。
     顺序很重要：必须先转义反斜杠本身，否则后面对 %/_ 加的反斜杠会被这一步再次转义。
     转义只作用于传入的 LIKE 模式值，不影响被匹配列的内容（如 Windows 路径中的反斜杠）。
+
+    [AUDIT-NOTE] SQLite LIKE 仅 % _ \\ 为特殊字符（[] 属 MS SQL/Access 语法，非 SQLite）。
+    本函数已转义全部 SQLite LIKE 元字符，勿添加 [] 转义。
     """
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

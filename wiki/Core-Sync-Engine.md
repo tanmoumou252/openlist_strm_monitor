@@ -178,7 +178,7 @@ A 区文件被删除时触发：
 新 `.strm` 出现在 B 区时触发：
 1. 计算指纹
 2. 血统验证（9 步管线 `_verify_b_path_lineage`）
-3. 血统失败：调用 `_restore_b_from_a_after_violation()`（物理删除越界文件 → 从 A 区恢复到正确位置），而非设 `invalid` 状态；恢复 DB 前必须由目标 B 路径解析唯一 `mapping_id`，解析失败则 fail-closed 跳过 `BRecord` 写入，并由后续去重复用同一 mapping
+3. 血统失败：先尝试 C 区迁移（`get_c_path_for_b` → 移动到 `C/<mapping_id>/<relative>`），迁移失败才回退到物理删除越界文件 → 从 A 区恢复到正确位置（`_restore_b_from_a_after_violation()`），而非设 `invalid` 状态；恢复 DB 前必须由目标 B 路径解析唯一 `mapping_id`，解析失败则 fail-closed 跳过 `BRecord` 写入，并由后续去重复用同一 mapping
 4. 无法解析 STRM：走 `_handle_unparseable_strm()` 分支
 5. 重复指纹：重命名为 `.duplicate`
 6. 有效新文件：注册 DB，加入身份跟踪
@@ -285,6 +285,10 @@ def notify_config_changed(self) -> None:
 - 任一方正在进行时，另一方尝试进入将**跳过执行**（周期审计静默跳过；手动审计返回 `already_running` 供前端轮询）。
 - 避免并发全量扫描导致的数据库写入竞争与资源争用。
 
+#### WebUI 会话安全（M-4）
+
+WebUI 会话 token 绑定登录时客户端 IP：`_handle_login` 在登录时记录客户端 IP，`_check_auth` 在每次请求时校验 `X-Session-Token` 对应的 IP，若异 IP 则返回 401 拒绝。会话存储为 `dict[str, tuple[float, str]]`（过期时间戳 + 绑定 IP），`_cleanup_sessions` 使用 `v[0]` 读取过期时间。详见 AGENTS.md Authentication 小节。
+
 #### 代次推进（`complete_index_generation`）三种触发时机
 
 | 时机 | 说明 |
@@ -322,7 +326,7 @@ def notify_config_changed(self) -> None:
 
 ### 安全方法
 
-- **`_restore_b_from_a_after_violation(local, webdav_path, fingerprint)`** — 血统越界后恢复：物理删除越界文件 → 从 A 区复制到正确位置 → 更新 DB 记录。写入前通过 `_mapping_id_for_b(correct_b_path)` 解析目标 mapping；无法解析时 fail-closed 返回，不写入 B 记录。调用 `ensure_single_visible_instance` 时复用已解析的 `mapping_id`，避免重复解析造成跨 mapping 去重。
+- **`_restore_b_from_a_after_violation(local, webdav_path, fingerprint)`** — 血统越界后恢复：先尝试 C 区迁移（`get_c_path_for_b` → 移动到 `C/<mapping_id>/<relative>`），迁移失败才回退到物理删除越界文件 → 从 A 区复制到正确位置 → 更新 DB 记录。写入前通过 `_mapping_id_for_b(correct_b_path)` 解析目标 mapping；无法解析时 fail-closed 返回，不写入 B 记录。调用 `ensure_single_visible_instance` 时复用已解析的 `mapping_id`，避免重复解析造成跨 mapping 去重。
 - **`_verify_a_source_exists(b_local_path, webdav_path, fingerprint)`** — A 源存在性校验：优先检查 identity 记录中的 A 源和按 WebDAV 路径查找到的 A 源；两者都缺失时，仅当 B 路径能解析唯一 mapping 且该 mapping 下存在对应 fingerprint 的 boundary 记录才放行，否则返回 `False`（mapping 无法解析时 fail-closed）。
 - **`_force_delete_and_verify(path)`** — 强制删除文件并验证删除是否成功。
 - **`_handle_b_zombie(path)`** — 处理 B 区僵尸文件（DB 记录存在但磁盘文件已消失）。

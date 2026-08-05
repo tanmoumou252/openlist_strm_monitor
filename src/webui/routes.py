@@ -10,7 +10,6 @@ WebUI 路由与处理器模块（合并自 webui_routes.py + webui_handlers.py�
 """
 from __future__ import annotations
 
-import hashlib
 import html as html_module
 import json
 import logging
@@ -33,6 +32,7 @@ from watchlist_match import (
     _compute_media_root, _extract_season_from_local_path,
 )
 from utils import escape_like
+from utils.password_utils import hash_password
 
 if TYPE_CHECKING:
     from tmdb_client import TmdbClient
@@ -42,17 +42,6 @@ if TYPE_CHECKING:
 # ============================================================
 # 工具函数
 # ============================================================
-
-def _hash_password_pbkdf2(password: str) -> str:
-    """对密码加盐 PBKDF2-HMAC-SHA256 哈希，返回 salt$iterations$hash 格式。
-
-    与 server.py:WebUIServer._hash_password / reset_admin.py:hash_password
-    保持完全一致的算法与格式，使登录端 _check_password 可正确验证。
-    """
-    salt = secrets.token_hex(16)
-    iterations = 600000
-    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iterations)
-    return f"{salt}${iterations}${h.hex()}"
 
 
 def _is_lan_ip(ip: str) -> bool:
@@ -399,8 +388,8 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 handler.end_headers()
                 handler.wfile.write(content)
             except Exception as e:
-                logging.error("[TMDB] 下载操作日志失败: %s", e)
-                handler._send_json({"error": str(e)}, 500)
+                logging.exception("[TMDB] 下载操作日志失败: %s", e)
+                handler._send_json({"error": "internal_error"}, 500)
         else:
             handler._send_json({"error": "TMDB 日志不可用"}, 404)
         return True
@@ -500,8 +489,8 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
             try:
                 items, has_next = tmdb_client.get_watchlist_movies(page=page)
             except Exception as e:
-                logging.error("[TMDB] 获取电影待看列表失败: %s", e)
-                handler._send_json({"error": "获取待看列表失败", "detail": str(e)}, 500)
+                logging.exception("[TMDB] 获取电影待看列表失败: %s", e)
+                handler._send_json({"error": "获取待看列表失败"}, 500)
                 return True
 
             # 如果有搜索查询，使用 FTS5 过滤
@@ -581,8 +570,8 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
             try:
                 items, has_next = tmdb_client.get_watchlist_tv(page=page)
             except Exception as e:
-                logging.error("[TMDB] 获取剧集待看列表失败: %s", e)
-                handler._send_json({"error": "获取待看列表失败", "detail": str(e)}, 500)
+                logging.exception("[TMDB] 获取剧集待看列表失败: %s", e)
+                handler._send_json({"error": "获取待看列表失败"}, 500)
                 return True
 
             # 如果有搜索查询，使用 FTS5 过滤
@@ -792,8 +781,8 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 "tv_shows": tv_shows[:10],
             })
         except Exception as e:
-            logging.error("[TMDB] 搜索失败: %s", e)
-            handler._send_json({"error": str(e)}, 500)
+            logging.exception("[TMDB] 搜索失败: %s", e)
+            handler._send_json({"error": "internal_error"}, 500)
         return True
 
     return False
@@ -910,7 +899,8 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
                     "config_update", "error", f"TMDB 配置保存失败: {e}")
             except Exception:
                 pass
-        handler._send_json({"success": False, "error": f"保存失败: {e}"}, 500)
+        # M-13: 不回传原始异常信息
+        handler._send_json({"success": False, "error": "保存失败"}, 500)
 
 
 def _handler_reinit_tmdb(webui_server, tmdb_cfg) -> None:
@@ -992,8 +982,8 @@ def _handle_webui_config_get(handler, webui_server, scope: str) -> None:
             cfg.pop("admin_password", None)
         handler._send_json({"success": True, "scope": scope, "config": cfg})
     except Exception as e:
-        logging.warning("[WebUI] 读取配置失败 (scope=%s): %s", scope, e)
-        handler._send_json({"success": False, "error": str(e)}, 500)
+        logging.exception("[WebUI] 读取配置失败 (scope=%s): %s", scope, e)
+        handler._send_json({"success": False, "error": "internal_error"}, 500)
 
 
 def _validate_strm_engines(value: str) -> bool:
@@ -1123,7 +1113,7 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
         if scope == "ui" and "admin_password" in data:
             _pw = data["admin_password"]
             if isinstance(_pw, str) and _pw and "$" not in _pw:
-                data["admin_password"] = _hash_password_pbkdf2(_pw)
+                data["admin_password"] = hash_password(_pw)
         for key, val in data.items():
             _wdb.set_config(scope, str(key), str(val) if val is not None else "")
 
@@ -1152,8 +1142,8 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
     except json.JSONDecodeError:
         handler._send_json({"success": False, "error": "无效的 JSON"}, 400)
     except Exception as e:
-        logging.warning("[WebUI] 写入配置失败 (scope=%s): %s", scope, e)
-        handler._send_json({"success": False, "error": str(e)}, 500)
+        logging.exception("[WebUI] 写入配置失败 (scope=%s): %s", scope, e)
+        handler._send_json({"success": False, "error": "internal_error"}, 500)
 
 
 def _hot_reload_openlist_config(webui_server) -> None:
@@ -1285,7 +1275,6 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
             })
         else:
             error_type = client.last_error_type or "unknown"
-            error_message = client.last_error_message or ""
 
             # 根据错误类型返回不同的错误消息
             error_messages = {
@@ -1299,16 +1288,19 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
             }
             display_message = error_messages.get(error_type, error_messages["unknown"])
 
+            # M-13: display_message 已按 error_type 映射为用户友好文本，
+            # 不回传 client.last_error_message（可能含内部路径/凭据）
             handler._send_json({
                 "success": False,
                 "error": display_message,
                 "error_type": error_type,
-                "error_message": error_message,
             })
     except Exception as e:
+        # M-13: 不回传原始异常信息
+        logging.error("[OpenList] 连接测试异常: %s", e, exc_info=True)
         handler._send_json({
             "success": False,
-            "error": f"连接失败: {e}",
+            "error": "连接失败",
             "error_type": "exception",
         })
 
@@ -1476,7 +1468,8 @@ def _handle_openlist_ping(handler, webui_server) -> None:
             status = status_map.get(error_type, "auth_failed")
             handler._send_json({"success": True, "status": status})
     except Exception as e:
-        handler._send_json({"success": True, "status": "offline", "error": str(e)})
+        logging.exception("[OpenList] 状态检查失败: %s", e)
+        handler._send_json({"success": True, "status": "offline", "error": "internal_error"})
 
 
 def _handle_openlist_paths(handler, webui_server) -> None:
@@ -1582,7 +1575,7 @@ def _do_match_refresh(webui_server) -> None:
     except Exception as e:
         logging.error("[TMDB] 收录状态刷新失败: %s", e, exc_info=True)
         with webui_server._match_refresh_lock:
-            webui_server._match_refresh_result = {"error": str(e)}
+            webui_server._match_refresh_result = {"error": "internal_error"}
         if _wdb:
             try:
                 _wdb.log_tmdb_operation(
@@ -1652,7 +1645,8 @@ def _handle_tmdb_watchlist_match_override(
                 pass
     except Exception as e:
         logging.error("[TMDB] 手动覆盖收录状态失败: %s", e, exc_info=True)
-        handler._send_json({"success": False, "message": f"覆盖失败: {e}"}, 500)
+        # M-13: 不回传原始异常信息
+        handler._send_json({"success": False, "message": "覆盖失败"}, 500)
 
 
 def _handle_tmdb_watchlist_match_clear(
@@ -1718,7 +1712,8 @@ def _handle_tmdb_watchlist_match_clear(
                 pass
     except Exception as e:
         logging.error("[TMDB] 清除人工覆盖失败: %s", e, exc_info=True)
-        handler._send_json({"success": False, "message": f"清除失败: {e}"}, 500)
+        # M-13: 不回传原始异常信息
+        handler._send_json({"success": False, "message": "清除失败"}, 500)
 
 
 def _handle_tmdb_watchlist_bg_sync(handler, webui_server) -> None:
@@ -2009,7 +2004,8 @@ def handle_dashboard(handler) -> None:
             "mappings": mapping_metadata,
         })
     except Exception as e:
-        handler._send_json({"error": str(e)}, 500)
+        logging.exception("[Dashboard] 获取索引元数据失败: %s", e)
+        handler._send_json({"error": "internal_error"}, 500)
 
 
 def handle_records_api(handler, params) -> None:
@@ -2157,21 +2153,9 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
         if not stored:
             handler._send_json({"error": "未设置管理员密码"}, 400)
             return
-        # 从 WebUIServer 的静态方法验证密码（内联避免 import 路径问题）
-        try:
-            parts = stored.split("$", 2)
-            if len(parts) != 3:
-                handler._send_json({"error": "密码格式损坏，请用 python reset_admin.py 重置"}, 500)
-                return
-            salt, iterations_str, stored_hash = parts
-            iterations = int(iterations_str)
-            pw_hash = hashlib.pbkdf2_hmac(
-                "sha256", password.encode(), salt.encode(), iterations)
-            # 使用时序安全比较，防止时序攻击
-            import hmac
-            password_ok = hmac.compare_digest(pw_hash.hex(), stored_hash)
-        except (ValueError, AttributeError):
-            password_ok = False
+        # M-2: 使用统一的密码工具模块验证密码
+        from utils.password_utils import verify_password
+        password_ok = verify_password(password, stored)
         if not password_ok:
             with _login_attempts_lock:
                 attempts.append(now)
@@ -2183,8 +2167,9 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
             _login_attempts.pop(client_ip, None)
         # 生成 session token
         token = secrets.token_hex(32)
+        # M-4: Session 绑定客户端 IP（防止被盗 token 跨 IP 使用）
         with webui_server._sessions_lock:
-            webui_server._sessions[token] = time.time() + 604800  # 7天
+            webui_server._sessions[token] = (time.time() + 604800, client_ip)  # 7天, IP
         handler._send_json({"success": True, "token": token})
     except json.JSONDecodeError:
         handler._send_json({"error": "无效的 JSON"}, 400)
@@ -2912,8 +2897,8 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
         result = _do_media_refresh(app_service, area, media_name, mapping_id=mapping_id)
         handler._send_json(result)
     except Exception as e:
-        logging.error("[Refresh] 刷新媒体 %s 失败: %s", media_name, e)
-        handler._send_json({"error": str(e), "status": "error"}, 500)
+        logging.exception("[Refresh] 刷新媒体 %s 失败: %s", media_name, e)
+        handler._send_json({"error": "internal_error", "status": "error"}, 500)
     finally:
         refresh_lock.release()
 
@@ -2987,7 +2972,8 @@ def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str |
             a_records = [dict(r) for r in rows]
     except Exception as e:
         logging.error("[Refresh] 查询 A 区记录失败: %s", e)
-        return {"ok": False, "error": f"query failed: {e}"}
+        # M-13: 不回传原始异常信息
+        return {"ok": False, "error": "query_failed"}
 
     _refresh_log("debug", "[Refresh] 查询完成 耗时=%.2fs 记录数=%d",
                  time.monotonic() - phase_start, len(a_records))
@@ -3026,7 +3012,9 @@ def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str |
     _refresh_log("debug", "[Refresh] 引擎 API 完成 耗时=%.2fs", time.monotonic() - phase_start)
 
     if list_result is None or list_result.get("code") not in (0, 200):
-        return {"ok": False, "error": "OpenList API 返回错误", "detail": list_result}
+        # M-13: 不回传原始 API 响应（可能含内部路径/服务端详情）
+        logging.error("[Refresh] OpenList API 返回异常: code=%s", list_result.get("code") if isinstance(list_result, dict) else None)
+        return {"ok": False, "error": "OpenList API 返回错误"}
 
     # 检查 API 返回内容是否为空（可能是云盘临时不可达或目录不存在）
     _data = list_result.get("data", {})
@@ -3230,7 +3218,8 @@ def handle_logs_api(handler, params: dict) -> None:
         tail = tail[::-1]  # 反转为倒序（最新在上），与 TMDB 操作日志保持一致
         handler._send_json({"lines": tail, "count": len(tail)})
     except Exception as e:
-        handler._send_json({"error": str(e)}, 500)
+        logging.exception("[WebUI] 读取日志尾部失败: %s", e)
+        handler._send_json({"error": "internal_error"}, 500)
 
 
 def handle_download_log_api(handler, params: dict) -> None:
@@ -3257,8 +3246,8 @@ def handle_download_log_api(handler, params: dict) -> None:
         with open(log_file_path, 'rb') as f:
             handler.wfile.write(f.read())
     except Exception as e:
-        logging.error(f"[WebUI] 下载日志文件失败: {e}")
-        handler._send_json({"error": str(e)}, 500)
+        logging.exception("[WebUI] 下载日志文件失败: %s", e)
+        handler._send_json({"error": "internal_error"}, 500)
 
 
 def handle_config_api(handler) -> None:
@@ -3267,7 +3256,13 @@ def handle_config_api(handler) -> None:
     TMDB 配置优先从 DB (webui_config scope=tmdb) 读取，
     如果 DB 无数据则回退到内存 TmdbConfig 对象。
     OpenList 配置优先从 DB (webui_config scope=openlist) 读取。
+    
+    M-3: 未认证时只返回状态 booleans（configured/not_configured），
+         完整配置信息需认证后获取，防止局域网信息泄露。
     """
+    # [AUDIT-NOTE] M-3 已接受（局域网权衡）：非敏感字段（webdav_host/webdav_user/
+    # b_root/a_folders）有意在登录前可读，以便 SPA/onboarding 在鉴权前渲染（服务绑定局域网）。
+    # 敏感项（webdav_password/totp_secret/api key）已脱敏为 bool。勿再标记为信息泄露。
     cfg = handler.webui._config
     tmdb_client = handler.webui._tmdb_client
     tmdb_cfg = getattr(cfg, "tmdb", None)
@@ -3280,6 +3275,45 @@ def handle_config_api(handler) -> None:
     # TMDB token 相关 — DB 优先
     token = db_tmdb_cfg.get("access_token", "") or (
         getattr(tmdb_cfg, "access_token", "") if tmdb_cfg else "")
+    token_configured = bool(token)
+
+    # 检查是否已认证（通过检查 X-Session-Token 头）
+    token_header = getattr(handler.headers, 'get', lambda k, d=None: d)('X-Session-Token', '')
+    is_authenticated = False
+    if token_header and handler.webui._has_password:
+        from time import time as _time
+        with handler.webui._sessions_lock:
+            import hmac as _hmac
+            for stored_token in handler.webui._sessions:
+                if _hmac.compare_digest(token_header.encode('utf-8'), stored_token.encode('utf-8')):
+                    expiry, _ = handler.webui._sessions[stored_token]
+                    if _time() < expiry:
+                        is_authenticated = True
+                    break
+
+    if not is_authenticated:
+        # M-3: 未认证时只返回最基本的状态 booleans，防止信息泄露
+        handler._send_json({
+            # 只返回是否已配置的状态，不返回具体值
+            "tmdb_configured": bool(tmdb_client),
+            "tmdb_token_configured": token_configured,
+            "tmdb_api_key_configured": bool(db_tmdb_cfg.get("api_key", "") or (
+                getattr(tmdb_cfg, "api_key", "") if tmdb_cfg else "")),
+            "tmdb_proxy_configured": bool(db_tmdb_cfg.get("proxy_http", "") or (
+                getattr(tmdb_cfg, "proxy_http", "") if tmdb_cfg else "")),
+            "webdav_configured": bool(db_openlist_cfg.get("webdav_host", "") or (
+                getattr(getattr(cfg, "webdav", None), "host", "") if getattr(cfg, "webdav", None) else "")),
+            "a_folders_count": len(getattr(cfg, "strm_storage_map", {})),
+            "a_b_mappings_count": len(getattr(cfg, "a_b_mappings", [])),
+            "webui_port": getattr(handler.webui, '_port', 8579),
+            "webui_bind": getattr(handler.webui, '_bind', '0.0.0.0'),
+            # 认证状态
+            "_authenticated": False,
+            "_message": "未认证，仅返回配置状态。请登录后获取完整配置。",
+        })
+        return
+
+    # 认证通过，返回完整配置
     token_preview = (token[:16] + "...") if len(token) > 16 else (token or "")
     token_configured = bool(token)
 
@@ -3418,7 +3452,7 @@ def handle_config_api(handler) -> None:
     tmdb_anime_min_season_ratio = db_tmdb_cfg.get("anime_min_season_ratio", "") or (
         str(getattr(tmdb_cfg, "anime_min_season_ratio", "0.3")) if tmdb_cfg else "0.3")
     tmdb_cache_ttl = db_tmdb_cfg.get("watchlist_cache_ttl", "") or (
-        str(getattr(tmdb_cfg, "watchlist_cache_ttl", "43200")) if tmdb_cfg else "43200")
+        str(getattr(tmdb_cfg, "watchlist_cache_ttl", "604800")) if tmdb_cfg else "604800")
 
     handler._send_json({
         # 数据库 & WebUI
@@ -3458,7 +3492,7 @@ def handle_config_api(handler) -> None:
         ],
         "strm_engine_paths": strm_engine_paths,
         "refresh_paths": refresh_paths_val,
-        # WebDAV
+        # WebDAV（M-3: 认证后才返回敏感信息）
         "webdav_host": webdav_host,
         "webdav_user": webdav_user,
         "webdav_password": webdav_password,
@@ -3470,6 +3504,8 @@ def handle_config_api(handler) -> None:
         # Behavior
         "behavior_action": behavior_action,
         "ghost_protect_seconds": ghost_protect_seconds,
+        # M-3: 认证状态标记
+        "_authenticated": True,
     })
 
 
@@ -3673,11 +3709,13 @@ def _handle_config_validate(handler, webui_server) -> None:
                     "suggestion": "请检查 OpenList 配置或网络连通性",
                 })
         except Exception as e:
+            # M-13: 通用消息，不向前端泄露异常详情（HTML 转义仅防 XSS，不防信息泄露）
+            logging.debug("[仪表盘] OpenList 连接检查异常: %s", e, exc_info=True)
             checks.append({
                 "name": "openlist_online",
                 "label": "OpenList 连接",
                 "status": "warning",
-                "message": f"连接异常: {html_module.escape(str(e))}",
+                "message": "连接异常",
                 "suggestion": "请检查网络或 OpenList 服务状态",
             })
 
@@ -3739,8 +3777,8 @@ def _handle_onboarding_complete_step(handler, webui_server, body: bytes) -> None
         try:
             _wdb.set_config("ui", f"onboarding_{step}_completed", "1")
         except Exception as e:
-            logging.error("[Onboarding] 标记步骤完成失败: %s", e)
-            handler._send_json({"error": str(e)}, 500)
+            logging.exception("[Onboarding] 标记步骤完成失败: %s", e)
+            handler._send_json({"error": "internal_error"}, 500)
             return
 
     handler._send_json({"ok": True})
@@ -3805,7 +3843,7 @@ def handle_index_audit(handler, body: bytes) -> None:
         except Exception as e:
             logging.error("[IndexAudit] 审计失败: %s", e, exc_info=True)
             with webui_server._index_audit_lock:
-                webui_server._index_audit_result = {"error": str(e)}
+                webui_server._index_audit_result = {"error": "internal_error"}
 
         finally:
             # 清除进行中标记

@@ -4,7 +4,7 @@
 覆盖 P1-P18 密码安全检查清单中标记"无直接测试"的项：
   P1  PBKDF2-HMAC-SHA256 600k 迭代哈希格式
   P2  密码验证正确性（正确/错误）
-  P3  时序安全现状记录（== 而非 hmac.compare_digest，已知设计选择）
+  P3  时序安全已修复：使用 hmac.compare_digest（M-5/H-5），=== 比较已移除
   P5  /api/webui/config/ui GET 不泄露 admin_password
   P6  明文密码写入 DB 时自动哈希
   P11 首次启动生成随机密码
@@ -210,16 +210,15 @@ class TestPasswordHashing:
     def test_p3_password_compare_not_timing_safe(self):
         """P3: 时序安全现状记录。
 
-        当前实现使用 == 比较 hex（server.py:917, routes.py:1846），
-        而非 hmac.compare_digest。这是已知设计选择，非 bug：
-        LAN-only 部署场景无远程时序侧信道攻击面。
-        本测试仅记录现状，不修改源码。
+        当前实现使用 hmac.compare_digest（通过 password_utils.verify_password），
+        防止时序攻击。这是已知安全设计，M-5 修复后统一使用恒定时间比较。
+        本测试验证当前实现已使用安全比较。
         """
         import inspect
         source = inspect.getsource(WebUIServer._check_password)
-        # 现状：使用 == 比较，不使用 hmac.compare_digest
-        assert "==" in source, "当前实现使用 == 比较"
-        assert "compare_digest" not in source, "当前实现未使用 hmac.compare_digest"
+        # 修复后：使用 verify_password（内部使用 hmac.compare_digest）
+        assert "verify_password" in source, "当前实现应使用统一的 verify_password"
+        assert "==" not in source, "当前实现不应使用 == 比较"
 
 
 # ============================================================
