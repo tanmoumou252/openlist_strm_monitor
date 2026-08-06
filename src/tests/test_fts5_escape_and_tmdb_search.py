@@ -215,7 +215,6 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     cfg.tmdb.language = "zh-CN"
     cfg.tmdb.host = ""
     cfg.tmdb.csv_watchlist_file = ""
-    cfg.tmdb.watchlist_db = ""
     cfg.tmdb.watchlist_cache_ttl = 604800
     cfg.tmdb.fuzzy_threshold = 0.60
     cfg.tmdb.anime_min_ep_ratio = 0.3

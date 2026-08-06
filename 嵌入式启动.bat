@@ -13,6 +13,18 @@ if not exist "%PYTHON%" (
     exit /b 1
 )
 
+:: B1: 检查 Python 版本 >= 3.11
+:: [已修复] B1: Python >=3.11 版本检查（用 sys.exit 而非 exit，兼容禁用 site 的嵌入式 Python）
+"%PYTHON%" -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>nul
+if %errorlevel% neq 0 (
+    echo [ERROR] Python 版本过低，需要 3.11 或更高版本。
+    echo.
+    "%PYTHON%" --version
+    echo.
+    pause
+    exit /b 1
+)
+
 if not exist "%APP%" (
     echo [ERROR] 未找到 WebUI 服务器: %APP%
     pause

@@ -59,7 +59,6 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     cfg.tmdb.language = "zh-CN"
     cfg.tmdb.host = ""
     cfg.tmdb.csv_watchlist_file = ""
-    cfg.tmdb.watchlist_db = ""
     cfg.tmdb.watchlist_cache_ttl = 604800
     cfg.tmdb.fuzzy_threshold = 0.60
     cfg.tmdb.anime_min_ep_ratio = 0.3
@@ -2125,3 +2124,68 @@ class TestDBInitFailure:
             assert resp.get("error") == "server_error"
         finally:
             server._db_init_failed = False
+
+
+# ============================================================
+# P1-3 回归：数据库路径固定 + watchlist_db 移除
+# ============================================================
+
+
+class TestP13WatchlistDbRemoved:
+    """P1-3 回归：watchlist_db 字段已从配置中移除，验证各入口的拒绝/剥离行为。"""
+
+    def test_tmdb_configure_rejects_watchlist_db(self, webui_server):
+        """POST /api/tmdb/configure 含 watchlist_db → 400"""
+        server, base, session_token = webui_server
+
+        body = {"watchlist_db": "/custom/path.db", "language": "zh-CN"}
+        status, _, resp = _http_post(base, "/api/tmdb/configure", body, session_token)
+
+        assert status == 400, f"含 watchlist_db 应返回 400，实际: {status}"
+        assert resp.get("success") is False
+        assert "已移除" in resp.get("error", "")
+
+        # 验证 language 未被写入（请求被整体拒绝）
+        wdb = server._watchlist_db
+        if wdb:
+            stored_lang = wdb.get_config("tmdb", "language")
+            # language 不应被写入（因为请求整体被拒绝）
+            assert stored_lang != "zh-CN" or stored_lang is None, \
+                "watchlist_db 拒绝应阻止整次写入"
+
+    def test_webui_config_tmdb_scope_strips_watchlist_db(self, webui_server):
+        """POST /api/webui/config/tmdb 含 watchlist_db → 剥离该键，其余键正常写入"""
+        server, base, session_token = webui_server
+
+        # 同时发送 watchlist_db（应被剥离）和 language（应被写入）
+        body = {"watchlist_db": "/orphan/path.db", "language": "en"}
+        status, _, resp = _http_post(base, "/api/webui/config/tmdb", body, session_token)
+
+        assert status == 200, f"剥离后应正常返回 200，实际: {status}"
+        assert resp.get("success") is True
+
+        # 验证 language 已写入
+        wdb = server._watchlist_db
+        assert wdb is not None, "watchlist_db 应已初始化"
+        stored_lang = wdb.get_config("tmdb", "language")
+        assert stored_lang == "en", f"language 应为 'en'，实际: {stored_lang}"
+
+        # 验证 watchlist_db 未写入 DB
+        orphan = wdb.get_config("tmdb", "watchlist_db")
+        assert orphan is None or orphan == "", \
+            f"watchlist_db 应被剥离不写入 DB，实际: {orphan!r}"
+
+    def test_config_api_db_file_is_fixed(self, webui_server):
+        """GET /api/config 返回的 db_file 和 tmdb_watchlist_db 为固定项目根路径"""
+        server, base, session_token = webui_server
+
+        status, _, resp = _http_get(base, "/api/config", session_token)
+        assert status == 200
+        db_file = resp.get("db_file", "")
+        tmdb_db = resp.get("tmdb_watchlist_db", "")
+        # 两者应为非空字符串且不含自定义路径标记
+        assert isinstance(db_file, str) and len(db_file) > 0
+        assert isinstance(tmdb_db, str) and len(tmdb_db) > 0
+        # 不应包含用户自定义路径的特征（如 /custom/）
+        assert "/custom/" not in db_file, f"db_file 不应含自定义路径: {db_file}"
+        assert "/custom/" not in tmdb_db, f"tmdb_watchlist_db 不应含自定义路径: {tmdb_db}"

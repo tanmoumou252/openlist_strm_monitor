@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -75,6 +76,7 @@ def _make_admin_client(tmp_path: Path, host: str = "http://openlist:5244") -> Op
         client._check_exists_cache = {}
         client._check_exists_cache_ttl = 60
         client._check_exists_cache_max = 5000
+        client._check_exists_cache_lock = threading.Lock()
         client.last_error_message = None
         client.last_error_type = None
         client.token_cache_path = str(tmp_path / ".admin_token.json")

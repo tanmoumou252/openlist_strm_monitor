@@ -68,7 +68,6 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     cfg.tmdb.language = "zh-CN"
     cfg.tmdb.host = ""
     cfg.tmdb.csv_watchlist_file = ""
-    cfg.tmdb.watchlist_db = ""
     cfg.tmdb.watchlist_cache_ttl = 604800
     cfg.tmdb.fuzzy_threshold = 0.60
     cfg.tmdb.anime_min_ep_ratio = 0.3
@@ -445,9 +444,12 @@ class TestResetAdminPassword:
         reset_admin = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(reset_admin)
 
-        # 模拟命令行参数：短密码 + 指定 DB 路径
+        # [已修复] P1-3: patch find_db_path 到 tmp_path，移除 --db 参数
+        monkeypatch.setattr(reset_admin, "find_db_path", lambda: str(db_path))
+
+        # 模拟命令行参数：短密码（不带 --db）
         monkeypatch.setattr(sys, "argv", [
-            "reset_admin.py", "ab", f"--db={db_path}"])
+            "reset_admin.py", "ab"])
 
         # 短密码应触发 sys.exit(1)
         with pytest.raises(SystemExit) as exc_info:
@@ -471,9 +473,12 @@ class TestResetAdminPassword:
         reset_admin = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(reset_admin)
 
+        # [已修复] P1-3: patch find_db_path 到 tmp_path，移除 --db 参数
+        monkeypatch.setattr(reset_admin, "find_db_path", lambda: str(db_path))
+
         valid_password = "validpass123"
         monkeypatch.setattr(sys, "argv", [
-            "reset_admin.py", valid_password, f"--db={db_path}"])
+            "reset_admin.py", valid_password])
 
         # 不应抛出 SystemExit（正常完成）
         reset_admin.main()
@@ -504,6 +509,22 @@ class TestResetAdminPassword:
         # WebUIServer 应能验证
         assert WebUIServer._check_password(password, reset_hash) is True, \
             "reset_admin.py 生成的哈希应可被 WebUIServer._check_password 验证"
+
+    def test_p13_db_param_rejected(self, tmp_path, monkeypatch):
+        """[已修复] P1-3: reset_admin.py 拒绝 --db 参数。"""
+        reset_admin_path = Path(__file__).resolve().parent.parent.parent / "reset_admin.py"
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("reset_admin", reset_admin_path)
+        reset_admin = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reset_admin)
+
+        monkeypatch.setattr(sys, "argv", [
+            "reset_admin.py", "--db=/arbitrary/path.db"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            reset_admin.main()
+        assert exc_info.value.code == 1, \
+            f"--db 参数应被拒绝并退出，实际: {exc_info.value.code}"
 
 
 # ============================================================

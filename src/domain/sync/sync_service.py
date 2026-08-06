@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -16,7 +17,6 @@ if TYPE_CHECKING:
     from config import AppConfig
 
 from utils import read_strm_webdav_path, safe_remove_file, webdav_parent, make_strm_fingerprint
-
 
 class SyncService:
     """A->B 同步服务"""
@@ -392,51 +392,73 @@ class SyncService:
             dedup_queue.clear()
 
         t_pass2 = time.time()
-        try:
-            with self.db.bulk_connection() as conn:
-                for idx, rec in enumerate(all_a_records, 1):
-                    target_path = rec_target_map[idx - 1]
 
-                    # Pass 1 中被跳过的记录（ghost/fp/missing/filtered/mapping）target_path 为 None
-                    if target_path is None:
-                        continue
+        def _run_pass2(conn):
+            """Pass 2 执行阶段（提取为函数以便 use_bulk 分支复用）。"""
+            # [已修复] Task 1: batch_count 在外层作用域定义，此处需 nonlocal 才能修改
+            nonlocal batch_count
+            for idx, rec in enumerate(all_a_records, 1):
+                target_path = rec_target_map[idx - 1]
 
-                    if target_path in target_conflicts:
-                        counters["skip_target_conflict"] += 1
-                        continue
+                # Pass 1 中被跳过的记录（ghost/fp/missing/filtered/mapping）target_path 为 None
+                if target_path is None:
+                    continue
 
-                    result = self._sync_one_record(rec, valid_engine_paths, conn,
-                                                   dedup_queue,
-                                                   mapping_id=rec_mapping_map[idx - 1])
-                    counters[result] = counters.get(result, 0) + 1
-                    batch_count += 1
+                if target_path in target_conflicts:
+                    counters["skip_target_conflict"] += 1
+                    continue
 
-                    # 分批提交模式：每 1000 条提交一次，释放锁
-                    if not use_bulk and batch_count >= BATCH_COMMIT_SIZE:
-                        conn.commit()
-                        _flush_dedup_queue()
-                        batch_count = 0
-                        logging.debug("[初始化] 分批提交: 已处理 %d 条", idx)
+                result = self._sync_one_record(rec, valid_engine_paths, conn,
+                                               dedup_queue,
+                                               mapping_id=rec_mapping_map[idx - 1])
+                counters[result] = counters.get(result, 0) + 1
+                batch_count += 1
 
-                    if idx % log_interval == 0:
-                        c = counters
-                        total_skip_2 = (
-                            c["skip_ghost"] + c["skip_fp"] + c["skip_missing"]
-                            + c["skip_filtered"] + c["skip_exists_diff"]
-                            + c["skip_target_conflict"])
-                        logging.info(
-                            "[初始化] A -> B 进度: %d/%d (%.0f%%) %.1fs | "
-                            "成功=%d 跳过=%d 冲突=%d 失败=%d",
-                            idx, total_count, idx / total_count * 100,
-                            time.time() - t0, c["success"],
-                            total_skip_2, c["skip_target_conflict"], c["fail"])
-
-                # 提交剩余批次
-                if batch_count > 0:
+                # 分批提交模式：每 1000 条提交一次，释放锁
+                if not use_bulk and batch_count >= BATCH_COMMIT_SIZE:
                     conn.commit()
-                # 单事务模式：bulk commit 后统一去重
-                _flush_dedup_queue()
+                    _flush_dedup_queue()
+                    batch_count = 0
+                    logging.debug("[初始化] 分批提交: 已处理 %d 条", idx)
+
+                if idx % log_interval == 0:
+                    c = counters
+                    total_skip_2 = (
+                        c["skip_ghost"] + c["skip_fp"] + c["skip_missing"]
+                        + c["skip_filtered"] + c["skip_exists_diff"]
+                        + c["skip_target_conflict"])
+                    logging.info(
+                        "[初始化] A -> B 进度: %d/%d (%.0f%%) %.1fs | "
+                        "成功=%d 跳过=%d 冲突=%d 失败=%d",
+                        idx, total_count, idx / total_count * 100,
+                        time.time() - t0, c["success"],
+                        total_skip_2, c["skip_target_conflict"], c["fail"])
+
+            # 提交剩余批次
+            if batch_count > 0:
+                conn.commit()
+            # 单事务模式：bulk commit 后统一去重
+            _flush_dedup_queue()
+
+        try:
+            # [已修复] Task 1: use_bulk=False 进入 rw_lock 保护的标准写路径
+            if use_bulk:
+                # use_bulk=True（启动时，无并发）：bulk_connection 绕过 rw_lock
+                with self.db.bulk_connection() as conn:
+                    _run_pass2(conn)
+            else:
+                # [已修复] N-P1-1: use_bulk=False 走 rw_lock.write_locked()，
+                # 与周期刷新(_scan_and_sync)和手动审计(run_full_audit_now)共享
+                # 同进程互斥边界，避免并发访问 self._cache_ghost/_cache_b_fp
+                # 命中被对方 finally 置 None 的对象（AttributeError → 回滚）。
+                # use_bulk=False（刷新/审计时，有并发）：rw_lock + 标准连接
+                with self.db.rw_lock.write_locked(), self.db.connection() as conn:
+                    _run_pass2(conn)
         finally:
+            # [已修复] N-P1-4: 无论事务成功或失败，finally 均清空 L1 缓存。
+            # 若 bulk/分批 commit 回滚，DB 已恢复但缓存若不清理会残留本次新增的
+            # 指纹，导致后续合法记录被 skip_fp 跳过（A→B 复制遗漏）。
+            # 清空后下次调用重新预加载，缓存不会残留跨调用。
             self._cache_ghost = None
             self._cache_b_fp = None
 
@@ -628,8 +650,9 @@ class SyncService:
             try:
                 if b_local.exists():
                     b_local.unlink()
-            except Exception:
-                pass
+            except Exception as e:
+                # [设计取舍] #10: 尽力回滚——unlink 失败被有意忽略
+                logging.warning("[A→B] 回滚删除失败 %s: %s", b_local, e)
             return "fail"
 
     def _bulk_upsert_b(self, conn, local_path, webdav_path, parent_webdav_path,
@@ -801,7 +824,9 @@ class SyncService:
                 "[A->B跳过] B区文件已存在但webdav源不同，拒绝覆写: %s (现有: %s, 请求: %s)",
                 b_local, existing_webdav_path, webdav_path
             )
-            return "skip_exists_diff"
+            # [已修复] N-P1-3: 返回 None（语义=跳过），而非字符串 "skip_exists_diff"
+            # 调用方 routes.py:3028 将 None 计入 skipped，字符串会误计入 failed
+            return None
         # 如果 WebDAV 源文件已不存在，说明 A 区是冗余文件，清理掉。
         # 三态：仅权威 False 才删；None=不可信 → fail-closed 跳过。
         exists = self.app.admin_api.check_exists(webdav_path)
@@ -870,7 +895,6 @@ class SyncService:
                 "[A->B复制失败] DB错误: %s | b_local=%s webdav=%s parent=%s fingerprint=%s",
                 e, b_local, webdav_path, parent, fingerprint,
             )
-            # [AUDIT-NOTE] 有意忽略返回值：这是 except 块内的尽力回滚清理（DB 写已失败），
             # 非“删文件后删 DB”路径。勿当作 M-8 未守卫删除标记。
             safe_remove_file(b_local)
             return False

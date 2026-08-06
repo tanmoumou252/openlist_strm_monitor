@@ -31,6 +31,34 @@ export function _formatTimeAgo(ts) {
   return `${Math.floor(sec / 86400)} 天前`;
 }
 
+/** 相对时间（刚刚 / N分钟前 / N小时前 / N天前），超过 7 天回退为本地日期时间。 */
+export function formatTimestamp(timestamp) {
+  if (!timestamp || timestamp === 0) return '未知';
+  try {
+    const date = new Date(timestamp * 1000);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return '刚刚';
+    if (diffMins < 60) return `${diffMins}分钟前`;
+    if (diffHours < 24) return `${diffHours}小时前`;
+    if (diffDays < 7) return `${diffDays}天前`;
+
+    return date.toLocaleDateString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch (e) {
+    return '未知';
+  }
+}
+
 export function createSortLink(area, sort, order, colName, colKey, params = {}) {
   const newOrder = (sort === colKey && order === 'asc') ? 'desc' : 'asc';
   const arrow = sort === colKey ? (order === 'asc' ? icon('arrow_up') : icon('arrow_down')) : '';
@@ -38,6 +66,9 @@ export function createSortLink(area, sort, order, colName, colKey, params = {}) 
   if (params.kind) href += '&kind=' + encodeURIComponent(params.kind);
   if (params.q) href += '&q=' + encodeURIComponent(params.q);
   if (params.media) href += '&media=' + encodeURIComponent(params.media);
+  const pageSize = Number(params.page_size);
+  if (Number.isInteger(pageSize) && pageSize > 0) href += '&page_size=' + encodeURIComponent(pageSize);
+  if (params.mapping_id) href += '&mapping_id=' + encodeURIComponent(params.mapping_id);
   return `<a href="${href}" class="sort-btn">${colName}${arrow}</a>`;
 }
 

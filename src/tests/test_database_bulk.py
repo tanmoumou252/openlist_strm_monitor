@@ -10,6 +10,7 @@ database.py bulk_connection / batch 辅助方法测试。
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import tempfile
 import time
@@ -928,18 +929,20 @@ class TestLastVerifiedAtColumn:
 
     def test_touch_verified_by_mapping_updates_all_paths_under_root(self, db: Database):
         """touch_verified_by_mapping 更新所有在根路径下的记录"""
+        # 用 os.sep 构造路径，与 touch_verified_by_mapping 的 os.sep 匹配（Windows 反斜杠）
+        sep = os.sep
         db.upsert_a_batch([
-            ("/a/root1/file1.strm", "/m/1.mp4", "/m"),
-            ("/a/root1/file2.strm", "/m/2.mp4", "/m"),
-            ("/a/root2/file3.strm", "/m/3.mp4", "/m"),
+            (f"{sep}a{sep}root1{sep}file1.strm", "/m/1.mp4", "/m"),
+            (f"{sep}a{sep}root1{sep}file2.strm", "/m/2.mp4", "/m"),
+            (f"{sep}a{sep}root2{sep}file3.strm", "/m/3.mp4", "/m"),
         ])
         # 注意参数顺序：(local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, mapping_id, status)
         db.upsert_b_batch([
-            ("/b/root1/file1.strm", "/m/1.mp4", "/m", "/a/root1/file1.strm",
+            (f"{sep}b{sep}root1{sep}file1.strm", "/m/1.mp4", "/m", f"{sep}a{sep}root1{sep}file1.strm",
              "fp1", "m1", "valid"),
-            ("/b/root1/file2.strm", "/m/2.mp4", "/m", "/a/root1/file2.strm",
+            (f"{sep}b{sep}root1{sep}file2.strm", "/m/2.mp4", "/m", f"{sep}a{sep}root1{sep}file2.strm",
              "fp2", "m1", "valid"),
-            ("/b/root2/file3.strm", "/m/3.mp4", "/m", "/a/root2/file3.strm",
+            (f"{sep}b{sep}root2{sep}file3.strm", "/m/3.mp4", "/m", f"{sep}a{sep}root2{sep}file3.strm",
              "fp3", "m2", "valid"),
         ])
 
@@ -951,11 +954,11 @@ class TestLastVerifiedAtColumn:
             b_initial = dict(conn.execute(
                 "SELECT source_a_path, last_verified_at FROM b_strm_files"
             ).fetchall())
-            initial_a_root2 = a_initial["/a/root2/file3.strm"]
-            initial_b_m2 = b_initial["/a/root2/file3.strm"]
+            initial_a_root2 = a_initial[f"{sep}a{sep}root2{sep}file3.strm"]
+            initial_b_m2 = b_initial[f"{sep}a{sep}root2{sep}file3.strm"]
 
         now = time.time()
-        db.touch_verified_by_mapping("m1", "/a/root1", now)
+        db.touch_verified_by_mapping("m1", f"{sep}a{sep}root1", now)
 
         with db.read_connection() as conn:
             a_rows = dict(conn.execute(
@@ -966,16 +969,42 @@ class TestLastVerifiedAtColumn:
             ).fetchall())
 
             # A 区：root1 下的被更新
-            assert a_rows["/a/root1/file1.strm"] == now
-            assert a_rows["/a/root1/file2.strm"] == now
+            assert a_rows[f"{sep}a{sep}root1{sep}file1.strm"] == now
+            assert a_rows[f"{sep}a{sep}root1{sep}file2.strm"] == now
             # A 区：root2 下的未受影响，保持初始值
-            assert a_rows["/a/root2/file3.strm"] == initial_a_root2
+            assert a_rows[f"{sep}a{sep}root2{sep}file3.strm"] == initial_a_root2
 
             # B 区：m1 mapping 的被更新
-            assert b_rows["/a/root1/file1.strm"] == now
-            assert b_rows["/a/root1/file2.strm"] == now
+            assert b_rows[f"{sep}a{sep}root1{sep}file1.strm"] == now
+            assert b_rows[f"{sep}a{sep}root1{sep}file2.strm"] == now
             # B 区：m2 mapping 的未受影响，保持初始值
-            assert b_rows["/a/root2/file3.strm"] == initial_b_m2
+            assert b_rows[f"{sep}a{sep}root2{sep}file3.strm"] == initial_b_m2
+
+    def test_touch_verified_by_mapping_windows_sep_and_wildcard_escape(self, db: Database):
+        """F1 回归：Windows 反斜杠路径应被匹配；含 _/% 的目录名不应误匹配"""
+        sep = os.sep
+        # 根路径含下划线（_ 是 LIKE 通配符），子目录含百分号（% 是 LIKE 通配符）
+        root = f"{sep}box{sep}strm_zone"
+        db.upsert_a_batch([
+            (f"{root}{sep}100%_special{sep}file1.strm", "/m/1.mp4", "/m"),
+            (f"{root}{sep}normal{sep}file2.strm", "/m/2.mp4", "/m"),
+            # 前缀相似但不在根下的记录（root 是 /box/strm_zone，这条是 /box/strm_zone_extra）
+            (f"{sep}box{sep}strm_zone_extra{sep}file3.strm", "/m/3.mp4", "/m"),
+        ])
+
+        now = time.time()
+        db.touch_verified_by_mapping("m1", root, now)
+
+        with db.read_connection() as conn:
+            a_rows = dict(conn.execute(
+                "SELECT local_path, last_verified_at FROM a_strm_files"
+            ).fetchall())
+
+            # 根下所有记录（含通配符目录名）都被更新
+            assert a_rows[f"{root}{sep}100%_special{sep}file1.strm"] == now
+            assert a_rows[f"{root}{sep}normal{sep}file2.strm"] == now
+            # 前缀相似但不在根下的记录不受影响（escape_like + 尾部分隔符防止误匹配）
+            assert a_rows[f"{sep}box{sep}strm_zone_extra{sep}file3.strm"] != now
 
     def test_insert_new_record_initializes_last_verified_at(self, db: Database):
         """插入新记录时 last_verified_at 初始化为 now"""

@@ -7,6 +7,9 @@ pytest>=7.0.0
 # 测试覆盖率报告（可选，src/tests/run_tests.bat --cov 使用）
 pytest-cov>=4.0.0
 
-# Mock TMDB API 服务器（仅 src/tests/test_tmdb_api.py 使用）
+# HTTP 请求库（多处测试使用，如 test_tmdb_api.py、test_openlist_admin_api.py）
+requests>=2.31.0
+
+# Mock TMDB API 服务器（独立调试工具，非 pytest 用例；仅 src/tests/test_tmdb_api.py --flask 启动）
 flask>=2.0.0
 

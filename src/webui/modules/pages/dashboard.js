@@ -1,7 +1,7 @@
 import { api } from '../core/api.js';
 import { isRenderStale } from '../core/router.js';
 import { icon } from '../core/icons.js';
-import { esc } from '../core/utils.js';
+import { esc, formatTimestamp } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
 import { showConfirmDialog } from '../components/dialog.js';
 import {
@@ -331,9 +331,9 @@ export async function startMainProgram() {
       showConfirmDialog(
         '启动前检查未通过',
         preflightHtml,
-        '知道了',
-        '取消',
-        { htmlContent: true }
+        null,
+        null,
+        { htmlContent: true, confirmText: '知道了', cancelText: '取消' }
       );
     }
     return;
@@ -431,23 +431,26 @@ export async function renderDashboard(el) {
   </div>
 </div>
 
+<!-- N1: watchdog 降级指示（后端 _watchers_healthy 标志） -->
+${d.watchers_healthy === false ? `<div class="dashboard-warning-banner" style="margin:12px 0;padding:10px 14px;background:color-mix(in srgb,var(--error) 12%,transparent);border:1px solid color-mix(in srgb,var(--error) 40%,transparent);border-radius:var(--radius-control);color:var(--error);font-size:13px;display:flex;align-items:center;gap:8px">${icon('warning')} watchdog 监视器降级：部分区域事件可能未同步，请检查 WebUI 日志</div>` : ''}
+
 <div class="stat-grid">
   <div class="stat-card"><div class="label">${icon('movie')} A 区 STRM</div><div class="value">${d.a_count}</div></div>
   <div class="stat-card"><div class="label">${icon('tv')} B 区 STRM</div><div class="value">${d.b_count}</div></div>
   <div class="stat-card"><div class="label">${icon('area_c')} C 区幽灵</div><div class="value">${d.c_count}</div></div>
 <div class="stat-card"><div class="label">B - valid</div><div class="value stat-value-primary">${d.b_valid}</div></div>
-	  <div class="stat-card"><div class="label">B - duplicate</div><div class="value stat-value-warning">${d.b_duplicate}</div></div>
-	  <div class="stat-card"><div class="label">B - quarantined</div><div class="value stat-value-error">${d.b_quarantined}</div></div>
+    <div class="stat-card"><div class="label">B - duplicate</div><div class="value stat-value-warning">${d.b_duplicate}</div></div>
+    <div class="stat-card"><div class="label">B - quarantined</div><div class="value stat-value-error">${d.b_quarantined}</div></div>
   <div class="stat-card"><div class="label">${icon('tmdb')} TMDB</div><div class="value stat-value-large">${d.tmdb_configured ? '已配置' : '未配置'}</div></div>
   <div class="stat-card"><div class="label">WebUI 运行时间</div><div class="value stat-value-large" id="uptime-val">-</div></div>
 </div>
 
 <!-- 索引元数据（Task 2） -->
 <div class="stat-grid" style="margin-top:16px">
-  <div class="stat-card"><div class="label">${icon('update')} 索引代次</div><div class="value stat-value-primary">#${d.index_metadata?.index_generation || 0}</div></div>
-  <div class="stat-card"><div class="label">${icon('schedule')} 最近索引</div><div class="value" title="${_formatExact(d.index_metadata?.last_full_index_at)}">${d.index_metadata?.last_full_index_at ? _formatTimestamp(d.index_metadata.last_full_index_at) : '暂无记录'}</div></div>
+  <div class="stat-card"><div class="label">${icon('update')} 索引代次</div><div class="value stat-value-primary" id="index-generation">#${d.index_metadata?.index_generation || 0}</div></div>
+  <div class="stat-card"><div class="label">${icon('schedule')} 最近索引</div><div class="value" title="${_formatExact(d.index_metadata?.last_full_index_at)}">${d.index_metadata?.last_full_index_at ? formatTimestamp(d.index_metadata.last_full_index_at) : '暂无记录'}</div></div>
   <div class="stat-card"><div class="label">${icon('link')} 映射版本</div><div class="value" title="${esc(d.index_metadata?.mapping_version || '')}">${d.index_metadata?.mapping_version ? d.index_metadata.mapping_version.substring(0, 8) + '...' : '-'}</div></div>
-  <div class="stat-card"><div class="label">映射版本生成</div><div class="value" title="${_formatExact(d.index_metadata?.mapping_version_generated_at)}">${d.index_metadata?.mapping_version_generated_at ? _formatTimestamp(d.index_metadata.mapping_version_generated_at) : '暂无记录'}</div></div>
+  <div class="stat-card"><div class="label">映射版本生成</div><div class="value" title="${_formatExact(d.index_metadata?.mapping_version_generated_at)}">${d.index_metadata?.mapping_version_generated_at ? formatTimestamp(d.index_metadata.mapping_version_generated_at) : '暂无记录'}</div></div>
 </div>
 
 <!-- A'.3: 立即全量审计按钮 -->
@@ -472,46 +475,18 @@ ${d.mappings && d.mappings.length > 0 ? `
           <div>B: ${esc(_shortenPath(m.b_root))}</div>
         </div>
         <div style="font-size:11px;color:var(--text-muted)">
-          索引时间: <span title="${_formatExact(m.index_generation_at)}">${m.index_generation_at ? _formatTimestamp(m.index_generation_at) : '未索引'}</span>
+          索引时间: <span title="${_formatExact(m.index_generation_at)}">${m.index_generation_at ? formatTimestamp(m.index_generation_at) : '未索引'}</span>
         </div>
       </div>
     `).join('')}
   </div>
 </div>
 ` : ''}
-	
-	  <!-- 密码提示 -->
-	  <div style="text-align:center;font-size:12px;color:var(--text-muted);margin-top:8px">
+  
+    <!-- 密码提示 -->
+    <div style="text-align:center;font-size:12px;color:var(--text-muted);margin-top:8px">
       管理密码仅在首次启动时打印到控制台（不写入日志） · 忘记密码可运行 <code style="background:var(--bg-control);padding:1px 4px;border-radius:3px">python reset_admin.py</code> 重置
-	  </div>`;
-
-// Task 2: 索引元数据辅助函数
-function _formatTimestamp(timestamp) {
-  if (!timestamp || timestamp === 0) return '未知';
-  try {
-    const date = new Date(timestamp * 1000);
-    const now = new Date();
-    const diffMs = now - date;
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMs / 3600000);
-    const diffDays = Math.floor(diffMs / 86400000);
-    
-    if (diffMins < 1) return '刚刚';
-    if (diffMins < 60) return `${diffMins}分钟前`;
-    if (diffHours < 24) return `${diffHours}小时前`;
-    if (diffDays < 7) return `${diffDays}天前`;
-    
-    return date.toLocaleDateString('zh-CN', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch (e) {
-    return '未知';
-  }
-}
+    </div>`;
 
 /** 将 Unix 时间戳转为精确的 YYYY-MM-DD HH:mm:ss 格式（用于 title tooltip） */
 function _formatExact(timestamp) {
@@ -573,13 +548,26 @@ function _shortenPath(path) {
         const maxPolls = 300;
         for (let i = 0; i < maxPolls; i++) {
           await new Promise(r => setTimeout(r, 2000));
+          // [已修复] L6: 轮询循环含 isRenderStale 检查
+          if (isRenderStale()) return;
           try {
             const st = await api('/api/index/audit/status');
+            // T11c: already_running 是"被其他任务占用"，不是完成的假成功
+            if (st.result && st.result.status === 'already_running') {
+              if (auditStatusText) auditStatusText.textContent = '审计被其他任务占用（已在进行中）';
+              auditBtn.disabled = false;
+              auditBtn.innerHTML = `${icon('play_arrow')} 立即全量审计`;
+              return;
+            }
             if (!st.running && st.result) {
-              if (st.result.error) {
+              // [已修复] N-P2-10: 显式判断 status === 'completed' 再读 generation，
+              // 避免用 `!error` 推断成功、`|| 0` 掩盖缺 generation 的脆弱性
+              if (st.result.status === 'completed') {
+                if (auditStatusText) auditStatusText.textContent = '审计完成，索引代次 #' + (st.result.index_generation || 0);
+              } else if (st.result.error) {
                 if (auditStatusText) auditStatusText.textContent = '审计失败: ' + st.result.error;
               } else {
-                if (auditStatusText) auditStatusText.textContent = '审计完成，索引代次 #' + (st.result.index_generation || 0);
+                if (auditStatusText) auditStatusText.textContent = '审计未完成';
               }
               auditBtn.disabled = false;
               auditBtn.innerHTML = `${icon('play_arrow')} 立即全量审计`;
@@ -587,7 +575,7 @@ function _shortenPath(path) {
               try {
                 const dashResp = await api('/api/dashboard');
                 if (dashResp && dashResp.index_metadata) {
-                  const genEl = document.querySelector('.stat-value-primary');
+                  const genEl = document.getElementById('index-generation');
                   if (genEl) genEl.textContent = '#' + (dashResp.index_metadata.index_generation || 0);
                 }
               } catch (e) { /* 忽略刷新失败 */ }

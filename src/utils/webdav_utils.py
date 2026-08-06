@@ -12,7 +12,6 @@ from utils.strm_utils import canonicalize_webdav_path
 # autopep8: on
 # isort: on
 
-
 def webdav_parent(path: str) -> str:
     path = canonicalize_webdav_path(path, case_sensitive=True)
     parts = path.strip("/").split("/")
@@ -20,12 +19,10 @@ def webdav_parent(path: str) -> str:
         return "/"
     return "/" + "/".join(parts[:-1])
 
-
 def webdav_root_name(path: str) -> str:
     path = canonicalize_webdav_path(path, case_sensitive=True)
     parts = [p for p in path.strip("/").split("/") if p]
     return parts[0] if parts else ""
-
 
 def build_webdav_trash_path(webdav_path: str, trash_dir_name: str) -> str:
     webdav_path = canonicalize_webdav_path(webdav_path, case_sensitive=True)
@@ -44,11 +41,10 @@ def build_webdav_trash_path(webdav_path: str, trash_dir_name: str) -> str:
 
     return trash_dir + "/" + filename
 
-
 def _canonicalize_webdav_path_for_cloud(webdav_path: str) -> str:
     """规范化 WebDAV 路径用于云端操作
+    # [设计取舍] #11: 两套路径语义是设计分工，勿合并
 
-    [AUDIT-NOTE] 与 strm_utils.canonicalize_webdav_path 语义不同是设计分工：
     后者用于指纹/身份（NFC，不解码不 normpath）；本函数用于云 API 路径比较
     （unquote+normpath，无 NFC）。两者从不交叉比较，仅 _b_file_score 去重打分用。勿合并。
     """

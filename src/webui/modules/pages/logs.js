@@ -1,6 +1,8 @@
 import { api } from '../core/api.js';
 import { icon } from '../core/icons.js';
 import { esc, fmtTime } from '../core/utils.js';
+import { showToast } from '../components/toast.js';
+import { isRenderStale } from '../core/router.js';
 
 // 当前日志类型：'tmdb' = TMDB 操作日志（主日志，默认），'main' = 主程序日志
 let currentLogType = 'tmdb';
@@ -64,6 +66,9 @@ export async function renderLogs(el) {
 async function _fetchAndRenderLogs(el) {
   const url = currentLogType === 'tmdb' ? '/api/tmdb/logs' : '/api/logs';
   const data = await api(url);
+
+  // 导航期间在途请求返回后，若页面代际已变则丢弃，避免覆盖新页面
+  if (isRenderStale()) return;
 
   let logs, totalCount;
   if (currentLogType === 'tmdb') {
@@ -154,8 +159,15 @@ async function _fetchAndRenderLogs(el) {
       refreshBtn.innerHTML = '刷新中...';
       try {
         await _fetchAndRenderLogs(el);
+      } catch (e) {
+        showToast('刷新失败: ' + e.message, 'error');
       } finally {
-        // _fetchAndRenderLogs 已经重建了 DOM，这里不需要恢复按钮状态
+        // [已修复] N-P1-6: 恢复按钮状态（_fetchAndRenderLogs 可能重建 DOM，需重新获取引用）
+        const btn = document.getElementById('logs-refresh');
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = originalHtml;
+        }
       }
     });
   }
@@ -203,7 +215,7 @@ async function _fetchAndRenderLogs(el) {
         URL.revokeObjectURL(url);
       } catch (err) {
         console.error('下载日志失败:', err);
-        alert('下载失败: ' + err.message);
+        showToast('下载失败: ' + err.message, 'error');
       } finally {
         downloadBtn.disabled = false;
         downloadBtn.innerHTML = originalHtml;

@@ -1,4 +1,5 @@
 import { icon } from './icons.js';
+import { esc } from './utils.js';
 import { _mainStatusTimer, setMainStatusTimer, stopUptimeTimer, _hasPassword, setHasPassword } from './state.js';
 import { ApiAuthError } from './api.js';
 

@@ -362,7 +362,6 @@ class TestFixes:
     def test_mkdir_return_value(self):
         """测试 mkdir 返回值逻辑"""
         # 这个测试需要实际的 WebDAV 连接
-        # 这里只验证方法签名
         from webdav_client import OpenlistWebDAV
 
         client = OpenlistWebDAV(
@@ -381,7 +380,6 @@ class TestFixes:
             user="admin",
             password="test",
         )
-        # 验证方法存在
         assert hasattr(client, "list_contents")
 
 

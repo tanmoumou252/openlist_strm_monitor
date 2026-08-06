@@ -50,16 +50,13 @@ from media_renamer import (
     extract_season_from_path,
 )
 
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
 
 def ensure_base_dir_first():
     normalized_base_dir = os.path.normcase(os.path.abspath(BASE_DIR))
     sys.path[:] = [p for p in sys.path if os.path.normcase(
         os.path.abspath(p or os.getcwd())) != normalized_base_dir]
     sys.path.insert(0, BASE_DIR)
-
 
 ensure_base_dir_first()
 
@@ -68,7 +65,6 @@ B_SCAN_SLOW_OPERATION_SECONDS = 3.0
 
 # autopep8: on
 # isort: on
-
 
 @dataclass(slots=True, frozen=True)
 class StrmStorageInfo:
@@ -87,7 +83,6 @@ class StrmStorageInfo:
     @property
     def is_sync_mode(self) -> bool:
         return self.save_local_mode.lower() == "update"
-
 
 class StrmStorageManager:
     """STRM 存储管理器"""
@@ -176,7 +171,6 @@ class StrmStorageManager:
             result["valid"].append(storage)
         return result
 
-
 class AppService:
     """应用核心服务。
 
@@ -242,6 +236,8 @@ class AppService:
         self._fingerprint_locks: dict[str, threading.Lock] = {}
         # WebUI 媒体刷新锁：防止同一媒体并发刷新
         self._refresh_lock = threading.Lock()
+        # N1: Watchdog 健康状态标志 - 由 area_watchers 设置，dashboard 读取并显示
+        self._watchers_healthy = True
         self.sync_service = SyncService(self)
         self.subtitle_handler = SubtitleHandler(self)
         self._mapping_version = mapping_version(self.a_b_mappings, self.c_root)
@@ -307,12 +303,20 @@ class AppService:
         threading.Thread(target=_delayed_clear, daemon=True).start()
 
     def get_path_lock(self, path: str | Path) -> threading.Lock:
+        """获取路径锁。
+        
+        锁字典有容量上限（10000），超过时清空防止内存泄漏。
+        """
         key = str(Path(path).resolve())
         with self._path_locks_lock:
             lock = self._path_locks.get(key)
             if lock is None:
                 lock = threading.Lock()
                 self._path_locks[key] = lock
+            # L1: 容量上限 - 超过 10000 时告警（弃用 clear 防锁引用失效）
+            # [已修复] L1: 锁字典容量告警（已弃用 clear 方案）
+            if len(self._path_locks) > 10000:
+                logging.warning("[Lock] _path_locks 容量 %d", len(self._path_locks))
         return lock
 
     def get_webdav_lock(self, webdav_path: str) -> threading.Lock:
@@ -329,6 +333,10 @@ class AppService:
             if lock is None:
                 lock = threading.Lock()
                 self._path_locks[key] = lock
+            # L1: 容量上限 - 超过 10000 时告警（弃用 clear 防锁引用失效）
+            # [已修复] L1: 锁字典容量告警（已弃用 clear 方案）
+            if len(self._path_locks) > 10000:
+                logging.warning("[Lock] _path_locks 容量 %d", len(self._path_locks))
         return lock
 
     def get_fingerprint_lock(self, fingerprint: str) -> threading.Lock:
@@ -338,6 +346,10 @@ class AppService:
             if lock is None:
                 lock = threading.Lock()
                 self._fingerprint_locks[fingerprint] = lock
+            # L1: 容量上限 - 超过 10000 时告警（弃用 clear 防锁引用失效）
+            # [已修复] L1: 锁字典容量告警（已弃用 clear 方案）
+            if len(self._fingerprint_locks) > 10000:
+                logging.warning("[Lock] _fingerprint_locks 容量 %d", len(self._fingerprint_locks))
         return lock
 
     def is_path_under_any_root(self, path: str, roots: list[str]) -> bool:
@@ -1192,6 +1204,24 @@ class AppService:
         total_a = self.db.get_a_count_under_root(cloud_media_root)
         if len(matches) == 1 and total_a > 1:
             bad_file = matches[0]
+            s_webdav = read_strm_webdav_path(bad_file)
+            if not s_webdav:
+                logging.warning("[单兵审判] 无法读取 STRM 的 WebDAV 路径，跳过删除: %s", bad_file)
+                return
+            # [已修复] N4: fail-closed 云端二次核验
+            # fail-closed 云端核验：30s 观察期基于纯 DB 状态，期间云端可能被恢复，需二次确认
+            # check_exists 三态：True=云端仍在→取消, False=权威缺失→删除, None=不可信→取消
+            try:
+                exists_check = self.admin_api.check_exists(s_webdav)
+            except Exception as exc:
+                logging.warning("[单兵审判] 云端核验失败（不可信），跳过删除: %s (%s)", bad_file, exc)
+                return
+            if exists_check is not False:
+                # True=云端仍在, None=不可信 → 中止删除，记录决策
+                status = "云端仍在" if exists_check is True else "不可信"
+                logging.info("[单兵审判] 单兵审判取消：%s，保留文件: %s", status, bad_file)
+                return
+            # check_exists 返回 False，权威确认云端已删除，安全删除本地文件
             logging.warning("[B区清理] 审判结果：确认单兵脱离集体，执行物理删除: %s", bad_file)
             if safe_remove_file(bad_file):
                 self.db.delete_b_by_local(str(bad_file))
@@ -1430,7 +1460,11 @@ class AppService:
                      processed_count, total_records, time.time() - t_start)
 
     def _handle_b_record_migration(self, old_path: str, new_path: str, fingerprint: str) -> None:
-        """处理 B 区记录的路径迁移"""
+        """处理 B 区记录的路径迁移
+        
+        物理删除失败时回滚 DB move，保持磁盘↔DB 一致性。
+        检查 old_path/new_path 磁盘状态，条件回滚并记录警告日志。
+        """
         mapping_id = self._mapping_id_for_b(new_path) or self._mapping_id_for_b(old_path)
         if not mapping_id:
             logging.warning("[B区自同步] 无法解析 mapping，跳过路径迁移: %s -> %s", old_path, new_path)
@@ -1440,15 +1474,41 @@ class AppService:
         if identity and identity.current_b_path == old_path:
             self.db.update_identity_b_path(fingerprint, new_path)
         
+        # [已修复] N3: 物理删除失败已回滚 DB move（保持磁盘↔DB 一致性）
+        # 物理删除失败的孤儿处理 - 回滚 DB move 保持磁盘↔DB 一致性
+        delete_success = False
         try:
             old_path_obj = Path(old_path)
             if old_path_obj.exists() and str(old_path_obj.resolve()) != str(Path(new_path).resolve()):
                 if safe_remove_file(old_path_obj):
                     logging.debug("[B区自同步] 删除旧路径物理文件: %s", old_path)
+                    delete_success = True
                 else:
-                    logging.warning("[B区自同步] 删除旧路径物理文件失败: %s", old_path)
+                    logging.warning("[B区自同步] 删除旧路径物理文件失败，回滚 DB 记录: %s", old_path)
         except Exception as e:
-            logging.warning("[B区自同步] 删除旧路径物理文件失败: %s (%s)", old_path, e)
+            logging.warning("[B区自同步] 删除旧路径物理文件失败，回滚 DB 记录: %s (%s)", old_path, e)
+        
+        # 如果物理删除失败，回滚 DB move 使记录与磁盘一致
+        if not delete_success:
+            try:
+                # 检查 old_path 磁盘上确实存在且 new_path 不存在，才回滚
+                old_exists = Path(old_path).exists()
+                new_exists = Path(new_path).exists()
+                if old_exists and not new_exists:
+                    self.db.move_b_record(new_path, old_path)
+                    if identity and identity.current_b_path == new_path:
+                        self.db.update_identity_b_path(fingerprint, old_path)
+                    logging.info("[B区自同步] 已回滚 DB 记录以保持一致性: %s", old_path)
+                else:
+                    # 如果 new_path 已存在或 old_path 不存在，状态已不一致，记录警告
+                    logging.warning(
+                        "[B区自同步] 物理删除失败且状态不一致 (old=%s, new=%s)，需手动检查",
+                        old_exists, new_exists)
+            except Exception as rollback_exc:
+                logging.error(
+                    "[B区自同步] 回滚 DB 记录失败，可能存在磁盘/DB 不一致: %s (%s)",
+                    old_path, rollback_exc)
+            return  # 跳过后续的 ensure_single_visible_instance，因为回滚了
         
         if fingerprint:
             # 【已核对，勿再作为 bug 上报】
@@ -1964,7 +2024,8 @@ class AppService:
         remove_empty_dirs(self.c_root)
 
     def cleanup_a_deleted_on_cloud(self, engine_path: str) -> None:
-        """在 update 模式下，清理 A 区中云端已删除的文件"""
+        """[设计取舍] N5: 死代码——原 update 模式冗余清理，现已被
+        `cleanup_a_redundant_using_api` 取代，保留仅为兼容旧调用路径。"""
         if not engine_path:
             return
         # 规范化路径前缀，避免 /movies 误匹配 /movies_extra (P2-8)
@@ -2165,9 +2226,10 @@ class AppService:
             a_local_path, webdav_path, parent_webdav_path)
 
     def copy_a_record_to_b(self, a_local_path: str,
-                           webdav_path: str, parent: str) -> bool | None:
+                           webdav_path: str, parent: str,
+                           mapping_id: str = "") -> bool | None:
         return self.sync_service.copy_a_record_to_b(
-            a_local_path, webdav_path, parent)
+            a_local_path, webdav_path, parent, mapping_id=mapping_id)
 
     def _should_treat_as_movie(
             self, a_local_path: str | Path, webdav_path: str | None = None) -> bool:
@@ -2458,7 +2520,7 @@ class AppService:
                 try:
                     c_target = self.get_c_path_for_b(mapping_id, local_path, b_root)
                     c_target.parent.mkdir(parents=True, exist_ok=True)
-                    # [AUDIT-NOTE] copyfile 在恢复锁外是有意设计：marker 在锁内设置，消费侧
+                    # [设计取舍] #2: copyfile 在恢复锁外是有意设计（避免死锁）
                     # handle_b_deleted 在锁内检查，_restoring_generation 计数器防并发恢复竞争。勿把 copyfile 移入锁内。
                     move_file(local, c_target)
                     self.db.move_b_record(local_path, str(c_target))
@@ -2814,8 +2876,14 @@ class AppService:
                     local_path)
                 self.db.delete_b_by_local(str(local))
                 return
+            # [已修复] Task 4: 云端 MOVE/DELETE 成功才联动清理；失败保留 A 区/A 记录
             if webdav_path:
-                self._execute_webdav_deletion(webdav_path, parent_webdav_path)
+                ok = self._execute_webdav_deletion(webdav_path, parent_webdav_path)
+                if not ok:
+                    logging.warning(
+                        "[B区删除联动] 云端删除失败，保留 A 区记录以便重试: %s",
+                        webdav_path)
+                    return
                 self._delete_a_file_by_webdav(webdav_path)
             self.db.delete_b_by_local(str(local))
             if fingerprint:
@@ -2935,6 +3003,9 @@ class AppService:
                 logging.error("[云盘操作] 移动失败: %s -> %s", cloud_path, trash_path)
             else:
                 logging.info("[云盘操作] 移动成功: %s -> %s", cloud_path, trash_path)
+                # [已修复] N-P1-2: 写操作后失效 check_exists 缓存，避免陈旧 True
+                self.admin_api.invalidate_check_exists_cache(cloud_path)
+                self.admin_api.invalidate_check_exists_cache(trash_path)
             return ok
         
         # DELETE 操作
@@ -2944,6 +3015,8 @@ class AppService:
             logging.error("[云盘操作] 删除失败: %s", cloud_path)
         else:
             logging.info("[云盘操作] 删除成功: %s", cloud_path)
+            # [已修复] N-P1-2: 写操作后失效 check_exists 缓存，避免陈旧 True
+            self.admin_api.invalidate_check_exists_cache(cloud_path)
         return ok
 
     def migrate_b_under_root_to_c(self, root_path: str) -> None:
@@ -3205,7 +3278,7 @@ class AppService:
         if not local_path:
             return
         local = Path(local_path)
-        # [AUDIT-NOTE] 先删 DB 再删文件（B-7 反序）是设计如此：避免 watchdog 级联；
+        # [设计取舍] #3: 先删 DB 再删文件是设计如此（避免 watchdog 级联）
         # 物理删除为尽力而为。勿当作 M-8 未守卫删除标记。
         # B-7 删除归因：先删 DB 记录，再删物理文件。
         # 反序原顺序以消除竞态窗口：若先 safe_remove_file，其触发的 on_deleted
@@ -3284,6 +3357,10 @@ class AppService:
                     logging.warning("[回收站] 目录创建失败: %s (将尝试继续)", sub_path)
                     # mkdir 在目录已存在时仍返回 True（见 webdav_client.py）
                     # 如果真的创建失败，继续尝试下一层，最坏情况由 move API 报错
+                else:
+                    # [已修复] N-P1-2: mkdir 成功后失效父目录缓存
+                    parent_dir = "/".join(sub_path.rstrip("/").split("/")[:-1]) or "/"
+                    self.admin_api.invalidate_check_exists_cache(parent_dir)
 
             return True
         except Exception as e:

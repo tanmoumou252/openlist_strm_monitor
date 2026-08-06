@@ -29,8 +29,8 @@ async function _lazyLoadSeasonCount(wrapper) {
   wrapper.dataset.seasonLoaded = '1';
   if (wrapper.querySelector('.tmdb-season-bars')) return;
 try {
-	    const data = await api('/api/tmdb/season-count/' + type + '/' + id);
-	    const count = data.season_count || 0;
+      const data = await api('/api/tmdb/season-count/' + type + '/' + id);
+      const count = data.season_count || 0;
     if (count > 1) {
       const bars = document.createElement('div');
       bars.className = 'tmdb-season-bars';
@@ -80,8 +80,8 @@ async function _loadGenres(tmdbId, type) {
   const cachedGenres = _getGenreCache(cacheKey);
   if (cachedGenres) { _renderGenres(container, cachedGenres); return; }
 try {
-	    const data = await api('/api/tmdb/genres/' + type + '/' + tmdbId);
-	    const genres = data.genres || [];
+      const data = await api('/api/tmdb/genres/' + type + '/' + tmdbId);
+      const genres = data.genres || [];
     _setGenreCache(cacheKey, genres);
     _renderGenres(container, genres);
   } catch (e) {
@@ -259,9 +259,9 @@ export async function renderTmdb(el, params) {
   html += `<span class="tmdb-page-info" style="padding:4px 10px">第 ${curPage}/${totalPages} 页 · 共 ${total} 项</span>`;
   html += `<span style="width:1px;height:16px;background:color-mix(in srgb,var(--border-color) 30%,transparent);flex-shrink:0"></span>`;
 html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${icon('csv')}</button>`;
-	  html += `<button class="tmdb-export-btn" data-export="json-movie" title="电影 JSON">${icon('json')}</button>`;
-	  html += `<button class="tmdb-export-btn" data-export="json-tv" title="剧集 JSON">${icon('tv')}</button>`;
-	  html += '</div></div>';
+    html += `<button class="tmdb-export-btn" data-export="json-movie" title="电影 JSON">${icon('json')}</button>`;
+    html += `<button class="tmdb-export-btn" data-export="json-tv" title="剧集 JSON">${icon('tv')}</button>`;
+    html += '</div></div>';
 
   html += `<div class="toolbar"><div class="search-wrap">${icon('search', 'search-prefix')}<input type="text" id="tmdb-search" placeholder="搜索待看列表..." value="${esc(q)}"></div><button class="search-btn" id="tmdb-search-btn">${icon('search')} 搜索</button></div>`;
 

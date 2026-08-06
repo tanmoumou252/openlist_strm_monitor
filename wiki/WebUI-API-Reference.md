@@ -1,4 +1,5 @@
 # 十、WebUI API 接口参考
+> 最后更新：2026-08-06
 
 所有 API 端点由 `WebUIServer`（`src/webui/server.py`）提供服务，路由处理器在 `src/webui/routes.py` 中。
 
@@ -134,10 +135,10 @@
 ### `GET /api/config`
 获取应用配置（非敏感字段）。响应为扁平对象，包含约 30 个字段，主要分组如下：
 
-- **数据库**：`db_file`、`db_exists`
+- **数据库**：`db_file`（固定项目根路径，仅读）、`db_exists`
 - **WebUI**：`webui_port`、`webui_bind`
-- **TMDB**：`tmdb_configured`、`tmdb_token_configured`、`tmdb_language`、`tmdb_host`、`tmdb_api_key`（**布尔值**，已脱敏）、`tmdb_api_key_configured`、`tmdb_proxy_configured`、`tmdb_proxy_enabled`、`tmdb_account_id`、`tmdb_watchlist_db`、`tmdb_watchlist_enabled`、`tmdb_fuzzy_threshold`、`tmdb_anime_min_ep_ratio`、`tmdb_anime_max_season_diff`、`tmdb_anime_min_season_ratio`、`tmdb_cache_ttl`
-- **A/B/C 区**：`a_b_mappings`（A↔B 映射列表）、`b_root`、`c_root`、`a_folders`、`strm_engine_paths`、`refresh_paths`
+- **TMDB**：`tmdb_configured`、`tmdb_token_configured`、`tmdb_language`、`tmdb_host`、`tmdb_api_key`（**布尔值**，已脱敏）、`tmdb_api_key_configured`、`tmdb_proxy_configured`、`tmdb_proxy_enabled`、`tmdb_account_id`、`tmdb_watchlist_enabled`、`tmdb_fuzzy_threshold`、`tmdb_anime_min_ep_ratio`、`tmdb_anime_max_season_diff`、`tmdb_anime_min_season_ratio`、`tmdb_cache_ttl`
+- **A/B/C 区**：`a_b_mappings`（A↔B 映射列表，每个元素含 `a_root`、`b_root`、`label` 和 `mapping_id`）、`b_root`、`c_root`、`a_folders`、`strm_engine_paths`、`refresh_paths`
 - **OpenList/WebDAV**：`webdav_host`、`webdav_user`、`webdav_password`（**布尔值**，已脱敏）、`webdav_totp_secret`（**布尔值**，已脱敏）
 - **刷新/行为**：`refresh_enabled`、`refresh_interval`、`behavior_action`、`ghost_protect_seconds`
 
@@ -210,7 +211,7 @@ Ping OpenList API。**免 Token**。
 获取 OpenList 路径配置。响应字段：
 
 - `a_folders` — A 区根目录列表（由 STRM 引擎自动发现）
-- `a_b_mappings` — A↔B 映射列表，每个元素含 `a_root`（A 区根路径）与 `b_root`（对应的 B 区根路径）
+- `a_b_mappings` — A↔B 映射列表，每个元素含 `a_root`（A 区根路径）、`b_root`（对应的 B 区根路径）、`label`（标签）和 `mapping_id`（映射唯一标识符）
 - `b_root` — 全局 B 区根目录（兼容旧配置）
 - `c_root` — C 区根目录
 
@@ -282,17 +283,33 @@ TMDB 云端搜索（非本地数据库）：
 - `status`（str，必填）— 取值 `matched`、`fuzzy`、`unmatched`、`uncomputed` 之一。
 - `reason`（str，可选）— 覆盖原因，默认 `"manual_override"`，截断至 256 字符。
 
-> ⚠️ **契约修正**：早期文档将 body 键写作 `type`，实际代码读取的是 `media_type`。按 `type` 提交会得到 400「无效的 media_type」。这是当前文档与代码不一致的修复点。
+> **契约修正**：早期文档将 body 键写作 `type`，实际代码读取的是 `media_type`。按 `type` 提交会得到 400「无效的 media_type」。这是当前文档与代码不一致的修复点。
 
 成功返回 `{"success": true, "message": "收录状态已手动覆盖"}`。
+
+### `POST /api/tmdb/watchlist/match/clear`
+清除指定条目的手动覆盖状态，恢复到自动计算。
+
+**请求 Body**：
+```json
+{
+  "id": 550,
+  "media_type": "movie"
+}
+```
+
+- `id`（int，必填）— TMDB 条目 ID，非整数返回 400「无效的 id」。
+- `media_type`（str，必填）— 取值 `movie` 或 `tv`，其他值返回 400「无效的 media_type」。
+
+成功返回 `{"success": true, "message": "..."}`。
 
 ### `POST /api/tmdb/configure`
 更新 TMDB 配置。实际接受 14 个字段：
 
-- 通用循环字段（11 个）：`access_token`、`api_key`、`language`、`host`、`watchlist_db`、`csv_watchlist_file`、`fuzzy_threshold`、`anime_min_ep_ratio`、`anime_max_season_diff`、`watchlist_cache_ttl`、`anime_min_season_ratio`
+- 通用循环字段（10 个）：`access_token`、`api_key`、`language`、`host`、`csv_watchlist_file`、`fuzzy_threshold`、`anime_min_ep_ratio`、`anime_max_season_diff`、`watchlist_cache_ttl`、`anime_min_season_ratio`
 - 特殊处理字段（3 个）：`proxy_http`、`proxy_enabled`、`watchlist_enabled`
 
-> 注：`access_token` 为空且已配置时会跳过覆盖（避免前端截断覆盖）；`watchlist_db` 相对路径会转为绝对路径。成功返回 `{"success": true, "message": "TMDB 配置已更新", "tmdb_configured": <bool>}`，无变更返回 `{"success": true, "message": "无变更"}`。
+> 注：`access_token` 为空且已配置时会跳过覆盖（避免前端截断覆盖）；`watchlist_db` 字段已移除，数据库路径固定在项目根 `tmdb_watchlist.db`，请求体如含该键将返回 400。成功返回 `{"success": true, "message": "TMDB 配置已更新", "tmdb_configured": <bool>}`，无变更返回 `{"success": true, "message": "无变更"}`。
 
 ### `GET /api/tmdb/season-count/{type}/{id}`
 获取电视剧季数。`{type}` 为 `tv`，`{id}` 为 TMDB ID。仅查 DB 缓存，不调用 TMDB API。非 `tv` 类型（如 `movie`）静默返回 `{"id": <id>, "season_count": 0}`，不报错。
@@ -326,6 +343,8 @@ TMDB 头像/海报图片代理。**免 Token**。
 ### `GET /api/logs`
 获取系统日志。唯一参数 `lines`（默认 `200`），返回最近 N 行日志。
 
+> 返回的日志行按**倒序**排列（最新的日志在前），与 WebUI 日志页一致。
+
 **响应**：
 ```json
 {
@@ -349,19 +368,34 @@ TMDB 头像/海报图片代理。**免 Token**。
 
 **请求**：`{ "step": "..." }`
 
-`step` 取值受限，仅支持以下之一，否则返回 400：
+`step` 取值受限，仅支持以下三个步骤（需手动标记完成），否则返回 400：
 - `view_ab` — 浏览 A/B 区
 - `tmdb_refresh` — 刷新 TMDB 待看列表匹配
 - `tmdb_match` — 完成 TMDB 匹配
 
 成功返回 `{"ok": true}`。每个步骤的完成标记写入 DB：`onboarding_{step}_completed`。
 
+**完整的 7 步引导流程**（dashboard.js 中定义）：
+
+| 步骤 | Key | 标记方式 | 说明 |
+|------|-----|---------|------|
+| 1 | `password` | 自动检测 | 管理员密码已设置时自动完成 |
+| 2 | `tmdb` | 自动检测 | TMDB 配置完成时自动完成 |
+| 3 | `openlist` | 自动检测 | OpenList 配置完成时自动完成 |
+| 4 | `main` | 自动检测 | 主程序运行时自动完成 |
+| 5 | `view_ab` | 手动标记 | 通过本 API 标记完成 |
+| 6 | `tmdb_refresh` | 手动标记 | 通过本 API 标记完成 |
+| 7 | `tmdb_match` | 手动标记 | 通过本 API 标记完成 |
+
+前 4 步由系统根据配置状态自动检测完成，后 3 步需用户手动点击「标记完成」按钮调用本 API。
+
 ### 引导状态读取（无独立 status 端点）
 
 引导状态由前端通过 `GET /api/config/status` 读取（其响应包含 `onboarding_completed` 等键，驱动引导卡片的「已完成 / 进行中」展示）；`GET /api/webui/config/ui`（免 Token）用于读取/写入 UI 配置，整体完成或跳过通过 `POST /api/webui/config/ui` 写入。相关键如下：
 
 - `onboarding_completed` — 整体是否完成
-- `view_ab_completed` / `tmdb_refresh_completed` / `tmdb_match_completed` — 各步骤完成标记
+- `onboarding_password_completed` / `onboarding_tmdb_completed` / `onboarding_openlist_completed` / `onboarding_main_completed` — 自动检测步骤完成标记
+- `onboarding_view_ab_completed` / `onboarding_tmdb_refresh_completed` / `onboarding_tmdb_match_completed` — 手动标记步骤完成标记
 
 > 注：`onboarding_skipped` 虽然在 `ui` scope 的键白名单中，但代码中从未被写入或读取，属死键，不建议使用。
 

@@ -1,10 +1,11 @@
 # 五、数据库结构参考
+> 最后更新：2026-08-06
 
 项目使用两个 SQLite 数据库，均采用 **WAL 模式** 以获得并发读取性能。
 
 ## bridge.db — 核心同步状态
 
-由 `Database` 类管理（`src/database.py`）。通过自定义 `ReadWriteLock` 类（`database.py` 顶部定义，支持读写分离：多个读者并发、写者独占、写者优先防饥饿）保证线程安全。所有表在 `_create_schema()` 方法中创建。bridge.db 共 **16 张表**：12 张常规表（`a_strm_files`、`b_strm_files`、`strm_identity`、`c_ghost_files`、`ghost_protection`、`known_folders`、`protected_roots`、`protected_roots_snapshot`、`sync_control`、`strm_media_boundary`、`b_identity_projection`、`b_lineage_snapshot`）+ 1 张独立创建的 `subtitles` 表（由 `init_subtitle_table()` 单独创建，`Database.__init__()` 时调用）+ 3 张 FTS5 虚拟表（`a_strm_files_fts`、`b_strm_files_fts`、`c_ghost_files_fts`）。
+由 `Database` 类管理（`src/database.py`）。通过自定义 `ReadWriteLock` 类（`database.py` 顶部定义，支持读写分离：多个读者并发、写者独占、写者优先防饥饿）保证线程安全。所有表在 `_create_schema()` 方法中创建。bridge.db 共 **16 张表**：13 张常规表（`a_strm_files`、`b_strm_files`、`strm_identity`、`c_ghost_files`、`ghost_protection`、`known_folders`、`protected_roots`、`protected_roots_snapshot`、`sync_control`、`strm_media_boundary`、`b_identity_projection`、`b_lineage_snapshot`，以及独立创建的 `subtitles` 表（由 `init_subtitle_table()` 单独创建，`Database.__init__()` 时调用））+ 3 张 FTS5 虚拟表（`a_strm_files_fts`、`b_strm_files_fts`、`c_ghost_files_fts`）。
 
 ### 性能 PRAGMA 设置
 

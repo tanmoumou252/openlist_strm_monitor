@@ -9,13 +9,11 @@ import json
 import hashlib
 from pathlib import Path
 
-
 def normalize_local_root(path: str | Path) -> Path:
     """返回用于 mapping 归属判断的规范化本地根路径。"""
     # 保留 resolved 的实际大小写用于文件系统和 DB 路径；Windows 大小写
     # 等价性由 Path/比较方处理，mapping_id 单独使用 normcase。
     return Path(path).expanduser().resolve()
-
 
 try:
     import tomllib
@@ -30,9 +28,7 @@ from utils.bootstrap import ensure_base_dir_first
 
 ensure_base_dir_first()
 
-
 LINEAGE_VERSION = 1
-
 
 def mapping_version(a_b_mappings: list["ABMapping"], c_root: str | Path) -> str:
     """根据规范化 mapping 集合和全局 C 根生成稳定版本摘要。"""
@@ -51,7 +47,6 @@ def mapping_version(a_b_mappings: list["ABMapping"], c_root: str | Path) -> str:
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-
 @dataclass(slots=True)
 class ABMapping:
     """A 区根目录到 B 区根目录的映射关系"""
@@ -65,7 +60,6 @@ class ABMapping:
         """由 A 根规范化路径生成稳定 mapping_id"""
         normalized = str(normalize_local_root(a_root))
         return hashlib.sha1(normalized.encode()).hexdigest()[:8]
-
 
 def read_line_list(
     file_path: str, base_dir: str | Path, is_webdav: bool = False
@@ -83,14 +77,12 @@ def read_line_list(
         return [line.rstrip("/") for line in lines]
     return lines
 
-
 @dataclass(slots=True)
 class WebDAVConfig:
     host: str
     user: str
     password: str
     totp_secret: str
-
 
 @dataclass(slots=True)
 class RefreshConfig:
@@ -101,7 +93,6 @@ class RefreshConfig:
     log_level: str = "INFO"  # 刷新日志级别：DEBUG/INFO/WARNING
     full_audit_interval_days: int = 7  # A 区全量审计周期；0 表示关闭
 
-
 @dataclass(slots=True)
 class BehaviorConfig:
     sync_on_startup: bool
@@ -111,7 +102,6 @@ class BehaviorConfig:
     ghost_protect_seconds: int = 300
     a_to_b_restore_delay_seconds: int = 30
 
-
 @dataclass(slots=True)
 class LogConfig:
     level: str
@@ -119,13 +109,11 @@ class LogConfig:
     backup_count: int
     file: str = "strm_bridge.log"
 
-
 @dataclass(slots=True)
 class WebUIConfig:
     enabled: bool = True
     port: int = 8579
     bind: str = "0.0.0.0"
-
 
 @dataclass(slots=True)
 class TmdbProxyConfig:
@@ -133,7 +121,6 @@ class TmdbProxyConfig:
     enabled: bool = False
     http: str = ""
     https: str = ""
-
 
 @dataclass(slots=True)
 class TmdbConfig:
@@ -143,12 +130,11 @@ class TmdbConfig:
     host: str = ""
     api_key: str = ""
     csv_watchlist_file: str = ""
-    watchlist_db: str = ""
+    # [已修复] P1-3: watchlist_db 字段已移除，数据库路径固定在项目根 tmdb_watchlist.db
     watchlist_cache_ttl: float = 604800  # 默认 7 天
     fuzzy_threshold: float = 0.60
     anime_min_ep_ratio: float = 0.3
     anime_max_season_diff: float = 0.3  # 新增：动漫最大季度差异阈值
-    # [AUDIT-NOTE] anime_max_season_diff 有意保留但 watchlist_match.py 未读取（季数检查硬编码
     # > total_seasons + 1）。已在 wiki/Configuration-Reference.md 注明运行时无效。为配置兼容保留。
     # 除非同时移除 WebUI 字段与文档，否则勿当死代码删除。
     anime_min_season_ratio: float = 0.3  # 新增：动漫最少季数比例阈值
@@ -157,15 +143,13 @@ class TmdbConfig:
     proxy_enabled: bool = False
     proxy_http: str = ""
 
-
 @dataclass(slots=True)
 class LocalConfig:
     base_dir: str
     a_dir: str
     b_dir: str
     c_dir: str
-    db_file: str = "./bridge.db"
-
+    db_file: str = ""  # [已修复] P1-3: 固定项目根 bridge.db，from_file 强制填充
 
 @dataclass(slots=True)
 class PathsConfig:
@@ -173,7 +157,6 @@ class PathsConfig:
     refresh_paths: list[str]
     b_root: str = ""
     c_root: str = ""
-
 
 @dataclass
 class StrmStorageMapping:
@@ -220,7 +203,6 @@ class StrmStorageMapping:
         if sub_path:
             return os.path.join(base, sub_path.lstrip("/\\"))
         return base
-
 
 @dataclass(slots=True)
 class AppConfig:
@@ -445,14 +427,14 @@ class AppConfig:
         if c_root and not Path(c_root).is_absolute():
             logging.warning("[Config] c_root 不是绝对路径: %s", c_root)
 
+        # [已修复] P1-3: bridge.db 固定在项目根，[local].db_file 不再从 config.toml 读取
+        # [设计取舍] 仅测试注入，生产固定项目根
         local = LocalConfig(
             base_dir=base_dir,
             a_dir="",  # 默认为空，需在 WebUI 配置
             b_dir=b_root,
             c_dir=c_root,
-            db_file=os.path.normpath(os.path.join(
-                base_dir, local_data.get(
-                    "db_file", "bridge.db"))),
+            db_file=os.path.normpath(os.path.join(base_dir, "bridge.db")),
         )
 
         webdav_data = data.get("webdav", {})
@@ -657,7 +639,6 @@ class AppConfig:
         except Exception as exc:
             logging.warning("[STRM存储API] 获取 STRM 存储信息失败: %s", exc)
 
-
 def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
     """将 config.toml 和 txt 文件中的配置迁移到 DB。
 
@@ -704,7 +685,7 @@ def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
                                 json.dumps(legacy_refresh_paths, ensure_ascii=False))
 
         # STRM 引擎配置
-        # ⚠️ a 区来源仅以 "用户在 WebUI 手动添加并保存的引擎" 为唯一真相来源
+        # a 区来源仅以 "用户在 WebUI 手动添加并保存的引擎" 为唯一真相来源
         # （DB 键 openlist.strm_engines，由 WebUI POST 写入）。
         # 迁移时【绝不】把 OpenList 端自动发现的引擎注入为"用户已配置"：
         # 即使 OpenList 存在 strm 引擎而用户没显式添加，也不进入 a_folders / b 区

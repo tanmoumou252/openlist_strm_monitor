@@ -91,7 +91,6 @@ if TYPE_CHECKING:
 # autopep8: on
 # isort: on
 
-
 # ============================================================
 # 静态文件目录（PROJECT_ROOT/dist/）
 # ============================================================
@@ -108,7 +107,6 @@ if not STATIC_DIR.exists():
         "请运行 'cd src/webui && npm run build' 构建前端资源",
         STATIC_DIR
     )
-
 
 # ============================================================
 # 字体代理 Mixin（合并自 webui_font_proxy.py）
@@ -271,7 +269,6 @@ class FontProxyMixin:
             # type: ignore[attr-defined]
             self.send_error(502, "font proxy failed")
 
-
 # ============================================================
 # Handler 类（合并自 webui.py 的 _WebUIHandler 和
 #                standalone_webui.py 的 _TestWebUIHandler）
@@ -346,8 +343,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         if path in ("/api/tmdb/avatar", "/api/tmdb/poster",
                     "/api/openlist/status", "/api/openlist/ping"):
             return True
-        # [AUDIT-NOTE] C-1 已修复：本白名单仅对 GET 生效（method.upper()=="GET" 门控）。
-        # POST /api/webui/config/* 需有效会话，无法未鉴权重置 admin_password。勿再标记为未鉴权改密。
+        # [设计取舍] #13: 白名单 GET-only 是有意设计（SPA/onboarding 登录前需读取）
         if method.upper() == "GET" and path in ("/api/config", "/api/webui/config/ui"):
             return True
         # 验证 session token
@@ -383,6 +379,10 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        # 安全响应头：防止浏览器 MIME 类型嗅探和 iframe 嵌入
+        # [已修复] S4: 已添加 X-Content-Type-Options: nosniff + X-Frame-Options: DENY
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:
@@ -395,6 +395,9 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        # [已修复] S4: 已添加 X-Content-Type-Options: nosniff + X-Frame-Options: DENY
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         try:
@@ -448,12 +451,38 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "public, max-age=604800")
         else:
             self.send_header("Cache-Control", "no-store")
-
+        # 注意：静态资源文件（字体、图片）也应有这些头，防止浏览器 MIME 嗅探
+        # [已修复] S4: 已添加 X-Content-Type-Options: nosniff + X-Frame-Options: DENY
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:
             self.wfile.write(body)
         except (ConnectionAbortedError, BrokenPipeError):
+            pass
+
+    def send_error(self, code, message=None, explain=None):
+        """重写 BaseHTTPRequestHandler.send_error，添加安全响应头（nosniff + DENY）。
+
+        防止错误页被浏览器 MIME 嗅探 / iframe 嵌入。捕获所有异常避免二次崩溃。
+        """
+        try:
+            self.send_response(code, message)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            body = (
+                f"<html><head><title>Error {code}</title></head>"
+                f"<body><h1>{code} {message or 'Error'}</h1></body></html>"
+            ).encode("utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except (ConnectionAbortedError, BrokenPipeError):
+                pass
+        except Exception:
             pass
 
     def _try_serve_static(self, path: str) -> bool:
@@ -495,106 +524,113 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         if not self._check_auth("GET"):
             return
 
-        # TMDB 路由（复用 webui.routes 的增强版）
-        if path.startswith("/api/tmdb/"):
-            tmdb_client = getattr(self.webui, '_tmdb_client', None)
-            if _tmdb_routes(self, tmdb_client, path, params,
-                            webui_server=self.webui):
-                return
+        try:
+            # TMDB 路由（复用 webui.routes 的增强版）
+            if path.startswith("/api/tmdb/"):
+                tmdb_client = getattr(self.webui, '_tmdb_client', None)
+                if _tmdb_routes(self, tmdb_client, path, params,
+                                webui_server=self.webui):
+                    return
 
-        # SPA 初始页面（从 dist/index.html 提供）
-        if path == "/" or path == "/api/page":
-            self._send_static_file()
-        elif path == "/login":
-            self._send_static_file()
-        elif path == "/favicon.ico":
-            # publicDir 提供稳定无哈希路径 assets/favicon.ico
-            self._send_static_file("assets/favicon.ico")
-        elif path == "/logo.png":
-            logos = sorted(STATIC_DIR.glob("assets/logo.*.png"))
-            if logos:
-                self._send_static_file(
-                    str(random.choice(logos).relative_to(STATIC_DIR)))
-            else:
-                logger.error(
-                    "_send_static_file: Logos not found in assets, returning 404.")
-                self.send_error(404, "Logo not found")
-        elif path == "/api/dashboard":
-            handle_dashboard(self)
-        elif path.startswith("/api/area/"):
-            area = path.split("/api/area/")[1].split("/")[0].split("?")[0]
-            rest = path.split("/api/area/")[1]
-            sub = rest[len(area):] if len(rest) > len(area) else ""
-            if sub.startswith("/detail"):
-                handle_area_detail(self, area, params)
-            elif area:
-                handle_area(self, area, params)
+            # SPA 初始页面（从 dist/index.html 提供）
+            if path == "/" or path == "/api/page":
+                self._send_static_file()
+            elif path == "/login":
+                self._send_static_file()
+            elif path == "/favicon.ico":
+                # publicDir 提供稳定无哈希路径 assets/favicon.ico
+                self._send_static_file("assets/favicon.ico")
+            elif path == "/logo.png":
+                logos = sorted(STATIC_DIR.glob("assets/logo.*.png"))
+                if logos:
+                    self._send_static_file(
+                        str(random.choice(logos).relative_to(STATIC_DIR)))
+                else:
+                    logger.error(
+                        "_send_static_file: Logos not found in assets, returning 404.")
+                    self.send_error(404, "Logo not found")
+            elif path == "/api/dashboard":
+                handle_dashboard(self)
+            elif path.startswith("/api/area/"):
+                area = path.split("/api/area/")[1].split("/")[0].split("?")[0]
+                rest = path.split("/api/area/")[1]
+                sub = rest[len(area):] if len(rest) > len(area) else ""
+                if sub.startswith("/detail"):
+                    handle_area_detail(self, area, params)
+                elif area:
+                    handle_area(self, area, params)
+                else:
+                    self._send_json({"error": "not found"}, 404)
+            elif path == "/openlist_strm_bridge.png":
+                self._send_static_file("assets/openlist_strm_bridge.png")
+            elif path.startswith("/fonts/css/"):
+                # 配置了 tmdb.host：路由到 EdgeOne CDN
+                # 未配置 tmdb.host：保留原来的本地 Google Fonts CSS 代理
+                if self._configured_cdn_host():
+                    self._redirect_to_configured_cdn(path, parsed.query)
+                else:
+                    self._proxy_google_font_css(path, parsed.query)
+            elif path.startswith("/fonts/gstatic/"):
+                # 配置了 tmdb.host：路由到 EdgeOne CDN
+                # 未配置 tmdb.host：保留原来的本地 Google Fonts 字体文件代理
+                if self._configured_cdn_host():
+                    self._redirect_to_configured_cdn(path, parsed.query)
+                else:
+                    self._proxy_google_font_file(path)
+            elif path.endswith(".woff2") or path.endswith(".woff") or path.endswith(".ttf"):
+                # Font files served from static/
+                fname = path.lstrip("/")
+                if ".." in fname or "/" in fname or "\\" in fname:
+                    self._send_json({"error": "invalid path"}, 400)
+                else:
+                    self._send_static_file(fname)
+            elif path == "/api/logs":
+                handle_logs_api(self, params)
+            elif path == "/api/logs/download":
+                handle_download_log_api(self, params)
+            elif path == "/api/records":
+                handle_records_api(self, params)
+            elif path == "/api/config":
+                handle_config_api(self)
+            elif path == "/api/config/status":
+                _handle_config_status(self, self.webui)
+            elif path.startswith("/api/webui/config/"):
+                scope = path.split(
+                    "/api/webui/config/")[1].split("/")[0].split("?")[0]
+                if scope:
+                    _handle_webui_config_get(self, self.webui, scope)
+                else:
+                    self._send_json({"error": "scope required"}, 400)
+            # OpenList API 路由
+            elif path == "/api/openlist/status":
+                _handle_openlist_status(self, self.webui)
+            elif path == "/api/openlist/ping":
+                _handle_openlist_ping(self, self.webui)
+            elif path == "/api/openlist/strm-engines":
+                _handle_openlist_strm_engines(self, self.webui)
+            elif path == "/api/openlist/monitored-paths":
+                _handle_openlist_monitored_paths(self, self.webui, params)
+            elif path == "/api/openlist/paths":
+                _handle_openlist_paths(self, self.webui)
+            # 主程序控制路由
+            elif path == "/api/main/status":
+                _handle_main_status(self, self.webui)
+            elif path == "/api/admin/status":
+                self._send_json({"has_password": self.webui._has_password})
+            elif path == "/api/index/audit/status":
+                from webui.routes import handle_index_audit_status
+                handle_index_audit_status(self)
+            # 通用静态文件处理（.js / .css / .svg / .png / .jpg / .ico / .woff2 等）
+            elif self._try_serve_static(path):
+                pass
             else:
                 self._send_json({"error": "not found"}, 404)
-        elif path == "/openlist_strm_bridge.png":
-            self._send_static_file("assets/openlist_strm_bridge.png")
-        elif path.startswith("/fonts/css/"):
-            # 配置了 tmdb.host：路由到 EdgeOne CDN
-            # 未配置 tmdb.host：保留原来的本地 Google Fonts CSS 代理
-            if self._configured_cdn_host():
-                self._redirect_to_configured_cdn(path, parsed.query)
-            else:
-                self._proxy_google_font_css(path, parsed.query)
-        elif path.startswith("/fonts/gstatic/"):
-            # 配置了 tmdb.host：路由到 EdgeOne CDN
-            # 未配置 tmdb.host：保留原来的本地 Google Fonts 字体文件代理
-            if self._configured_cdn_host():
-                self._redirect_to_configured_cdn(path, parsed.query)
-            else:
-                self._proxy_google_font_file(path)
-        elif path.endswith(".woff2") or path.endswith(".woff") or path.endswith(".ttf"):
-            # Font files served from static/
-            fname = path.lstrip("/")
-            if ".." in fname or "/" in fname or "\\" in fname:
-                self._send_json({"error": "invalid path"}, 400)
-            else:
-                self._send_static_file(fname)
-        elif path == "/api/logs":
-            handle_logs_api(self, params)
-        elif path == "/api/logs/download":
-            handle_download_log_api(self, params)
-        elif path == "/api/records":
-            handle_records_api(self, params)
-        elif path == "/api/config":
-            handle_config_api(self)
-        elif path == "/api/config/status":
-            _handle_config_status(self, self.webui)
-        elif path.startswith("/api/webui/config/"):
-            scope = path.split(
-                "/api/webui/config/")[1].split("/")[0].split("?")[0]
-            if scope:
-                _handle_webui_config_get(self, self.webui, scope)
-            else:
-                self._send_json({"error": "scope required"}, 400)
-        # OpenList API 路由
-        elif path == "/api/openlist/status":
-            _handle_openlist_status(self, self.webui)
-        elif path == "/api/openlist/ping":
-            _handle_openlist_ping(self, self.webui)
-        elif path == "/api/openlist/strm-engines":
-            _handle_openlist_strm_engines(self, self.webui)
-        elif path == "/api/openlist/monitored-paths":
-            _handle_openlist_monitored_paths(self, self.webui, params)
-        elif path == "/api/openlist/paths":
-            _handle_openlist_paths(self, self.webui)
-        # 主程序控制路由
-        elif path == "/api/main/status":
-            _handle_main_status(self, self.webui)
-        elif path == "/api/admin/status":
-            self._send_json({"has_password": self.webui._has_password})
-        elif path == "/api/index/audit/status":
-            from webui.routes import handle_index_audit_status
-            handle_index_audit_status(self)
-        # 通用静态文件处理（.js / .css / .svg / .png / .jpg / .ico / .woff2 等）
-        elif self._try_serve_static(path):
-            pass
-        else:
-            self._send_json({"error": "not found"}, 404)
+        except Exception as e:
+            logging.error("[WebUI] GET %s 处理异常: %s", self.path, e, exc_info=True)
+            try:
+                self._send_json({"error": "internal_error"}, 500)
+            except Exception:
+                pass
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -603,7 +639,13 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             return
         if not self._check_auth("POST"):
             return
-        content_length = int(self.headers.get("Content-Length", 0))
+        # [已修复] N-P0-1: do_POST 请求体解析在路由 try/except 之外 → 畸形请求挂起连接
+        # Content-Length 非数字或负值会抛 ValueError/IOError，导致无 HTTP 响应 → 客户端挂起
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (ValueError, TypeError):
+            self._send_json({"error": "invalid Content-Length"}, 400)
+            return
         # 防止恶意超大请求体耗尽内存（DoS）— 配置类 JSON 载荷不会超过此值
         if content_length > _MAX_CONTENT_LENGTH:
             self._send_json(
@@ -611,58 +653,68 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
                 413,
             )
             return
-        body = self.rfile.read(content_length) if content_length else b"{}"
-        if path == "/api/login":
-            _handle_login(self, self.webui, body)
-        elif path == "/api/tmdb/configure":
-            _handle_tmdb_configure(self, self.webui, body)
-        elif path == "/api/tmdb/watchlist/match/refresh":
-            _handle_tmdb_watchlist_match_refresh(self, self.webui)
-        elif path == "/api/tmdb/watchlist/match/override":
-            _handle_tmdb_watchlist_match_override(self, self.webui, body)
-        elif path == "/api/tmdb/watchlist/match/clear":
-            _handle_tmdb_watchlist_match_clear(self, self.webui, body)
-        elif path == "/api/tmdb/watchlist/sync":
-            _handle_tmdb_watchlist_bg_sync(self, self.webui)
-        elif path == "/api/restart-webui":
-            _handle_restart_webui(self, self.webui)
-        elif path == "/api/openlist/test-connection":
-            _handle_openlist_test_connection(self, self.webui, body)
-        elif path == "/api/config/validate":
-            _handle_config_validate(self, self.webui)
-        elif path == "/api/onboarding/complete-step":
-            from webui.routes import _handle_onboarding_complete_step
-            _handle_onboarding_complete_step(self, self.webui, body)
-        elif path == "/api/main/start":
-            _handle_main_start(self, self.webui, body)
-        elif path == "/api/main/stop":
-            _handle_main_stop(self, self.webui)
-        elif path.startswith("/api/area/") and path.endswith("/refresh"):
-            # POST /api/area/{area}/refresh
-            parts = path.split("/api/area/")
-            if len(parts) == 2:
-                rest = parts[1]
-                area_and_refresh = rest.split("/")
-                if len(area_and_refresh) == 2 and area_and_refresh[1] == "refresh":
-                    area = area_and_refresh[0]
-                    handle_area_refresh(self, area, body)
+        try:
+            body = self.rfile.read(content_length) if content_length else b"{}"
+        except Exception:
+            self._send_json({"error": "request body read failed"}, 400)
+            return
+        try:
+            if path == "/api/login":
+                _handle_login(self, self.webui, body)
+            elif path == "/api/tmdb/configure":
+                _handle_tmdb_configure(self, self.webui, body)
+            elif path == "/api/tmdb/watchlist/match/refresh":
+                _handle_tmdb_watchlist_match_refresh(self, self.webui)
+            elif path == "/api/tmdb/watchlist/match/override":
+                _handle_tmdb_watchlist_match_override(self, self.webui, body)
+            elif path == "/api/tmdb/watchlist/match/clear":
+                _handle_tmdb_watchlist_match_clear(self, self.webui, body)
+            elif path == "/api/tmdb/watchlist/sync":
+                _handle_tmdb_watchlist_bg_sync(self, self.webui)
+            elif path == "/api/restart-webui":
+                _handle_restart_webui(self, self.webui)
+            elif path == "/api/openlist/test-connection":
+                _handle_openlist_test_connection(self, self.webui, body)
+            elif path == "/api/config/validate":
+                _handle_config_validate(self, self.webui)
+            elif path == "/api/onboarding/complete-step":
+                from webui.routes import _handle_onboarding_complete_step
+                _handle_onboarding_complete_step(self, self.webui, body)
+            elif path == "/api/main/start":
+                _handle_main_start(self, self.webui, body)
+            elif path == "/api/main/stop":
+                _handle_main_stop(self, self.webui)
+            elif path.startswith("/api/area/") and path.endswith("/refresh"):
+                # POST /api/area/{area}/refresh
+                parts = path.split("/api/area/")
+                if len(parts) == 2:
+                    rest = parts[1]
+                    area_and_refresh = rest.split("/")
+                    if len(area_and_refresh) == 2 and area_and_refresh[1] == "refresh":
+                        area = area_and_refresh[0]
+                        handle_area_refresh(self, area, body)
+                    else:
+                        self._send_json({"error": "not found"}, 404)
                 else:
                     self._send_json({"error": "not found"}, 404)
+            elif path.startswith("/api/webui/config/"):
+                scope = path.split(
+                    "/api/webui/config/")[1].split("/")[0].split("?")[0]
+                if scope:
+                    _handle_webui_config_post(self, self.webui, scope, body)
+                else:
+                    self._send_json({"error": "scope required"}, 400)
+            elif path == "/api/index/audit":
+                from webui.routes import handle_index_audit
+                handle_index_audit(self, body)
             else:
                 self._send_json({"error": "not found"}, 404)
-        elif path.startswith("/api/webui/config/"):
-            scope = path.split(
-                "/api/webui/config/")[1].split("/")[0].split("?")[0]
-            if scope:
-                _handle_webui_config_post(self, self.webui, scope, body)
-            else:
-                self._send_json({"error": "scope required"}, 400)
-        elif path == "/api/index/audit":
-            from webui.routes import handle_index_audit
-            handle_index_audit(self, body)
-        else:
-            self._send_json({"error": "not found"}, 404)
-
+        except Exception as e:
+            logging.error("[WebUI] POST %s 处理异常: %s", self.path, e, exc_info=True)
+            try:
+                self._send_json({"error": "internal_error"}, 500)
+            except Exception:
+                pass
 
 # ============================================================
 # 服务器（合并自 webui.py 的 WebUIServer 和
@@ -837,6 +889,7 @@ class WebUIServer:
             logging.debug("[WebUI] TMDB 客户端初始化失败: %s", e)
 
     def _reinit_watchlist_db(self) -> None:
+        # [已修复] P1-3: 数据库路径固定在项目根，不再读取 tmdb_cfg.watchlist_db
         """据当前配置重建 TMDB 待看列表 SQLite 数据库。
 
         DB 无条件创建（用于存储 webui_config 配置），
@@ -1216,7 +1269,6 @@ class WebUIServer:
                 result["refresh_last_error"] = rs._last_error_summary
         return result
 
-
 # ============================================================
 # 独立运行入口
 # ============================================================
@@ -1362,7 +1414,6 @@ def main():
 
     server.stop()
     logger.info("已退出")
-
 
 if __name__ == "__main__":
     main()

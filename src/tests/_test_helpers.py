@@ -10,6 +10,8 @@ from pathlib import Path
 from threading import Lock
 from unittest.mock import MagicMock, Mock
 
+from database import ReadWriteLock  # noqa: E402
+
 
 def build_mock_app(
     tmp_path: Path | None = None,
@@ -65,6 +67,13 @@ def build_mock_app(
     app.config.behavior.ghost_protect_seconds = ghost_protect_seconds
     app.admin_api = app_cls()
     app.db = app_cls()
+    app.db.rw_lock = ReadWriteLock()  # [已修复] Task 1: 提供真实 ReadWriteLock 供 use_bulk=False 上下文管理器
+    # [已修复] Task 1: connection/read_connection 需支持上下文管理器协议
+    _conn_mock = MagicMock()
+    _conn_mock.__enter__ = Mock(return_value=_conn_mock)
+    _conn_mock.__exit__ = Mock(return_value=False)
+    app.db.connection = Mock(return_value=_conn_mock)
+    app.db.read_connection = Mock(return_value=_conn_mock)
 
     # 默认 DB 查询返回空列表(防止后台线程对 Mock 对象迭代导致 TypeError)
     app.db.get_b_under_root.return_value = []

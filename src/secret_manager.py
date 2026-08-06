@@ -47,7 +47,6 @@ _cryptography_available: bool | None = None
 _decryption_failed = False
 _decryption_failure_count = 0
 
-
 def _check_cryptography_available() -> bool:
     """检测 cryptography 是否已安装，结果缓存。"""
     global _cryptography_available
@@ -72,7 +71,6 @@ def _check_cryptography_available() -> bool:
             )
     return _cryptography_available
 
-
 def check_decryption_health() -> dict:
     """C-3: 检查解密健康状态（供启动时调用）。
     
@@ -95,17 +93,14 @@ def check_decryption_health() -> dict:
                  "部分凭据可能已失效。请检查主密钥文件 .secret_key 是否正确。"
         ),
     }
-
-
-# [AUDIT-NOTE] C-3 已接受：.secret_key 无 HMAC/校验和 sidecar 是设计取舍。密钥被篡改/
 # 损坏时经可观测的解密失败暴露（_decryption_failed + WARNING + check_decryption_health()）。
-# 完整性 sidecar 不在范围内。勿再标记。
 def _load_or_create_master_key() -> bytes:
     """加载或创建主密钥。
 
     首次调用时生成 32 字节随机密钥并以 URL-safe base64 写入 ``.secret_key``；
     后续调用直接读取。Unix 下尝试 chmod 600；Windows 尽力而为。
     """
+    # [设计取舍] #8: 完整性 sidecar 不在范围内（解密失败暴露）
     if os.path.exists(_KEY_FILE):
         with open(_KEY_FILE, "rb") as f:
             key = f.read().strip()
@@ -134,7 +129,6 @@ def _load_or_create_master_key() -> bytes:
     log.info("[SecretManager] 已生成新的主密钥文件: %s", _KEY_FILE)
     return key
 
-
 def _get_fernet():
     """获取 Fernet 实例（带模块级缓存）。若 cryptography 不可用返回 None。"""
     global _cached_fernet
@@ -148,11 +142,9 @@ def _get_fernet():
     _cached_fernet = Fernet(key)
     return _cached_fernet
 
-
 def is_encrypted(value: str) -> bool:
     """判断值是否已被本模块加密（以 ``ENC:`` 开头）。"""
     return isinstance(value, str) and value.startswith(_ENC_PREFIX)
-
 
 def encrypt(plaintext: str) -> str:
     """加密明文字符串。
@@ -172,7 +164,6 @@ def encrypt(plaintext: str) -> str:
     ciphertext = fernet.encrypt(plaintext.encode("utf-8"))
     # Fernet 输出已是 URL-safe base64 bytes，直接拼接前缀
     return _ENC_PREFIX + ciphertext.decode("ascii")
-
 
 def decrypt(ciphertext: str) -> str:
     """解密密文字符串。
@@ -216,7 +207,6 @@ def decrypt(ciphertext: str) -> str:
             e,
         )
         return ""
-
 
 def reset_master_key_for_testing() -> None:
     """测试用：清空模块级 Fernet 缓存，强制下次调用重新加载。

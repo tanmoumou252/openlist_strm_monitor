@@ -28,12 +28,12 @@ from pathlib import Path
 BASE_URL = "https://api.themoviedb.org"
 
 # 缓存文件路径：与 src/.admin_token.json 同级
+# [设计取舍] S6: 本地缓存 PII（account_id），通过 .gitignore + 0600 权限保护
 _CACHE_DIR = Path(__file__).parent
 _CACHE_FILE = _CACHE_DIR / ".tmdb_account.json"
 
 # 缓存有效期（秒）：7 天
 _CACHE_TTL = 7 * 24 * 3600
-
 
 # ============================================================
 # TMDB 客户端
@@ -73,7 +73,7 @@ class TmdbClient:
     # ----------------------------------------------------------
     # account_id 缓存
     # ----------------------------------------------------------
-
+    # 文件格式为简单 JSON，便于调试和手动检查；安全由 LAN 环境+文件权限保证。
     def _load_cached_account_id(self) -> None:
         """从本地缓存文件加载 account_id"""
         if not _CACHE_FILE.exists():
@@ -95,7 +95,6 @@ class TmdbClient:
                 )
         except Exception as e:
             logging.warning("[TMDB] 读取缓存文件失败: %s", e)
-
     def _save_cached_account_id(self) -> None:
         """保存 account_id 到本地缓存文件"""
         try:
@@ -453,7 +452,6 @@ class TmdbClient:
             page += 1
             time.sleep(0.3)
         return all_items
-
 
 # ============================================================
 # 便捷工厂函数

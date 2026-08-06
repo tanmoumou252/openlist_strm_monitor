@@ -66,7 +66,9 @@ export function _setCachedWatchlist(type, data) {
 }
 
 // UI Config helpers — 使用 AbortController 避免快速连点时回滚覆盖正确值（P1-6）
+// L4: 添加版本号机制解决竞态：abort 后不会错误回滚已完成的请求
 let _uiConfigController = null;
+let _uiConfigVersion = 0;  // L4: 版本号 - 每次成功保存递增，防止 abort 后错误回滚
 export async function _loadUiConfig() {
   try {
     const resp = await fetch('/api/webui/config/ui');
@@ -79,27 +81,37 @@ export function _getUiConfig(key) {
 }
 export function _setUiConfig(key, val) {
   const oldVal = _uiConfig[key];
+  const versionBefore = _uiConfigVersion;  // L4: 记录保存前的版本号
   _uiConfig[key] = val;
   // 取消前一次未完成的保存请求
   if (_uiConfigController) _uiConfigController.abort();
   _uiConfigController = new AbortController();
 fetch('/api/webui/config/ui', {
-	    method: 'POST',
-	    headers: {
-	      'Content-Type': 'application/json',
-	      'X-Session-Token': localStorage.getItem('session_token') || ''
-	    },
-	    body: JSON.stringify({ [key]: val }),
-	    signal: _uiConfigController.signal
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Session-Token': localStorage.getItem('session_token') || ''
+      },
+      body: JSON.stringify({ [key]: val }),
+      signal: _uiConfigController.signal
   }).then(resp => {
     if (!resp.ok) {
       console.warn('[UI Config] 保存失败:', resp.status, resp.statusText);
-      if (oldVal === undefined) delete _uiConfig[key]; else _uiConfig[key] = oldVal;
+      // L4: 只有版本号未变化时才回滚（防止 abort 后的旧请求错误回滚新值）
+      if (_uiConfigVersion === versionBefore) {
+        if (oldVal === undefined) delete _uiConfig[key]; else _uiConfig[key] = oldVal;
+      }
+    } else {
+      // L4: 保存成功，递增版本号
+      _uiConfigVersion++;
     }
   }).catch(err => {
     if (err.name === 'AbortError') return; // 被取消的是上一次请求，忽略
     console.warn('[UI Config] 保存请求失败:', err);
-    if (oldVal === undefined) delete _uiConfig[key]; else _uiConfig[key] = oldVal;
+    // L4: 只有版本号未变化时才回滚
+    if (_uiConfigVersion === versionBefore) {
+      if (oldVal === undefined) delete _uiConfig[key]; else _uiConfig[key] = oldVal;
+    }
   });
 }
 

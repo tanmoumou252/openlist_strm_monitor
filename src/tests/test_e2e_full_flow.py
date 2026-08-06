@@ -49,7 +49,6 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     cfg.tmdb.api_key = ""
     cfg.tmdb.language = "zh-CN"
     cfg.tmdb.host = ""
-    cfg.tmdb.watchlist_db = ""
     cfg.tmdb.watchlist_cache_ttl = 604800
     cfg.tmdb.fuzzy_threshold = 0.60
     cfg.tmdb.anime_min_ep_ratio = 0.3
@@ -198,8 +197,6 @@ def real_config_webui_server(tmp_path):
     c_dir.mkdir(exist_ok=True)
     toml_path = tmp_path / "config.toml"
     toml_path.write_text(
-        "[local]\n"
-        'db_file = "bridge.db"\n'
         "[paths]\n"
         f'b_root = "{b_dir.as_posix()}"\n'
         f'c_root = "{c_dir.as_posix()}"\n',

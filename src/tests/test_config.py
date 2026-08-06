@@ -44,8 +44,9 @@ from config import (  # noqa: E402
 # ============================================================
 
 _MINIMAL_TOML = """
-[local]
-db_file = "bridge.db"
+[webui]
+port = 8579
+bind = "0.0.0.0"
 """
 
 
@@ -248,7 +249,14 @@ class TestAppConfigFromFile:
         assert cfg.base_dir == str(tmp_path)
 
     def test_db_file_is_normalized_absolute(self, tmp_path):
+        # [已修复] P1-3: db_file 固定在项目根，[local].db_file 不再从 config.toml 读取
         cfg = AppConfig.from_file(_write_toml(tmp_path, _MINIMAL_TOML))
+        assert Path(cfg.local.db_file) == tmp_path / "bridge.db"
+
+    def test_db_file_ignores_custom_local_db_file(self, tmp_path):
+        # [已修复] P1-3: 即使 TOML 含 [local] db_file，运行路径仍为 base_dir/bridge.db
+        toml = _MINIMAL_TOML + '\n[local]\ndb_file = "custom.db"\n'
+        cfg = AppConfig.from_file(_write_toml(tmp_path, toml))
         assert Path(cfg.local.db_file) == tmp_path / "bridge.db"
 
     def test_log_file_is_absolute(self, tmp_path):
@@ -320,7 +328,7 @@ class TestAppConfigFromFile:
         assert cfg.webui.bind == "0.0.0.0"
 
     def test_webui_override(self, tmp_path):
-        toml = _MINIMAL_TOML + '\n[webui]\nport = 9000\nbind = "127.0.0.1"\n'
+        toml = _MINIMAL_TOML.replace('port = 8579', 'port = 9000').replace('bind = "0.0.0.0"', 'bind = "127.0.0.1"')
         cfg = AppConfig.from_file(_write_toml(tmp_path, toml))
         assert cfg.webui.port == 9000
         assert cfg.webui.bind == "127.0.0.1"

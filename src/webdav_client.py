@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import os
+import threading
 import time
 from urllib.parse import unquote
 from pathlib import Path
@@ -81,10 +82,12 @@ class OpenListAdminClient:
         self._fs_list_logged: set[str] = set()
         self._fs_list_logged_time: float = 0.0  # 上次清理时间
 
-        # True/False=权威存在/不存在；None=列表不可信（fail-closed，不得当「不存在」）
-        self._check_exists_cache: dict[str, tuple[float, bool | None]] = {}
+        # True=权威存在/不存在；None=列表不可信（fail-closed，不得当「不存在」）
+        # [已修复] Task 2: 只缓存 True；False/None 不缓存（避免陈旧 False 误导清理）
+        self._check_exists_cache: dict[str, tuple[float, bool]] = {}
         self._check_exists_cache_ttl: int = 60  # 缓存 60 秒
         self._check_exists_cache_max: int = 5000  # 缓存容量上限，超出时淘汰最旧项
+        self._check_exists_cache_lock = threading.Lock()  # 缓存访问加锁
 
         # 最近一次登录的错误详情（调用方可通过属性访问）
         self.last_error_message: str | None = None
@@ -500,6 +503,15 @@ class OpenListAdminClient:
         return None
 
     # 4. 创建目录 (FS API)
+    def _invalidate_check_exists_cache(self, path: str) -> None:
+        """[已修复] Task 2 + N-P1-2: 写操作后失效相关缓存（含父路径）。"""
+        with self._check_exists_cache_lock:
+            normalized = path.rstrip("/") if path else "/"
+            self._check_exists_cache.pop(normalized, None)
+            # 同时失效父路径缓存（移动/删除可能影响父目录列表）
+            parent = os.path.dirname(normalized) or "/"
+            self._check_exists_cache.pop(parent, None)
+
     def mkdir(self, path: str) -> bool:
         """创建目录。
 
@@ -564,6 +576,8 @@ class OpenListAdminClient:
             log.error("[移动] 业务失败: code=%s message=%s", code, data.get("message", ""))
             return False
         log.debug("[移动] 成功")
+        self._invalidate_check_exists_cache(src)
+        self._invalidate_check_exists_cache(dst)
         return True
 
     # 6. 删除文件 (FS API)
@@ -592,6 +606,7 @@ class OpenListAdminClient:
             log.error('[删除] 业务失败: code=%s message=%s', code, data.get('message', ''))
             return False
         log.debug('[删除] 成功')
+        self._invalidate_check_exists_cache(path)
         return True
 
     # 7. 检查路径是否存在 (逻辑方法)
@@ -631,12 +646,14 @@ class OpenListAdminClient:
         分页 per_page=100（对齐 OpenAPI maximum 与 Issue7 列表契约）。
         """
         now = time.time()
-        cache_key = path if path else "/"
-        if cache_key in self._check_exists_cache:
-            cached_time, cached_result = self._check_exists_cache[cache_key]
-            if now - cached_time < self._check_exists_cache_ttl:
-                log.debug("[check_exists] 命中缓存: %s -> %s", cache_key, cached_result)
-                return cached_result
+        # [已修复] Task 2: 统一 key 规范化（strip 尾斜杠），避免 /path 与 /path/ 双 key
+        cache_key = path.rstrip("/") if path else "/"
+        with self._check_exists_cache_lock:
+            if cache_key in self._check_exists_cache:
+                cached_time, cached_result = self._check_exists_cache[cache_key]
+                if now - cached_time < self._check_exists_cache_ttl:
+                    log.debug("[check_exists] 命中缓存: %s -> %s", cache_key, cached_result)
+                    return cached_result
 
         result: bool | None = None
         if not path or path == "/":
@@ -691,16 +708,47 @@ class OpenListAdminClient:
                 log.error("check_exists 异常: %s - %s", path, e)
                 result = None
 
-        # H-4: 不缓存 None 结果（不可信应重新查询），只缓存 True/False
-        if result is not None:
-            self._check_exists_cache[cache_key] = (now, result)
-            # 淘汰最旧项以保持容量上限
-            if len(self._check_exists_cache) > self._check_exists_cache_max:
-                # 找到最旧的项（按时间戳排序）
-                oldest_key = min(self._check_exists_cache.keys(), 
-                               key=lambda k: self._check_exists_cache[k][0])
-                del self._check_exists_cache[oldest_key]
+        # [已修复] Task 2: 只缓存 True（权威存在）；False/None 不缓存（避免陈旧 False 误导清理）
+        if result is True:
+            with self._check_exists_cache_lock:
+                self._check_exists_cache[cache_key] = (now, result)
+                # 淘汰最旧项以保持容量上限
+                if len(self._check_exists_cache) > self._check_exists_cache_max:
+                    oldest_key = min(self._check_exists_cache.keys(),
+                                   key=lambda k: self._check_exists_cache[k][0])
+                    del self._check_exists_cache[oldest_key]
         return result
+
+    def invalidate_check_exists_cache(self, path: str) -> None:
+        """使 check_exists 缓存失效。
+        
+        [已修复] N-P1-2: 写操作后失效 check_exists 缓存，避免陈旧 True
+        
+        清除指定路径及其所有父路径的缓存条目，确保写操作（MOVE/DELETE/mkdir）
+        后的缓存一致性。
+        
+        Args:
+            path: 要失效的路径（Cloud 路径，如 /dir1/file.strm）
+        """
+        if not path:
+            return
+            
+        keys_to_remove: list[str] = []
+        
+        # 生成该路径及其所有父路径的缓存键
+        path = path.rstrip("/")
+        while path:
+            keys_to_remove.append(path)
+            parent = "/".join(path.split("/")[:-1])
+            if parent == path:
+                break
+            path = parent or "/"
+        
+        with self._check_exists_cache_lock:
+            for key in keys_to_remove:
+                if key in self._check_exists_cache:
+                    del self._check_exists_cache[key]
+                    log.debug("[check_exists] 缓存失效: %s", key)
 
     # 8. 获取兼容格式的内容列表 (逻辑方法)
     def list_contents(self, path: str) -> dict[str, list[dict[str, Any]]] | None:

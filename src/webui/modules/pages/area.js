@@ -1,6 +1,6 @@
 import { api } from '../core/api.js';
 import { icon } from '../core/icons.js';
-import { esc, fmtTime, createSortLink, renderTmdbResults } from '../core/utils.js';
+import { esc, fmtTime, createSortLink, renderTmdbResults, formatTimestamp } from '../core/utils.js';
 import { navigate, isRenderStale } from '../core/router.js';
 import { showToast } from '../components/toast.js';
 import { showConfirmDialog } from '../components/dialog.js';
@@ -55,15 +55,15 @@ async function renderAreaList(el, area, params) {
   const tabsHtml = kinds.map(k => {
     const active = (kind || '') === k.v ? ' active' : '';
     // tab href 保留搜索词，点击 tab 切分类时 q 不丢失
-    const href = `#area_${area}?kind=${k.v}&sort=${sort}&order=${order}${q ? '&q=' + encodeURIComponent(q) : ''}`;
+    const href = `#area_${area}?kind=${k.v}&sort=${sort}&order=${order}&page_size=${pageSize}${q ? '&q=' + encodeURIComponent(q) : ''}`;
     // "全部"tab 计数用 d.total（跨分类去重总数）；后端 kind_counts 无 all 键，直接读会恒为 0
-    const count = k.v === 'all' ? (d.total || 0) : (d.kind_counts[k.v] || 0);
+    const count = k.v === 'all' ? (d.total || 0) : ((d.kind_counts || {})[k.v] || 0);
     return `<button class="category-tab${active}" data-kind-href="${href}">${icon(k.i)} ${k.l} <span class="count">${count}</span></button>`;
   }).join('');
 
   // Sort link helper
   function sortLink(colName, colKey) {
-    return createSortLink(area, sort, order, colName, colKey, { kind, q });
+    return createSortLink(area, sort, order, colName, colKey, { kind, q, page_size: pageSize });
   }
 
   // Media cards
@@ -86,11 +86,11 @@ async function renderAreaList(el, area, params) {
   if (d.total_pages > 1) {
     pagerHtml = '<div class="pager">';
     if (d.page > 1) {
-      pagerHtml += `<a href="#area_${area}?page=${d.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">${icon('chevron_l')} 上一页</a>`;
+      pagerHtml += `<a href="#area_${area}?page=${d.page - 1}&sort=${sort}&order=${order}&page_size=${d.page_size}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">${icon('chevron_l')} 上一页</a>`;
     }
     pagerHtml += `<span class="current">第 ${d.page} / ${d.total_pages} 页 (共 ${d.total} 项)</span>`;
     if (d.page < d.total_pages) {
-      pagerHtml += `<a href="#area_${area}?page=${d.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">下一页 ${icon('chevron_r')}</a>`;
+      pagerHtml += `<a href="#area_${area}?page=${d.page + 1}&sort=${sort}&order=${order}&page_size=${d.page_size}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">下一页 ${icon('chevron_r')}</a>`;
     }
     pagerHtml += '</div>';
   }
@@ -182,11 +182,6 @@ async function renderAreaDetail(el, area, params) {
 
   const d = await api(url);
 
-  function stripPath(p, root) {
-    if (root && p.startsWith(root)) return p.slice(root.length);
-    return p;
-  }
-
   const kindPart = kind ? '?kind=' + encodeURIComponent(kind) : '';
   const areaLabels = { a: 'A 区', b: 'B 区', c: 'C 区' };
   const areaLabel = areaLabels[area] || area.toUpperCase() + ' 区';
@@ -205,7 +200,7 @@ async function renderAreaDetail(el, area, params) {
   <a href="#area_${area}${kindPart}" class="back-icon-btn" title="返回列表">${icon('back')}</a>
   <span style="color:var(--text-main);font-size:14px;font-weight:600">${esc(media)}</span>
   <span style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px)">· ${d.total} 个文件</span>
-  ${(area === 'a' || area === 'b') ? `<button class="toolbar-btn" id="refresh-media-btn" data-mapping-id="${mappingIdParam}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button>` : ''}
+  ${(area === 'a' || area === 'b') ? `<button class="toolbar-btn refresh-media-btn" data-mapping-id="${esc(mappingIdParam)}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button>` : ''}
 </div>`;
 
   // Task 2: 多 mapping 场景渲染
@@ -221,9 +216,9 @@ async function renderAreaDetail(el, area, params) {
       // Mapping 分区标题
       html += `<div style="margin:16px 0 8px;padding:12px;background:var(--bg-surface-variant);border-radius:8px;border:1px solid var(--border-subtle)">`;
       html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">`;
-      html += `<span style="font-weight:600;color:var(--text-primary)">${mappingId === 'unknown' ? '未知映射' : '映射 ' + mappingId}</span>`;
+      html += `<span style="font-weight:600;color:var(--text-primary)">${mappingId === 'unknown' ? '未知映射' : '映射 ' + esc(mappingId)}</span>`;
       if (indexMetadata && indexMetadata.mapping_index_generation) {
-        html += `<span style="font-size:11px;color:var(--text-muted)">索引 #${indexMetadata.mapping_index_generation} · ${indexMetadata.mapping_index_generation_at ? _formatTimestamp(indexMetadata.mapping_index_generation_at) : '未索引'}</span>`;
+        html += `<span style="font-size:11px;color:var(--text-muted)">索引 #${indexMetadata.mapping_index_generation} · ${indexMetadata.mapping_index_generation_at ? formatTimestamp(indexMetadata.mapping_index_generation_at) : '未索引'}</span>`;
       }
       html += `</div>`;
       
@@ -234,9 +229,9 @@ async function renderAreaDetail(el, area, params) {
       if (strmEngineRoot) html += `<div class="path-line"><span class="path-label">STRM 入口：</span><span class="path-value mono">${esc(strmEngineRoot)}</span></div>`;
       html += `</div>`;
       
-      // Fix R5: 多 mapping 模式下每个分区渲染独立刷新按钮
+      // [已修复] N-P2-7: 多 mapping 模式下使用 class 而非重复 id（HTML 要求 id 唯一）
       if (area === 'a' || area === 'b') {
-        html += `<div class="toolbar" style="margin-top:8px;justify-content:flex-end"><button class="toolbar-btn" id="refresh-media-btn" data-mapping-id="${mappingId}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button></div>`;
+        html += `<div class="toolbar" style="margin-top:8px;justify-content:flex-end"><button class="toolbar-btn refresh-media-btn" data-mapping-id="${esc(mappingId)}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button></div>`;
       }
       html += `</div>`;
       
@@ -247,28 +242,33 @@ async function renderAreaDetail(el, area, params) {
       if (mapping.total_pages > 1) {
         html += '<div class="pager">';
         if (mapping.page > 1) {
-          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}&mapping_id=${mappingId}">${icon('chevron_l')} 上一页</a>`;
+          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}&mapping_id=${encodeURIComponent(mappingId)}">${icon('chevron_l')} 上一页</a>`;
         }
         html += `<span class="current">第 ${mapping.page} / ${mapping.total_pages} 页</span>`;
         if (mapping.page < mapping.total_pages) {
-          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}&mapping_id=${mappingId}">下一页 ${icon('chevron_r')}</a>`;
+          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}&mapping_id=${encodeURIComponent(mappingId)}">下一页 ${icon('chevron_r')}</a>`;
+        }
+        // F2: 请求页码超出该 mapping 记录数被 clamp 时，明确提示而非静默截断
+        if (mapping.clamped) {
+          html += `<span class="pager-clamped" style="color:var(--text-muted);font-size:12px;margin-left:8px">（该分区记录较少，已回退到最后一页）</span>`;
         }
         html += '</div>';
       }
     }
   } else {
-    // 单 mapping 或旧 API（向后兼容）
+    // 单 mapping 或旧 API（向后兼容）— 使用函数开头的 areaLabels/areaLabel 定义
     const localRoot = d.local_root || '';
     const webdavRoot = d.webdav_root || '';
     const strmEngineRoot = d.strm_engine_root || '';
     const mappingId = d.mapping_id || '';
     const indexMetadata = d.index_metadata;
+    // [已修复] N-P2-8: 删除外层死定义（areaLabels 和 areaLabel 已在函数开头定义）
     
     // 索引元数据（单 mapping）
     if (indexMetadata && indexMetadata.mapping_index_generation) {
       html += `<div style="margin:8px 0;padding:8px 12px;background:var(--bg-surface-variant);border-radius:6px;font-size:12px;color:var(--text-secondary)">`;
       html += `索引代次 #${indexMetadata.mapping_index_generation} · `;
-      html += `最近索引: ${indexMetadata.mapping_index_generation_at ? _formatTimestamp(indexMetadata.mapping_index_generation_at) : '未索引'}`;
+      html += `最近索引: ${indexMetadata.mapping_index_generation_at ? formatTimestamp(indexMetadata.mapping_index_generation_at) : '未索引'}`;
       html += `</div>`;
     }
     
@@ -320,7 +320,8 @@ async function renderAreaDetail(el, area, params) {
   setDetailToggleState(document.querySelectorAll('.season-details').length > 0);
 
   // 绑定刷新按钮事件（支持多 mapping 模式下的多个刷新按钮）
-  document.querySelectorAll('#refresh-media-btn').forEach(refreshBtn => {
+  // [已修复] N-P2-7: 选择器改为 class（HTML 按钮用 class="refresh-media-btn"，非 id）
+  document.querySelectorAll('.refresh-media-btn').forEach(refreshBtn => {
     const btnMappingId = refreshBtn.dataset.mappingId || '';
     const doRefresh = async () => {
       refreshBtn.disabled = true;
@@ -354,7 +355,8 @@ async function renderAreaDetail(el, area, params) {
         '刷新媒体数据',
         `将触发 STRM 引擎重新生成并同步。<br><br>媒体：${esc(media)}<br><br>是否继续？`,
         async () => { await doRefresh(); },
-        null
+        null,
+        { htmlContent: true }
       );
     });
   });
@@ -408,32 +410,4 @@ function _renderSeasons(area, seasons, sort, order, kind, q, media, localRoot, w
     html += '</tbody></table></div></details>';
   }
   return html;
-}
-
-// Task 2: 时间戳格式化辅助函数
-function _formatTimestamp(timestamp) {
-  if (!timestamp || timestamp === 0) return '未知';
-  try {
-    const date = new Date(timestamp * 1000);
-    const now = new Date();
-    const diffMs = now - date;
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMs / 3600000);
-    const diffDays = Math.floor(diffMs / 86400000);
-    
-    if (diffMins < 1) return '刚刚';
-    if (diffMins < 60) return `${diffMins}分钟前`;
-    if (diffHours < 24) return `${diffHours}小时前`;
-    if (diffDays < 7) return `${diffDays}天前`;
-    
-    return date.toLocaleDateString('zh-CN', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch (e) {
-    return '未知';
-  }
 }

@@ -11,7 +11,6 @@ from urllib.parse import unquote, urlparse
 
 FINGERPRINT_VERSION = "strmfp:v1"
 
-
 def parse_strm_content(content: str) -> str | None:
     """
     从 STRM 内容中解析真实 WebDAV 路径。
@@ -49,7 +48,6 @@ def parse_strm_content(content: str) -> str | None:
         return canonicalize_webdav_path(content, case_sensitive=True)
 
     return None
-
 
 def canonicalize_webdav_path(webdav_path: str, *,
                              case_sensitive: bool = True) -> str:
@@ -95,7 +93,6 @@ def canonicalize_webdav_path(webdav_path: str, *,
 
     return canonical
 
-
 def make_strm_fingerprint(webdav_path: str, *,
                           case_sensitive: bool = True) -> str:
     """
@@ -114,7 +111,6 @@ def make_strm_fingerprint(webdav_path: str, *,
     payload = f"{FINGERPRINT_VERSION}:{canonical}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-
 def read_strm_webdav_path(file_path: str | Path) -> str | None:
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -123,7 +119,6 @@ def read_strm_webdav_path(file_path: str | Path) -> str | None:
         # 如果文件不存在、无法读取或包含非法字节，返回 None 而不是崩溃
         return None
 
-
 def escape_like(value: str) -> str:
     """转义 SQL LIKE 通配符（% _ \\），配合 ``ESCAPE '\\'`` 子句使用。
 
@@ -131,7 +126,7 @@ def escape_like(value: str) -> str:
     顺序很重要：必须先转义反斜杠本身，否则后面对 %/_ 加的反斜杠会被这一步再次转义。
     转义只作用于传入的 LIKE 模式值，不影响被匹配列的内容（如 Windows 路径中的反斜杠）。
 
-    [AUDIT-NOTE] SQLite LIKE 仅 % _ \\ 为特殊字符（[] 属 MS SQL/Access 语法，非 SQLite）。
     本函数已转义全部 SQLite LIKE 元字符，勿添加 [] 转义。
     """
+    # [设计取舍] #12: LIKE 转义已完整（[] 非 SQLite 语法）
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

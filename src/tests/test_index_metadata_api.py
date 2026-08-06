@@ -12,6 +12,7 @@ Dashboard/Area 索引元数据 API 测试。
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import tempfile
 import time
@@ -311,22 +312,23 @@ class TestManualFullIndexAudit:
 
     def test_audit_advances_last_verified_at(self, db: Database):
         """审计完成后应推进所有记录的 last_verified_at"""
-        # 插入 A 区记录
+        sep = os.sep
+        # 插入 A 区记录（用 os.sep 构造路径，与 touch_verified_by_mapping 匹配）
         db.upsert_a_batch([
-            ("/a/root1/file1.strm", "/m/1.mp4", "/m"),
-            ("/a/root1/file2.strm", "/m/2.mp4", "/m"),
+            (f"{sep}a{sep}root1{sep}file1.strm", "/m/1.mp4", "/m"),
+            (f"{sep}a{sep}root1{sep}file2.strm", "/m/2.mp4", "/m"),
         ])
         db.upsert_b_batch([
-            ("/b/root1/file1.strm", "/m/1.mp4", "/m", "/a/root1/file1.strm",
+            (f"{sep}b{sep}root1{sep}file1.strm", "/m/1.mp4", "/m", f"{sep}a{sep}root1{sep}file1.strm",
              "fp1", "m1", "valid"),
-            ("/b/root1/file2.strm", "/m/2.mp4", "/m", "/a/root1/file2.strm",
+            (f"{sep}b{sep}root1{sep}file2.strm", "/m/2.mp4", "/m", f"{sep}a{sep}root1{sep}file2.strm",
              "fp2", "m1", "valid"),
         ])
 
         # 模拟审计完成
         now = time.time()
         db.complete_index_generation(["m1"], completed_at=now)
-        db.touch_verified_by_mapping("m1", "/a/root1", now)
+        db.touch_verified_by_mapping("m1", f"{sep}a{sep}root1", now)
 
         # 验证 last_verified_at 已推进
         with db.read_connection() as conn:
@@ -337,10 +339,10 @@ class TestManualFullIndexAudit:
                 "SELECT source_a_path, last_verified_at FROM b_strm_files"
             ).fetchall())
 
-            assert a_rows["/a/root1/file1.strm"] == now
-            assert a_rows["/a/root1/file2.strm"] == now
-            assert b_rows["/a/root1/file1.strm"] == now
-            assert b_rows["/a/root1/file2.strm"] == now
+            assert a_rows[f"{sep}a{sep}root1{sep}file1.strm"] == now
+            assert a_rows[f"{sep}a{sep}root1{sep}file2.strm"] == now
+            assert b_rows[f"{sep}a{sep}root1{sep}file1.strm"] == now
+            assert b_rows[f"{sep}a{sep}root1{sep}file2.strm"] == now
 
     def test_audit_status_endpoint_returns_running_and_result(self, db: Database):
         """GET /api/index/audit/status 应返回 {running, result} 可轮询"""

@@ -1,8 +1,9 @@
 # OpenList STRM Bridge Wiki 首页
+> 最后更新：2026-08-06
 
 `openlist_strm_bridge` 是一个专为 **OpenList STRM 引擎"更新模式"** 打造的本地与云端智能防灾协调层。作为 OpenList 与媒体库（Emby / Jellyfin）之间的协调中枢，打通 STRM 的"生成→刮削消费→重命名整理→删除→云端联动→冗余回收"整条闭环链路。
 
-## 💡 项目核心定位
+## 项目核心定位
 
 OpenList STRM 引擎能够高效地生成 `.strm` 文件供本地媒体库刮削使用。但在真实的生产环境中，用户通常面临以下严峻的自愈与防灾挑战：
 
@@ -14,7 +15,7 @@ OpenList STRM 引擎能够高效地生成 `.strm` 文件供本地媒体库刮削
 
 本中间件的目的是在 A 区（引擎生成区）、B 区（媒体库消费区）、C 区（幽灵收容区）与云端真实文件之间建立一条由 SQLite 持久化、OpenList Admin API 强绑定的自愈型桥梁，实现双向同步、血统校验、智能去重、字幕同步、熔断保护的完整闭环。
 
-## 🌟 核心特性
+## 核心特性
 
 1. **API 动态映射**：启动时主动调用 OpenList Admin API 抓取所有 `driver=strm` 的存储节点，自动梳理本地路径与云端真实监控路径的分组映射。（`config.py`、`app_service_core.py`）
 
@@ -34,14 +35,14 @@ OpenList STRM 引擎能够高效地生成 `.strm` 文件供本地媒体库刮削
 
 8. **中文智能搜索**：基于 SQLite FTS5 + `simple` 中文分词器（cppjieba 封装），对 A/B 区 STRM 文件与 TMDB 待看列表实现中文标题/路径全文检索；分词器缺失时软降级但中文检索会失效，故 `simple` 为硬依赖。（`database.py`、`tmdb_watchlist_db.py`）
 
-## 🚨 终极警示：OpenList 令牌与播放签名的强依赖关系
+## 终极警示：OpenList 令牌与播放签名的强依赖关系
 
 由于 OpenList STRM 引擎下发的直链包含了签名（`?sign=`）：
 
 - **不可恢复的重置灾难**：该签名是 OpenList 服务端算出来的。**绝对不要在 OpenList 后台轻易重置令牌**。一旦重置，即使本地所有 STRM 路径保存完好、云端文件没有任何变动，已生成的 STRM 里的直链全部会报"签名失效"导致彻底无法播放。
 - **系统绑定约束**：本项目对于特定的 OpenList 服务端是**强绑定**的。如果迁移到新的服务器，必须清理本地 `bridge.db` 数据库及 B 区文件，让新服务器重新建立全量生成。
 
-## 📂 A/B/C 三区模型
+## A/B/C 三区模型
 
 | 区域 | 角色 | 目录来源 | 监控处理器 |
 |------|------|----------|-----------|
@@ -49,19 +50,19 @@ OpenList STRM 引擎能够高效地生成 `.strm` 文件供本地媒体库刮削
 | **B 区** | 媒体库消费 | 用户配置的 B 根目录 | `BAreaEventHandler` — 创建/修改/删除/移动 |
 | **C 区** | 幽灵收容 | 用户配置的 C 根目录 | `CAreaEventHandler` — 仅记录日志 |
 
-## 🔍 智能搜索
+## 智能搜索
 
 项目内置中文友好的全文搜索：底层使用 SQLite **FTS5** 虚拟表，并加载 `simple` 中文分词器（cppjieba 封装，资源位于 `src/tokenizers/simple/`）对 A 区/B 区 STRM 文件路径及 TMDB 待看列表的标题、简介建立索引。当分词器扩展缺失时会软降级到 `unicode61`，但 `unicode61` 不对中文切词，导致中文搜索实际失效——因此部署时需确保 `simple.dll` 存在。索引的孤儿行由 `_rebuild_fts_if_stale` 等机制在基表变更后自动清理，保证检索结果与真实数据一致。
 
-## 🧭 首次启动引导
+## 首次启动引导
 
 新用户首次打开 WebUI 会看到 **7 步新手引导**（确认管理员密码 → 配置 TMDB → 配置 OpenList → 启动主程序 → 查看 A/B 区 → 刷新 TMDB 待看列表 → 检测 TMDB 收录状态）。单步完成通过 `POST /api/onboarding/complete-step` 上报，整体完成或跳过则通过 `POST /api/webui/config/ui` 写入 `onboarding_completed` 标记；引导状态保存在 `tmdb_watchlist.db` 的 `webui_config` 表中，下次打开自动恢复进度。
 
-## 🚀 快速开始
+## 快速开始
 
 ```bash
 pip install -r requirements.txt
-# 编辑 config.toml 填写 OpenList 服务器信息
+# 启动 WebUI 后，在「配置」页面填写 OpenList 服务器信息
 python src/webui/server.py
 # 打开 http://localhost:8579
 ```

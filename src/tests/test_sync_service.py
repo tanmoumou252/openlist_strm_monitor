@@ -248,11 +248,16 @@ class TestSyncServiceScanAToBFullSync:
         app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
         app.a_b_mappings = [ABMapping(mapping_id="test_m1", a_root="/a_root", b_root="/b_root")]
 
-    def _make_bulk_conn_mock(self):
+    def _make_bulk_conn_mock(self, app):
         """Create a mock connection that supports context manager protocol."""
         mock_conn = Mock()
         mock_conn.__enter__ = Mock(return_value=mock_conn)
         mock_conn.__exit__ = Mock(return_value=False)
+        # [已修复] Task 1: use_bulk=False 走 self.db.connection()，需同时 mock
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        app.db.connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.connection.return_value.__exit__ = Mock(return_value=False)
         return mock_conn
 
     def test_full_sync_all_records(self, tmp_path):
@@ -272,11 +277,11 @@ class TestSyncServiceScanAToBFullSync:
         app.build_b_path_from_a.side_effect = _build_side_effect
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
         with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
-            svc.scan_a_to_b_full_sync()
+            svc.scan_a_to_b_full_sync(use_bulk=True)
 
         assert mock_sync.call_count == 2
 
@@ -290,7 +295,7 @@ class TestSyncServiceScanAToBFullSync:
         self._setup_records(app, records, tmp_path)
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
         with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
@@ -307,7 +312,7 @@ class TestSyncServiceScanAToBFullSync:
         app.db.get_all_ghost_protected_paths.return_value = {"/m/f1.mp4"}
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
         with patch.object(svc, "_sync_one_record", return_value="skip_ghost") as mock_sync:
@@ -324,7 +329,7 @@ class TestSyncServiceScanAToBFullSync:
         app.db.get_all_b_fingerprints.return_value = set()
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
         with patch.object(svc, "_sync_one_record", return_value="skip_missing") as mock_sync:
@@ -369,7 +374,7 @@ class TestSyncServiceScanAToBFullSync:
         self._setup_bulk_records(app, N, tmp_path)
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
         with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
@@ -391,7 +396,7 @@ class TestSyncServiceScanAToBFullSync:
         self._setup_bulk_records(app, N, tmp_path)
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
         with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
@@ -413,7 +418,7 @@ class TestSyncServiceScanAToBFullSync:
         self._setup_bulk_records(app, N, tmp_path)
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
         with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
@@ -430,7 +435,7 @@ class TestSyncServiceScanAToBFullSync:
         self._setup_bulk_records(app, N, tmp_path)
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
         with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
@@ -446,7 +451,7 @@ class TestSyncServiceScanAToBFullSync:
         self._setup_bulk_records(app, N, tmp_path)
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
         with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
@@ -464,7 +469,7 @@ class TestSyncServiceScanAToBFullSync:
         self._setup_records(app, records, tmp_path)
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
         with patch.object(svc, "_sync_one_record", side_effect=RuntimeError("boom")):
@@ -490,7 +495,7 @@ class TestSyncServiceScanAToBFullSync:
         app.build_b_path_from_a.side_effect = lambda local, webdav=None: b_root / Path(local).name
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
 
@@ -513,7 +518,7 @@ class TestSyncServiceScanAToBFullSync:
         app.build_b_path_from_a.return_value = b_root / "file1.strm"
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
 
@@ -538,7 +543,7 @@ class TestSyncServiceScanAToBFullSync:
         app.build_b_path_from_a.return_value = b_root / "Season 20" / "S20E10.strm"
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
         with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
@@ -561,7 +566,7 @@ class TestSyncServiceScanAToBFullSync:
         app.build_b_path_from_a.return_value = b_root / "Season 20" / "S20E10.strm"
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
         with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
@@ -584,7 +589,7 @@ class TestSyncServiceScanAToBFullSync:
         app.build_b_path_from_a.return_value = b_root / "f1.strm"
 
         svc = SyncService(app)
-        mock_conn = self._make_bulk_conn_mock()
+        mock_conn = self._make_bulk_conn_mock(app)
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
 

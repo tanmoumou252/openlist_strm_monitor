@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 _SIMPLE_DLL_PATH = Path(__file__).parent / "tokenizers" / "simple" / "simple.dll"
 _SIMPLE_VERSION_PATH = Path(__file__).parent / "tokenizers" / "simple" / "VERSION"
 
-
 def _load_simple_into(conn: sqlite3.Connection) -> str | None:
     """向连接加载 simple 分词器扩展。成功返回已加载的 simple 版本号字符串，失败返回 None。
 
@@ -69,8 +68,8 @@ _SENSITIVE_KEYS: frozenset[tuple[str, str]] = frozenset({
     ("openlist", "webdav_totp_secret"),
     ("tmdb", "access_token"),
     ("tmdb", "api_key"),
+    ("tmdb", "proxy_http"),
 })
-
 
 # ============================================================
 # Schema SQL
@@ -142,11 +141,10 @@ CREATE TABLE IF NOT EXISTS webui_config (
 );
 """
 
-
 class TmdbWatchlistDb:
     """TMDB 待看列表 SQLite 数据库管理器。"""
 
-    def __init__(self, db_path: str | Path, ttl: float = 604800, tmdb_log_max_rows: int = 1000) -> None:
+    def __init__(self, db_path: str | Path, ttl: float = 604800, tmdb_log_max_rows: int = 1000) -> None:  # [设计取舍] 路径参数仅测试注入与内部隔离，生产固定项目根 tmdb_watchlist.db
         self._db_path = str(db_path)
         self._ttl = ttl
         self._tmdb_log_max_rows = tmdb_log_max_rows
@@ -315,8 +313,8 @@ class TmdbWatchlistDb:
             logging.warning("[TMDB] 获取匹配统计失败: %s", e)
         return result
 
-
     def _get_meta(self, key: str, default: str = "") -> str:
+        # [设计取舍] #9: meta 回退 default 是有意设计（损坏不阻塞启动）
         try:
             with self._conn() as conn:
                 row = conn.execute(
@@ -324,7 +322,6 @@ class TmdbWatchlistDb:
                 ).fetchone()
                 return row[0] if row else default
         except Exception as e:
-            # [AUDIT-NOTE] 静默回退 default 是有意设计（meta 读取失败不应阻塞 TMDB 功能）。
             # 下方已加 logging.debug。勿改为 re-raise。
             logging.debug("[meta] 读取 %s 失败，回退默认: %s", key, e)
             return default
@@ -885,7 +882,9 @@ class TmdbWatchlistDb:
                 if details and isinstance(details, dict):
                     return details
                 return None
-            except Exception:
+            except Exception as e:
+                # [已修复] N2: 详情写失败已记录日志
+                logging.warning("[TMDB-DB] 获取剧集详情失败 tv_id=%s: %s", tid, e)
                 return None
 
         fetched = 0
@@ -924,8 +923,9 @@ class TmdbWatchlistDb:
                                      last_ep_season, last_ep_episode, tid))
                                 conn.commit()
                             fetched += 1
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            # N2: 记录 DB 写失败日志，便于诊断 SQLite 锁/磁盘满等问题
+                            logging.warning("[TMDB-DB] 详情更新失败 (tid=%d): %s", tid, exc)
             if start + BATCH_SIZE < len(ids_to_fetch):
                 time.sleep(BATCH_SLEEP)
 

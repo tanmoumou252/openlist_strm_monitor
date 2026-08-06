@@ -618,8 +618,6 @@ class TestWebUiSavedMappingReachesReady:
             d.mkdir()
         toml_path = tmp_path / "config.toml"
         toml_path.write_text(
-            "[local]\n"
-            'db_file = "bridge.db"\n'
             "[paths]\n"
             f'b_root = "{b_dir.as_posix()}"\n'
             f'c_root = "{c_dir.as_posix()}"\n',

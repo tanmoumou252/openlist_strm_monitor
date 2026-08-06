@@ -1,4 +1,5 @@
 # 十一、配置项完整参考
+> 最后更新：2026-08-06
 
 ## 配置优先级
 
@@ -13,16 +14,7 @@
 
 所有配置类定义在 `src/config.py` 中，为类型化 dataclass。
 
-### `[local]` — `LocalConfig`
-
-```toml
-[local]
-db_file = "./bridge.db"
-```
-
-| 键 | 默认值 | 说明 |
-|-----|------|------|
-| `db_file` | `"./bridge.db"` | 核心数据库路径 |
+> **数据库路径固定**：`bridge.db` 与 `tmdb_watchlist.db` 固定在项目根目录，`[local].db_file` 配置项已移除，**不可通过 config.toml 或 WebUI 更改数据库路径**。
 
 ### `[paths]` — `PathsConfig`
 
@@ -114,7 +106,6 @@ totp_secret = ""
 | `anime_max_season_diff` | `0.3` | 番剧匹配允许的最大季数差（运行时未读取，当前无效） |
 | `anime_min_season_ratio` | `0.3` | 番剧匹配最少季数比例 |
 | `csv_watchlist_file` | `""` | CSV 待看列表文件路径（可选） |
-| `watchlist_db` | `""` | 自定义 TMDB 待看列表数据库路径（可选，默认项目根 `tmdb_watchlist.db`）。注：此字段虽存在，但 `routes.py` 硬编码数据库路径，实际未被读取 |
 | `proxy_enabled` | `false` | 启用 TMDB API 代理 |
 | `proxy_http` | `""` | HTTP 代理地址 |
 | `proxy` | `{}` | 嵌套代理配置 `TmdbProxyConfig`（含 `enabled`、`http`、`https`） |
@@ -138,7 +129,6 @@ totp_secret = ""
 | `tmdb` | `anime_max_season_diff` | 番剧最大季数差（运行时未读取，当前无效） |
 | `tmdb` | `anime_min_season_ratio` | 番剧最少季数比例 |
 | `tmdb` | `csv_watchlist_file` | CSV 待看列表文件路径 |
-| `tmdb` | `watchlist_db` | 自定义 TMDB 待看列表数据库路径 |
 | `openlist` | `webdav_host` | OpenList 主机 |
 | `openlist` | `webdav_user` | OpenList 用户 |
 | `openlist` | `webdav_password` | OpenList 密码（加密存储） |

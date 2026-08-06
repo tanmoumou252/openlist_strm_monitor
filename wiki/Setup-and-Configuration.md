@@ -1,4 +1,5 @@
 # 三、安装与配置
+> 最后更新：2026-08-06
 
 ## 系统要求
 
@@ -40,12 +41,9 @@ pip install -r requirements.txt
 主配置文件位于项目根目录，包含以下段：
 
 ```toml
-[local]
-db_file = "./bridge.db"          # 核心数据库路径
-
 [paths]
- b_root = ""                      # 仅兼容显示，不自动生成生产 mapping
- c_root = "./测试c"               # 全局 C 区幽灵目录
+b_root = ""                      # 运行时仍消费，作为单 mapping 兼容路径（b_root→local.b_dir）
+c_root = "./测试c"               # 全局 C 区幽灵目录（c_root→local.c_dir）
 
 # 生产映射在 WebUI/DB 中显式配置：
 # [{a_root="./测试a1", b_root="./测试b1"}]   # mapping_id 自动生成，无需手写
@@ -80,12 +78,11 @@ max_size_mb = 2                   # 日志文件最大 MB
 backup_count = 5                  # 轮转备份数
 
 [webui]
-enabled = true                    # 启用 WebUI
 port = 8579                       # HTTP 端口
 bind = "0.0.0.0"                  # 监听地址
 
 [tmdb]
-# 注意：[tmdb] TOML 段已废弃，TMDB 配置仅从数据库加载
+# 注意：[tmdb] TOML 段已废弃，勿恢复 enabled 等开关；TMDB 配置仅从数据库加载
 # 以下仅供参考，用于首次迁移
 access_token = ""                 # TMDB API 访问令牌
 api_key = ""                      # TMDB API 密钥
@@ -155,7 +152,7 @@ WebUI 和核心同步引擎同时启动。主程序状态显示在 WebUI 仪表�
 
 | 文件 | 用途 | 表数量 | 位置 |
 |------|------|--------|------|
-| `bridge.db` | 核心同步状态 | 13 常规表 + 3 FTS5 | `[local] db_file` 配置 |
-| `tmdb_watchlist.db` | TMDB 缓存 + WebUI 配置 | 6 张表 | 项目根目录（`main.py` 硬编码） |
+| `bridge.db` | 核心同步状态 | 13 常规表 + 3 FTS5 | 项目根目录（固定） |
+| `tmdb_watchlist.db` | TMDB 缓存 + WebUI 配置 | 6 张表 | 项目根目录（固定） |
 
 两个数据库均使用 **WAL 模式** 以获得并发读取性能。

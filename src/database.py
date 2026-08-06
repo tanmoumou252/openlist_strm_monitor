@@ -16,9 +16,9 @@ class ReadWriteLock:
     """读写锁：允许多个读者并发访问，写者独占。
 
     实现要点：
-    - 读者通过 _read_lock 与写者互斥（第一个读者获取，最后一个读者释放）
+    - 读者通过主 _lock + _no_writers 条件变量与写者互斥（首个读者计数，末位读者唤醒）
     - 写者通过 _write_lock 互斥（所有写者串行化）
-    - 写者优先：当有写者等待时，新读者阻塞，防止写者饥饿
+    - 写者优先：当有写者等待或活跃时，新读者阻塞，防止写者饥饿
     """
 
     def __init__(self):
@@ -68,12 +68,9 @@ class ReadWriteLock:
         finally:
             self._write_lock.release()
 
-
-
 # ============================================================
 # 数据库记录类型定义
 # ============================================================
-
 
 @dataclass(frozen=True)
 class ARecord:
@@ -82,7 +79,6 @@ class ARecord:
     webdav_path: str
     parent_webdav_path: str
     updated_at: float
-
 
 @dataclass(frozen=True)
 class BRecord:
@@ -96,7 +92,6 @@ class BRecord:
     updated_at: float
     mapping_id: str = ""  # Mapping ID for multi-A↔multi-B isolation
 
-
 @dataclass(frozen=True)
 class IdentityRecord:
     """STRM 身份记录"""
@@ -105,7 +100,6 @@ class IdentityRecord:
     source_a_path: str | None
     current_b_path: str | None
     updated_at: float
-
 
 @dataclass(frozen=True)
 class CRecord:
@@ -116,7 +110,6 @@ class CRecord:
     ghost_root: str
     moved_at: float
 
-
 @dataclass(frozen=True)
 class BoundaryRecord:
     """媒体边界映射记录"""
@@ -126,7 +119,6 @@ class BoundaryRecord:
     current_media_name: str
     engine_entry_path: str
     updated_at: float
-
 
 @dataclass(frozen=True)
 class BLineageSnapshotRecord:
@@ -140,7 +132,6 @@ class BLineageSnapshotRecord:
     validation_state: str
     verified_at: float
 
-
 @dataclass(frozen=True)
 class ProtectedRootRecord:
     """受保护根目录记录"""
@@ -148,7 +139,6 @@ class ProtectedRootRecord:
     trash_path: str
     active: bool
     updated_at: float
-
 
 @dataclass(frozen=True)
 class SubtitleRecord:
@@ -163,7 +153,6 @@ class SubtitleRecord:
     status: str
     created_at: str
     updated_at: str
-
 
 class Database:
     _last_ghost_cleanup: float
@@ -205,10 +194,10 @@ class Database:
                 )
                 return True
             else:
-                logging.warning(f"[DB] Simple tokenizer not found at {simple_dll}, falling back to unicode61")
+                logging.warning("[DB] Simple tokenizer not found at %s, falling back to unicode61", simple_dll)
                 return False
         except Exception as e:
-            logging.warning(f"[DB] Failed to load simple tokenizer: {e}, falling back to unicode61")
+            logging.warning("[DB] Failed to load simple tokenizer: %s, falling back to unicode61", e)
             return False
 
     @classmethod
@@ -237,6 +226,7 @@ class Database:
 
     def _probe_writeable(self, conn: sqlite3.Connection) -> None:
         """用 BEGIN IMMEDIATE / ROLLBACK 探测连接是否可写（不变更 schema）。
+        # [设计取舍] #6: 与 connection() 探针模式一致且安全
 
         BEGIN IMMEDIATE 会尝试获取 RESERVED 锁，在文件只读或 query_only
         模式下均会抛 OperationalError。
@@ -332,7 +322,7 @@ class Database:
 
         调用方在 with 块内执行所有 SQL。正常结束时自动 COMMIT，异常时 ROLLBACK。
 
-        ⚠️ 绕过 rw_lock 和 _probe_writeable——仅用于启动时单线程批量同步。
+        绕过 rw_lock 和 _probe_writeable——仅用于启动时单线程批量同步。
         跨进程场景安全（SQLite WAL 自身处理并发），同进程多线程场景不安全。
         """
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -347,7 +337,7 @@ class Database:
         finally:
             conn.close()
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str) -> None:  # [设计取舍] 路径参数仅测试注入与内部隔离，生产固定项目根 bridge.db
         self.db_path = db_path
         self.rw_lock = ReadWriteLock()
         self._last_ghost_cleanup = 0.0
@@ -612,7 +602,7 @@ class Database:
                         f"INSERT INTO {fts_table}(rowid, local_path, webdav_path) "
                         f"SELECT rowid, local_path, webdav_path FROM {main_table}"
                     )
-                    logging.info(f"[DB] 首次回填 {fts_table}: {main_count} 条记录")
+                    logging.info("[DB] 首次回填 %s: %d 条记录", fts_table, main_count)
 
     def _rebuild_fts_if_stale(self, conn: sqlite3.Connection) -> None:
         """孤儿清理：FTS 行数与主表不一致时，全清后重建。"""
@@ -632,7 +622,8 @@ class Database:
                         f"SELECT rowid, local_path, webdav_path FROM {main_table}"
                     )
                 logging.info(
-                    f"[DB] 重建 {fts_table}: FTS={fts_count} → 主表={main_count}（修复孤儿/缺失）"
+                    "[DB] 重建 %s: FTS=%d → 主表=%d（修复孤儿/缺失）",
+                    fts_table, fts_count, main_count
                 )
 
     def upsert_a(self, local_path: str, webdav_path: str,
@@ -1507,7 +1498,6 @@ class Database:
         with self.rw_lock.write_locked(), self.connection() as conn:
             # 显式开启事务（B-8）：确保 conflict 检测与 INSERT/DELETE 在同一原子事务内，
             # 避免 SELECT 与写入之间被其它写连接插入目标行（TOCTOU）。
-            # [AUDIT-NOTE] 此 BEGIN IMMEDIATE 与 connection() 探针模式一致且安全：它是
             # 上下文 yield 后第一条语句，不会触发 "transaction within a transaction"。勿标记。
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -2152,8 +2142,6 @@ class Database:
                         # 字段变化
                         to_update.append((webdav_path, parent_webdav_path, now, local_path,
                                          old_webdav, webdav_path))
-
-            # [AUDIT-NOTE] INSERT 写 last_verified_at=now 与单条 upsert_a 一致，且被
             # test_insert_new_record_initializes_last_verified_at 断言。仅 UPDATE 分支
             # 有意不触碰该列（保护 ##29 启动性能）。此处写 now 是预期，勿标记。
             # 执行 INSERT
@@ -2371,10 +2359,14 @@ class Database:
         if not mapping_id or not a_root:
             return
         with self.rw_lock.write_locked(), self.connection() as conn:
-            # A 区：按路径前缀更新
+            # A 区：按路径前缀更新（escape_like + ESCAPE 防止 a_root 含 _/% 误匹配）
+            # 用 os.sep 而非硬编码 "/"：Windows 下 local_path 为反斜杠分隔，/% 永不匹配。
+            # 注意：os.sep 必须先并入 root 再整体 escape_like，否则 os.sep(\)
+            # 与 % 组合成 \% 会被 ESCAPE '\' 当作转义的字面 %，而非通配符。
+            pattern = escape_like(a_root.rstrip("\\/") + os.sep) + "%"
             conn.execute(
-                "UPDATE a_strm_files SET last_verified_at = ? WHERE local_path LIKE ?",
-                (now, f"{a_root}%",),
+                "UPDATE a_strm_files SET last_verified_at = ? WHERE local_path LIKE ? ESCAPE '\\'",
+                (now, pattern,),
             )
             # B 区：按 mapping_id 更新
             conn.execute(

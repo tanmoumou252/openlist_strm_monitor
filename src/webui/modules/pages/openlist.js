@@ -4,6 +4,7 @@ import { esc, createField } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
 import { showConfirmDialog } from '../components/dialog.js';
 import { OpenListState } from '../core/state.js';
+import { isRenderStale } from '../core/router.js';
 
 const _openlistHelpTexts = {
   webdav_host: 'OpenList 的 WebDAV 服务地址。\n格式：http://IP:端口/dav\n例如：http://127.0.0.1:5244/dav',
@@ -42,6 +43,10 @@ function _olHelpIcon(key, tooltipBelow = false) {
 }
 
 export async function _renderOpenListConfig(cfg) {
+  // [已修复] N-P1-7: 在 await 前捕获容器引用，避免异步竞态将旧 HTML 插入当前子页
+  const subpage = document.getElementById('config-subpage');
+  if (!subpage || !subpage.isConnected) return;
+
   let openlistCfg = {};
   try {
     const resp = await api('/api/webui/config/openlist');
@@ -301,8 +306,8 @@ export async function _renderOpenListConfig(cfg) {
   html += `</div>`;
   html += `</div>`;
 
-  const subpage = document.getElementById('config-subpage');
-  if (subpage) {
+  // [已修复] N-P1-7: openlist.js 异步竞态，await 后检查容器连接状态和渲染代际
+  if (subpage && subpage.isConnected && !isRenderStale()) {
     const backBtn = subpage.querySelector('.config-back-btn');
     if (backBtn) {
       backBtn.insertAdjacentHTML('afterend', html);
@@ -319,30 +324,30 @@ export async function _renderOpenListConfig(cfg) {
 }
 
 function _syncRefreshPathsFromPreviewEngines() {
-	  // 从引擎配置推导缺失的刷新路径（仅添加新路径，不覆盖已有路径）
-	  const derived = new Set();
-	  OpenListState.strmEngines.forEach(row => {
-	    if (!row || !row.engine || !row.monitored_paths) return;
-	    const engineEntry = row.engine;
-	    row.monitored_paths.forEach(p => {
-	      const lastDir = String(p).replace(/\/$/, '').split('/').pop();
-	      if (lastDir) {
-	        const refreshPath = `${engineEntry.replace(/\/$/, '')}/${lastDir}`;
-	        derived.add(refreshPath);
-	      }
-	    });
-	  });
-	  // 合并：保留用户已有的路径 + 补充引擎配置中新增的推导路径
-	  const existing = OpenListState.refreshPaths || [];
-	  const existingSet = new Set(existing);
-	  for (const d of derived) {
-	    if (!existingSet.has(d)) {
-	      existing.push(d);
-	    }
-	  }
-	  OpenListState.refreshPaths = existing;
-	  _renderRefreshPathsTags();
-	}
+    // 从引擎配置推导缺失的刷新路径（仅添加新路径，不覆盖已有路径）
+    const derived = new Set();
+    OpenListState.strmEngines.forEach(row => {
+      if (!row || !row.engine || !row.monitored_paths) return;
+      const engineEntry = row.engine;
+      row.monitored_paths.forEach(p => {
+        const lastDir = String(p).replace(/\/$/, '').split('/').pop();
+        if (lastDir) {
+          const refreshPath = `${engineEntry.replace(/\/$/, '')}/${lastDir}`;
+          derived.add(refreshPath);
+        }
+      });
+    });
+    // 合并：保留用户已有的路径 + 补充引擎配置中新增的推导路径
+    const existing = OpenListState.refreshPaths || [];
+    const existingSet = new Set(existing);
+    for (const d of derived) {
+      if (!existingSet.has(d)) {
+        existing.push(d);
+      }
+    }
+    OpenListState.refreshPaths = existing;
+    _renderRefreshPathsTags();
+  }
 
 function _renderRefreshPathsTags() {
   const container = document.getElementById('refresh-paths-tags');
@@ -417,14 +422,14 @@ function _bindOpenListFormEvents(cfg, openlistCfg) {
     btn.innerHTML = '测试中...';
     try {
 const data = await api('/api/openlist/test-connection', {
-	        method: 'POST',
-	        body: {
-	          host: document.getElementById('ol-webdav-host')?.value || '',
-	          user: document.getElementById('ol-webdav-user')?.value || '',
-	          password: document.getElementById('ol-webdav-password')?.value || '',
-	          totp_secret: document.getElementById('ol-webdav-totp-secret')?.value || '',
-	        },
-	      });
+          method: 'POST',
+          body: {
+            host: document.getElementById('ol-webdav-host')?.value || '',
+            user: document.getElementById('ol-webdav-user')?.value || '',
+            password: document.getElementById('ol-webdav-password')?.value || '',
+            totp_secret: document.getElementById('ol-webdav-totp-secret')?.value || '',
+          },
+        });
       if (data.success) {
         showToast('连接成功！', 'success');
         OpenListState.apiStatus = 'online';
@@ -612,9 +617,9 @@ const data = await api('/api/restart-webui', { method: 'POST' });
         log_file: document.getElementById('ol-log-path')?.value || '',
       };
 const data = await api('/api/webui/config/openlist', {
-	        method: 'POST',
-	        body,
-	      });
+          method: 'POST',
+          body,
+        });
 if (data.success) {
         showToast('OpenList 配置已保存并热更新', 'success');
         const savedHost = document.getElementById('ol-webdav-host')?.value || '';
@@ -636,31 +641,31 @@ if (data.success) {
 }
 
 function _refreshABMappings() {
-	  const container = document.getElementById('ab-mappings-display');
-	  if (!container) return;
-	  const configuredEngines = OpenListState.strmEngines.filter(e => e.engine);
-	  const aFolders = [];
-	  configuredEngines.forEach(eng => {
-	    const engData = OpenListState.availableEngines.find(e => e.mount_path === eng.engine);
-	    if (engData && engData.local_path && !aFolders.includes(engData.local_path)) {
-	      aFolders.push(engData.local_path);
-	    }
-	  });
-	  // 从已保存的 a_b_mappings 回填 B 根
-	  const savedMap = {};
-	  (OpenListState.abMappings || []).forEach(m => { savedMap[m.a_root] = m.b_root; });
-	  container.innerHTML = aFolders.length
-	    ? aFolders.map(f => `
-	      <div class="ab-mapping-row">
-	        <span class="a-folder-chip">${esc(f)}</span>
-	        <input type="text" class="b-root-input" data-a-root="${esc(f)}"
-	               value="${esc(savedMap[f] || '')}"
-	               placeholder="B 区根目录（如 D:\\emby\\strm）">
-	      </div>`).join('')
-	    : '<span style="color:var(--text-muted)">暂无数据（请先配置 STRM 引擎）</span>';
-	}
+    const container = document.getElementById('ab-mappings-display');
+    if (!container) return;
+    const configuredEngines = OpenListState.strmEngines.filter(e => e.engine);
+    const aFolders = [];
+    configuredEngines.forEach(eng => {
+      const engData = OpenListState.availableEngines.find(e => e.mount_path === eng.engine);
+      if (engData && engData.local_path && !aFolders.includes(engData.local_path)) {
+        aFolders.push(engData.local_path);
+      }
+    });
+    // 从已保存的 a_b_mappings 回填 B 根
+    const savedMap = {};
+    (OpenListState.abMappings || []).forEach(m => { savedMap[m.a_root] = m.b_root; });
+    container.innerHTML = aFolders.length
+      ? aFolders.map(f => `
+        <div class="ab-mapping-row">
+          <span class="a-folder-chip">${esc(f)}</span>
+          <input type="text" class="b-root-input" data-a-root="${esc(f)}"
+                 value="${esc(savedMap[f] || '')}"
+                 placeholder="B 区根目录（如 D:\\emby\\strm）">
+        </div>`).join('')
+      : '<span style="color:var(--text-muted)">暂无数据（请先配置 STRM 引擎）</span>';
+  }
 
-	function _refreshEngineRow(idx) {
+  function _refreshEngineRow(idx) {
   const container = document.getElementById(`tag-container-${idx}`);
   if (!container) return;
   const row = OpenListState.strmEngines[idx];

@@ -38,11 +38,9 @@ if TYPE_CHECKING:
     from tmdb_client import TmdbClient
     from database import Database
 
-
 # ============================================================
 # 工具函数
 # ============================================================
-
 
 def _is_lan_ip(ip: str) -> bool:
     """判断 IP 是否为局域网地址（含 localhost）"""
@@ -67,7 +65,6 @@ def _is_lan_ip(ip: str) -> bool:
         return True
     return False
 
-
 def _human_size(size: int) -> str:
     """人类可读的文件大小"""
     for unit in ("B", "KB", "MB", "GB"):
@@ -75,7 +72,6 @@ def _human_size(size: int) -> str:
             return f"{size:.1f} {unit}"
         size //= 1024
     return f"{size:.1f} TB"
-
 
 def _resolve_tmdb_proxy(app_config) -> str | None:
     """统一 TMDB 代理解析逻辑（与客户端初始化一致）"""
@@ -94,7 +90,6 @@ def _resolve_tmdb_proxy(app_config) -> str | None:
     if proxy_cfg and proxy_cfg.enabled and proxy_cfg.http:
         return proxy_cfg.http
     return None
-
 
 def _build_img_opener(handler, use_proxy=True):
     """构建用于图片/头像请求的 opener（从配置读取代理，不依赖 tmdb_client.proxy）。"""
@@ -116,7 +111,6 @@ def _build_img_opener(handler, use_proxy=True):
         return urllib.request.build_opener(proxy_handler)
     return urllib.request.build_opener()
 
-
 def _try_bind_port(host: str, port: int) -> bool:
     """尝试绑定端口，检测端口是否可用。
 
@@ -136,7 +130,6 @@ def _try_bind_port(host: str, port: int) -> bool:
     except OSError:
         return False
 
-
 def _safe_int(val: str | None, default: int = 0) -> int:
     if val is None:
         return default
@@ -144,7 +137,6 @@ def _safe_int(val: str | None, default: int = 0) -> int:
         return int(val)
     except (TypeError, ValueError):
         return default
-
 
 # ============================================================
 # TMDB Genre ID → 中文名映射表
@@ -184,7 +176,6 @@ TMDB_GENRE_NAMES: dict[int, str] = {
     10768: "战争政治",
 }
 
-
 # ============================================================
 # match_status → _status 映射
 # ============================================================
@@ -194,7 +185,6 @@ _STATUS_MAP = {
     "unmatched": "out",
     "uncomputed": "out",
 }
-
 
 # ============================================================
 # 后台同步
@@ -225,7 +215,6 @@ def _bg_sync_refresh(server) -> None:
     finally:
         with server._sync_lock:
             server._sync_running = False
-
 
 # ============================================================
 # TMDB 路由
@@ -284,10 +273,15 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         return True
 
     # Avatar proxy route — 支持 EdgeOne/custom host 反代
+    # 免鉴权（登录前需显示头像），但需输入校验防止路径注入
     if path == "/api/tmdb/avatar":
         avatar_hash = params.get("hash", [""])[0]
         if not avatar_hash:
             handler._send_json({"error": "missing hash"}, 400)
+            return True
+        # N6: avatar_hash 应为十六进制字符串（MD5 或 SHA 哈希）- 防止路径注入
+        if not all(c in "0123456789abcdefABCDEF" for c in avatar_hash):
+            handler._send_json({"error": "invalid hash format (must be hex)"}, 400)
             return True
         _host = handler.webui._config.tmdb.host
         if _host:
@@ -320,6 +314,11 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         width = params.get("w", ["342"])[0]
         if not poster_path:
             handler._send_json({"error": "missing path"}, 400)
+            return True
+        # N6: poster_path 应为 TMDB 路径格式（/t/p/xxx 或类似），限制字符集防注入
+        # 追加 '..' 检查：字符类允许连续点，需显式拒绝路径穿越
+        if not re.match(r'^/[A-Za-z0-9._/\-]+$', poster_path) or '..' in poster_path:
+            handler._send_json({"error": "invalid poster path format"}, 400)
             return True
         if width not in ("92", "154", "185", "342", "500", "780"):
             width = "342"
@@ -787,14 +786,12 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
 
     return False
 
-
 # ============================================================
 # 共享 TMDB POST 处理器
 # ============================================================
 
 from tmdb_watchlist_db import TmdbWatchlistDb  # noqa: E402
 from watchlist_match import refresh_watchlist_match_state  # noqa: E402
-
 
 def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
     """处理 TMDB 配置更新请求。
@@ -814,8 +811,15 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
     try:
         changed = False
         applied = {}  # 只记录实际生效的值
+        # [已修复] P1-3: watchlist_db 已从允许字段中移除，请求体含该键时返回 400
+        if "watchlist_db" in data:
+            handler._send_json(
+                {"success": False, "error": "该路径配置已移除，请使用固定项目根路径"},
+                400,
+            )
+            return
         for key in ("access_token", "api_key", "language", "host",
-                    "watchlist_db", "csv_watchlist_file",
+                    "csv_watchlist_file",
                     "fuzzy_threshold", "anime_min_ep_ratio",
                     "anime_max_season_diff", "watchlist_cache_ttl", "anime_min_season_ratio"):
             if key in data and data[key] is not None:
@@ -824,20 +828,6 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
                 if key in ("access_token", "api_key") and not val:
                     if getattr(tmdb_cfg, key, ""):
                         continue
-                if key == "watchlist_db" and val:
-                    val = str(val).strip()
-                    if val:
-                        p = Path(val)
-                        if not p.is_absolute():
-                            project_root = getattr(
-                                webui_server, '_project_root', None)
-                            if project_root:
-                                base_dir = str(project_root)
-                            else:
-                                base_dir = getattr(
-                                    webui_server._config, "base_dir",
-                                    str(Path.cwd()))
-                            val = str(Path(base_dir) / val)
                 setattr(tmdb_cfg, key, val)
                 applied[key] = val  # 记录实际生效的值
                 changed = True
@@ -902,7 +892,6 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
         # M-13: 不回传原始异常信息
         handler._send_json({"success": False, "error": "保存失败"}, 500)
 
-
 def _handler_reinit_tmdb(webui_server, tmdb_cfg) -> None:
     """重新初始化 TMDB 客户端和 watchlist DB。"""
     from tmdb_client import create_tmdb_client  # noqa: E402
@@ -925,7 +914,6 @@ def _handler_reinit_tmdb(webui_server, tmdb_cfg) -> None:
     # 获取 api_key，为空时从 config.toml 兜底
     api_key = getattr(tmdb_cfg, "api_key", "") or ""
 
-
     try:
         webui_server._tmdb_client = create_tmdb_client(
             access_token=getattr(tmdb_cfg, "access_token", "") or "",
@@ -937,7 +925,8 @@ def _handler_reinit_tmdb(webui_server, tmdb_cfg) -> None:
     except Exception as e:
         logging.warning("[TMDB] 重新初始化客户端失败: %s", e)
         webui_server._tmdb_client = None
-    # 重建 watchlist DB（固定路径，无条件创建）
+    # [已修复] P1-3: 数据库路径固定在项目根，watchlist_db 字段已移除
+    # [设计取舍] 仅测试注入，生产固定项目根
     db_path = str(project_root / "tmdb_watchlist.db")
     ttl = float(getattr(tmdb_cfg, "watchlist_cache_ttl", 604800))
     try:
@@ -945,7 +934,6 @@ def _handler_reinit_tmdb(webui_server, tmdb_cfg) -> None:
     except Exception as e:
         logging.warning("[TMDB] 待看列表数据库重建失败: %s", e)
         webui_server._watchlist_db = None
-
 
 def _save_tmdb_to_db(webui_server, changes: dict) -> None:
     """保存 TMDB 配置到 DB webui_config 表（scope="tmdb"）。
@@ -963,7 +951,6 @@ def _save_tmdb_to_db(webui_server, changes: dict) -> None:
         logging.info("[TMDB] 配置已保存到 DB (webui_config scope=tmdb)")
     except Exception as e:
         logging.warning("[TMDB] 保存配置到 DB 失败: %s", e)
-
 
 def _handle_webui_config_get(handler, webui_server, scope: str) -> None:
     """处理 GET /api/webui/config/{scope} — 返回指定 scope 的所有配置。"""
@@ -984,7 +971,6 @@ def _handle_webui_config_get(handler, webui_server, scope: str) -> None:
     except Exception as e:
         logging.exception("[WebUI] 读取配置失败 (scope=%s): %s", scope, e)
         handler._send_json({"success": False, "error": "internal_error"}, 500)
-
 
 def _validate_strm_engines(value: str) -> bool:
     """校验 openlist.strm_engines 写入值。
@@ -1012,7 +998,6 @@ def _validate_strm_engines(value: str) -> bool:
             return False
     return True
 
-
 def _validate_a_b_mappings(value: str) -> bool:
     """校验 openlist.a_b_mappings 写入值。
 
@@ -1038,8 +1023,6 @@ def _validate_a_b_mappings(value: str) -> bool:
         if label is not None and not isinstance(label, str):
             return False
     return True
-
-
 
 def _handle_webui_config_post(handler, webui_server, scope: str,
                                body: bytes) -> None:
@@ -1110,10 +1093,28 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
         # admin_password 必须以 salt$iterations$hash 格式存储；
         # 若以明文写入（str(val)），登录端 split("$", 2) 会失败 → 永久锁死。
         # 在写入循环前统一处理，避免循环内重复哈希。
+        # 密码长度校验（≥4）：防止管理员把 password 设为空串导致认证失效
+        # 整数等非字符串类型必须拒绝，避免 str(val) 写入字面量导致永久锁死
+        # [已修复] S2: 密码类型/长度校验，防空密码旁路认证
         if scope == "ui" and "admin_password" in data:
             _pw = data["admin_password"]
-            if isinstance(_pw, str) and _pw and "$" not in _pw:
+            if not isinstance(_pw, str):
+                handler._send_json({"success": False, "error": "密码必须为字符串"}, 400)
+                return
+            # [已修复] N-P1-8: 用严格哈希正则判断"已哈希"，而非简单 "$" in _pw
+            # 密码如 My$ecret 含 $ 但不符合哈希格式，必须重新哈希，否则登录永久锁死
+            if re.match(r'^[0-9a-f]{32}\$[0-9]+\$[0-9a-f]{64}$', _pw):
+                pass  # 已哈希，原样写入
+            else:
+                if len(_pw) < 4:
+                    handler._send_json(
+                        {"success": False, "error": "密码长度至少 4 个字符"}, 400)
+                    return
                 data["admin_password"] = hash_password(_pw)
+        # [已修复] P1-3: tmdb scope 收到 watchlist_db 键时宽容剥离，避免写入 DB 孤儿键
+        if scope == "tmdb" and "watchlist_db" in data:
+            logging.warning("[WebUI] tmdb scope 配置收到已移除的 watchlist_db 键，已剥离")
+            data.pop("watchlist_db", None)
         for key, val in data.items():
             _wdb.set_config(scope, str(key), str(val) if val is not None else "")
 
@@ -1134,6 +1135,14 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
             except Exception:
                 pass
 
+        # [已修复] N-P2-4: tmdb scope 写入后重新初始化 TMDB 客户端 + 重载 DB 配置
+        if scope == "tmdb":
+            try:
+                webui_server._load_db_config()
+                _handler_reinit_tmdb(webui_server, webui_server._config.tmdb)
+            except Exception as e:
+                logging.warning("[WebUI] tmdb scope 热更新失败: %s", e)
+
         # 更新 _has_password 缓存（ui scope 管理密码变更时）
         if scope == "ui" and "admin_password" in data:
             webui_server._has_password = bool(data.get("admin_password"))
@@ -1144,7 +1153,6 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
     except Exception as e:
         logging.exception("[WebUI] 写入配置失败 (scope=%s): %s", scope, e)
         handler._send_json({"success": False, "error": "internal_error"}, 500)
-
 
 def _hot_reload_openlist_config(webui_server) -> None:
     """OpenList 配置保存后热更新：从 DB 重新加载配置并更新内存引用。"""
@@ -1220,7 +1228,6 @@ def _hot_reload_openlist_config(webui_server) -> None:
     except Exception as e:
         logging.warning("[HotReload] OpenList 配置热更新失败: %s", e)
 
-
 def _reinit_admin_client(webui_server) -> None:
     """重新初始化 OpenListAdminClient 并更新 AppService 引用。"""
     try:
@@ -1244,7 +1251,6 @@ def _reinit_admin_client(webui_server) -> None:
             logging.warning("[HotReload] 新的 OpenListAdminClient 登录失败: %s — 保留旧客户端继续运行", new_client.last_error_message or "未知错误")
     except Exception as e:
         logging.warning("[HotReload] 重新初始化 OpenListAdminClient 失败: %s", e)
-
 
 def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None:
     """处理 POST /api/openlist/test-connection — 验证 API 连接。"""
@@ -1304,7 +1310,6 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
             "error_type": "exception",
         })
 
-
 def _fetch_strm_storages(cfg) -> list[dict]:
     """确保 STRM 存储映射已加载，并返回按 entry_path 展开的存储列表。
 
@@ -1335,7 +1340,6 @@ def _fetch_strm_storages(cfg) -> list[dict]:
             "local_path": mapping.local_path,
         })
     return result
-
 
 def _handle_openlist_strm_engines(handler, webui_server) -> None:
     """处理 GET /api/openlist/strm-engines — 获取 STRM 引擎列表。
@@ -1379,7 +1383,6 @@ def _handle_openlist_strm_engines(handler, webui_server) -> None:
 
     handler._send_json({"success": True, "engines": engines})
 
-
 def _handle_openlist_monitored_paths(handler, webui_server, params) -> None:
     """处理 GET /api/openlist/monitored-paths?engine=/strm — 获取监控目录。
 
@@ -1407,7 +1410,6 @@ def _handle_openlist_monitored_paths(handler, webui_server, params) -> None:
 
     handler._send_json({"success": True, "engine": engine, "paths": paths})
 
-
 def _openlist_merged_webdav_cfg(webui_server):
     """合并 DB/config.toml 的 WebDAV 配置，返回 (host, user, password, totp_secret)。"""
     cfg = webui_server._config
@@ -1424,7 +1426,6 @@ def _openlist_merged_webdav_cfg(webui_server):
     totp_secret = db_cfg.get("webdav_totp_secret", "") or cfg.webdav.totp_secret
     return host, user, password, totp_secret
 
-
 def _handle_openlist_status(handler, webui_server) -> None:
     """处理 GET /api/openlist/status — 仅判断是否已配置（不解耦在线性）。
 
@@ -1437,7 +1438,6 @@ def _handle_openlist_status(handler, webui_server) -> None:
         handler._send_json({"success": True, "status": "unconfigured"})
         return
     handler._send_json({"success": True, "status": "configured", "host": host})
-
 
 def _handle_openlist_ping(handler, webui_server) -> None:
     """处理 GET /api/openlist/ping — 探测 OpenList 服务在线状态。
@@ -1470,7 +1470,6 @@ def _handle_openlist_ping(handler, webui_server) -> None:
     except Exception as e:
         logging.exception("[OpenList] 状态检查失败: %s", e)
         handler._send_json({"success": True, "status": "offline", "error": "internal_error"})
-
 
 def _handle_openlist_paths(handler, webui_server) -> None:
     """处理 GET /api/openlist/paths — 路径自动获取。
@@ -1512,7 +1511,6 @@ def _handle_openlist_paths(handler, webui_server) -> None:
         "c_root": cfg.paths.c_root,
     })
 
-
 def _handle_tmdb_watchlist_match_refresh(handler, webui_server) -> None:
     """触发后台刷新 TMDB 待看列表的收录状态。"""
     if not getattr(webui_server, '_watchlist_db', None):
@@ -1545,7 +1543,6 @@ def _handle_tmdb_watchlist_match_refresh(handler, webui_server) -> None:
     threading.Thread(
         target=_do_match_refresh, args=(webui_server,), daemon=True).start()
     handler._send_json({"success": True, "message": "后台收录状态刷新已启动"})
-
 
 def _do_match_refresh(webui_server) -> None:
     """后台执行收录状态刷新。"""
@@ -1585,7 +1582,6 @@ def _do_match_refresh(webui_server) -> None:
     finally:
         with webui_server._match_refresh_lock:
             webui_server._match_refresh_running = False
-
 
 def _handle_tmdb_watchlist_match_override(
         handler, webui_server, body: bytes) -> None:
@@ -1647,7 +1643,6 @@ def _handle_tmdb_watchlist_match_override(
         logging.error("[TMDB] 手动覆盖收录状态失败: %s", e, exc_info=True)
         # M-13: 不回传原始异常信息
         handler._send_json({"success": False, "message": "覆盖失败"}, 500)
-
 
 def _handle_tmdb_watchlist_match_clear(
         handler, webui_server, body: bytes) -> None:
@@ -1715,7 +1710,6 @@ def _handle_tmdb_watchlist_match_clear(
         # M-13: 不回传原始异常信息
         handler._send_json({"success": False, "message": "清除失败"}, 500)
 
-
 def _handle_tmdb_watchlist_bg_sync(handler, webui_server) -> None:
     """触发后台 TMDB 待看列表同步。"""
     if not getattr(webui_server, '_tmdb_client', None) or not getattr(
@@ -1745,7 +1739,6 @@ def _handle_tmdb_watchlist_bg_sync(handler, webui_server) -> None:
         target=_do_bg_sync, args=(webui_server,), daemon=True).start()
     handler._send_json({"success": True, "message": "后台同步已启动"})
 
-
 def _do_bg_sync(webui_server) -> None:
     """后台执行待看列表同步。"""
     try:
@@ -1769,7 +1762,6 @@ def _do_bg_sync(webui_server) -> None:
     finally:
         with webui_server._sync_lock:
             webui_server._sync_running = False
-
 
 def _handle_restart_webui(handler, webui_server) -> None:
     """重启主程序（AppService）和 WebUI HTTP 服务。"""
@@ -1808,13 +1800,11 @@ def _handle_restart_webui(handler, webui_server) -> None:
             logging.error("[Restart] 重启失败: %s", e)
     threading.Thread(target=_do_restart, daemon=True).start()
 
-
 # ============================================================
 # 常量（Dashboard / Area 相关）
 # ============================================================
 
 PAGE_SIZE = 50
-
 
 # ============================================================
 # 工具：兼容两种 db 访问模式
@@ -1835,7 +1825,6 @@ def _db_get_table_counts(db) -> dict[str, int]:
     except Exception:
         return {"a_strm_files": 0, "b_strm_files": 0, "c_ghost_files": 0}
 
-
 def _db_get_b_status_counts(db) -> dict[str, int]:
     """获取 B 区状态统计。优先使用 db 方法，回退到原始 SQL。"""
     if hasattr(db, 'get_b_status_counts'):
@@ -1852,7 +1841,6 @@ def _db_get_b_status_counts(db) -> dict[str, int]:
     except Exception:
         return {"valid": 0, "duplicate": 0, "quarantined": 0}
 
-
 def _db_get_db_file_size(db) -> int:
     """获取数据库文件大小。优先使用 db 方法，回退到 os.path.getsize。"""
     if hasattr(db, 'get_db_file_size'):
@@ -1865,7 +1853,6 @@ def _db_get_db_file_size(db) -> int:
         except OSError:
             pass
     return 0
-
 
 def _get_records_paginated(handler, area: str, page: int = 1,
                            page_size: int = 100, search: str = "") -> dict:
@@ -1934,7 +1921,6 @@ def _get_records_paginated(handler, area: str, page: int = 1,
         logging.error("分页查询 %s 区记录失败: %s", area, e)
         return {"total": 0, "page": page, "page_size": page_size, "records": []}
 
-
 # ============================================================
 # Dashboard / Area / Records / Logs / Config 处理器
 # ============================================================
@@ -1966,7 +1952,6 @@ def _get_mapping_metadata_list(handler) -> list[dict]:
     
     return metadata_list
 
-
 def handle_dashboard(handler) -> None:
     """处理 GET /api/dashboard"""
     db = handler.webui._db
@@ -1979,6 +1964,10 @@ def handle_dashboard(handler) -> None:
         index_metadata = db.get_index_metadata()
         mapping_metadata = _get_mapping_metadata_list(handler)
         
+        # N1: 从 app_service 获取 watchdog 健康状态
+        app_service = handler.webui._app_service
+        watchers_healthy = getattr(app_service, '_watchers_healthy', True) if app_service else True
+        
         handler._send_json({
             "a_count": counts.get("a_strm_files", 0),
             "b_count": counts.get("b_strm_files", 0),
@@ -1987,6 +1976,8 @@ def handle_dashboard(handler) -> None:
             "b_duplicate": b_status.get("duplicate", 0),
             "b_quarantined": b_status.get("quarantined", 0),
             "tmdb_configured": bool(handler.webui._tmdb_client),
+            # N1: Watchdog 健康状态 - 前端据此显示降级指示
+            "watchers_healthy": watchers_healthy,
             # 遗留字段（保持向后兼容）
             "table_counts": counts,
             "b_status_counts": b_status,
@@ -2007,7 +1998,6 @@ def handle_dashboard(handler) -> None:
         logging.exception("[Dashboard] 获取索引元数据失败: %s", e)
         handler._send_json({"error": "internal_error"}, 500)
 
-
 def handle_records_api(handler, params) -> None:
     """处理 GET /api/records?area=a&page=1&page_size=100&search=xxx
 
@@ -2018,14 +2008,13 @@ def handle_records_api(handler, params) -> None:
     if area not in ("a", "b", "c"):
         handler._send_json({"error": "无效区域"}, 400)
         return
-    page = _safe_int(params.get("page", ["1"])[0], 1)
-    page_size = min(_safe_int(params.get("page_size", ["100"])[0], 100), 500)
+    page = max(1, _safe_int(params.get("page", ["1"])[0], 1))
+    page_size = max(1, min(_safe_int(params.get("page_size", ["100"])[0], 100), 500))
     search = params.get("search", [""])[0].strip()
 
     result = _get_records_paginated(handler, area, page=page,
                                      page_size=page_size, search=search)
     handler._send_json(result)
-
 
 # SQL 提取 kind 的逻辑（与 Python _media_info 一致）
 # 根据路径中的分类目录判断（番剧/电影/其他）
@@ -2105,13 +2094,11 @@ _KIND_FILTER_MAP = {
 # UI scope 写入白名单：仅允许这些 key 通过 POST /api/webui/config/ui 写入
 _UI_CONFIG_ALLOWED_KEYS = {"tmdb_cache_never_remind", "tmdb_match_toast_disabled", "admin_password", "onboarding_completed", "onboarding_skipped"}
 
-
 # 登录速率限制 (P2-13)
 _login_attempts: dict[str, list[float]] = {}
 _login_attempts_lock = threading.Lock()
 _LOGIN_MAX_ATTEMPTS = 5
 _LOGIN_LOCKOUT_SECONDS = 300
-
 
 def _handle_login(handler, webui_server, body: bytes) -> None:
     """处理 POST /api/login — 密码登录验证。"""
@@ -2176,7 +2163,6 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
     except Exception as e:
         logging.warning("[Login] 登录失败: %s", e)
         handler._send_json({"error": "服务器内部错误"}, 500)
-
 
 def _get_media_groups_paginated(handler, area: str, kind_filter: str,
                                  q: str, sort_key: str, sort_order: str,
@@ -2415,7 +2401,6 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
         return {"total": 0, "page": page, "page_size": page_size,
                 "media_items": [], "kind_counts": {}}
 
-
 def handle_area(handler, area, params) -> None:
     """处理 GET /api/area/{area} — 区域列表，返回按媒体分组的统计摘要"""
     if area not in ("a", "b", "c"):
@@ -2426,8 +2411,8 @@ def handle_area(handler, area, params) -> None:
     q = params.get("q", [""])[0].strip().lower()
     sort_key = params.get("sort", ["name"])[0]
     sort_order = params.get("order", ["asc"])[0]
-    page = _safe_int(params.get("page", ["1"])[0], 1)
-    page_size = min(_safe_int(params.get("page_size", ["50"])[0], 50), 500)
+    page = max(1, _safe_int(params.get("page", ["1"])[0], 1))
+    page_size = max(1, min(_safe_int(params.get("page_size", ["50"])[0], 50), 500))
 
     kind_label_map = {
         "anime": "番剧",
@@ -2484,7 +2469,6 @@ def handle_area(handler, area, params) -> None:
         "page_size": result["page_size"],
     })
 
-
 # 各区可排序字段白名单
 _AREA_SORT_FIELDS: dict[str, set[str]] = {
     "a": {"local_path", "webdav_path", "updated_at", "last_verified_at"},
@@ -2492,7 +2476,6 @@ _AREA_SORT_FIELDS: dict[str, set[str]] = {
     "c": {"local_path", "webdav_path", "moved_at"},
 }
 _AREA_SORT_ORDERS = {"asc", "desc"}
-
 
 def _natural_sort_key(path: str) -> tuple:
     """自然排序键：对 basename 的连续数字按整数比较，避免字典序导致的
@@ -2519,7 +2502,6 @@ def _natural_sort_key(path: str) -> tuple:
     parts.append((1, path))  # tiebreaker：完整路径
     return tuple(parts)
 
-
 def _compute_common_local_root(local_paths: list[str]) -> str:
     """计算多个本地路径的公共目录前缀。
 
@@ -2544,7 +2526,6 @@ def _compute_common_local_root(local_paths: list[str]) -> str:
         # 如果路径无法计算公共路径（如不同驱动器），返回空
         return ""
 
-
 def _escape_fts5_query(query: str) -> str:
     """清理 FTS5 查询字符串，移除可能被解释为运算符的字符。
 
@@ -2562,7 +2543,6 @@ def _escape_fts5_query(query: str) -> str:
     # 移除反斜杠（Windows 路径分隔符在 FTS5 中无意义）
     query = query.replace('\\', ' ')
     return query
-
 
 def handle_area_detail(handler, area, params) -> None:
     """处理 GET /api/area/{area}/detail — 区域详情，返回指定媒体的所有记录
@@ -2765,7 +2745,6 @@ def handle_area_detail(handler, area, params) -> None:
             "seasons": seasons,
         })
 
-
 def _process_mapping_partition(
     db,
     app_service,
@@ -2795,7 +2774,10 @@ def _process_mapping_partition(
     # 独立分页
     total = len(records)
     total_pages = max(1, ceil(total / PAGE_SIZE)) if total else 1
+    # F2: 记录请求页码是否被 clamp（多 mapping 时各分区记录数不同，静默截断会让用户看到错误页）
+    requested_page = page
     page = max(1, min(page, total_pages))
+    clamped = page != requested_page
     offset = (page - 1) * PAGE_SIZE
     paged_records = records[offset:offset + PAGE_SIZE]
 
@@ -2828,9 +2810,9 @@ def _process_mapping_partition(
         "total": total,
         "page": page,
         "total_pages": total_pages,
+        "clamped": clamped,
         "seasons": seasons,
     }
-
 
 def handle_area_refresh(handler, area, body: bytes) -> None:
     """处理 POST /api/area/{area}/refresh — 通过 STRM 入口路径触发引擎刷新并同步到 B 区
@@ -2901,7 +2883,6 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
         handler._send_json({"error": "internal_error", "status": "error"}, 500)
     finally:
         refresh_lock.release()
-
 
 def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str | None = None) -> dict:
     """执行媒体刷新逻辑：通过 STRM 入口路径触发引擎重新生成，然后同步到 B 区。
@@ -3088,7 +3069,6 @@ def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str |
         "verified_at": now_verified,
     }
 
-
 def _make_refresh_logger(level_name: str):
     """根据日志级别名称创建刷新日志辅助函数。
 
@@ -3109,7 +3089,6 @@ def _make_refresh_logger(level_name: str):
             logging.log(numeric, msg, *args)
 
     return _log
-
 
 def _compute_common_parent_path(paths: list[str]) -> str:
     """计算路径列表的最长公共父目录"""
@@ -3134,7 +3113,6 @@ def _compute_common_parent_path(paths: list[str]) -> str:
     if not common:
         return "/"
     return "/" + "/".join(common)
-
 
 def _parse_api_files(list_result: dict, parent_path: str) -> list[dict]:
     """解析 OpenList API 返回的文件列表，只保留 .strm 和字幕文件"""
@@ -3162,7 +3140,6 @@ def _parse_api_files(list_result: dict, parent_path: str) -> list[dict]:
                 "webdav_path": webdav_path,
             })
     return files
-
 
 def _read_log_file_tail(log_file: Path | str, lines_req: int) -> list[str]:
     """读取日志文件的最后 N 行。
@@ -3193,7 +3170,6 @@ def _read_log_file_tail(log_file: Path | str, lines_req: int) -> list[str]:
     except Exception:
         return []
 
-
 def handle_logs_api(handler, params: dict) -> None:
     """处理 GET /api/logs"""
     lines_req = _safe_int(params.get("lines", ["200"])[0], 200)
@@ -3221,7 +3197,6 @@ def handle_logs_api(handler, params: dict) -> None:
         logging.exception("[WebUI] 读取日志尾部失败: %s", e)
         handler._send_json({"error": "internal_error"}, 500)
 
-
 def handle_download_log_api(handler, params: dict) -> None:
     """处理 GET /api/logs/download - 下载完整的日志文件"""
     log_file_path = None
@@ -3239,16 +3214,22 @@ def handle_download_log_api(handler, params: dict) -> None:
         return
 
     try:
+        # [已修复] N-P2-5: 分块流式写 + Content-Length，避免整文件读入内存
+        file_size = log_file_path.stat().st_size
         handler.send_response(200)
         handler.send_header('Content-Type', 'application/octet-stream')
         handler.send_header('Content-Disposition', f'attachment; filename="{log_file_path.name}"')
+        handler.send_header('Content-Length', str(file_size))
         handler.end_headers()
         with open(log_file_path, 'rb') as f:
-            handler.wfile.write(f.read())
+            while True:
+                chunk = f.read(64 * 1024)
+                if not chunk:
+                    break
+                handler.wfile.write(chunk)
     except Exception as e:
         logging.exception("[WebUI] 下载日志文件失败: %s", e)
         handler._send_json({"error": "internal_error"}, 500)
-
 
 def handle_config_api(handler) -> None:
     """处理 GET /api/config — 归一化配置字段，兼容 WebUIConfig 和 AppConfig
@@ -3260,9 +3241,7 @@ def handle_config_api(handler) -> None:
     M-3: 未认证时只返回状态 booleans（configured/not_configured），
          完整配置信息需认证后获取，防止局域网信息泄露。
     """
-    # [AUDIT-NOTE] M-3 已接受（局域网权衡）：非敏感字段（webdav_host/webdav_user/
     # b_root/a_folders）有意在登录前可读，以便 SPA/onboarding 在鉴权前渲染（服务绑定局域网）。
-    # 敏感项（webdav_password/totp_secret/api key）已脱敏为 bool。勿再标记为信息泄露。
     cfg = handler.webui._config
     tmdb_client = handler.webui._tmdb_client
     tmdb_cfg = getattr(cfg, "tmdb", None)
@@ -3286,8 +3265,10 @@ def handle_config_api(handler) -> None:
             import hmac as _hmac
             for stored_token in handler.webui._sessions:
                 if _hmac.compare_digest(token_header.encode('utf-8'), stored_token.encode('utf-8')):
-                    expiry, _ = handler.webui._sessions[stored_token]
-                    if _time() < expiry:
+                    expiry, stored_ip = handler.webui._sessions[stored_token]
+                    client_ip = handler.client_address[0] if handler.client_address else ""
+                    # M-4: session 绑定客户端 IP，防止 token 跨 IP 复用
+                    if _time() < expiry and stored_ip == client_ip:
                         is_authenticated = True
                     break
 
@@ -3317,14 +3298,10 @@ def handle_config_api(handler) -> None:
     token_preview = (token[:16] + "...") if len(token) > 16 else (token or "")
     token_configured = bool(token)
 
-    # 数据库文件路径 — 兼容两种配置结构
-    # AppConfig: cfg.local.db_file
-    db_file = ""
-    local_cfg = getattr(cfg, "local", None)
-    if local_cfg and hasattr(local_cfg, "db_file"):
-        db_file = local_cfg.db_file
-    elif hasattr(cfg, "db_file"):
-        db_file = cfg.db_file
+    # [已修复] P1-3: db_file 固定在项目根，仅返回固定路径 + 存在状态，只读
+    project_root = (getattr(handler.webui, '_project_root', None)
+                    or Path(__file__).resolve().parent.parent.parent)
+    db_file = os.path.normpath(str(project_root / "bridge.db"))
 
     # 日志文件路径 — 兼容两种配置结构
     # AppConfig: cfg.log.file
@@ -3432,8 +3409,8 @@ def handle_config_api(handler) -> None:
             tmdb_cfg,
             "proxy_enabled",
             False) if tmdb_cfg else False
-    tmdb_watchlist_db = db_tmdb_cfg.get("watchlist_db", "") or (
-        getattr(tmdb_cfg, "watchlist_db", "") if tmdb_cfg else "")
+    # [已修复] P1-3: tmdb_watchlist_db 固定在项目根，只读，不从 webui_config 读取
+    tmdb_watchlist_db = str(project_root / "tmdb_watchlist.db")
     # TMDB Watchlist 启用/禁用开关 — DB 优先，默认启用
     tmdb_watchlist_enabled_raw = db_tmdb_cfg.get("watchlist_enabled", "")
     if tmdb_watchlist_enabled_raw != "":
@@ -3486,8 +3463,10 @@ def handle_config_api(handler) -> None:
         "b_root": b_root,
         "c_root": c_root,
         "a_folders": a_folders,
+        # [已修复] Task 5: a_b_mappings 补充 mapping_id，与 dashboard 一致
         "a_b_mappings": [
-            {"a_root": m.a_root, "b_root": m.b_root, "label": m.label}
+            {"a_root": m.a_root, "b_root": m.b_root, "label": m.label,
+             "mapping_id": m.mapping_id}
             for m in getattr(cfg, "a_b_mappings", [])
         ],
         "strm_engine_paths": strm_engine_paths,
@@ -3508,7 +3487,6 @@ def handle_config_api(handler) -> None:
         "_authenticated": True,
     })
 
-
 # ============================================================
 # 主程序控制 API
 # ============================================================
@@ -3522,7 +3500,6 @@ def _handle_main_status(handler, webui_server) -> bool:
     status = webui_server.get_main_status()
     handler._send_json(status)
     return True
-
 
 def _handle_main_start(handler, webui_server, body: bytes) -> bool:
     """POST /api/main/start — 启动主程序
@@ -3540,7 +3517,6 @@ def _handle_main_start(handler, webui_server, body: bytes) -> bool:
     handler._send_json(result, status_code)
     return True
 
-
 def _handle_main_stop(handler, webui_server) -> bool:
     """POST /api/main/stop — 停止主程序
     
@@ -3554,7 +3530,6 @@ def _handle_main_stop(handler, webui_server) -> bool:
     status_code = 500 if result.get("error_type") == "exception" else 200
     handler._send_json(result, status_code)
     return True
-
 
 # ============================================================
 # 配置状态 & 启动预检 API
@@ -3634,7 +3609,6 @@ def _handle_config_status(handler, webui_server) -> None:
         "tmdb_refresh_completed": tmdb_refresh_completed,
         "tmdb_match_completed": tmdb_match_completed,
     })
-
 
 def _handle_config_validate(handler, webui_server) -> None:
     """POST /api/config/validate — 启动主程序前的预检。
@@ -3758,7 +3732,6 @@ def _handle_config_validate(handler, webui_server) -> None:
         "checks": checks,
     })
 
-
 def _handle_onboarding_complete_step(handler, webui_server, body: bytes) -> None:
     """POST /api/onboarding/complete-step — 手动标记引导步骤完成"""
     try:
@@ -3783,11 +3756,9 @@ def _handle_onboarding_complete_step(handler, webui_server, body: bytes) -> None
 
     handler._send_json({"ok": True})
 
-
 # ============================================================
 # Task A: 手动全量审计端点
 # ============================================================
-
 
 def handle_index_audit(handler, body: bytes) -> None:
     """POST /api/index/audit — 触发手动全量审计（异步）"""
@@ -3860,7 +3831,6 @@ def handle_index_audit(handler, body: bytes) -> None:
         "status": "started",
         "message": "审计已启动"
     })
-
 
 def handle_index_audit_status(handler) -> None:
     """GET /api/index/audit/status — 查询审计进度"""

@@ -3,12 +3,14 @@ import { icon } from '../core/icons.js';
 import { esc, createField } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
 import { showConfirmDialog } from '../components/dialog.js';
-import { navigate } from '../core/router.js';
+import { navigate, isRenderStale } from '../core/router.js';  // L6: 导入 isRenderStale 用于轮询竞态防护
 import { _tmdbCache, _getUiConfig, _setUiConfig } from '../core/state.js';
 import { _renderOpenListConfig } from './openlist.js';
 
 export async function renderConfig(el, params) {
   const cfg = await api('/api/config');
+  // L6: await 期间若发生新导航，放弃渲染，避免旧页覆盖
+  if (isRenderStale()) return;
   // /api/config 是白名单端点，代理 URL 已脱敏为 tmdb_proxy_configured（布尔值）。
   // 配置页需要回显代理 URL，从已认证的 /api/webui/config/tmdb 获取。
   if (cfg.tmdb_proxy_configured) {
@@ -113,7 +115,6 @@ const tokenValue = '';  // 不预填截断预览，避免误保存覆盖真实 t
   const apiKeyValue = '';  // 不预填明文 API key（B-3：后端仅返回 bool），避免误保存覆盖
   const hostValue = cfg.tmdb_host || '';
   const proxyValue = cfg.tmdb_proxy_http || '';
-  const watchlistDbValue = cfg.tmdb_watchlist_db || '';
 
   const langLabelCls = 'floating-label is-shown is-floating is-filled';
   const langCustomValue = isCustomLang ? savedLang : '';
@@ -153,13 +154,12 @@ html += field('cfg-tmdb-token', 'Access Token', tokenValue, '输入 TMDB Access 
   html += langField;
   html += field('cfg-tmdb-host', '反代 Host', hostValue, '留空则使用官方 API');
   html += field('cfg-tmdb-proxy', 'HTTP 代理', proxyValue, '例: http://127.0.0.1:7890', 'text', true);
-html += field('cfg-tmdb-wldb', 'Watchlist DB', watchlistDbValue, '留空默认 tmdb_watchlist.db', 'text', true);
-	  html += field('cfg-tmdb-fuzzy', '模糊匹配阈值', cfg.tmdb_fuzzy_threshold || '0.60', '0.0~1.0', 'text', false, false, '', '模糊匹配相似度阈值（0.0~1.0）。越高要求越严格，建议 0.60。');
-	  html += field('cfg-tmdb-ep-ratio', '番剧最少集数比例', cfg.tmdb_anime_min_ep_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少集数占总集数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。');
-	  html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '1', '', 'text', false, false, '', '番剧最大允许季数差。超过此差值视为未收录，建议 1。');
-	  html += field('cfg-tmdb-min-season-ratio', '番剧最少季数比例', cfg.tmdb_anime_min_season_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少季数占总季数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。');
-	  html += field('cfg-tmdb-cache-ttl', '缓存 TTL（秒）', cfg.tmdb_cache_ttl || '604800', '', 'text', false, false, '', 'TMDB 缓存有效期（秒）。过期后重新从 TMDB 拉取数据，建议 604800（7 天）。');
-	  html += `</div>`;
+  html += field('cfg-tmdb-fuzzy', '模糊匹配阈值', cfg.tmdb_fuzzy_threshold || '0.60', '0.0~1.0', 'text', false, false, '', '模糊匹配相似度阈值（0.0~1.0）。越高要求越严格，建议 0.60。');
+    html += field('cfg-tmdb-ep-ratio', '番剧最少集数比例', cfg.tmdb_anime_min_ep_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少集数占总集数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。');
+    html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '1', '', 'text', false, false, '', '番剧最大允许季数差。超过此差值视为未收录，建议 1。');
+    html += field('cfg-tmdb-min-season-ratio', '番剧最少季数比例', cfg.tmdb_anime_min_season_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少季数占总季数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。');
+    html += field('cfg-tmdb-cache-ttl', '缓存 TTL（秒）', cfg.tmdb_cache_ttl || '604800', '', 'text', false, false, '', 'TMDB 缓存有效期（秒）。过期后重新从 TMDB 拉取数据，建议 604800（7 天）。');
+    html += `</div>`;
   html += `<div class="config-form-actions"><button class="toolbar-btn primary" id="cfg-tmdb-save">${icon('save')} 保存 TMDB 配置</button><button class="toolbar-btn" id="cfg-tmdb-refresh"> 刷新待看列表</button><button class="toolbar-btn" id="cfg-tmdb-match-refresh" style="background:color-mix(in srgb,var(--primary) 15%,var(--bg-card));border-color:color-mix(in srgb,var(--primary) 30%,var(--border-color))"> 刷新收录状态</button><button class="toolbar-btn secondary" id="cfg-tmdb-restart" style="color:#e37400;border-color:#e37400">${icon('refresh')} 重启 WebUI</button></div>`;
   html += `<div class="toggle-row"><span>关闭全屏 TMDB 缓存过期提醒</span><div class="segmented-switch" data-key="tmdb_cache_never_remind"><button type="button" data-value="off" class="active">否</button><button type="button" data-value="on">是</button></div></div>`;
   html += `<div class="toggle-row"><span>关闭右上角"建议刷新列表"提醒</span><div class="segmented-switch" data-key="tmdb_match_toast_disabled"><button type="button" data-value="off" class="active">否</button><button type="button" data-value="on">是</button></div></div>`;
@@ -343,27 +343,26 @@ async function _bindConfigFormEvents(cfg) {
       const _wmActiveBtn = document.querySelector('#cfg-tmdb-watchlist-enabled-switch button.active');
       const watchlistEnabled = !(_wmActiveBtn && _wmActiveBtn.dataset.value === 'off');
 const body = {
-	        language: langValue,
-	        host: document.getElementById('cfg-tmdb-host').value,
-	        proxy_http: document.getElementById('cfg-tmdb-proxy').value,
-	        proxy_enabled: document.getElementById('cfg-tmdb-proxy').value.trim() !== '',
-	        watchlist_db: document.getElementById('cfg-tmdb-wldb').value,
-	        watchlist_enabled: watchlistEnabled ? 'true' : 'false',
-	        fuzzy_threshold: document.getElementById('cfg-tmdb-fuzzy').value || '0.60',
-	        anime_min_ep_ratio: document.getElementById('cfg-tmdb-ep-ratio').value || '0.30',
-	        anime_max_season_diff: document.getElementById('cfg-tmdb-season-diff').value || '1',
-	        anime_min_season_ratio: document.getElementById('cfg-tmdb-min-season-ratio').value || '0.30',
-	        watchlist_cache_ttl: document.getElementById('cfg-tmdb-cache-ttl').value || '604800',
-	      };
+          language: langValue,
+          host: document.getElementById('cfg-tmdb-host').value,
+          proxy_http: document.getElementById('cfg-tmdb-proxy').value,
+        proxy_enabled: document.getElementById('cfg-tmdb-proxy').value.trim() !== '',
+        watchlist_enabled: watchlistEnabled ? 'true' : 'false',
+          fuzzy_threshold: document.getElementById('cfg-tmdb-fuzzy').value || '0.60',
+          anime_min_ep_ratio: document.getElementById('cfg-tmdb-ep-ratio').value || '0.30',
+          anime_max_season_diff: document.getElementById('cfg-tmdb-season-diff').value || '1',
+          anime_min_season_ratio: document.getElementById('cfg-tmdb-min-season-ratio').value || '0.30',
+          watchlist_cache_ttl: document.getElementById('cfg-tmdb-cache-ttl').value || '604800',
+        };
       // token 已配置时若输入框为空则不上传，避免截断预览覆盖真实 token
       if (tokenInput.value.trim()) body.access_token = tokenInput.value;
       if (document.getElementById('cfg-tmdb-apikey').value.trim()) body.api_key = document.getElementById('cfg-tmdb-apikey').value;
 const data = await api('/api/tmdb/configure', {
-	        method: 'POST',
-	        body,
-	      });
-	      if (data.success === false) throw new Error(data.error || data.message || '保存失败');
-	      showToast(data.message || '已保存', 'success');
+          method: 'POST',
+          body,
+        });
+        if (data.success === false) throw new Error(data.error || data.message || '保存失败');
+        showToast(data.message || '已保存', 'success');
     } catch (e) {
       showToast('保存失败: ' + e.message, 'error');
     } finally {
@@ -378,8 +377,8 @@ const data = await api('/api/tmdb/configure', {
     btn.innerHTML = '启动同步中...';
     try {
 const data = await api('/api/tmdb/watchlist/sync', { method: 'POST' });
-	      if (data.success) showToast('待看列表同步已启动', 'success');
-	      else showToast('同步失败: ' + (data.error || '未知错误'), 'error');
+        if (data.success) showToast('待看列表同步已启动', 'success');
+        else showToast('同步失败: ' + (data.error || '未知错误'), 'error');
     } catch (e) {
       showToast('同步失败: ' + e.message, 'error');
     } finally {
@@ -394,7 +393,7 @@ const data = await api('/api/tmdb/watchlist/sync', { method: 'POST' });
       btn.disabled = true;
       btn.innerHTML = '重启中...';
 try {
-	        await api('/api/restart-webui', { method: 'POST' });
+          await api('/api/restart-webui', { method: 'POST' });
         showToast('WebUI 正在重启...', 'info');
       } catch (e) {
         showToast('重启失败: ' + e.message, 'error');
@@ -417,12 +416,16 @@ const data = await api('/api/tmdb/watchlist/match/refresh', { method: 'POST' });
         const maxPolls = 120;
         for (let i = 0; i < maxPolls; i++) {
           await new Promise(r => setTimeout(r, 1000));
+          // [已修复] L6: 轮询循环含 isRenderStale 检查
+          if (isRenderStale()) return;
           try {
             const st = await api('/api/tmdb/watchlist/match/status');
             if (!st.running && st.result) {
               const r = st.result;
               if (r.error) {
                 showToast('收录状态刷新失败: ' + r.error, 'error');
+                // [已修复] N-P1-5: 匹配刷新失败时 break，避免错误toast风暴
+                break;
               } else {
                 const manualInfo = r.skipped_manual > 0 ? ` · 跳过 ${r.skipped_manual} 个人工覆盖` : '';
                 const uncomputedInfo = r.uncomputed > 0 ? ` · ${r.uncomputed} 项未计算` : '';

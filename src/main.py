@@ -4,7 +4,7 @@
 """
 主程序入口 - 仅启动 AppService（同步引擎）
 
-⚠️ 重要：WebUI 不在此处启动！
+重要：WebUI 不在此处启动！
 
 启动方式：
   - 仅启动主程序：python src/main.py
@@ -72,7 +72,7 @@ def main() -> None:
     if db._fts_tokenizer == 'unicode61':
         # simple 分词器未加载，中文搜索将失效
         logging.warning(
-            "[启动] ⚠️ Simple 分词器未加载（src/tokenizers/simple/simple.dll 不存在或加载失败），"
+            "[启动] Simple 分词器未加载（src/tokenizers/simple/simple.dll 不存在或加载失败），"
             "中文搜索功能将降级为 unicode61（对中文名返回空结果）。"
             "请确保 src/tokenizers/simple/simple.dll 存在，否则中文媒体名搜索无法使用。"
         )

@@ -571,6 +571,8 @@ class RefreshService:
             valid_engine_paths=snapshot_paths)
 
     def _cleanup_a_for_update_mode(self, accessible_engines: set[str]) -> None:
-        """在 update 模式下，清理 A 区中云端已删除的文件"""
+        """[设计取舍] N5: 死代码——原 update 模式冗余清理，现已被
+        `cleanup_a_redundant_using_api`（WebUI 手动刷新 / watchdog 触发）取代，
+        保留仅为兼容旧调用路径，勿当作活跃清理逻辑调用。"""
         for engine_path in accessible_engines:
             self.app.cleanup_a_deleted_on_cloud(engine_path)

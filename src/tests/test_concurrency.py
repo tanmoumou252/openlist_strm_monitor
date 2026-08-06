@@ -27,7 +27,6 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     cfg.tmdb.language = "zh-CN"
     cfg.tmdb.host = ""
     cfg.tmdb.csv_watchlist_file = ""
-    cfg.tmdb.watchlist_db = ""
     cfg.tmdb.watchlist_cache_ttl = 604800
     cfg.tmdb.fuzzy_threshold = 0.60
     cfg.tmdb.anime_min_ep_ratio = 0.3
@@ -139,9 +138,8 @@ class TestConcurrency:
         server = WebUIServer(cfg.webui, bridge_db, app_config=cfg)
         server._has_password = True
 
-        # 添加有效 session
-        import time
-        server._sessions["valid_token"] = time.time() + 3600
+        # 添加有效 session（[已修复] 预存 bug：需存 tuple (expiry, stored_ip)，非纯 float）
+        server._sessions["valid_token"] = (time.time() + 3600, "")
 
         port = _free_port()
         server._port = port

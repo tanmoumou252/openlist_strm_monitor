@@ -54,7 +54,9 @@ export function showConfirmDialog(title, message, onConfirm, onCancel, options =
   const overlay = document.createElement('div');
   overlay.id = 'confirm-dialog';
   overlay.className = 'modal-overlay';
-  // 支持 HTML 内容（用于预检对话框等富文本场景）
+  // S7: htmlContent 直接注入 innerHTML - 调用者须确保 content 为可信数据（非用户输入）。
+  // 当前仅用于内部富文本预检消息；如需支持用户内容，应使用 textContent 或 esc() 转义。
+  // [AUDIT-NOTE] S7: 已添加 XSS 风险警告注释，API 行为保持不变（文档化取舍），勿再标记
   const bodyContent = options.htmlContent ? message : `<p>${message}</p>`;
   overlay.innerHTML = `
     <div class="modal-box">

@@ -31,6 +31,23 @@ If InStr(output, "Python") = 0 Then
     WScript.Quit 1
 End If
 
+' B3: 检查 Python 版本 >= 3.11
+' [已修复] B3: Python >=3.11 版本检查（用 sys.exit 而非 exit，兼容禁用 site 的嵌入式 Python）
+Dim versionTest
+Set versionTest = WshShell.Exec("cmd /c " & quotedPythonPath & " -c ""import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)""")
+Dim versionOutput
+versionOutput = ""
+Do While Not versionTest.StdOut.AtEndOfStream
+    versionOutput = versionOutput & versionTest.StdOut.ReadLine
+Loop
+versionTest.StdOut.Close
+If versionTest.ExitCode <> 0 Then
+    MsgBox "Python 版本过低，需要 3.11 或更高版本。" & vbCrLf & vbCrLf & _
+           "当前版本: " & output, _
+           vbCritical, "启动错误"
+    WScript.Quit 1
+End If
+
 ' Launch in background with stderr redirected to log file
 Dim execCommand
 execCommand = "cmd /c " & quotedPythonPath & " src\webui\server.py 2>strm_bridge_boot.log"

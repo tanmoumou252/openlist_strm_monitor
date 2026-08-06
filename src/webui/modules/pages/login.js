@@ -90,11 +90,13 @@ export async function renderLogin(el) {
   }
 
   async function doLogin() {
-    const password = input.value.trim();
-    if (!password) {
+    // [已修复] N-P2-6: 不 trim 密码（含首尾空格的密码应原样发送），仅判空
+    const password = input.value;
+    if (!password || !password.trim()) {
       showError('请输入管理员密码');
       return;
     }
+    // 注意：不使用 password.trim()，让含首尾空格的密码原样发送给后端验证
     btn.disabled = true;
     btn.textContent = '登录中...';
     errorEl.style.display = 'none';

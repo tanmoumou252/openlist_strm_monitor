@@ -1,4 +1,5 @@
 # 四、核心同步引擎
+> 最后更新：2026-08-06
 
 ## AppService — 中央编排器
 
@@ -41,11 +42,11 @@ AppService.__init__()
 
 #### 启动序列（`start()`）
 
-9 步初始化过程：
+8 步初始化过程：
 
 1. **准备环境并初始化数据库** — 检查 A 区路径存在性（不存在则 warning），创建 B/C 目录（如需要），初始化 bridge.db 所有表
 
-2. **从 OpenList API 加载引擎配置** — 使用 `StrmStorageManager` 获取所有 `driver=strm` 的存储节点，解析 `addition` JSON 字段提取 `SaveStrmLocalPath`、`paths`、`SaveLocalMode`。仅过滤用户配置的引擎，构建映射：`引擎挂载点 → A 区本地路径 → 监控云端路径`
+2. **从 OpenList API 加载引擎配置** — `update_engine_configs()` 直接调用 OpenList Admin API（`get_strm_storages_full_info()`）获取所有 `driver=strm` 的存储节点（不走 `StrmStorageManager` 类，该类仅在 `refresh_service` 中实例化），解析 `addition` JSON 字段提取 `SaveStrmLocalPath`、`paths`、`SaveLocalMode`。仅过滤用户配置的引擎，构建映射：`引擎挂载点 → A 区本地路径 → 监控云端路径`
 
 3. **B 区物理磁盘逆向自同步**（`initial_scan_b()`，拆分为 4 个子函数）：默认扫描全部 B 根的文件元数据；只有 `b_lineage_snapshot` 的 mapping/version/lineage/state/size/mtime/fingerprint 全部匹配时才跳过完整血统校验，快照异常自动回退。`force_full=True` 只强制完整校验，不能绕过配置 fail-safe。
    - `_scan_b_disk()` — 遍历 B 区磁盘，计算每个 `.strm` 的指纹
@@ -63,7 +64,7 @@ AppService.__init__()
 
 6. **A 区全量扫描与索引建立** — 批量遍历所有 A 区目录，使用多线程并发读取 .strm 文件（4 个工作线程）。启动时使用 bulk_connection 长连接模式批量写入数据库（绕过 rw_lock，复用连接），扫描完成并提交后一次性重建 FTS 索引。定期刷新时使用 upsert_a_batch（保持线程安全，逐批维护 FTS）。每 100 条或每 2 秒输出进度日志（含 records/s 性能基准），解决日志冻结问题。字幕处理由启动后的 `_scan_a_subtitles_on_startup()` 补偿
 
-7. **A → B 全量同步**（可选，受 `sync_on_startup` 配置控制，方法 `scan_a_to_b_full_sync`） — 采用**两遍结构**：第一遍（索引阶段）遍历所有 A 记录，调用 `build_b_path_from_a()` 计算目标路径，建立 `target_path -> [source_info]` 索引并检测目标冲突（同目标 + 不同 WebDAV 身份）；第二遍（执行阶段）对非冲突目标调用 `_sync_one_record`，对冲突目标统一返回 `skip_target_conflict` 安全跳过（不复制、不覆盖、不自动改名）。启动时使用 `bulk_connection()` 长连接模式（1 个连接 + 1 次提交），跳过血统校验和 per-file `check_exists` HTTP。预加载 ghost 保护和 B 区指纹到内存缓存。`use_bulk` 参数控制模式选择：`use_bulk=True` 单事务提交（首次启动，无并发），`use_bulk=False` 分批提交（每 1000 条，主动刷新，有并发）。冲突汇总输出冲突数量、唯一目标数和最多 5 个示例。当 `sync_on_startup = false` 时跳过此步骤（日志输出"跳过 A→B 全量同步"），但启动等待仍然执行。
+7. **A → B 全量同步**（可选，受 `sync_on_startup` 配置控制，方法 `scan_a_to_b_full_sync`） — 采用**两遍结构**：第一遍（索引阶段）遍历所有 A 记录，调用 `build_b_path_from_a()` 计算目标路径，建立 `target_path -> [source_info]` 索引并检测目标冲突（同目标 + 不同 WebDAV 身份）；第二遍（执行阶段）对非冲突目标调用 `_sync_one_record`，对冲突目标统一返回 `skip_target_conflict` 安全跳过（不复制、不覆盖、不自动改名）。启动时使用 `bulk_connection()` 长连接模式（1 个连接 + 1 次提交），跳过血统校验和 per-file `check_exists` HTTP。预加载 ghost 保护和 B 区指纹到内存缓存。`use_bulk` 参数控制模式选择：`use_bulk=True` 单事务提交（首次启动，无并发），`use_bulk=False` 分批提交（每 1000 条，主动刷新，有并发）。`valid_engine_paths` 参数用于限定本次同步覆盖的引擎路径子集（定期刷新时只传待刷新引擎，全量审计传 `None` 表示全部）。冲突汇总输出冲突数量、唯一目标数和最多 5 个示例。当 `sync_on_startup = false` 时跳过此步骤（日志输出"跳过 A→B 全量同步"），但启动等待仍然执行。
 
 8. **启动 Watchdog 监控与刷新定时器** — 创建 `watchdog.Observer` 及三个事件处理器，启动 `RefreshService` 定时器
 

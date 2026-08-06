@@ -9,7 +9,6 @@ from watchdog.events import FileSystemEventHandler
 
 from utils import make_strm_fingerprint, read_strm_webdav_path
 
-
 class AAreaEventHandler(FileSystemEventHandler):
     def __init__(self, app) -> None:
         self.app = app
@@ -32,7 +31,7 @@ class AAreaEventHandler(FileSystemEventHandler):
             # 成功时重置失败计数
             self._failure_count = 0
         except Exception:
-            # [AUDIT-NOTE] 此处吞异常是有意设计：抛出会杀死 watchdog 观察线程。M-9 已在上方
+            # [设计取舍] #4: 吞异常是有意设计（抛出将杀死 watchdog 线程）
             # 加失败计数 + _watchers_healthy 健康信号。勿改为 re-raise 或移除 try/except。
             # M-9: 记录失败并监控健康状态
             self._failure_count += 1
@@ -45,7 +44,7 @@ class AAreaEventHandler(FileSystemEventHandler):
                     "[A区] 连续失败 %d 次，可能存在系统性问题，请检查日志",
                     self._failure_count
                 )
-                # 标记 fail-safe 激活
+                # [设计取舍] N1: 此标志由 dashboard 状态 API 消费，勿当死代码删除
                 if hasattr(self.app, '_watchers_healthy'):
                     self.app._watchers_healthy = False
 
@@ -62,7 +61,6 @@ class AAreaEventHandler(FileSystemEventHandler):
     def on_deleted(self, event) -> None:
         if not event.is_directory:
             self._run_async(self.app.handle_a_deleted, event.src_path)
-
 
 class BAreaEventHandler(FileSystemEventHandler):
     def __init__(self, app) -> None:
@@ -96,7 +94,7 @@ class BAreaEventHandler(FileSystemEventHandler):
                     "[B区] 连续失败 %d 次，可能存在系统性问题，请检查日志",
                     self._failure_count
                 )
-                # 标记 fail-safe 激活
+                # [设计取舍] N1: 此标志由 dashboard 状态 API 消费，勿当死代码删除
                 if hasattr(self.app, '_watchers_healthy'):
                     self.app._watchers_healthy = False
 
@@ -139,7 +137,6 @@ class BAreaEventHandler(FileSystemEventHandler):
         elif not src_is_strm and dst_is_strm:
             # 非 .strm 重命名为 .strm：等同于新建
             self._run_async(self.app.handle_b_created_or_modified, event.dest_path)
-
 
 class CAreaEventHandler(FileSystemEventHandler):
     def __init__(self, app) -> None:
