@@ -38,6 +38,7 @@ async function renderAreaList(el, area, params) {
   if (qs.length) url += '?' + qs.join('&');
 
   const d = await api(url);
+  if (isRenderStale()) return;
   const kindLabel = d.kind_label;
 
   // Category tabs
@@ -181,8 +182,7 @@ async function renderAreaDetail(el, area, params) {
   if (mappingIdParam) url += '&mapping_id=' + encodeURIComponent(mappingIdParam);
 
   const d = await api(url);
-
-  const kindPart = kind ? '?kind=' + encodeURIComponent(kind) : '';
+  if (isRenderStale()) return;
   const areaLabels = { a: 'A 区', b: 'B 区', c: 'C 区' };
   const areaLabel = areaLabels[area] || area.toUpperCase() + ' 区';
   

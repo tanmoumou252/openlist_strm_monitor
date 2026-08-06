@@ -197,7 +197,7 @@ if (isRenderStale(gen)) return; // 用户已导航离开
 - `嵌入式启动.bat` — 使用嵌入式 Python 环境
 - `环境变量启动.bat` — 使用系统 Python
 
-均提供启动模式选择菜单（WebUI 仅模式 vs 完整模式）。
+均直接启动 WebUI，由 `server.py` 内置交互菜单选择是否启动同步引擎。
 
 ### 网络绑定
 

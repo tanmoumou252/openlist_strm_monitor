@@ -650,9 +650,9 @@ class SyncService:
             try:
                 if b_local.exists():
                     b_local.unlink()
-            except Exception as e:
+            except Exception as rollback_err:
                 # [设计取舍] #10: 尽力回滚——unlink 失败被有意忽略
-                logging.warning("[A→B] 回滚删除失败 %s: %s", b_local, e)
+                logging.warning("[A→B] 回滚删除失败 %s: %s", b_local, rollback_err)
             return "fail"
 
     def _bulk_upsert_b(self, conn, local_path, webdav_path, parent_webdav_path,

@@ -65,7 +65,8 @@ export async function renderConfig(el, params) {
   document.querySelectorAll('.config-entrance-btn').forEach(btn => btn.addEventListener('click', () => {
     if (!entrance) return navigate(`#config?sub=${btn.dataset.sub}`);
     entrance.classList.add('fade-out');
-    const go = () => navigate(`#config?sub=${btn.dataset.sub}`);
+    let navigated = false;
+    const go = () => { if (navigated) return; navigated = true; navigate(`#config?sub=${btn.dataset.sub}`); };
     entrance.addEventListener('animationend', go, { once: true });
     setTimeout(go, 300);
   }));
@@ -74,7 +75,8 @@ export async function renderConfig(el, params) {
     const subpage = document.getElementById('config-subpage');
     if (!subpage) return navigate('#config');
     subpage.classList.add('exiting');
-    const go = () => { sessionStorage.setItem('_config_back', '1'); navigate('#config'); };
+    let navigated = false;
+    const go = () => { if (navigated) return; navigated = true; sessionStorage.setItem('_config_back', '1'); navigate('#config'); };
     subpage.addEventListener('animationend', go, { once: true });
     setTimeout(go, 350);
   });

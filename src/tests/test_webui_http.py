@@ -1879,7 +1879,13 @@ class TestConfigApiFreshInstall:
         handle_config_api(handler)  # 修复前抛 AttributeError
         handler._send_json.assert_called_once()
         payload = handler._send_json.call_args[0][0]
-        assert payload["a_b_mappings_count"] == 0
+        # N4: 未认证响应不泄露 port/bind/counts
+        assert "_authenticated" in payload
+        assert payload["_authenticated"] is False
+        assert "a_b_mappings_count" not in payload
+        assert "webui_port" not in payload
+        assert "webui_bind" not in payload
+        assert "a_folders_count" not in payload
         assert payload["webdav_configured"] is False
 
 

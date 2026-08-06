@@ -131,6 +131,7 @@ export async function renderTmdb(el, params) {
     api('/api/tmdb/status'),
     api('/api/config')
   ]);
+  if (isRenderStale()) return;
 
   const watchlistEnabledRaw = config.tmdb_watchlist_enabled;
   const watchlistDisabled = watchlistEnabledRaw === false || watchlistEnabledRaw === 'false';

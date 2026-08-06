@@ -77,10 +77,9 @@ class RefreshService:
         if interval <= 0:
             return False
         now = time.time()
-        if now - self._last_full_audit_at < interval:
-            return False
-        # A'.2: 与 run_full_audit_now 互斥，任一方进行中另一方跳过
         with self._full_audit_lock:
+            if now - self._last_full_audit_at < interval:
+                return False
             if self._full_audit_in_progress:
                 return False
             self._full_audit_in_progress = True
@@ -88,7 +87,8 @@ class RefreshService:
             logging.warning("[主动刷新] 触发兜底全量审计，可能访问所有 A 区磁盘")
             self.app.initial_scan_a(use_bulk=False, a_roots=None)
             self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
-            self._last_full_audit_at = now
+            with self._full_audit_lock:
+                self._last_full_audit_at = now
             mapping_ids = self.app._current_mapping_ids()
             if mapping_ids:
                 try:

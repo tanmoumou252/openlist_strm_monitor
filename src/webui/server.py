@@ -18,6 +18,7 @@ WebUI 服务器模块（合并自 standalone_webui.py + webui.py + webui_font_pr
 from __future__ import annotations
 
 import hashlib
+import html as html_module
 import json
 import logging
 import os
@@ -474,7 +475,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             self.send_header("X-Frame-Options", "DENY")
             body = (
                 f"<html><head><title>Error {code}</title></head>"
-                f"<body><h1>{code} {message or 'Error'}</h1></body></html>"
+                f"<body><h1>{code} {html_module.escape(str(message or 'Error'))}</h1></body></html>"
             ).encode("utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()

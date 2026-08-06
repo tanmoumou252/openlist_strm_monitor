@@ -104,7 +104,7 @@ totp_secret = ""
 | `fuzzy_threshold` | `0.60` | 标题模糊匹配最低相似度（0.0-1.0） |
 | `anime_min_ep_ratio` | `0.30` | 番剧匹配最少集数比例 |
 | `anime_max_season_diff` | `0.3` | 番剧匹配允许的最大季数差（运行时未读取，当前无效） |
-| `anime_min_season_ratio` | `0.3` | 番剧匹配最少季数比例 |
+| `anime_min_season_ratio` | `0.3` | 番剧匹配最少季数比例（**运行时未读取**，仅配置兼容保留） |
 | `csv_watchlist_file` | `""` | CSV 待看列表文件路径（可选） |
 | `proxy_enabled` | `false` | 启用 TMDB API 代理 |
 | `proxy_http` | `""` | HTTP 代理地址 |

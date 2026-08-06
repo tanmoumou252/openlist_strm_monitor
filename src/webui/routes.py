@@ -1437,7 +1437,7 @@ def _handle_openlist_status(handler, webui_server) -> None:
     if not host:
         handler._send_json({"success": True, "status": "unconfigured"})
         return
-    handler._send_json({"success": True, "status": "configured", "host": host})
+    handler._send_json({"success": True, "status": "configured"})
 
 def _handle_openlist_ping(handler, webui_server) -> None:
     """处理 GET /api/openlist/ping — 探测 OpenList 服务在线状态。
@@ -2140,6 +2140,12 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
         if not stored:
             handler._send_json({"error": "未设置管理员密码"}, 400)
             return
+        # 检测密码哈希格式是否损坏（salt$iterations$hash）
+        if "$" not in stored or len(stored.split("$", 2)) != 3:
+            handler._send_json({
+                "error": "密码格式损坏，请运行 reset_admin.py 重置管理员密码"
+            }, 500)
+            return
         # M-2: 使用统一的密码工具模块验证密码
         from utils.password_utils import verify_password
         password_ok = verify_password(password, stored)
@@ -2159,8 +2165,12 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
             webui_server._sessions[token] = (time.time() + 604800, client_ip)  # 7天, IP
         handler._send_json({"success": True, "token": token})
     except json.JSONDecodeError:
+        with _login_attempts_lock:
+            _login_attempts.setdefault(client_ip, []).append(now)
         handler._send_json({"error": "无效的 JSON"}, 400)
     except Exception as e:
+        with _login_attempts_lock:
+            _login_attempts.setdefault(client_ip, []).append(now)
         logging.warning("[Login] 登录失败: %s", e)
         handler._send_json({"error": "服务器内部错误"}, 500)
 
@@ -2407,7 +2417,7 @@ def handle_area(handler, area, params) -> None:
         handler._send_json({"error": "无效区域"}, 400)
         return
 
-    kind_filter = params.get("kind", ["anime"])[0]
+    kind_filter = params.get("kind", ["anime"])[0].lower()
     q = params.get("q", [""])[0].strip().lower()
     sort_key = params.get("sort", ["name"])[0]
     sort_order = params.get("order", ["asc"])[0]
@@ -2542,7 +2552,7 @@ def _escape_fts5_query(query: str) -> str:
     query = ' '.join(query.split())
     # 移除反斜杠（Windows 路径分隔符在 FTS5 中无意义）
     query = query.replace('\\', ' ')
-    return query
+    return f'"{query}"'
 
 def handle_area_detail(handler, area, params) -> None:
     """处理 GET /api/area/{area}/detail — 区域详情，返回指定媒体的所有记录
@@ -3218,7 +3228,8 @@ def handle_download_log_api(handler, params: dict) -> None:
         file_size = log_file_path.stat().st_size
         handler.send_response(200)
         handler.send_header('Content-Type', 'application/octet-stream')
-        handler.send_header('Content-Disposition', f'attachment; filename="{log_file_path.name}"')
+        safe_name = re.sub(r'[^\w.\-]', '_', log_file_path.name)
+        handler.send_header('Content-Disposition', f'attachment; filename="{safe_name}"')
         handler.send_header('Content-Length', str(file_size))
         handler.end_headers()
         with open(log_file_path, 'rb') as f:
@@ -3284,10 +3295,6 @@ def handle_config_api(handler) -> None:
                 getattr(tmdb_cfg, "proxy_http", "") if tmdb_cfg else "")),
             "webdav_configured": bool(db_openlist_cfg.get("webdav_host", "") or (
                 getattr(getattr(cfg, "webdav", None), "host", "") if getattr(cfg, "webdav", None) else "")),
-            "a_folders_count": len(getattr(cfg, "strm_storage_map", {})),
-            "a_b_mappings_count": len(getattr(cfg, "a_b_mappings", [])),
-            "webui_port": getattr(handler.webui, '_port', 8579),
-            "webui_bind": getattr(handler.webui, '_bind', '0.0.0.0'),
             # 认证状态
             "_authenticated": False,
             "_message": "未认证，仅返回配置状态。请登录后获取完整配置。",
@@ -3295,7 +3302,6 @@ def handle_config_api(handler) -> None:
         return
 
     # 认证通过，返回完整配置
-    token_preview = (token[:16] + "...") if len(token) > 16 else (token or "")
     token_configured = bool(token)
 
     # [已修复] P1-3: db_file 固定在项目根，仅返回固定路径 + 存在状态，只读

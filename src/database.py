@@ -91,6 +91,7 @@ class BRecord:
     status: str
     updated_at: float
     mapping_id: str = ""  # Mapping ID for multi-A↔multi-B isolation
+    last_verified_at: float = 0.0  # N2: 保留最后校验时间戳
 
 @dataclass(frozen=True)
 class IdentityRecord:
@@ -925,7 +926,7 @@ class Database:
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
-                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id
+                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id, last_verified_at
                 FROM b_strm_files WHERE local_path = ?
                 """,
                 (local_path,),
@@ -946,7 +947,7 @@ class Database:
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
-                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id
+                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id, last_verified_at
                 FROM b_strm_files WHERE webdav_path = ?
                 """,
                 (webdav_path,),
@@ -1309,7 +1310,7 @@ class Database:
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 """
-                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id
+                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id, last_verified_at
                 FROM b_strm_files
                 WHERE webdav_path LIKE ? ESCAPE '\\'
                 """,
@@ -1508,7 +1509,8 @@ class Database:
                            source_a_path,
                            fingerprint,
                            mapping_id,
-                           status
+                           status,
+                           last_verified_at
                     FROM b_strm_files
                     WHERE local_path = ?
                     """,
@@ -1519,7 +1521,7 @@ class Database:
                     conn.rollback()
                     return False
 
-                webdav_path, parent_webdav_path, source_a_path, fingerprint, mapping_id, status = row
+                webdav_path, parent_webdav_path, source_a_path, fingerprint, mapping_id, status, last_verified_at = row
                 now = time.time()
                 new_status = status or "valid"
 
@@ -1553,9 +1555,10 @@ class Database:
                         fingerprint,
                         status,
                         updated_at,
-                        mapping_id
+                        mapping_id,
+                        last_verified_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         new_local_path,
@@ -1566,6 +1569,7 @@ class Database:
                         new_status,
                         now,
                         mapping_id,
+                        last_verified_at,
                     ),
                 )
                 # 删除旧记录
@@ -1633,10 +1637,11 @@ class Database:
                        source_a_path,
                        fingerprint,
                        status,
-                       updated_at,
-                       mapping_id
-                FROM b_strm_files
-                WHERE fingerprint = ? AND mapping_id = ?
+                        updated_at,
+                        mapping_id,
+                        last_verified_at
+                 FROM b_strm_files
+                 WHERE fingerprint = ? AND mapping_id = ?
                 """,
                 (fingerprint, mapping_id),
             )
@@ -1682,10 +1687,11 @@ class Database:
                        source_a_path,
                        fingerprint,
                        status,
-                       updated_at,
-                       mapping_id
-                FROM b_strm_files
-                WHERE local_path = ?
+                        updated_at,
+                        mapping_id,
+                        last_verified_at
+                 FROM b_strm_files
+                 WHERE local_path = ?
                 """,
                 (local_path,),
             )
@@ -1737,10 +1743,11 @@ class Database:
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 f"""
-                SELECT local_path, webdav_path, parent_webdav_path,
-                       source_a_path, fingerprint, status, updated_at, mapping_id
-                FROM b_strm_files
-                WHERE {' AND '.join(where_parts)}
+                 SELECT local_path, webdav_path, parent_webdav_path,
+                        source_a_path, fingerprint, status, updated_at, mapping_id,
+                        last_verified_at
+                 FROM b_strm_files
+                 WHERE {' AND '.join(where_parts)}
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
@@ -1797,10 +1804,11 @@ class Database:
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
                 f"""
-                SELECT local_path, webdav_path, parent_webdav_path,
-                       source_a_path, fingerprint, status, updated_at, mapping_id
-                FROM b_strm_files
-                WHERE {where}
+                 SELECT local_path, webdav_path, parent_webdav_path,
+                        source_a_path, fingerprint, status, updated_at, mapping_id,
+                        last_verified_at
+                 FROM b_strm_files
+                 WHERE {where}
                 """,
                 params,
             )
@@ -1816,9 +1824,10 @@ class Database:
                            source_a_path,
                            fingerprint,
                            status,
-                           updated_at,
-                           mapping_id
-                    FROM b_strm_files
+                            updated_at,
+                            mapping_id,
+                            last_verified_at
+                     FROM b_strm_files
                 """)
             return [BRecord(*row) for row in cur.fetchall()]
 

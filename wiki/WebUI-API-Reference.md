@@ -137,7 +137,7 @@
 
 - **数据库**：`db_file`（固定项目根路径，仅读）、`db_exists`
 - **WebUI**：`webui_port`、`webui_bind`
-- **TMDB**：`tmdb_configured`、`tmdb_token_configured`、`tmdb_language`、`tmdb_host`、`tmdb_api_key`（**布尔值**，已脱敏）、`tmdb_api_key_configured`、`tmdb_proxy_configured`、`tmdb_proxy_enabled`、`tmdb_account_id`、`tmdb_watchlist_enabled`、`tmdb_fuzzy_threshold`、`tmdb_anime_min_ep_ratio`、`tmdb_anime_max_season_diff`、`tmdb_anime_min_season_ratio`、`tmdb_cache_ttl`
+- **TMDB**：`tmdb_configured`、`tmdb_token_configured`、`tmdb_language`、`tmdb_host`、`tmdb_api_key`（**布尔值**，已脱敏）、`tmdb_api_key_configured`、`tmdb_proxy_configured`、`tmdb_proxy_enabled`、`tmdb_account_id`、`tmdb_watchlist_enabled`、`tmdb_fuzzy_threshold`、`tmdb_anime_min_ep_ratio`、`tmdb_anime_max_season_diff`（**运行时未读取**）、`tmdb_anime_min_season_ratio`（**运行时未读取**）、`tmdb_cache_ttl`
 - **A/B/C 区**：`a_b_mappings`（A↔B 映射列表，每个元素含 `a_root`、`b_root`、`label` 和 `mapping_id`）、`b_root`、`c_root`、`a_folders`、`strm_engine_paths`、`refresh_paths`
 - **OpenList/WebDAV**：`webdav_host`、`webdav_user`、`webdav_password`（**布尔值**，已脱敏）、`webdav_totp_secret`（**布尔值**，已脱敏）
 - **刷新/行为**：`refresh_enabled`、`refresh_interval`、`behavior_action`、`ghost_protect_seconds`
@@ -306,7 +306,7 @@ TMDB 云端搜索（非本地数据库）：
 ### `POST /api/tmdb/configure`
 更新 TMDB 配置。实际接受 14 个字段：
 
-- 通用循环字段（10 个）：`access_token`、`api_key`、`language`、`host`、`csv_watchlist_file`、`fuzzy_threshold`、`anime_min_ep_ratio`、`anime_max_season_diff`、`watchlist_cache_ttl`、`anime_min_season_ratio`
+- 通用循环字段（10 个）：`access_token`、`api_key`、`language`、`host`、`csv_watchlist_file`、`fuzzy_threshold`、`anime_min_ep_ratio`、`anime_max_season_diff`（**运行时未读取**）、`watchlist_cache_ttl`、`anime_min_season_ratio`（**运行时未读取**）
 - 特殊处理字段（3 个）：`proxy_http`、`proxy_enabled`、`watchlist_enabled`
 
 > 注：`access_token` 为空且已配置时会跳过覆盖（避免前端截断覆盖）；`watchlist_db` 字段已移除，数据库路径固定在项目根 `tmdb_watchlist.db`，请求体如含该键将返回 400。成功返回 `{"success": true, "message": "TMDB 配置已更新", "tmdb_configured": <bool>}`，无变更返回 `{"success": true, "message": "无变更"}`。

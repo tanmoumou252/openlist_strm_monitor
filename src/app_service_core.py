@@ -357,7 +357,6 @@ class AppService:
             return False
         normalized_path = path.rstrip("/") or "/"
         # Windows 下路径大小写不敏感，统一小写比较 (P2-9)
-        import sys
         if sys.platform == "win32":
             normalized_path = normalized_path.lower()
         for root in roots:
@@ -3159,7 +3158,7 @@ class AppService:
             parsed = self._parse_fs_list_content(res)
             if parsed is None:
                 return None
-            content, _total = parsed
+            content, total = parsed
 
             for item in content:
                 if isinstance(item, dict) and not item.get("is_dir", False):
@@ -3168,7 +3167,7 @@ class AppService:
                         full_path = posixpath.join(directory_path, file_name)
                         result.add(full_path)
 
-            if len(content) < per_page:
+            if page * per_page >= total:
                 break
             page += 1
 

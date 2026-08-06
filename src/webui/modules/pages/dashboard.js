@@ -432,7 +432,7 @@ export async function renderDashboard(el) {
 </div>
 
 <!-- N1: watchdog 降级指示（后端 _watchers_healthy 标志） -->
-${d.watchers_healthy === false ? `<div class="dashboard-warning-banner" style="margin:12px 0;padding:10px 14px;background:color-mix(in srgb,var(--error) 12%,transparent);border:1px solid color-mix(in srgb,var(--error) 40%,transparent);border-radius:var(--radius-control);color:var(--error);font-size:13px;display:flex;align-items:center;gap:8px">${icon('warning')} watchdog 监视器降级：部分区域事件可能未同步，请检查 WebUI 日志</div>` : ''}
+${d.watchers_healthy === false ? `<div class="dashboard-warning-banner" style="margin:12px 0;padding:10px 14px;background:color-mix(in srgb,var(--error) 12%,transparent);border:1px solid color-mix(in srgb,var(--error) 40%,transparent);border-radius:var(--radius-control);color:var(--error);font-size:13px;display:flex;align-items:center;gap:8px">${icon('warn')} watchdog 监视器降级：部分区域事件可能未同步，请检查 WebUI 日志</div>` : ''}
 
 <div class="stat-grid">
   <div class="stat-card"><div class="label">${icon('movie')} A 区 STRM</div><div class="value">${d.a_count}</div></div>
@@ -447,15 +447,15 @@ ${d.watchers_healthy === false ? `<div class="dashboard-warning-banner" style="m
 
 <!-- 索引元数据（Task 2） -->
 <div class="stat-grid" style="margin-top:16px">
-  <div class="stat-card"><div class="label">${icon('update')} 索引代次</div><div class="value stat-value-primary" id="index-generation">#${d.index_metadata?.index_generation || 0}</div></div>
-  <div class="stat-card"><div class="label">${icon('schedule')} 最近索引</div><div class="value" title="${_formatExact(d.index_metadata?.last_full_index_at)}">${d.index_metadata?.last_full_index_at ? formatTimestamp(d.index_metadata.last_full_index_at) : '暂无记录'}</div></div>
-  <div class="stat-card"><div class="label">${icon('link')} 映射版本</div><div class="value" title="${esc(d.index_metadata?.mapping_version || '')}">${d.index_metadata?.mapping_version ? d.index_metadata.mapping_version.substring(0, 8) + '...' : '-'}</div></div>
+  <div class="stat-card"><div class="label">${icon('sync')} 索引代次</div><div class="value stat-value-primary" id="index-generation">#${d.index_metadata?.index_generation || 0}</div></div>
+  <div class="stat-card"><div class="label">${icon('speed')} 最近索引</div><div class="value" title="${_formatExact(d.index_metadata?.last_full_index_at)}">${d.index_metadata?.last_full_index_at ? formatTimestamp(d.index_metadata.last_full_index_at) : '暂无记录'}</div></div>
+  <div class="stat-card"><div class="label">${icon('swap_horiz')} 映射版本</div><div class="value" title="${esc(d.index_metadata?.mapping_version || '')}">${d.index_metadata?.mapping_version ? d.index_metadata.mapping_version.substring(0, 8) + '...' : '-'}</div></div>
   <div class="stat-card"><div class="label">映射版本生成</div><div class="value" title="${_formatExact(d.index_metadata?.mapping_version_generated_at)}">${d.index_metadata?.mapping_version_generated_at ? formatTimestamp(d.index_metadata.mapping_version_generated_at) : '暂无记录'}</div></div>
 </div>
 
 <!-- A'.3: 立即全量审计按钮 -->
 <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
-  <button class="toolbar-btn secondary" id="btn-run-full-audit" style="font-size:calc(var(--font-base) - 1px)">${icon('play_arrow')} 立即全量审计</button>
+  <button class="toolbar-btn secondary" id="btn-run-full-audit" style="font-size:calc(var(--font-base) - 1px)">${icon('refresh')} 立即全量审计</button>
   <span id="audit-status-text" style="font-size:calc(var(--font-base) - 1px);color:var(--text-muted)"></span>
 </div>
 
@@ -541,7 +541,7 @@ function _shortenPath(path) {
         if (resp.status === 'already_running') {
           if (auditStatusText) auditStatusText.textContent = '审计已在进行中';
           auditBtn.disabled = false;
-          auditBtn.innerHTML = `${icon('play_arrow')} 立即全量审计`;
+          auditBtn.innerHTML = `${icon('refresh')} 立即全量审计`;
           return;
         }
         // 轮询状态
@@ -556,7 +556,7 @@ function _shortenPath(path) {
             if (st.result && st.result.status === 'already_running') {
               if (auditStatusText) auditStatusText.textContent = '审计被其他任务占用（已在进行中）';
               auditBtn.disabled = false;
-              auditBtn.innerHTML = `${icon('play_arrow')} 立即全量审计`;
+              auditBtn.innerHTML = `${icon('refresh')} 立即全量审计`;
               return;
             }
             if (!st.running && st.result) {
@@ -570,7 +570,7 @@ function _shortenPath(path) {
                 if (auditStatusText) auditStatusText.textContent = '审计未完成';
               }
               auditBtn.disabled = false;
-              auditBtn.innerHTML = `${icon('play_arrow')} 立即全量审计`;
+              auditBtn.innerHTML = `${icon('refresh')} 立即全量审计`;
               // 局部刷新索引卡片
               try {
                 const dashResp = await api('/api/dashboard');
@@ -586,11 +586,11 @@ function _shortenPath(path) {
         }
         if (auditStatusText) auditStatusText.textContent = '审计超时，请稍后重试';
         auditBtn.disabled = false;
-        auditBtn.innerHTML = `${icon('play_arrow')} 立即全量审计`;
+        auditBtn.innerHTML = `${icon('refresh')} 立即全量审计`;
       } catch (e) {
         if (auditStatusText) auditStatusText.textContent = '审计请求失败: ' + e.message;
         auditBtn.disabled = false;
-        auditBtn.innerHTML = `${icon('play_arrow')} 立即全量审计`;
+        auditBtn.innerHTML = `${icon('refresh')} 立即全量审计`;
       }
     });
   }
