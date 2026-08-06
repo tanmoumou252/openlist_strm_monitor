@@ -1443,6 +1443,7 @@ class TestInitialScanB:
         )
         self.db.get_all_b_records.return_value = [record]
 
+        # [设计取舍] 有意冒烟测试，断言代码路径执行，非行为正确性验证
         with caplog.at_level(logging.INFO), \
              patch.object(self.app, "_verify_b_path_lineage", return_value=True):
             self.app.initial_scan_b()
@@ -1450,6 +1451,7 @@ class TestInitialScanB:
         assert any("B 区历史记录核对开始" in msg for msg in caplog.messages)
         assert any("B 区历史记录核对完成" in msg for msg in caplog.messages)
 
+    # [设计取舍] 有意冒烟测试，断言代码路径执行，非行为正确性验证
     def test_reconcile_pre_call_debug_logs(self, caplog):
         """B 区历史核对中关键函数调用前有 DEBUG 日志包含路径"""
         import logging

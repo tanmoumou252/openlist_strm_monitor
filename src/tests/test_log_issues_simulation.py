@@ -2001,6 +2001,7 @@ class TestNewIssue8_UnicodePaths(SimulationBase):
 class TestSimulationLogRegression(SimulationBase):
     """保留原有日志阶段标记的回归保护。"""
 
+    # [设计取舍] 有意冒烟测试，断言代码路径执行，非行为正确性验证
     def test_phase_markers_and_progress(self):
         self._run_full_sync(use_bulk=False)
         log = self._read_log()

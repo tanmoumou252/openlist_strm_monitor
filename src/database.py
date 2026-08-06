@@ -189,10 +189,12 @@ class Database:
                 self._fts_tokenizer = 'simple'
                 # 读取并缓存版本信息，供运维感知当前分词器版本
                 self._simple_version = self._read_simple_version()
-                logging.debug(
-                    "[DB] Simple tokenizer loaded successfully from %s (version: %s)",
-                    simple_dll, self._simple_version or "unknown",
-                )
+                if not self._simple_loaded_once:
+                    self._simple_loaded_once = True
+                    logging.debug(
+                        "[DB] Simple tokenizer loaded successfully from %s (version: %s)",
+                        simple_dll, self._simple_version or "unknown",
+                    )
                 return True
             else:
                 logging.warning("[DB] Simple tokenizer not found at %s, falling back to unicode61", simple_dll)
@@ -345,6 +347,7 @@ class Database:
         self._ghost_cleanup_lock = threading.Lock()
         self._fts_tokenizer = 'unicode61'  # 默认降级值,simple 加载成功后更新为 'simple'
         self._simple_version: str | None = None  # simple 分词器版本(加载成功后填充,见 _load_simple_tokenizer)
+        self._simple_loaded_once: bool = False  # simple 分词器加载日志去重（每连接需加载，但仅首次记录）
 
         # ===== 修复：确保数据库文件可写 =====
         self._ensure_db_writable()

@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 # 加载失败时各调用点会软降级到 SQLite 默认的 unicode61 分词器。
 _SIMPLE_DLL_PATH = Path(__file__).parent / "tokenizers" / "simple" / "simple.dll"
 _SIMPLE_VERSION_PATH = Path(__file__).parent / "tokenizers" / "simple" / "VERSION"
+# [设计取舍] simple 分词器加载日志去重：每连接需调用 load_extension，但仅首次记录日志
+_simple_loaded_logged = False
 
 def _load_simple_into(conn: sqlite3.Connection) -> str | None:
     """向连接加载 simple 分词器扩展。成功返回已加载的 simple 版本号字符串，失败返回 None。
@@ -54,7 +56,10 @@ def _load_simple_into(conn: sqlite3.Connection) -> str | None:
         except Exception:
             pass
         if version:
-            logging.debug("[TMDB-DB] Simple tokenizer loaded, version=%s", version)
+            global _simple_loaded_logged
+            if not _simple_loaded_logged:
+                _simple_loaded_logged = True
+                logging.debug("[TMDB-DB] Simple tokenizer loaded, version=%s", version)
         return version
     except Exception:
         return None
