@@ -30,6 +30,9 @@ class AAreaEventHandler(FileSystemEventHandler):
             func(*args)
             # 成功时重置失败计数
             self._failure_count = 0
+            # [已修复] P7b: 成功时恢复健康标志，防止健康状态永久锁定为 False
+            if hasattr(self.app, '_watchers_healthy'):
+                self.app._watchers_healthy = True
         except Exception:
             # [设计取舍] #4: 吞异常是有意设计（抛出将杀死 watchdog 线程）
             # 加失败计数 + _watchers_healthy 健康信号。勿改为 re-raise 或移除 try/except。
@@ -82,6 +85,9 @@ class BAreaEventHandler(FileSystemEventHandler):
             func(*args)
             # 成功时重置失败计数
             self._failure_count = 0
+            # [已修复] P7b: 成功时恢复健康标志，防止健康状态永久锁定为 False
+            if hasattr(self.app, '_watchers_healthy'):
+                self.app._watchers_healthy = True
         except Exception:
             # M-9: 记录失败并监控健康状态
             self._failure_count += 1

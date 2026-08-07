@@ -6,6 +6,23 @@ import pytest
 from tmdb_watchlist_db import TmdbWatchlistDb
 
 
+class _FakeTmdbClient:
+    """最小 TMDB 客户端桩：返回固定 watchlist 分页数据。"""
+
+    def __init__(self, movies=None, tv=None):
+        self.movies = movies or []
+        self.tv = tv or []
+
+    def get_watchlist_movies(self, page):
+        return (self.movies, False)
+
+    def get_watchlist_tv(self, page):
+        return (self.tv, False)
+
+    def get_tv_details(self, tid):
+        return None
+
+
 class TestFTSOrphanCleanup:
     """测试批量同步删除时 FTS 表的级联清理"""
 
@@ -145,3 +162,60 @@ class TestFTSOrphanCleanup:
         with db._conn() as conn:
             fts_count = conn.execute("SELECT COUNT(*) FROM tmdb_watchlist_fts").fetchone()[0]
             assert fts_count == 0, f"FTS 表应已清空，实际 {fts_count}（存在孤儿记录）"
+
+    def test_sync_preserves_both_movie_and_tv_fts(self, tmp_path):
+        """H1 回归：sync() 同时含电影+剧集时，电影的 FTS 行不得被剧集清理误删。
+
+        旧实现：剧集清理 `DELETE FROM tmdb_watchlist_fts WHERE rowid NOT IN (SELECT rowid FROM tv)`
+        会删掉全部电影 FTS 行，导致 /api/tmdb/watchlist/movie 搜索返回空。
+        """
+        db_path = str(tmp_path / "test.db")
+        db = TmdbWatchlistDb(db_path)
+
+        movies = [{
+            "id": 1001,
+            "title": "Inception",
+            "original_title": "Inception",
+            "overview": "A thief who steals corporate secrets.",
+            "poster_path": "/p.jpg",
+            "release_date": "2010-07-16",
+            "vote_average": 8.4,
+            "vote_count": 1000,
+        }]
+        tvs = [{
+            "id": 2001,
+            "name": "Breaking Bad",
+            "original_name": "Breaking Bad",
+            "overview": "A high school chemistry teacher.",
+            "poster_path": "/t.jpg",
+            "first_air_date": "2008-01-20",
+            "vote_average": 9.0,
+            "vote_count": 5000,
+            "number_of_seasons": 5,  # 使 _populate_tv_details 跳过详情拉取
+        }]
+
+        client = _FakeTmdbClient(movies=movies, tv=tvs)
+        db.sync(client, force=True)
+
+        # 1) FTS 应同时保留电影与剧集两类行
+        with db._conn() as conn:
+            fts_count = conn.execute("SELECT COUNT(*) FROM tmdb_watchlist_fts").fetchone()[0]
+            assert fts_count == 2, (
+                f"sync() 后 FTS 应保留 2 条（电影 1 + 剧集 1），实际 {fts_count}（电影行被剧集清理误删）"
+            )
+
+        # 2) 电影 FTS 搜索仍能返回结果（此前被剧集清理清空）
+        with db._conn() as conn:
+            rows = conn.execute(
+                "SELECT title FROM tmdb_watchlist_fts WHERE tmdb_watchlist_fts MATCH 'Inception'"
+            ).fetchall()
+            assert len(rows) == 1, f"电影 FTS 搜索应返回 1 条，实际 {len(rows)}"
+            assert rows[0][0] == "Inception"
+
+        # 3) 剧集 FTS 搜索仍能返回结果
+        with db._conn() as conn:
+            rows = conn.execute(
+                "SELECT title FROM tmdb_watchlist_fts WHERE tmdb_watchlist_fts MATCH 'Breaking'"
+            ).fetchall()
+            assert len(rows) == 1, f"剧集 FTS 搜索应返回 1 条，实际 {len(rows)}"
+            assert rows[0][0] == "Breaking Bad"

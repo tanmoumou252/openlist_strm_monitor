@@ -152,8 +152,7 @@ export async function _renderOpenListConfig(cfg) {
       });
     }
 
-    const deleteDisabled = '';
-
+    const rowDeleteDisabled = OpenListState.strmEngines.length <= 1 ? ' disabled' : '';
     return `<tr data-row-idx="${idx}">
       <td>
         <select class="engine-select" data-row="${idx}"${disabledAttr}>
@@ -166,7 +165,7 @@ export async function _renderOpenListConfig(cfg) {
         </div>
       </td>
       <td style="text-align:center">
-        <button class="table-btn danger" data-delete-row="${idx}"${deleteDisabled} title="删除此行">删除</button>
+        <button class="table-btn danger" data-delete-row="${idx}"${rowDeleteDisabled} title="删除此行">删除</button>
       </td>
     </tr>`;
   }
@@ -725,11 +724,11 @@ function _refreshEngineTable() {
         tagsHtml += `<span class="tag">${esc(p)}<button class="tag-remove" data-row="${idx}" data-pi="${pi}" title="删除">×</button></span>`;
       });
     }
-    const deleteDisabled = '';
+    // [已修复] Z-3: 删除死变量 deleteDisabled，直接在模板中渲染
     html += `<tr data-row-idx="${idx}">
       <td><select class="engine-select" data-row="${idx}"${disabledAttr}>${engineOptions}</select></td>
       <td><div class="tag-container" data-row="${idx}" id="tag-container-${idx}">${tagsHtml || '<span style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px)">选择引擎后自动填充</span>'}</div></td>
-      <td style="text-align:center"><button class="table-btn danger" data-delete-row="${idx}"${deleteDisabled} title="删除此行">删除</button></td>
+      <td style="text-align:center"><button class="table-btn danger" data-delete-row="${idx}" title="删除此行">删除</button></td>
     </tr>`;
   });
   html += '</tbody></table>';
@@ -786,7 +785,6 @@ export async function _checkApiStatus() {
     OpenListState.apiStatus = resp.status || 'offline';
     if (resp.status === 'unconfigured') {
       OpenListState.apiStatus = 'offline';
-      OpenListState.configured = false;
     }
     _updateApiStatusDot();
   } catch (e) {

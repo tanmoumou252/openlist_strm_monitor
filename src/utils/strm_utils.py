@@ -42,6 +42,12 @@ def parse_strm_content(content: str) -> str | None:
         if path.startswith("/d/"):
             path = "/" + path[3:]
 
+        # M7: 形如 http://host?sign=xxx 的内容 parsed.path 为空，
+        # canonicalize_webdav_path 会抛 ValueError，而 read_strm_webdav_path
+        # 的捕获元组不含 ValueError。畸形但可读的 STRM 应返回 None 而非崩溃。
+        if not path:
+            return None
+
         return canonicalize_webdav_path(path, case_sensitive=True)
 
     if content.startswith("/"):

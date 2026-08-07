@@ -185,6 +185,32 @@ class TestConfigJsTmdbThresholds:
             assert "'  " in nearby_content or '"  ' in nearby_content or "''" in nearby_content or '""' in nearby_content, \
                 f"字段 {field_id} 的调用点未传入非空 helperText"
 
+    def test_dead_fields_have_not_implemented_helper_text(self):
+        """两个死字段（season-diff、min-season-ratio）的 helperText 应含「未接入匹配逻辑」"""
+        content = CONFIG_JS.read_text(encoding="utf-8")
+
+        # 这两个字段是死配置（当前版本未接入匹配逻辑）
+        dead_fields = [
+            ("cfg-tmdb-season-diff", "未接入匹配逻辑"),
+            ("cfg-tmdb-min-season-ratio", "未接入匹配逻辑"),
+        ]
+
+        for field_id, marker in dead_fields:
+            pos = content.find(field_id)
+            assert pos != -1, f"未找到字段 {field_id}"
+            nearby = content[pos:pos + 300]
+            assert marker in nearby, \
+                f"字段 {field_id} 的 helperText 应含「{marker}」，实际附近: {nearby[:100]}"
+
+    def test_ep_ratio_helper_text_does_not_mention_not_implemented(self):
+        """cfg-tmdb-ep-ratio 是活配置，其 helperText 不应含「未接入匹配逻辑」"""
+        content = CONFIG_JS.read_text(encoding="utf-8")
+        pos = content.find("cfg-tmdb-ep-ratio")
+        assert pos != -1, "未找到字段 cfg-tmdb-ep-ratio"
+        nearby = content[pos:pos + 300]
+        assert "未接入匹配逻辑" not in nearby, \
+            f"cfg-tmdb-ep-ratio 是活配置，helperText 不应含「未接入匹配逻辑」，实际: {nearby[:100]}"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

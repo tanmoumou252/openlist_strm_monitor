@@ -14,7 +14,7 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_app_service_core.py` | 核心同步引擎 `AppService` 主流程与状态机测试 |
+| `test_app_service_core.py` | 核心同步引擎 `AppService` 主流程与状态机测试（含 **M6** `_extract_save_local_mode` 对 `SaveLocalMode: null` 返回 `""` 的守卫测试） |
 | `test_sync_service.py` | A→B 同步服务（`initial_scan_a` 批量索引、`scan_a_to_b_full_sync` 双模式同步、`_bulk_upsert_b` FTS 孤儿行处理）测试 |
 | `test_area_watchers.py` | A/B/C 三区文件系统监视器事件处理测试 |
 | `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试（含 `TestLastVerifiedAtWiring`） |
@@ -36,7 +36,7 @@ python -m pytest src/tests/ -v
 | `test_database_bulk.py` | bulk_connection 批量写入、只读 getter 读锁与并发数据库行为测试（含 `TestLastVerifiedAtColumn`） |
 | `test_fts5_search.py` | FTS5 全文检索查询与匹配测试（含 simple 分词器加载、版本可读、`黑暗`/`暗黑` 按词分词语义断言） |
 | `test_fts5_escape_and_tmdb_search.py` | FTS5 查询转义函数（`_escape_fts5_query`）与 TMDB 搜索路由测试（含 `进击的巨人[限制级]`、`电影：测试*`、`Spy×Family` 真实媒体名转义） |
-| `test_fts_orphan_cleanup.py` | FTS 孤儿行清理与一致性测试 |
+| `test_fts_orphan_cleanup.py` | FTS 孤儿行清理与一致性测试（含 **H1 回归**：`sync()` 同时含电影+剧集时两类 FTS 行均保留、电影搜索不失效） |
 | `test_tmdb_watchlist_db.py` | TMDB 待看列表 DB 单元测试：匹配状态 CRUD、季数缓存、全量同步 upsert/FTS/独立事务、TV detail 填充、操作日志、webui_config CRUD、加密迁移 |
 
 ### 配置 / 安全
@@ -55,7 +55,7 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_utils.py` | 通用工具函数测试（含 `TestMoveFile` EXDEV 跨设备回退测试、`quarantine_file` 时间戳重名、WebDAV 路径规范化） |
+| `test_utils.py` | 通用工具函数测试（含 `TestMoveFile` EXDEV 跨设备回退测试、`quarantine_file` 时间戳重名、WebDAV 路径规范化、**M7** `parse_strm_content` 对 `http://host?sign=xxx` 空 path 返回 `None` 的守卫测试） |
 | `test_encoding_utils.py` | 字幕编码转 UTF-8 工具测试（空字节、UTF-8 带/不带 BOM、GB18030→UTF-8、Big5→UTF-8、UTF-16 LE/BE 带 BOM、UTF-16 LE 无 BOM、不可识别编码 fail-safe、真实字幕样本往返） |
 | `test_media_renamer.py` | 媒体重命名与季/集号提取测试 |
 | `test_subtitle_handler.py` | 字幕同步与规范化测试（含 `TestSubtitleEncodingConversion`） |
@@ -69,7 +69,7 @@ python -m pytest src/tests/ -v
 | 文件 | 说明 |
 |------|------|
 | `test_openlist_hotreload.py` | OpenList 热重载/配置刷新测试 |
-| `test_webdav_client.py` | WebDAV 协议客户端测试（含 `_check_exists_cache` 容量淘汰验证） |
+| `test_webdav_client.py` | WebDAV 协议客户端测试（含 `_check_exists_cache` 容量淘汰验证、**M8** TOTP 无 padding base64 密钥解码回归） |
 | `test_tmdb_client.py` | TMDB API v3 客户端测试 |
 | `test_openlist_login_shared.py` | OpenList 登录错误消息解析（`parse_login_error`）测试 |
 | `test_main_entry.py` | `main.py` 入口参数拒绝路径测试（禁止使用 `--webui-only` / `--webui`）。 |
@@ -78,8 +78,9 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试（含 `TestAreaDetailKindParameter`、`TestAreaDetailCZonePagination`、`TestAreaDetailSingleMappingMid`、`TestTMDBWatchlistMatchOverrideConsistency`、`TestManualFullIndexAuditAPI`）。**D2 回归**：全新安装 `/api/config` 不抛异常（`TestConfigApiFreshInstall`）；**D3 回归**：fail-safe 时 `start_main` 返回失败（`TestStartMainFailSafe`）。 |
-| `test_webui_help_texts.py` | WebUI 帮助文案系统测试：`createField` 输出 `.field-helper-text`、`_openlistHelpTexts` 键完整性、`log_file` 不含「重启」、`refresh_*` 含「即时生效」、TMDB 阈值字段 helperText、孤儿键标注 |
+| `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试（含 `TestAreaDetailKindParameter`、`TestAreaDetailCZonePagination`、`TestAreaDetailSingleMappingMid`、`TestTMDBWatchlistMatchOverrideConsistency`、`TestManualFullIndexAuditAPI`）。**D2 回归**：全新安装 `/api/config` 不抛异常（`TestConfigApiFreshInstall`）；**D3 回归**：fail-safe 时 `start_main` 返回失败（`TestStartMainFailSafe`）。**第 23 轮回归**（`TestRound13Regressions`）：**M3** `_MEDIA_NAME_SQL` 别名目录（`/movies/` 等）不再坍缩「未分类」、**M4** 改密后旧 token 立即失效、**M5** `/api/admin/status` 带无效 token 返回 401 / 无 token 保持 200。 |
+| `test_webui_help_texts.py` | WebUI 帮助文案系统测试：`createField` 输出 `.field-helper-text`、`_openlistHelpTexts` 键完整性、`log_file` 不含「重启」、`refresh_*` 含「即时生效」、TMDB 阈值字段 helperText、孤儿键标注、死字段「未接入匹配逻辑」标注 |
+| `test_webui_source_contracts.py` | 前端源码契约回归测试：未定义变量（`mappingIdParam`/`deleteDisabled`）、死参数（`mapping_id`）、CSV 公式注入安全、`_do_bg_sync` 预检查、dialog 断言正则、配置「未接入」标注、畸形请求不计数、交付文档无行号、**M9** `_pageRenderGen = -1` 渲染护栏、**L5** `parseHash` 畸形编码容错 |
 | `test_call_coverage.py` | 路由调用覆盖率测试 |
 | `test_logging_system.py` | TMDB 操作日志表、日志读取接口与轮转产物测试 |
 | `test_logger_setup.py` | logger_setup 模块单元测试：handler 装配、重复初始化（热更新）、回退路径、级别过滤、启动分隔标记、临时目录清理（**窄编码控制台下无法编码字符不丢日志、且不改写流的全局 errors 策略**（`TestConsoleEncodingFallback`））。 |

@@ -10,7 +10,7 @@
 1. **IP 白名单** — `_is_lan_ip()` 函数阻止非局域网 IP（10.x、172.16-31.x、192.168.x、169.254.x、localhost）
 2. **会话 Token** — PBKDF2-HMAC-SHA256 认证。通过 `X-Session-Token` 头发送。7 天滑动过期，存储在服务器内存中。
 
-免 Token 路径：`/api/login`、`/api/admin/status`、`/api/config`、`/api/webui/config/ui`、`/api/tmdb/avatar`、`/api/tmdb/poster`、`/api/openlist/status`、`/api/openlist/ping`、`/api/page`（SPA 入口）、静态资源（`/`、`/assets/*`、`/favicon.ico`、`/logo.png`、`/openlist_strm_bridge.png`、`/login`、`/fonts/*`、`.woff2`/`.woff`/`.ttf` 字体）。
+免 Token 路径：`/api/login`、`/api/admin/status`（**双语义**：无 token 免 Token，带 token 走校验）、`/api/config`、`/api/webui/config/ui`、`/api/tmdb/avatar`、`/api/tmdb/poster`、`/api/openlist/status`、`/api/openlist/ping`、`/api/page`（SPA 入口）、静态资源（`/`、`/assets/*`、`/favicon.ico`、`/logo.png`、`/openlist_strm_bridge.png`、`/login`、`/fonts/*`、`.woff2`/`.woff`/`.ttf` 字体）。
 
 > 注：`/api/config/status` **不在**免 Token 白名单内，需要会话 Token（白名单中的 `/api/config` 是完整配置端点，非 status 端点）。若未设置管理员密码，`_check_auth` 直接放行全部路径。
 
@@ -99,7 +99,7 @@
 ```
 
 ### `GET /api/area/{area}/detail`
-获取文件详情。参数：`media`（文件路径）、`sort`（排序字段）、`order`（asc/desc）、`page`（分页）、`kind`（anime/movie/other/all）、`mapping_id`（指定 mapping 分区）。
+获取文件详情。参数：`media`（文件路径）、`sort`（排序字段）、`order`（asc/desc）、`page`（分页）、`kind`（anime/movie/other/all）。
 
 **响应字段**（按 area 类型）：
 - **A 区**：`local_path`、`webdav_path`、`parent_webdav_path`、`updated_at`（最后变更）、`last_verified_at`（最后核对，单剧目刷新/全量审计后更新）
@@ -172,7 +172,9 @@
 ## 登录
 
 ### `GET /api/admin/status`
-检查是否已配置管理员密码。**免 Token**。
+检查是否已配置管理员密码。**双语义（M5）**：
+- **无 `X-Session-Token`** → 免 Token 直通，返回 200（前端 `has_password` 变更检测依赖此路径）。
+- **带 `X-Session-Token`** → 走标准 token 校验，无效/过期返回 401。
 
 **响应**：`{ "has_password": true }`
 
@@ -304,7 +306,7 @@ TMDB 云端搜索（非本地数据库）：
 成功返回 `{"success": true, "message": "..."}`。
 
 ### `POST /api/tmdb/configure`
-更新 TMDB 配置。实际接受 14 个字段：
+更新 TMDB 配置。实际接受 13 个字段：
 
 - 通用循环字段（10 个）：`access_token`、`api_key`、`language`、`host`、`csv_watchlist_file`、`fuzzy_threshold`、`anime_min_ep_ratio`、`anime_max_season_diff`（**运行时未读取**）、`watchlist_cache_ttl`、`anime_min_season_ratio`（**运行时未读取**）
 - 特殊处理字段（3 个）：`proxy_http`、`proxy_enabled`、`watchlist_enabled`

@@ -52,7 +52,10 @@ def _generate_totp(secret: str, interval: int = 30, digits: int = 6) -> str:
     # 回退到 base64
     if secret_bytes is None:
         try:
-            secret_bytes = base64.b64decode(secret, validate=True)
+            # M8: 无 padding 的 base64 密钥（如 URL 安全 base64 转换而来）会抛
+            # binascii.Error 并被吞掉。先补全 padding 再解码。
+            padded_b64 = secret + "=" * ((4 - len(secret) % 4) % 4)
+            secret_bytes = base64.b64decode(padded_b64, validate=True)
         except (binascii.Error, ValueError):
             secret_bytes = None
 

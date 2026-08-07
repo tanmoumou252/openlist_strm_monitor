@@ -6,6 +6,7 @@ import time
 import logging
 import json
 import os
+import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -87,14 +88,16 @@ class RefreshService:
             logging.warning("[主动刷新] 触发兜底全量审计，可能访问所有 A 区磁盘")
             self.app.initial_scan_a(use_bulk=False, a_roots=None)
             self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
-            with self._full_audit_lock:
-                self._last_full_audit_at = now
+            # [已修复] P1: _last_full_audit_at 必须在所有 DB 写入成功后才更新，
+            # 防止 DB 写失败时时间戳已推进导致后续周期静默跳过审计
+            db_write_ok = True
             mapping_ids = self.app._current_mapping_ids()
             if mapping_ids:
                 try:
                     self.app.db.complete_index_generation(mapping_ids)
                 except Exception:
                     logging.warning("[主动刷新] 推进索引代次失败", exc_info=True)
+                    db_write_ok = False
                 # D'.3: 标记 last_verified_at（全量审计后推进核对时间）
                 try:
                     for m in getattr(self.app, 'a_b_mappings', []):
@@ -104,11 +107,18 @@ class RefreshService:
                             self.app.db.touch_verified_by_mapping(mid, a_root, now)
                 except Exception:
                     logging.warning("[主动刷新] 更新 last_verified_at 失败", exc_info=True)
+                    db_write_ok = False
             try:
                 self.app.db.set_control("last_full_audit_at", str(now))
-            except (AttributeError, OSError):
+            # L2: SQLite 瞬时错误（Windows AV 锁/磁盘瞬时只读）单独覆盖
+            except (AttributeError, OSError, sqlite3.OperationalError):
                 logging.warning("[主动刷新] 保存全量审计时间失败")
-            return True
+                db_write_ok = False
+            # DB 全部写入成功后，才推进内存时间戳
+            if db_write_ok:
+                with self._full_audit_lock:
+                    self._last_full_audit_at = now
+            return db_write_ok
         finally:
             with self._full_audit_lock:
                 self._full_audit_in_progress = False
@@ -131,13 +141,15 @@ class RefreshService:
             logging.warning("[手动审计] 触发全量审计，可能访问所有 A 区磁盘")
             self.app.initial_scan_a(use_bulk=False, a_roots=None)
             self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
-            self._last_full_audit_at = now
+            # [已修复] P1: _last_full_audit_at 必须在所有 DB 写入成功后才更新
+            db_write_ok = True
             mapping_ids = self.app._current_mapping_ids()
             if mapping_ids:
                 try:
                     self.app.db.complete_index_generation(mapping_ids)
                 except Exception:
                     logging.warning("[手动审计] 推进索引代次失败", exc_info=True)
+                    db_write_ok = False
                 # D'.3: 标记 last_verified_at
                 try:
                     for m in getattr(self.app, 'a_b_mappings', []):
@@ -147,14 +159,20 @@ class RefreshService:
                             self.app.db.touch_verified_by_mapping(mid, a_root, now)
                 except Exception:
                     logging.warning("[手动审计] 更新 last_verified_at 失败", exc_info=True)
+                    db_write_ok = False
             try:
                 self.app.db.set_control("last_full_audit_at", str(now))
-            except (AttributeError, OSError):
+            # L2: SQLite 瞬时错误（Windows AV 锁/磁盘瞬时只读）单独覆盖
+            except (AttributeError, OSError, sqlite3.OperationalError):
                 logging.warning("[手动审计] 保存全量审计时间失败")
+                db_write_ok = False
+            # DB 全部写入成功后，才推进内存时间戳
+            if db_write_ok:
+                self._last_full_audit_at = now
             meta = self.app.db.get_index_metadata()
             return {
-                "ok": True,
-                "status": "completed",
+                "ok": db_write_ok,
+                "status": "completed" if db_write_ok else "db_write_failed",
                 "index_generation": meta.get("index_generation", 0) if isinstance(meta, dict) else 0,
                 "index_generation_at": meta.get("index_generation_at", 0) if isinstance(meta, dict) else 0,
             }

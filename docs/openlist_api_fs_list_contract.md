@@ -191,6 +191,8 @@
       `cleanup_b_zombies_under_folder` 对 `None` `continue` 跳过该父目录。
 - [x] `content = None` 不再触发 `TypeError`，而是被判为不可信返回 `None`。
 - [x] 100 页安全阀耗尽 fail-closed 返回 `None`，不再返回部分集。
+      该上限是 B 区顺序分页链路的有意安全边界：超过 10000 条时整组跳过，
+      不与按 `total` 并发分页的 A 区收集器强行对齐。
 - [x] `per_page` 统一 `100`（仅 `_collect_cloud_files_in_directory` 需改；
       `_collect_cloud_files_concurrent` 本已 100）。
 - [x] 共享 `_parse_fs_list_content` helper 落地，两条链路复用。

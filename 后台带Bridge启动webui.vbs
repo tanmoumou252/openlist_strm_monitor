@@ -9,6 +9,11 @@ If pythonPath = "%PYTHON_EXE%" Then
     pythonPath = "python"
 End If
 
+' P8: 规范化引号——先去除已有外层引号，再统一加一层命令行引号
+If Left(pythonPath, 1) = """" And Right(pythonPath, 1) = """" Then
+    pythonPath = Mid(pythonPath, 2, Len(pythonPath) - 2)
+End If
+
 ' H-9: 用双引号包裹路径，防止路径含空格时命令断裂
 Dim quotedPythonPath
 quotedPythonPath = """" & pythonPath & """"

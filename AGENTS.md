@@ -177,7 +177,7 @@ The Vite config groups modules into chunks:
 - Token transmitted via `X-Session-Token` header
 - Frontend `api()` wrapper in `api.js` auto-attaches token from localStorage
 - IP whitelist (LAN only) as first defense layer
-- Whitelisted paths (no token required): `/api/config`, `/api/webui/config/ui`, `/api/tmdb/avatar`, `/api/tmdb/poster`, `/api/openlist/status`, `/api/openlist/ping`, `/api/admin/status`, `/api/login`, `/login` (SPA route), `/api/page`, `/`, static assets (`/assets/*`, `/favicon.ico`, `/logo.png`, `/openlist_strm_bridge.png`, `/fonts/*`, `.woff2`/`.woff`/`.ttf`)
+- Whitelisted paths (no token required): `/api/config`, `/api/webui/config/ui`, `/api/tmdb/avatar`, `/api/tmdb/poster`, `/api/openlist/status`, `/api/openlist/ping`, `/api/admin/status` (**双语义 M5**: 无 token 免 Token，带 token 走标准校验), `/api/login`, `/login` (SPA route), `/api/page`, `/`, static assets (`/assets/*`, `/favicon.ico`, `/logo.png`, `/openlist_strm_bridge.png`, `/fonts/*`, `.woff2`/`.woff`/`.ttf`)
 - `/login` is a SPA GET route served from `dist/index.html` (same fallback as `/` and `/api/page`); it is NOT a separate login page and must stay token-free so the SPA can load before login. `/api/login` is the POST authentication endpoint — the two are different things.
 
 ### Backend API Routes

@@ -172,14 +172,16 @@ async function renderAreaDetail(el, area, params) {
   const order = params.order || 'asc';
   const page = parseInt(params.page) || 1;
   const q = params.q || '';
-  const mappingIdParam = params.mapping_id || '';
+
+  // [已修复] F1: 构造 kindPart 用于返回按钮，保留筛选参数
+  const kindPart = kind ? `?kind=${encodeURIComponent(kind)}${q ? '&q=' + encodeURIComponent(q) : ''}` : (q ? `?q=${encodeURIComponent(q)}` : '');
 
   let url = `/api/area/${area}/detail?media=${encodeURIComponent(media)}`;
   if (sort) url += '&sort=' + encodeURIComponent(sort);
   if (order) url += '&order=' + encodeURIComponent(order);
   if (kind) url += '&kind=' + encodeURIComponent(kind);
   url += '&page=' + page;
-  if (mappingIdParam) url += '&mapping_id=' + encodeURIComponent(mappingIdParam);
+  // [已修复] F2: mapping_id 已从 URL 中移除（后端不消费该参数）
 
   const d = await api(url);
   if (isRenderStale()) return;
@@ -200,7 +202,7 @@ async function renderAreaDetail(el, area, params) {
   <a href="#area_${area}${kindPart}" class="back-icon-btn" title="返回列表">${icon('back')}</a>
   <span style="color:var(--text-main);font-size:14px;font-weight:600">${esc(media)}</span>
   <span style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px)">· ${d.total} 个文件</span>
-  ${(area === 'a' || area === 'b') ? `<button class="toolbar-btn refresh-media-btn" data-mapping-id="${esc(mappingIdParam)}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button>` : ''}
+  ${(area === 'a' || area === 'b' && !isMultiMapping) ? `<button class="toolbar-btn refresh-media-btn" data-mapping-id="${esc(d.mapping_id || '')}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button>` : ''}
 </div>`;
 
   // Task 2: 多 mapping 场景渲染
@@ -236,17 +238,18 @@ async function renderAreaDetail(el, area, params) {
       html += `</div>`;
       
       // 季分组（独立）
-      html += _renderSeasons(area, mapping.seasons || [], sort, order, kind, q, media, localRoot, webdavRoot, mappingId);
+      html += _renderSeasons(area, mapping.seasons || [], sort, order, kind, q, media, localRoot, webdavRoot);
       
       // 分页（独立）
+      // [已修复] F2: 删除死参数 mapping_id，后端分区由记录自身 mapping_id 列派生
       if (mapping.total_pages > 1) {
         html += '<div class="pager">';
         if (mapping.page > 1) {
-          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}&mapping_id=${encodeURIComponent(mappingId)}">${icon('chevron_l')} 上一页</a>`;
+          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}">${icon('chevron_l')} 上一页</a>`;
         }
         html += `<span class="current">第 ${mapping.page} / ${mapping.total_pages} 页</span>`;
         if (mapping.page < mapping.total_pages) {
-          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}&mapping_id=${encodeURIComponent(mappingId)}">下一页 ${icon('chevron_r')}</a>`;
+          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}">下一页 ${icon('chevron_r')}</a>`;
         }
         // F2: 请求页码超出该 mapping 记录数被 clamp 时，明确提示而非静默截断
         if (mapping.clamped) {
@@ -284,7 +287,7 @@ async function renderAreaDetail(el, area, params) {
     }
     
     // 季分组
-    html += _renderSeasons(area, d.seasons || [], sort, order, kind, q, media, localRoot, webdavRoot, mappingId);
+    html += _renderSeasons(area, d.seasons || [], sort, order, kind, q, media, localRoot, webdavRoot);
     
     // 分页
     if (d.total_pages > 1) {
@@ -363,16 +366,14 @@ async function renderAreaDetail(el, area, params) {
 }
 
 // Task 2: 渲染季分组和记录表
-function _renderSeasons(area, seasons, sort, order, kind, q, media, localRoot, webdavRoot, mappingId) {
+function _renderSeasons(area, seasons, sort, order, kind, q, media, localRoot, webdavRoot) {
   function stripPath(p, root) {
     if (root && p.startsWith(root)) return p.slice(root.length);
     return p;
   }
   
   function sortLink(colName, colKey) {
-    const params = { kind, q, media };
-    if (mappingId) params.mapping_id = mappingId;
-    return createSortLink(area, sort, order, colName, colKey, params);
+    return createSortLink(area, sort, order, colName, colKey, { kind, q, media });
   }
   
   let html = '';

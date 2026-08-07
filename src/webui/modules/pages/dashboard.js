@@ -16,8 +16,6 @@ export { startUptimeTimer, stopUptimeTimer, updateUptime, _loadOnboarding };
 // 首次配置引导（Onboarding Guide）
 // ============================================================
 
-let _onboardingState = null;
-
 async function _fetchConfigStatus() {
   try {
     return await api('/api/config/status');
@@ -52,7 +50,7 @@ function _renderOnboardingCard(status) {
   if (!status) return '';
 
   // 引导已完成/跳过 → 不渲染卡片，由 renderDashboard 中的按钮处理
-  if (status.onboarding_completed) {
+  if (status.onboarding_completed === '1') {
     return '';
   }
 
@@ -164,8 +162,6 @@ function _bindOnboardingEvents() {
   if (skipBtn) {
     skipBtn.addEventListener('click', async () => {
       await _markOnboardingCompleted();
-      // 立即更新本地状态并刷新 UI
-      if (_onboardingState) _onboardingState.onboarding_completed = true;
       const card = document.getElementById('onboarding-card');
       if (card) card.remove();
       const quickBtn = document.getElementById('onboarding-quick-btn');
@@ -177,8 +173,6 @@ function _bindOnboardingEvents() {
   if (completeBtn) {
     completeBtn.addEventListener('click', async () => {
       await _markOnboardingCompleted();
-      // 立即更新本地状态并刷新 UI
-      if (_onboardingState) _onboardingState.onboarding_completed = true;
       const card = document.getElementById('onboarding-card');
       if (card) card.remove();
       const quickBtn = document.getElementById('onboarding-quick-btn');
@@ -216,7 +210,6 @@ function _bindOnboardingEvents() {
 
 async function _loadOnboarding() {
   const status = await _fetchConfigStatus();
-  _onboardingState = status;
   const container = document.getElementById('onboarding-container');
   if (container) {
     container.innerHTML = _renderOnboardingCard(status);
@@ -226,7 +219,7 @@ async function _loadOnboarding() {
   // Update header quick button visibility
   const quickBtn = document.getElementById('onboarding-quick-btn');
   if (quickBtn) {
-    if (status && status.onboarding_completed) {
+    if (status && status.onboarding_completed === '1') {
       quickBtn.style.display = 'inline-flex';
     } else {
       quickBtn.style.display = 'none';
@@ -315,6 +308,21 @@ export async function updateMainStatus() {
       uptimeText.textContent = '点击启动按钮开始同步服务';
       if (startBtn) startBtn.style.display = 'inline-flex';
       if (stopBtn) stopBtn.style.display = 'none';
+    }
+
+    // [已修复] P7b: 轮询更新 watcher 健康横幅，后端恢复时隐藏 banner
+    if (status.watchers_healthy !== false) {
+      const banner = document.querySelector('.dashboard-warning-banner');
+      if (banner) banner.remove();
+    } else {
+      // 后端降级时显示 banner（如果不存在）
+      if (!document.querySelector('.dashboard-warning-banner')) {
+        const mainControlCard = document.querySelector('.main-control-card');
+        if (mainControlCard) {
+          const bannerHtml = `<div class="dashboard-warning-banner" style="margin:12px 0;padding:10px 14px;background:color-mix(in srgb,var(--error) 12%,transparent);border:1px solid color-mix(in srgb,var(--error) 40%,transparent);border-radius:var(--radius-control);color:var(--error);font-size:13px;display:flex;align-items:center;gap:8px">${icon('warn')} watchdog 监视器降级：部分区域事件可能未同步，请检查 WebUI 日志</div>`;
+          mainControlCard.insertAdjacentHTML('afterend', bannerHtml);
+        }
+      }
     }
   } catch (e) {
     // 静默处理状态获取失败

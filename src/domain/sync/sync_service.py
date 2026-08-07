@@ -611,6 +611,11 @@ class SyncService:
                     return "success"
                 except Exception as e:
                     logging.warning("[A->B] B已存在但数据库写入失败 %s: %s", b_local, e)
+                    # M2: 与拷贝分支对齐，显式回滚共享连接，防止半提交污染后续 commit
+                    try:
+                        conn.rollback()
+                    except Exception as rb_err:
+                        logging.warning("[A→B] 回滚连接失败: %s", rb_err)
                     return "fail"
             else:
                 # B 区文件已存在但 WebDAV 路径不同 — 不覆盖，保护用户操作
@@ -646,6 +651,11 @@ class SyncService:
             return "success"
         except Exception as e:
             logging.error("[A->B] 数据库写入失败 %s: %s", b_local, e)
+            # [已修复] P3: 显式回滚连接，防止事务提交不完整的记录
+            try:
+                conn.rollback()
+            except Exception as rb_err:
+                logging.warning("[A→B] 回滚连接失败: %s", rb_err)
             # 回滚：删除已拷贝的文件
             try:
                 if b_local.exists():

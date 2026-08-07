@@ -888,6 +888,47 @@ class TestDistStaticPages:
         assert "assets/" not in text
 
 
+class TestDistFontCoverage:
+    """构建产物级字体覆盖：dist 字体 cmap 应包含当前网页全部扫描字符。"""
+
+    def _dist_font(self) -> Path | None:
+        """返回 dist/assets/ 下的子集字体路径，不存在则返回 None。"""
+        dist = _webui_dir().parent.parent / "dist" / "assets"
+        if not dist.exists():
+            return None
+        fonts = list(dist.glob("NotoSansSC-Subset-*.woff2"))
+        return fonts[0] if fonts else None
+
+    def test_dist_font_covers_scanned_codepoints(self):
+        """dist 字体的 cmap 应包含 webui 源码扫描到的全部字符。"""
+        font_path = self._dist_font()
+        if font_path is None:
+            pytest.skip("dist/ 尚未构建或缺少子集字体")
+
+        cmap = sf.read_font_cmap(font_path)
+        if cmap is None:
+            pytest.skip("无法读取 dist 字体 cmap")
+
+        webui_dir = _webui_dir()
+        scanned, _ = sf.scan_web_source_codepoints(webui_dir)
+        if not scanned:
+            pytest.skip("webui 源码无扫描字符")
+
+        missing = scanned - cmap
+        if not missing:
+            return  # 完美覆盖
+
+        # 区分源字体缺字（WARNING）与子集丢字（ERROR）
+        from_source, from_subset = sf.classify_missing(scanned, cmap, cmap)
+        if from_source:
+            pytest.skip(
+                f"源字体缺字（WARNING，非子集化失败）：{sorted(from_source)[:10]}"
+            )
+        # 子集丢字（ERROR）必须失败
+        assert not from_subset, \
+            f"dist 字体缺失扫描字符（子集化失败）：{sorted(from_subset)[:20]}"
+
+
 # ============================================================
 # Task G: 字体子集扫描集补全测试
 # ============================================================

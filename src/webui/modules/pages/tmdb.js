@@ -184,14 +184,11 @@ export async function renderTmdb(el, params) {
     const url = `/api/tmdb/watchlist/${apiType}?all=1`;
     const promise = api(url);
     _fetchPromises[apiType] = promise;
-    try {
-      data = await promise;
-      _setCachedWatchlist(apiType, data);
-    } finally {
-      setTimeout(() => {
-        if (_fetchPromises[apiType] === promise) _fetchPromises[apiType] = null;
-      }, 1000);
-    }
+    // [已修复] P13: 用 promise.finally 替代 setTimeout，防止 Promise 挂起导致条目永驻
+    data = await promise.finally(() => {
+      if (_fetchPromises[apiType] === promise) _fetchPromises[apiType] = null;
+    });
+    _setCachedWatchlist(apiType, data);
   }
   let items = data.results || [];
 

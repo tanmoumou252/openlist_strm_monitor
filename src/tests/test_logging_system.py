@@ -55,7 +55,12 @@ class TestTmdbOperationLog:
         assert logs[2]["detail"] == '{"count": 10}'
 
     def test_log_auto_cleanup_after_7_days(self, tmp_path):
-        """测试 7 天前的日志自动清理"""
+        """测试 7 天前的日志自动清理
+
+        注意：_prune_tmdb_logs() 仅在写侧 log_tmdb_operation() 调用（M-14 设计），
+        get_tmdb_logs() 只做 SELECT。因此插入旧日志后需显式调用 _prune_tmdb_logs()
+        触发清理，再通过 get_tmdb_logs() 验证结果。
+        """
         db_path = str(tmp_path / "test_tmdb.db")
         db = TmdbWatchlistDb(db_path)
 
@@ -71,7 +76,10 @@ class TestTmdbOperationLog:
             )
             conn.commit()
 
-        # 查询应触发清理
+        # 显式触发写侧清理（M-14 设计：_prune_tmdb_logs 只在 log_tmdb_operation 调用）
+        db._prune_tmdb_logs()
+
+        # 查询应只返回 recent 日志
         logs = db.get_tmdb_logs(limit=10)
 
         # 应该只有 1 条（旧的被清理）

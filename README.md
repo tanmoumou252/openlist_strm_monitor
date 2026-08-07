@@ -395,7 +395,7 @@ python -m pytest src/tests/test_onboarding_e2e.py -v
 | [用户手册](docs/用户手册.md) | 功能说明、操作指南、使用技巧 |
 | [工作流程](docs/工作流程.md) | A/B/C 三区同步流程详解、字幕处理 |
 | [设计思路](docs/设计思路.md) | 架构决策、安全机制设计理念 |
-| [接入文档](docs/ink-reveal/接入文档.md) | 面向开发者的 API 对接与集成说明 |
+| [接入文档](docs/ink-reveal/接入文档.md) | 壁纸晕染特效接入文档 |
 | [Wiki 首页](https://github.com/tanmoumou252/openlist_strm_monitor/wiki) | 社区维护的 FAQ、最佳实践 |
 
 ---

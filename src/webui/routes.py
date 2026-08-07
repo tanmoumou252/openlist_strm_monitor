@@ -73,6 +73,17 @@ def _human_size(size: int) -> str:
         size //= 1024
     return f"{size:.1f} TB"
 
+# [已修复] P16: CSV 单元格安全——防止公式注入
+# 以 =, +, -, @ 开头的文本在电子表格中会被解释为公式，添加前缀使其作为文本处理
+_CSV_FORMULA_PREFIXES = frozenset("=+-@")
+
+
+def _csv_safe_text(val: str) -> str:
+    """对 CSV 文本单元格进行公式注入防护。"""
+    if val and isinstance(val, str) and val[0] in _CSV_FORMULA_PREFIXES:
+        return "\t" + val
+    return val
+
 def _resolve_tmdb_proxy(app_config) -> str | None:
     """统一 TMDB 代理解析逻辑（与客户端初始化一致）"""
     tmdb_cfg = getattr(app_config, "tmdb", None)
@@ -289,17 +300,33 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         else:
             avatar_url = f"https://www.gravatar.com/avatar/{avatar_hash}?d=identicon&s=80"
         try:
+            # [已修复] F7: 添加大小限制（10MB），防止内存耗尽 DoS
+            MAX_IMG_SIZE = 10 * 1024 * 1024  # 10MB
             ava_req = urllib.request.Request(
                 avatar_url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
             )
             opener = _build_img_opener(handler, use_proxy=not bool(_host))
             resp = opener.open(ava_req, timeout=10)
-            img_data = resp.read()
+
+            # 检查 Content-Length（如果服务端返回）
+            content_length = int(resp.headers.get("Content-Length", 0))
+            if content_length > MAX_IMG_SIZE:
+                handler._send_json({"error": "Image too large"}, 413)
+                return True
+
+            # [已修复] F7: 分块读取，防止无界 read() 导致内存耗尽 DoS
+            img_data = resp.read(MAX_IMG_SIZE + 1)
+            if len(img_data) > MAX_IMG_SIZE:
+                handler._send_json({"error": "Image too large"}, 413)
+                return True
+
             handler.send_response(200)
             handler.send_header("Content-Type", "image/png")
             handler.send_header("Content-Length", str(len(img_data)))
             handler.send_header("Cache-Control", "public, max-age=86400")
+            handler.send_header("X-Content-Type-Options", "nosniff")
+            handler.send_header("X-Frame-Options", "DENY")
             handler.end_headers()
             handler.wfile.write(img_data)
             return True
@@ -327,18 +354,39 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         poster_url = f"{img_base}/w{width}{poster_path}"
         logging.debug("[TMDB] Poster Request - path: %s, url: %s", poster_path, poster_url)
         try:
+            # [已修复] F7: 添加大小限制（10MB），防止内存耗尽 DoS
+            MAX_IMG_SIZE = 10 * 1024 * 1024  # 10MB
             poster_req = urllib.request.Request(
                 poster_url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
             )
             opener = _build_img_opener(handler, use_proxy=True)
             resp = opener.open(poster_req, timeout=15)
-            img_data = resp.read()
+
+            # 检查 Content-Length（如果服务端返回）
+            content_length = int(resp.headers.get("Content-Length", 0))
+            if content_length > MAX_IMG_SIZE:
+                handler._send_json({"error": "Image too large"}, 413)
+                return True
+
+            # [已修复] F7: 分块读取，防止无界 read() 导致内存耗尽 DoS
+            img_data = resp.read(MAX_IMG_SIZE + 1)
+            if len(img_data) > MAX_IMG_SIZE:
+                handler._send_json({"error": "Image too large"}, 413)
+                return True
+
             content_type = resp.headers.get("Content-Type", "image/jpeg")
+            # 白名单 Content-Type，防止通过 Content-Type 头注入恶意内容
+            allowed_types = {"image/jpeg", "image/png", "image/webp"}
+            if content_type not in allowed_types:
+                content_type = "image/jpeg"
+
             handler.send_response(200)
             handler.send_header("Content-Type", content_type)
             handler.send_header("Content-Length", str(len(img_data)))
             handler.send_header("Cache-Control", "public, max-age=604800")
+            handler.send_header("X-Content-Type-Options", "nosniff")
+            handler.send_header("X-Frame-Options", "DENY")
             handler.end_headers()
             handler.wfile.write(img_data)
             return True
@@ -414,15 +462,16 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
             orig = item.get("original_title") or item.get(
                 "original_name") or ""
             date = item.get("release_date") or item.get("first_air_date") or ""
-            rating = item.get("vote_average", 0)
+            # [已修复] Z-1: 处理 vote_average=None，避免 f"{None:.1f}" 抛 TypeError
+            rating = item.get("vote_average") or 0
             status_label = {
                 "in": "已收录",
                 "out": "待看",
                 "que": "有疑问"}.get(
                 status,
                 "待看")
-            writer.writerow([status_label, item.get("id", ""), media_type,
-                             title, orig, date, f"{rating:.1f}"])
+            writer.writerow([_csv_safe_text(status_label), item.get("id", ""), media_type,
+                             _csv_safe_text(title), _csv_safe_text(orig), _csv_safe_text(date), f"{rating:.1f}"])
         csv_data = buf.getvalue().encode("utf-8-sig")
 
         # 直接返回 CSV 数据作为浏览器下载
@@ -1144,8 +1193,11 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
                 logging.warning("[WebUI] tmdb scope 热更新失败: %s", e)
 
         # 更新 _has_password 缓存（ui scope 管理密码变更时）
+        # M4: 改密后清空全部会话，使旧 token 立即失效（旧 token 最长 7 天）
         if scope == "ui" and "admin_password" in data:
             webui_server._has_password = bool(data.get("admin_password"))
+            with webui_server._sessions_lock:
+                webui_server._sessions.clear()
         handler._send_json(
             {"success": True, "scope": scope, "saved": len(data)})
     except json.JSONDecodeError:
@@ -1260,13 +1312,21 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
         data = {}
 
     cfg = webui_server._config
-    host = data.get("host", cfg.webdav.host)
     user = data.get("user", cfg.webdav.user)
     password = data.get("password", cfg.webdav.password)
     totp_secret = data.get("totp_secret", cfg.webdav.totp_secret)
 
+    # [已修复] F6: 限制 host 参数，仅允许测试当前配置的 host，防止 SSRF
+    # 忽略请求体中的 host，始终使用当前配置的 host
+    host = cfg.webdav.host
+
     if not host:
-        handler._send_json({"success": False, "error": "WebDAV 地址不能为空"}, 400)
+        handler._send_json({"success": False, "error": "WebDAV 地址未配置"}, 400)
+        return
+
+    # 验证 host 格式：必须是 http(s) URL
+    if not re.match(r'^https?://', host):
+        handler._send_json({"success": False, "error": "WebDAV 地址格式无效（必须是 http:// 或 https://）"}, 400)
         return
 
     try:
@@ -1742,8 +1802,13 @@ def _handle_tmdb_watchlist_bg_sync(handler, webui_server) -> None:
 def _do_bg_sync(webui_server) -> None:
     """后台执行待看列表同步。"""
     try:
+        # [已修复] Z-6: 显式检查 TMDB 客户端引用，防止未来重构移除 try/except 兜底
+        tmdb_client = getattr(webui_server, '_tmdb_client', None)
+        if tmdb_client is None:
+            logging.warning("[TMDB] 后台同步中止：_tmdb_client 未初始化")
+            return
         # force=True 确保同步执行，因为 TTL 检查已移至 sync 方法内部
-        webui_server._watchlist_db.sync(webui_server._tmdb_client, force=True)
+        webui_server._watchlist_db.sync(tmdb_client, force=True)
         logging.info("[TMDB] 后台同步完成")
         _wdb = getattr(webui_server, '_watchlist_db', None)
         if _wdb:
@@ -2033,7 +2098,9 @@ _KIND_SQL = """
     END
 """
 
-# 提取媒体名称：找到分类目录后的第一级目录名
+# 提取媒体名称：找到分类目录后的第一段目录名
+# M3: 覆盖 _KIND_SQL 中归为 电影/番剧 的全部别名目录（/movies/ /movie/ /anime/ /动漫/ /动画/），
+# 否则别名目录下的标题会坍缩进 '未分类'。偏移量 = 匹配串长度（含首尾斜杠）。
 _MEDIA_NAME_SQL = f"""
     CASE
         WHEN {_KIND_SQL} = '番剧' THEN
@@ -2050,6 +2117,42 @@ _MEDIA_NAME_SQL = f"""
                         1,
                         INSTR(SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/番剧/') + 4) || '/', '/') - 1
                     )
+                WHEN INSTR(REPLACE(webdav_path, '\\', '/'), '/anime/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/anime/') + 7),
+                        1,
+                        INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/anime/') + 7) || '/', '/') - 1
+                    )
+                WHEN INSTR(REPLACE(local_path, '\\', '/'), '/anime/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/anime/') + 7),
+                        1,
+                        INSTR(SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/anime/') + 7) || '/', '/') - 1
+                    )
+                WHEN INSTR(REPLACE(webdav_path, '\\', '/'), '/动漫/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/动漫/') + 4),
+                        1,
+                        INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/动漫/') + 4) || '/', '/') - 1
+                    )
+                WHEN INSTR(REPLACE(local_path, '\\', '/'), '/动漫/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/动漫/') + 4),
+                        1,
+                        INSTR(SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/动漫/') + 4) || '/', '/') - 1
+                    )
+                WHEN INSTR(REPLACE(webdav_path, '\\', '/'), '/动画/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/动画/') + 4),
+                        1,
+                        INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/动画/') + 4) || '/', '/') - 1
+                    )
+                WHEN INSTR(REPLACE(local_path, '\\', '/'), '/动画/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/动画/') + 4),
+                        1,
+                        INSTR(SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/动画/') + 4) || '/', '/') - 1
+                    )
                 ELSE '未分类'
             END
         WHEN {_KIND_SQL} = '电影' THEN
@@ -2065,6 +2168,30 @@ _MEDIA_NAME_SQL = f"""
                         SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/电影/') + 4),
                         1,
                         INSTR(SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/电影/') + 4) || '/', '/') - 1
+                    )
+                WHEN INSTR(REPLACE(webdav_path, '\\', '/'), '/movies/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/movies/') + 8),
+                        1,
+                        INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/movies/') + 8) || '/', '/') - 1
+                    )
+                WHEN INSTR(REPLACE(local_path, '\\', '/'), '/movies/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/movies/') + 8),
+                        1,
+                        INSTR(SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/movies/') + 8) || '/', '/') - 1
+                    )
+                WHEN INSTR(REPLACE(webdav_path, '\\', '/'), '/movie/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/movie/') + 7),
+                        1,
+                        INSTR(SUBSTR(REPLACE(webdav_path, '\\', '/'), INSTR(REPLACE(webdav_path, '\\', '/'), '/movie/') + 7) || '/', '/') - 1
+                    )
+                WHEN INSTR(REPLACE(local_path, '\\', '/'), '/movie/') > 0 THEN
+                    SUBSTR(
+                        SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/movie/') + 7),
+                        1,
+                        INSTR(SUBSTR(REPLACE(local_path, '\\', '/'), INSTR(REPLACE(local_path, '\\', '/'), '/movie/') + 7) || '/', '/') - 1
                     )
                 ELSE '未分类'
             END
@@ -2129,6 +2256,11 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
         _login_attempts[client_ip] = attempts
     try:
         data = json.loads(body)
+        # [已修复] P5: 校验 JSON body 必须为对象，防止非对象体导致 AttributeError
+        # 安全权衡：畸形请求不计入 _login_attempts（攻击者无法通过批量畸形请求触发锁定）
+        if not isinstance(data, dict):
+            handler._send_json({"error": "请求体须为 JSON 对象"}, 400)
+            return
         password = data.get("password", "")
         if not password:
             handler._send_json({"error": "密码不能为空"}, 400)
@@ -3182,7 +3314,8 @@ def _read_log_file_tail(log_file: Path | str, lines_req: int) -> list[str]:
 
 def handle_logs_api(handler, params: dict) -> None:
     """处理 GET /api/logs"""
-    lines_req = _safe_int(params.get("lines", ["200"])[0], 200)
+    # [已修复] F5: 限制 lines 参数范围，防止 DoS（内存耗尽）
+    lines_req = max(1, min(_safe_int(params.get("lines", ["200"])[0], 200), 5000))
 
     # 确定日志文件路径
     log_file = None

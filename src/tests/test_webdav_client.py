@@ -127,6 +127,16 @@ class TestGenerateTotp:
         assert len(code) == 8
         assert code.isdigit()
 
+    def test_unpadded_base64_secret_works(self):
+        # M8: 无 padding 的 base64 密钥（如 URL 安全 base64 转换而来）解码必须成功
+        # "dGVzdHNlY3JldA" 对应 bytes "testsecret"（无 = padding，4 的倍数余 2）
+        code = _generate_totp("dGVzdHNlY3JldA")
+        assert len(code) == 6
+        assert code.isdigit()
+        # 与补 padding 后解码的等价密钥产生相同结果
+        padded = _generate_totp("dGVzdHNlY3JldA==")
+        assert code == padded
+
 
 # ===========================================================================
 # OpenListAdminClient — token cache

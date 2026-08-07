@@ -13,12 +13,16 @@ from typing import Generator
 from utils import escape_like
 
 class ReadWriteLock:
-    """读写锁：允许多个读者并发访问，写者独占。
+    """读写锁：写者优先，读者与写者间无硬互斥。
 
     实现要点：
-    - 读者通过主 _lock + _no_writers 条件变量与写者互斥（首个读者计数，末位读者唤醒）
     - 写者通过 _write_lock 互斥（所有写者串行化）
     - 写者优先：当有写者等待或活跃时，新读者阻塞，防止写者饥饿
+    - 读者与写者间的行级数据隔离由 SQLite WAL 快照提供（read_connection 使用
+      query_only 独立连接 + WAL 快照），本锁不提供读者/写者硬互斥。
+
+    说明：`_read_lock` 按用户决策(A)移除，WAL 提供隔离。原 docstring 声称"读写
+    互斥"，但 _read_lock 从未被 read_locked 触碰，属虚假安全承诺，故移除。
     """
 
     def __init__(self):
@@ -26,7 +30,6 @@ class ReadWriteLock:
         self._readers = 0
         self._writers_waiting = 0
         self._writers_active = 0
-        self._read_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._no_writers = threading.Condition(self._lock)
 
@@ -55,12 +58,9 @@ class ReadWriteLock:
             with self._lock:
                 self._writers_waiting -= 1
                 self._writers_active += 1
-            # 第一个写者获取 _read_lock，阻止新读者进入
-            self._read_lock.acquire()
             try:
                 yield
             finally:
-                self._read_lock.release()
                 with self._lock:
                     self._writers_active -= 1
                     if self._writers_active == 0:
@@ -966,7 +966,7 @@ class Database:
     def get_all_b(self) -> list[BRecord]:
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute("""
-                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id
+                SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id, last_verified_at
                 FROM b_strm_files
                 """)
             return [BRecord(*row) for row in cur.fetchall()]

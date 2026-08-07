@@ -328,8 +328,15 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         # 登录接口放行
         if path == "/api/login":
             return True
-        # 密码状态查询放行
+        # 密码状态查询放行（M5 双语义）：
+        # - 无 token → 白名单直通（router.js:105 依赖 200 + has_password 做变更检测）
+        # - 带 token → 走标准 token 校验，无效返回 401（过期/撤销的 token 不再得到 200）
         if path == "/api/admin/status":
+            token = self.headers.get("X-Session-Token", "")
+            if token:
+                if not self._validate_session_token(token, self.client_address[0]):
+                    self._send_json({"error": "unauthorized", "need_login": True}, 401)
+                    return False
             return True
         # 静态资源放行（SPA 需要加载 — 登录前必须可用）
         if path == "/" or path.startswith("/assets/") or path == "/favicon.ico" \
@@ -348,8 +355,19 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         if method.upper() == "GET" and path in ("/api/config", "/api/webui/config/ui"):
             return True
         # 验证 session token
-        token = self.headers.get("X-Session-Token", "")
-        client_ip = self.client_address[0]
+        if self._validate_session_token(
+                self.headers.get("X-Session-Token", ""),
+                self.client_address[0]):
+            return True
+        self._send_json({"error": "unauthorized", "need_login": True}, 401)
+        return False
+
+    def _validate_session_token(self, token: str, client_ip: str) -> bool:
+        """验证 session token 是否有效（含 IP 绑定 + 滑动过期）。
+
+        M5: 抽为独立方法供 _check_auth 的常规路径与 /api/admin/status 双语义路径复用。
+        """
+        webui = self.webui
         now = time.time()
         with webui._sessions_lock:
             # 使用常量时间比较防止时序攻击
@@ -367,7 +385,6 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
                     # 滑动过期：刷新 7 天
                     webui._sessions[matched_token] = (now + 604800, client_ip)
                     return True
-        self._send_json({"error": "unauthorized", "need_login": True}, 401)
         return False
 
     # ----------------------------------------------------------
@@ -1005,12 +1022,14 @@ class WebUIServer:
             logging.error("[WebUI] %s", msg)
             return
 
+        # H2: 先初始化管理员密码再启动 HTTP 线程，消除鉴权空窗（TOCTOU）。
+        # 首启时会同步生成随机密码并做 PBKDF2 哈希（数百 ms~数秒），此延迟可接受，
+        # 否则 _has_password 为 False 时 _check_auth 会放行所有 LAN 请求。
+        self._init_admin_password()
+
         self._thread = threading.Thread(
             target=self._server.serve_forever, daemon=True, name="WebUI")
         self._thread.start()
-
-        # 初始化管理员密码
-        self._init_admin_password()
 
         # 启动 session 过期自动清理（每小时执行一次）
         self._session_cleanup_event = threading.Event()
@@ -1255,7 +1274,7 @@ class WebUIServer:
         Returns:
             {"running": bool, "uptime": int | None,
              "refresh_healthy": bool, "refresh_consecutive_failures": int,
-             "refresh_last_error": str}
+             "refresh_last_error": str, "watchers_healthy": bool}
         """
         result: dict = {
             "running": self._app_running,
@@ -1268,6 +1287,10 @@ class WebUIServer:
                 result["refresh_healthy"] = rs._consecutive_failures == 0
                 result["refresh_consecutive_failures"] = rs._consecutive_failures
                 result["refresh_last_error"] = rs._last_error_summary
+            # [已修复] P7b: 返回 watcher 健康状态供前端轮询更新 banner
+            result["watchers_healthy"] = getattr(self._app_service, '_watchers_healthy', True)
+        else:
+            result["watchers_healthy"] = True  # 主程序未运行时默认健康
         return result
 
 # ============================================================

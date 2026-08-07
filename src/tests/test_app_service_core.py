@@ -89,6 +89,13 @@ class TestStrmStorageManager:
         mode = self.manager._extract_save_local_mode(addition)
         assert mode == "update"
 
+    def test_extract_save_local_mode_null_returns_empty(self):
+        # M6: 远端 API 返回 "SaveLocalMode": null 时 .get 默认值不生效，
+        # 必须显式类型守卫返回 ""，否则 is_sync_mode 调 .lower() 抛 AttributeError
+        assert self.manager._extract_save_local_mode('{"SaveLocalMode": null}') == ""
+        assert self.manager._extract_save_local_mode('{"SaveLocalMode": 123}') == ""
+        assert self.manager._extract_save_local_mode('{}') == ""
+
     def test_get_strm_storages_returns_full_info(self):
         # get_strm_storages_full_info 已经按 driver 过滤，返回扁平 STRM 列表（含完整 addition）
         self.mock_client.get_strm_storages_full_info.return_value = [

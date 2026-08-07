@@ -593,15 +593,10 @@ class TmdbWatchlistDb:
                     )
                     conn.execute(
                         "DELETE FROM movies WHERE id NOT IN (SELECT id FROM _keep_movie_ids)")
-                    # 同步清理 FTS 表中的孤儿记录
-                    conn.execute(
-                        "DELETE FROM tmdb_watchlist_fts WHERE rowid NOT IN (SELECT rowid FROM movies)")
                     conn.commit()
             else:
                 with self._conn() as conn:
                     conn.execute("DELETE FROM movies")
-                    # 同步清理 FTS 表
-                    conn.execute("DELETE FROM tmdb_watchlist_fts")
                     conn.commit()
 
             logging.info("[TMDB] 电影同步完成 (%d 项)", len(movie_ids))
@@ -645,15 +640,10 @@ class TmdbWatchlistDb:
                     )
                     conn.execute(
                         "DELETE FROM tv WHERE id NOT IN (SELECT id FROM _keep_tv_ids)")
-                    # 同步清理 FTS 表中的孤儿记录
-                    conn.execute(
-                        "DELETE FROM tmdb_watchlist_fts WHERE rowid NOT IN (SELECT rowid FROM tv)")
                     conn.commit()
             else:
                 with self._conn() as conn:
                     conn.execute("DELETE FROM tv")
-                    # 同步清理 FTS 表
-                    conn.execute("DELETE FROM tmdb_watchlist_fts")
                     conn.commit()
 
             logging.info("[TMDB] 剧集同步完成 (%d 项)", len(tv_ids))
@@ -662,6 +652,16 @@ class TmdbWatchlistDb:
         except Exception as e:
             logging.warning("[TMDB] 剧集同步失败: %s", e)
             self.log_tmdb_operation("sync_tv_error", "error", f"剧集同步失败: {e}")
+
+        # ---- 统一清理 FTS 孤儿记录 ----
+        # H1: 电影/剧集两类 FTS 行共存于同一虚表，任何一类的内联 DELETE 都会误删另一类的行。
+        # 此处统一在两类同步（含异常路径）之后联合清理，仅删除两类数据库中都不存在的孤儿行。
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM tmdb_watchlist_fts "
+                "WHERE rowid NOT IN (SELECT rowid FROM movies) "
+                "AND rowid NOT IN (SELECT rowid FROM tv)")
+            conn.commit()
 
         # ---- 批量补齐季数 ----
         if tv_sync_ok:

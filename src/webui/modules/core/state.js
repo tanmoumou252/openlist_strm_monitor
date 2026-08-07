@@ -86,14 +86,15 @@ export function _setUiConfig(key, val) {
   // 取消前一次未完成的保存请求
   if (_uiConfigController) _uiConfigController.abort();
   _uiConfigController = new AbortController();
-fetch('/api/webui/config/ui', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Session-Token': localStorage.getItem('session_token') || ''
-      },
-      body: JSON.stringify({ [key]: val }),
-      signal: _uiConfigController.signal
+  // [已修复] P18: 缩进对齐（原列 0，现缩进 2 空格）
+  fetch('/api/webui/config/ui', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Session-Token': localStorage.getItem('session_token') || ''
+    },
+    body: JSON.stringify({ [key]: val }),
+    signal: _uiConfigController.signal
   }).then(resp => {
     if (!resp.ok) {
       console.warn('[UI Config] 保存失败:', resp.status, resp.statusText);

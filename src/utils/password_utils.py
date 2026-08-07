@@ -20,6 +20,8 @@ import secrets
 # 常量：OWASP 2023 PBKDF2-HMAC-SHA256 推荐
 _DEFAULT_ITERATIONS = 600_000
 _SALT_BYTE_LEN = 16  # 128 位
+# 硬上限：防止植入极端迭代次数导致 DoS
+_MAX_ITERATIONS = 10_000_000
 
 
 def hash_password(password: str, iterations: int = _DEFAULT_ITERATIONS) -> str:
@@ -58,6 +60,8 @@ def verify_password(password: str, stored: str) -> bool:
             return False
         salt, iterations_str, stored_hash = parts
         iterations = int(iterations_str)
+        if iterations > _MAX_ITERATIONS:
+            return False
         h = hashlib.pbkdf2_hmac(
             "sha256",
             password.encode("utf-8"),

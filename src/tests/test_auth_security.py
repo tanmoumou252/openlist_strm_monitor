@@ -2,7 +2,7 @@
 认证安全测试 (Task H.1)
 
 测试范围：
-1. 连续 5 次错误密码后第 6 次返回 429（登录限流）
+1. 登录限流数据结构验证（端到端 429 测试见 test_webui_http.py）
 2. _hash_password 返回值符合 salt$iterations$hash 三段式，iterations 为 600000
 3. 首启密码只打印一次：二次初始化时不再打印
 
@@ -29,36 +29,83 @@ class TestLoginRateLimit:
     """测试登录限流机制（核心逻辑验证）"""
 
     def test_login_attempts_dict_tracks_failures(self):
-        """_login_attempts 字典正确记录失败次数"""
+        """_login_attempts 字典正确记录失败时间戳列表"""
         from webui.routes import _login_attempts
         _login_attempts.clear()
 
         ip = "127.0.0.1"
-        _login_attempts[ip] = _login_attempts.get(ip, 0) + 1
-        assert _login_attempts[ip] == 1
+        now = time.time()
+        # 真实数据结构：时间戳列表
+        _login_attempts[ip] = [now]
+        assert len(_login_attempts[ip]) == 1
+        assert _login_attempts[ip][0] == now
 
-        _login_attempts[ip] = _login_attempts.get(ip, 0) + 1
-        assert _login_attempts[ip] == 2
+        # 追加第二次失败
+        now2 = now + 1
+        _login_attempts[ip] = _login_attempts[ip] + [now2]
+        assert len(_login_attempts[ip]) == 2
 
-        # 成功登录后应重置
-        _login_attempts[ip] = 0
-        assert _login_attempts[ip] == 0
+        # 成功登录后应重置（pop）
+        _login_attempts.pop(ip, None)
+        assert ip not in _login_attempts
         _login_attempts.clear()
 
     def test_rate_limit_threshold_is_five(self):
-        """限流阈值为 5 次失败"""
-        from webui.routes import _login_attempts
+        """限流阈值为 5 次失败（时间戳列表长度 >= 5）"""
+        from webui.routes import _login_attempts, _LOGIN_MAX_ATTEMPTS
         _login_attempts.clear()
 
         ip = "127.0.0.1"
-        # 模拟 5 次失败
-        for _ in range(5):
-            _login_attempts[ip] = _login_attempts.get(ip, 0) + 1
-        assert _login_attempts[ip] == 5
+        now = time.time()
+        # 模拟 5 次失败：时间戳列表长度达到阈值
+        _login_attempts[ip] = [now + i for i in range(5)]
+        assert len(_login_attempts[ip]) == _LOGIN_MAX_ATTEMPTS
 
         # 第 6 次时，检查逻辑应返回 429
         # （实际 HTTP 检查在 test_webui_http.py 中覆盖）
         _login_attempts.clear()
+
+    def test_malformed_json_body_does_not_count(self):
+        """非 dict JSON（[]、null、字符串）返回 400 且不向 _login_attempts 追加时间戳"""
+        from webui.routes import _handle_login, _login_attempts
+        _login_attempts.clear()
+
+        handler = MagicMock()
+        handler.client_address = ("127.0.0.1",)
+        webui_server = MagicMock()
+        webui_server._watchlist_db = MagicMock()
+        webui_server._watchlist_db.get_config.return_value = "stored_hash"
+
+        for bad_body in (b"[]", b"null", b'"abc"'):
+            _login_attempts.clear()
+            _handle_login(handler, webui_server, bad_body)
+            # 畸形请求不应追加时间戳（列表长度保持 0）
+            attempts = _login_attempts.get("127.0.0.1", [])
+            assert len(attempts) == 0, \
+                f"畸形请求体 {bad_body!r} 不应向 _login_attempts 追加时间戳，实际: {attempts}"
+            # 应返回 400
+            call_args = handler._send_json.call_args
+            assert call_args[0][1] == 400
+
+    def test_wrong_password_counts_toward_limit(self):
+        """错误密码返回 401 且 _login_attempts[ip] 增长"""
+        from webui.routes import _handle_login, _login_attempts
+        from utils.password_utils import hash_password
+        _login_attempts.clear()
+
+        handler = MagicMock()
+        handler.client_address = ("127.0.0.1",)
+        webui_server = MagicMock()
+        # 设置一个真实哈希，但密码不匹配
+        stored_hash = hash_password("correct_password")
+        webui_server._watchlist_db = MagicMock()
+        webui_server._watchlist_db.get_config.return_value = stored_hash
+
+        _handle_login(handler, webui_server, b'{"password": "wrong"}')
+        assert "127.0.0.1" in _login_attempts
+        assert len(_login_attempts["127.0.0.1"]) == 1
+        handler._send_json.assert_called_once()
+        assert handler._send_json.call_args[0][1] == 401
 
 
 class TestPasswordHash:

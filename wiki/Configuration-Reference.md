@@ -203,7 +203,7 @@ OpenList 后台配置                    程序内部映射
 
 ## JWT Token 缓存
 
-`OpenListAdminClient` 将 JWT Token 缓存到 `~/.openlist_admin_token.json`，避免重复登录。Token 过期前 60 秒自动刷新。401 时清除缓存并重新登录。
+`OpenListAdminClient` 将 JWT Token 缓存到 `src/.admin_token.json`（`OpenListAdminClient` 所在目录），避免重复登录。Token 过期前 60 秒自动刷新。401 时清除缓存并重新登录。
 
 ## 多存储分组
 

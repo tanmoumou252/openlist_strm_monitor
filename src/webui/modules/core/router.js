@@ -21,6 +21,15 @@ export function buildNav(activeTab) {
   }).join('\n');
 }
 
+// L5: 畸形编码（如 %zz）会抛 URIError 使 router() 整体中止，回退为原始字符串
+const safeDecode = (s) => {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+};
+
 export function parseHash() {
   const hash = location.hash.slice(1) || 'dashboard';
   const [page, qstr] = hash.split('?');
@@ -28,8 +37,7 @@ export function parseHash() {
   if (qstr) {
     for (const kv of qstr.split('&')) {
       const [k, v] = kv.split('=');
-      params[decodeURIComponent(k)] = decodeURIComponent(
-        (v || '').replace(/\+/g, '%20'));
+      params[safeDecode(k)] = safeDecode((v || '').replace(/\+/g, '%20'));
     }
   }
   return { page, params };
@@ -67,7 +75,12 @@ export async function router() {
   // 渲染护栏（F-3）：每次导航递增代际，被 await 挂起的旧渲染在恢复时
   // 发现代际不匹配即中止，避免快速切换页面时旧页覆盖新页 + 定时器泄漏。
   const myGen = ++_renderGen;
-  _pageRenderGen = myGen;  // 同步当前渲染代际，使 isRenderStale() 正确工作
+  // M9: 原实现 `_pageRenderGen = myGen` 使 isRenderStale() 恒返回 false
+  // （_pageRenderGen === _renderGen），12 处页面渲染护栏全部失效。
+  // 改为 -1：router() 一开始即标记"已有更新导航"，任何 await 恢复的旧页
+  // （包括新页自身在首次 await 后）isRenderStale() 均返回 true 并退出；
+  // 自身代际判断由闭包 isStale() 承担。
+  _pageRenderGen = -1;
   const isStale = () => myGen !== _renderGen;
 
   // Auth guard：未初始化密码状态时，非登录页跳转至 login 等待初始化
@@ -96,6 +109,16 @@ export async function router() {
         if (isStale()) return;  // F-3：验证期间用户已导航到其它页
         if (!resp.ok) {
           localStorage.removeItem('session_token');
+          navigate('#login');
+          return;
+        }
+        // [已修复] F3: 同步前端 _hasPassword 与服务端 has_password 状态
+        // 管理员重置密码后，前端需要感知并强制重新登录
+        const data = await resp.json();
+        if (data && typeof data.has_password === 'boolean' && data.has_password !== _hasPassword) {
+          console.warn('[Auth] 服务端密码状态已变更，清除会话并重新登录');
+          localStorage.removeItem('session_token');
+          setHasPassword(data.has_password);
           navigate('#login');
           return;
         }

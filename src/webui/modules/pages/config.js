@@ -158,8 +158,8 @@ html += field('cfg-tmdb-token', 'Access Token', tokenValue, '输入 TMDB Access 
   html += field('cfg-tmdb-proxy', 'HTTP 代理', proxyValue, '例: http://127.0.0.1:7890', 'text', true);
   html += field('cfg-tmdb-fuzzy', '模糊匹配阈值', cfg.tmdb_fuzzy_threshold || '0.60', '0.0~1.0', 'text', false, false, '', '模糊匹配相似度阈值（0.0~1.0）。越高要求越严格，建议 0.60。');
     html += field('cfg-tmdb-ep-ratio', '番剧最少集数比例', cfg.tmdb_anime_min_ep_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少集数占总集数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。');
-    html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '1', '', 'text', false, false, '', '番剧最大允许季数差。超过此差值视为未收录，建议 1。');
-    html += field('cfg-tmdb-min-season-ratio', '番剧最少季数比例', cfg.tmdb_anime_min_season_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少季数占总季数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。');
+    html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '1', '', 'text', false, false, '', '番剧最大允许季数差。超过此差值视为未收录，建议 1。当前版本未接入匹配逻辑（保留待用）。');
+    html += field('cfg-tmdb-min-season-ratio', '番剧最少季数比例', cfg.tmdb_anime_min_season_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少季数占总季数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。当前版本未接入匹配逻辑（保留待用）。');
     html += field('cfg-tmdb-cache-ttl', '缓存 TTL（秒）', cfg.tmdb_cache_ttl || '604800', '', 'text', false, false, '', 'TMDB 缓存有效期（秒）。过期后重新从 TMDB 拉取数据，建议 604800（7 天）。');
     html += `</div>`;
   html += `<div class="config-form-actions"><button class="toolbar-btn primary" id="cfg-tmdb-save">${icon('save')} 保存 TMDB 配置</button><button class="toolbar-btn" id="cfg-tmdb-refresh"> 刷新待看列表</button><button class="toolbar-btn" id="cfg-tmdb-match-refresh" style="background:color-mix(in srgb,var(--primary) 15%,var(--bg-card));border-color:color-mix(in srgb,var(--primary) 30%,var(--border-color))"> 刷新收录状态</button><button class="toolbar-btn secondary" id="cfg-tmdb-restart" style="color:#e37400;border-color:#e37400">${icon('refresh')} 重启 WebUI</button></div>`;
@@ -378,9 +378,10 @@ const data = await api('/api/tmdb/configure', {
     btn.disabled = true;
     btn.innerHTML = '启动同步中...';
     try {
-const data = await api('/api/tmdb/watchlist/sync', { method: 'POST' });
-        if (data.success) showToast('待看列表同步已启动', 'success');
-        else showToast('同步失败: ' + (data.error || '未知错误'), 'error');
+      // [已修复] P18: 缩进对齐（原列 0，现缩进 6 空格）
+      const data = await api('/api/tmdb/watchlist/sync', { method: 'POST' });
+      if (data.success) showToast('待看列表同步已启动', 'success');
+      else showToast('同步失败: ' + (data.error || '未知错误'), 'error');
     } catch (e) {
       showToast('同步失败: ' + e.message, 'error');
     } finally {
@@ -411,7 +412,8 @@ try {
     btn.disabled = true;
     btn.innerHTML = '启动刷新中...';
     try {
-const data = await api('/api/tmdb/watchlist/match/refresh', { method: 'POST' });
+      // [已修复] P18: 缩进对齐（原列 0，现缩进 6 空格）
+      const data = await api('/api/tmdb/watchlist/match/refresh', { method: 'POST' });
       if (data.success) {
         showToast(data.message || '后台收录状态刷新已启动', 'info');
         btn.innerHTML = '刷新中...';

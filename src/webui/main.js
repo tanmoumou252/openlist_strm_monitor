@@ -10,6 +10,7 @@ setRouterFn(router);
 
 // Bind hashchange event (will be activated after auth init)
 let _hashchangeBound = false;
+let _visibilityGeneration = 0;
 function _bindHashchange() {
   if (!_hashchangeBound) {
     window.addEventListener('hashchange', router);
@@ -48,6 +49,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 页面可见性优化：隐藏时暂停定时器，恢复时重启
   document.addEventListener('visibilitychange', () => {
+    const generation = ++_visibilityGeneration;
     if (document.hidden) {
       if (_mainStatusTimer) {
         clearInterval(_mainStatusTimer);
@@ -58,6 +60,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // 仅在 dashboard 页面恢复定时器
       if (!_mainStatusTimer) {
         import('./modules/pages/dashboard.js').then(m => {
+          if (generation !== _visibilityGeneration || document.hidden || !document.getElementById('uptime-val')) return;
           setMainStatusTimer(setInterval(m.updateMainStatus, CONFIG.MAIN_STATUS_POLL_INTERVAL));
         });
       }

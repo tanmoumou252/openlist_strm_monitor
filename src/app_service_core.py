@@ -112,7 +112,10 @@ class StrmStorageManager:
             return ""
         try:
             addition_dict = json.loads(addition)
-            return addition_dict.get("SaveLocalMode", "")
+            # M6: 远端 API 可能返回 "SaveLocalMode": null，.get 默认值不生效，
+            # 需显式类型守卫，否则 is_sync_mode 调 .lower() 会抛 AttributeError
+            val = addition_dict.get("SaveLocalMode")
+            return val if isinstance(val, str) else ""
         except json.JSONDecodeError:
             return ""
 
@@ -559,7 +562,8 @@ class AppService:
             self.db.set_control("last_full_audit_at", str(audit_now))
             if hasattr(self.refresh_service, "_last_full_audit_at"):
                 self.refresh_service._last_full_audit_at = audit_now
-        except (AttributeError, OSError):
+        # L2: set_control 为 SQLite 写，Windows AV 锁/磁盘瞬时只读可抛 OperationalError
+        except (AttributeError, OSError, sqlite3.OperationalError):
             logging.warning("[启动] 保存全量审计时间失败")
         
         t_sub = time.time()
@@ -1550,8 +1554,13 @@ class AppService:
                 )
                 self.refresh_identity_current_b_path(fingerprint, mapping_id)
                 self._store_valid_lineage_snapshot(disk_path, fingerprint)
+                # [已修复] P2: 捕获 ensure_single_visible_instance 异常，防止磁盘满/杀毒锁
+                # 导致启动阶段整个应用崩溃（B3-B raise 路径）
                 if fingerprint:
-                    self.ensure_single_visible_instance(fingerprint, disk_path, mapping_id=self._mapping_id_for_b(disk_path))
+                    try:
+                        self.ensure_single_visible_instance(fingerprint, disk_path, mapping_id=self._mapping_id_for_b(disk_path))
+                    except Exception as e:
+                        logging.error("[初始化] 去重失败 %s: %s（继续处理后续记录）", disk_path, e, exc_info=True)
 
                 new_insert_count += 1
                 
@@ -2201,7 +2210,13 @@ class AppService:
                             logging.warning("[A区清理] 物理删除失败，跳过DB删除: %s", a_local_path)
                     return
             # H-1: 把 copy_a_record_to_b 移入 fp_lock 块内，避免 TOCTOU 竞争
-            self.copy_a_record_to_b(str(local), webdav_path, parent, mapping_id=mapping_id)
+            # [已修复] Z-7: 增加 try/except 记录 A 路径和 mapping 上下文
+            try:
+                self.copy_a_record_to_b(str(local), webdav_path, parent, mapping_id=mapping_id)
+            except Exception:
+                logging.exception(
+                    "[A->B复制失败] A路径=%s, WebDAV=%s, mapping=%s",
+                    local, webdav_path, mapping_id)
 
     def handle_a_deleted(self, local_path: str) -> None:
         if Path(local_path).exists():
@@ -3152,7 +3167,10 @@ class AppService:
         page = 1
         per_page = 100  # 对齐 docs maximum:100
 
-        while page <= 100:  # 安全阀
+        # [设计取舍] P4: B 区僵尸清理保留 100 页安全阀。超过 10000 条时
+        # 整个父目录 fail-closed 跳过，避免无界顺序请求及部分结果触发误删除。
+        # A 区并发收集器按 total 获取全部页，性能模型不同，二者不强行对齐。
+        while page <= 100:  # [设计取舍] P4: 100 页上限是有意的安全阀，勿与 A 区并发版对齐
             res = self.admin_api.list_directory(
                 directory_path, page=page, per_page=per_page)
             parsed = self._parse_fs_list_content(res)
@@ -3167,7 +3185,7 @@ class AppService:
                         full_path = posixpath.join(directory_path, file_name)
                         result.add(full_path)
 
-            if page * per_page >= total:
+            if len(content) < per_page:
                 break
             page += 1
 

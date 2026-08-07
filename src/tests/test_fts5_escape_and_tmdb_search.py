@@ -63,9 +63,10 @@ class TestEscapeFts5Query:
         assert "name" in result
 
     def test_escape_double_quote(self):
-        """双引号应被移除"""
+        """双引号应被移除，结果用引号包裹（FTS5 短语精确匹配，提交 1ab6826）"""
         result = _escape_fts5_query('test"name')
-        assert '"' not in result
+        # 内部引号被移除，外部包裹引号
+        assert result == '"testname"'
         assert "test" in result
         assert "name" in result
 
@@ -122,21 +123,25 @@ class TestEscapeFts5Query:
         assert "name" in result
 
     def test_escape_all_special_chars(self):
-        """所有特殊字符同时出现应全部被处理"""
+        """所有特殊字符同时出现应全部被处理，结果用引号包裹"""
         query = '*-+"(){}[]^~:\\'
         escaped = _escape_fts5_query(query)
+        # 剥离外层包裹引号后验证内部无运算符字符
+        inner = escaped[1:-1] if escaped.startswith('"') and escaped.endswith('"') else escaped
         # 验证所有运算符字符都被移除或替换
         for char in ['*', '+', '"', '(', ')', '{', '}', '[', ']', '^', '~', ':', '\\']:
-            assert char not in escaped, f"字符 {char} 不应在清理结果中"
+            assert char not in inner, f"字符 {char} 不应在清理结果中"
+        # 结果应以引号包裹
+        assert escaped.startswith('"') and escaped.endswith('"')
 
     def test_plain_text_unchanged(self):
-        """普通文本（无特殊字符）应保持不变"""
-        assert _escape_fts5_query("普通电影名") == "普通电影名"
-        assert _escape_fts5_query("Movie Title 2024") == "Movie Title 2024"
+        """普通文本（无特殊字符）应保持不变，但被引号包裹（FTS5 短语精确匹配）"""
+        assert _escape_fts5_query("普通电影名") == '"普通电影名"'
+        assert _escape_fts5_query("Movie Title 2024") == '"Movie Title 2024"'
 
     def test_empty_string(self):
-        """空字符串应返回空"""
-        assert _escape_fts5_query("") == ""
+        """空字符串应返回空引号对"""
+        assert _escape_fts5_query("") == '""'
 
     def test_chinese_with_special(self):
         """中文混合特殊字符应正确清理"""
@@ -152,10 +157,10 @@ class TestEscapeFts5Query:
         result = _escape_fts5_query("进击的巨人[限制级]")
         # 方括号被替换为空格
         assert "[" not in result and "]" not in result
-        # 主名保留，且方括号处变为空格分隔
-        assert "进击的巨人 限制级" == result, f"期望 '进击的巨人 限制级'，实际 {result!r}"
+        # 主名保留，且方括号处变为空格分隔（结果被引号包裹）
+        assert result == '"进击的巨人 限制级"', f"期望 '\"进击的巨人 限制级\"'，实际 {result!r}"
         # 主名可独立作为搜索词命中（列表搜索场景下转义后能搜到主名）
-        assert _escape_fts5_query("进击的巨人") == "进击的巨人"
+        assert _escape_fts5_query("进击的巨人") == '"进击的巨人"'
 
     def test_escape_colon_star(self):
         """'电影：测试*'：全角冒号不在移除集内（保留），星号移除。
@@ -171,15 +176,15 @@ class TestEscapeFts5Query:
     def test_escape_fullwidth(self):
         """'Spy×Family'：连字符/乘号处理——× 非 FTS5 运算符应保留为词内字符。"""
         result = _escape_fts5_query("Spy×Family")
-        # ×（U+00D7 乘号）不在移除/空格化集合内，应原样保留
-        assert "Spy×Family" == result, f"期望 'Spy×Family' 原样保留，实际 {result!r}"
+        # ×（U+00D7 乘号）不在移除/空格化集合内，应原样保留（结果被引号包裹）
+        assert result == '"Spy×Family"', f"期望 '\"Spy×Family\"'，实际 {result!r}"
         # 对照：普通半角连字符在词内保留（已有 test_hyphen_in_middle_preserved 覆盖）
         assert "Family" in result
 
     def test_no_special_chars_returns_same(self):
-        """不含特殊字符的输入应原样返回"""
-        assert _escape_fts5_query("hello world") == "hello world"
-        assert _escape_fts5_query("12345") == "12345"
+        """不含特殊字符的输入应原样返回（但被引号包裹）"""
+        assert _escape_fts5_query("hello world") == '"hello world"'
+        assert _escape_fts5_query("12345") == '"12345"'
 
     def test_hyphen_in_middle_preserved(self):
         """词中间的连字符应保留（如 test-123）"""
@@ -187,9 +192,9 @@ class TestEscapeFts5Query:
         assert "test-123" in result
 
     def test_multiple_spaces_collapsed(self):
-        """多个连续空白应被合并为单个空格"""
+        """多个连续空白应被合并为单个空格（结果被引号包裹）"""
         result = _escape_fts5_query("test   name")
-        assert result == "test name"
+        assert result == '"test name"'
 
 
 # ============================================================

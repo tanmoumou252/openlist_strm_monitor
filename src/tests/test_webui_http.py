@@ -69,7 +69,7 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     proxy.http = ""
     cfg.tmdb.proxy = proxy
     # webdav
-    cfg.webdav.host = ""
+    cfg.webdav.host = "http://openlist:5244"
     cfg.webdav.user = ""
     cfg.webdav.password = ""
     cfg.webdav.totp_secret = ""
@@ -90,7 +90,7 @@ def _make_mock_db(tmp_path: Path) -> MagicMock:
     """构造最小化 Database mock。"""
     db = MagicMock(spec=["db_path", "get_table_counts", "get_b_status_counts",
                          "get_db_file_size", "get_subtitle_by_local",
-                         "read_connection", "get_index_metadata"])
+                         "read_connection", "get_index_metadata", "get_all_config"])
     db.db_path = str(tmp_path / "bridge.db")
     db.get_table_counts.return_value = {
         "a_strm_files": 0, "b_strm_files": 0, "c_ghost_files": 0,
@@ -101,7 +101,7 @@ def _make_mock_db(tmp_path: Path) -> MagicMock:
     db.get_db_file_size.return_value = 0
     db.get_subtitle_by_local.return_value = None
     db.get_index_metadata.return_value = {"mapping_index_generation": 1, "mapping_index_generation_at": 1000.0}
-
+    db.get_all_config.return_value = {}
     # read_connection 需要返回一个上下文管理器
     mock_conn = MagicMock()
     mock_conn.execute.return_value.fetchone.return_value = (0,)
@@ -500,6 +500,8 @@ class TestOpenListRoutes:
 
     def test_openlist_status_unconfigured(self, webui_server):
         server, base, session_token = webui_server
+        # 显式设为未配置（_make_mock_config 默认有 host，此处覆盖）
+        server._config.webdav.host = ""
         status, _, body = _http_get(base, "/api/openlist/status", session_token)
         assert status == 200
         assert isinstance(body, dict)
@@ -762,6 +764,8 @@ class TestPostRoutes:
 
     def test_openlist_test_connection_empty_host(self, webui_server):
         server, base, session_token = webui_server
+        # 显式设为空以测试"未配置"路径（_make_mock_config 默认有 host）
+        server._config.webdav.host = ""
         status, _, body = _http_post(
             base, "/api/openlist/test-connection",
             {"host": "", "user": "", "password": ""}, session_token)
@@ -1100,6 +1104,30 @@ class TestSecurity:
         assert _is_lan_ip("203.0.113.1") is False
         assert _is_lan_ip("8.8.8.8") is False
         assert _is_lan_ip("1.2.3.4") is False
+
+    def test_rate_limit_returns_429_after_five_failures(self, webui_server):
+        """连续 5 次错误密码后第 6 次返回 429（登录限流端到端验证）。"""
+        from webui.routes import _login_attempts
+
+        server, base_url, session_token = webui_server
+        # fixture 已成功登录一次，_login_attempts 已清空；重新确认
+        _login_attempts.clear()
+
+        # 连续发送 6 次错误密码
+        for i in range(6):
+            status, _, resp = _http_post(base_url, "/api/login", {"password": "wrong_password"})
+            if i < 5:
+                assert status == 401, f"第 {i + 1} 次错误密码应返回 401，实际: {status}"
+            else:
+                assert status == 429, f"第 6 次错误密码应返回 429，实际: {status}"
+                assert "登录尝试过于频繁" in resp.get("error", ""), \
+                    f"429 响应应包含限流提示，实际: {resp}"
+
+        # 断言对应 IP 有 5 条失败时间戳（第 6 次被 429 拒绝，不追加）
+        ip = "127.0.0.1"
+        assert ip in _login_attempts
+        assert len(_login_attempts[ip]) == 5, \
+            f"期望 5 条失败记录（第 6 次被 429 拒绝不追加），实际: {len(_login_attempts[ip])}"
 
 
 # ============================================================
@@ -1451,6 +1479,8 @@ class TestOnboardingAPI:
     def test_config_status_unconfigured(self, webui_server):
         """未配置时返回基础状态"""
         server, base, session_token = webui_server
+        # 显式设为未配置（_make_mock_config 默认有 host，此处覆盖）
+        server._config.webdav.host = ""
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert status == 200
         assert resp["password_set"] is True  # 测试模式自动生成密码
@@ -1486,6 +1516,8 @@ class TestOnboardingAPI:
     def test_config_validate_openlist_unconfigured(self, webui_server):
         """OpenList 未配置时返回 error"""
         server, base, session_token = webui_server
+        # 显式设为未配置（_make_mock_config 默认有 host，此处覆盖）
+        server._config.webdav.host = ""
         status, _, resp = _http_post(base, "/api/config/validate", {}, session_token)
         assert status == 200
         assert resp["ok"] is False
@@ -2112,6 +2144,77 @@ class TestSessionIPBinding:
         # 用原 token 从 127.0.0.1 请求 → 应成功
         status, _, resp = _http_get(base, "/api/area/a", session_token)
         assert status == 200
+
+
+class TestRound13Regressions:
+    """第 23 轮 superpower 审计回归（M3 / M4 / M5）。"""
+
+    def test_media_name_sql_matches_all_alias_dirs(self):
+        """M3: _MEDIA_NAME_SQL 应对 /movies/ /movie/ /anime/ /动漫/ /动画/ 别名目录提取正确媒体名。
+
+        旧实现只匹配 /番剧/ 与 /电影/，别名目录全部坍缩进 '未分类'。
+        """
+        import sqlite3
+        from webui.routes import _MEDIA_NAME_SQL
+
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        cases = {
+            "/movies/Inception/Inception.strm": ("Inception", "电影"),
+            "/movie/Dunkirk/Dunkirk.strm": ("Dunkirk", "电影"),
+            "/anime/Attack/Attack.strm": ("Attack", "番剧"),
+            "/动漫/鬼灭之刃/鬼灭之刃.strm": ("鬼灭之刃", "番剧"),
+            "/动画/咒术回战/咒术回战.strm": ("咒术回战", "番剧"),
+            "/番剧/进击的巨人/进击的巨人.strm": ("进击的巨人", "番剧"),
+            "/电影/流浪地球/流浪地球.strm": ("流浪地球", "电影"),
+        }
+        for path, (exp_name, _exp_kind) in cases.items():
+            sql = f"SELECT {_MEDIA_NAME_SQL} FROM (SELECT ? AS webdav_path, ? AS local_path)"
+            got = cur.execute(sql, (path, path)).fetchone()[0]
+            assert got == exp_name, (
+                f"别名目录 {path} 应提取 '{exp_name}'，实际 '{got}'（未分类坍缩）"
+            )
+
+    def test_password_change_invalidates_old_session(self, webui_server):
+        """M4: 改密后旧 token 应立即失效（401），不能继续冒用。"""
+        server, base, session_token = webui_server
+
+        # 改密前旧 token 有效
+        status, _, _ = _http_get(base, "/api/area/a", session_token)
+        assert status == 200
+
+        # 修改管理员密码 → 应清空全部会话
+        status, _, body = _http_post(
+            base, "/api/webui/config/ui",
+            {"admin_password": "new_password_456"}, session_token)
+        assert status == 200, f"改密应成功，实际 {status}: {body}"
+
+        # 旧 token 现在应失效
+        status, _, resp = _http_get(base, "/api/area/a", session_token)
+        assert status == 401, f"改密后旧 token 应返回 401，实际 {status}"
+        assert resp.get("error") == "unauthorized"
+
+        # 会话表应已清空
+        with server._sessions_lock:
+            assert len(server._sessions) == 0
+
+    def test_admin_status_invalid_token_returns_401(self, webui_server):
+        """M5: /api/admin/status 带无效 token 应返回 401（不再无条件 200）。"""
+        server, base, _session_token = webui_server
+        status, _, resp = _http_get(
+            base, "/api/admin/status", "fake-or-expired-token")
+        assert status == 401, f"带无效 token 的 admin/status 应返回 401，实际 {status}"
+        assert resp.get("error") == "unauthorized"
+
+    def test_admin_status_no_token_returns_200(self, webui_server):
+        """M5: /api/admin/status 无 token 应保持白名单直通（200 + has_password）。
+
+        router.js:105 的 has_password 变更检测依赖该 200 响应。
+        """
+        server, base, _session_token = webui_server
+        status, _, body = _http_get(base, "/api/admin/status")
+        assert status == 200, f"无 token 的 admin/status 应返回 200，实际 {status}"
+        assert isinstance(body, dict) and "has_password" in body
 
 
 class TestDBInitFailure:
