@@ -4,7 +4,7 @@ import { esc, createField } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
 import { showConfirmDialog } from '../components/dialog.js';
 import { OpenListState } from '../core/state.js';
-import { isRenderStale } from '../core/router.js';
+import { captureRenderGuard } from '../core/router.js';
 
 const _openlistHelpTexts = {
   webdav_host: 'OpenList 的 WebDAV 服务地址。\n格式：http://IP:端口/dav\n例如：http://127.0.0.1:5244/dav',
@@ -43,6 +43,8 @@ function _olHelpIcon(key, tooltipBelow = false) {
 }
 
 export async function _renderOpenListConfig(cfg) {
+  // N0: 代际快照工厂——在首次 await 前捕获
+  const isStale = captureRenderGuard();
   // [已修复] N-P1-7: 在 await 前捕获容器引用，避免异步竞态将旧 HTML 插入当前子页
   const subpage = document.getElementById('config-subpage');
   if (!subpage || !subpage.isConnected) return;
@@ -306,7 +308,7 @@ export async function _renderOpenListConfig(cfg) {
   html += `</div>`;
 
   // [已修复] N-P1-7: openlist.js 异步竞态，await 后检查容器连接状态和渲染代际
-  if (subpage && subpage.isConnected && !isRenderStale()) {
+  if (subpage && subpage.isConnected && !isStale()) {
     const backBtn = subpage.querySelector('.config-back-btn');
     if (backBtn) {
       backBtn.insertAdjacentHTML('afterend', html);

@@ -1,5 +1,5 @@
 import { api } from '../core/api.js';
-import { isRenderStale } from '../core/router.js';
+import { captureRenderGuard } from '../core/router.js';
 import { icon } from '../core/icons.js';
 import { esc, formatTimestamp } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
@@ -407,9 +407,11 @@ export async function stopMainProgram() {
 }
 
 export async function renderDashboard(el) {
+  // N0: 代际快照工厂——在首次 await 前捕获，供其后所有 isStale() 判定
+  const isStale = captureRenderGuard();
   const d = await api('/api/dashboard');
   // F-3: await 期间若发生新导航，放弃渲染，避免旧页覆盖 + setInterval 泄漏
-  if (isRenderStale()) return;
+  if (isStale()) return;
   if (d.uptime != null) {
     setServerStartTime(Date.now() - d.uptime * 1000);
   }
@@ -540,6 +542,8 @@ function _shortenPath(path) {
   const auditStatusText = document.getElementById('audit-status-text');
   if (auditBtn) {
     auditBtn.addEventListener('click', async () => {
+      // N0: 审计轮询独立捕获代际，仅对该 handler 生效
+      const isStale = captureRenderGuard();
       if (!confirm('确定要执行全量审计吗？\n\n这是一个重操作，耗时取决于 A 区库大小，会扫描全部 A 区根目录（含机械硬盘）。不会删除任何文件。')) return;
       auditBtn.disabled = true;
       auditBtn.innerHTML = '审计中...';
@@ -556,8 +560,8 @@ function _shortenPath(path) {
         const maxPolls = 300;
         for (let i = 0; i < maxPolls; i++) {
           await new Promise(r => setTimeout(r, 2000));
-          // [已修复] L6: 轮询循环含 isRenderStale 检查
-          if (isRenderStale()) return;
+          // [已修复] L6: 轮询循环含 isStale 检查
+          if (isStale()) return;
           try {
             const st = await api('/api/index/audit/status');
             // T11c: already_running 是"被其他任务占用"，不是完成的假成功

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import atexit
+import http.client
 import json
 import logging
 import socket
@@ -511,6 +512,28 @@ class TestSensitiveDataLeak:
 
 class TestRequestLimits:
     """请求限制测试。"""
+
+    def test_negative_content_length_rejected(self, tmp_path):
+        """T4: 负 Content-Length 应返回 400，而非挂起线程。
+
+        旧实现只做上界校验：int("-1") 正常返回 → 绕过 413 → rfile.read(-1)
+        读到 EOF 挂起线程；ThreadingHTTPServer 无 socket 超时，/api/login 又在
+        白名单内，未鉴权即可挂线程。
+        """
+        with _TestServerHelper(tmp_path) as ts:
+            conn = http.client.HTTPConnection("127.0.0.1", ts.port, timeout=5.0)
+            conn.putrequest("POST", "/api/login")
+            conn.putheader("Content-Length", "-1")
+            conn.putheader("Content-Type", "application/json")
+            conn.endheaders()
+            resp = conn.getresponse()
+            status = resp.status
+            try:
+                resp.read()
+            except Exception:
+                pass
+            conn.close()
+            assert status == 400, f"负 Content-Length 应返回 400，实际 {status}"
 
     def test_max_content_length(self, tmp_path):
         """测试请求体大小限制。"""

@@ -592,13 +592,16 @@ class SyncService:
         if b_local.exists():
             existing_webdav = read_strm_webdav_path(b_local)
             if existing_webdav == webdav_path:
-                # M-7: 捕获异常并返回 "fail"，与其他分支对齐
                 try:
+                    # T2: 本条记录写入前建 SAVEPOINT，失败只回滚本记录，
+                    # 不再回滚整批（旧实现 conn.rollback() 会抹掉同批已落盘 B 区的成功行）
+                    conn.execute("SAVEPOINT sp_rec")
                     # 使用 bulk_connection 写入数据库
                     self._bulk_upsert_b(conn, str(b_local), webdav_path,
                                         parent, local_path, fingerprint, mapping_id)
                     self._bulk_upsert_identity(conn, fingerprint, webdav_path,
                                                local_path, str(b_local))
+                    conn.execute("RELEASE sp_rec")
                     self._cache_b_fp.add((mapping_id, fingerprint))
                     # 去重延迟到事务提交后执行
                     if dedup_queue is not None:
@@ -611,11 +614,12 @@ class SyncService:
                     return "success"
                 except Exception as e:
                     logging.warning("[A->B] B已存在但数据库写入失败 %s: %s", b_local, e)
-                    # M2: 与拷贝分支对齐，显式回滚共享连接，防止半提交污染后续 commit
+                    # T2: 只回滚到本记录 SAVEPOINT，保留同批其他成功行
                     try:
-                        conn.rollback()
+                        conn.execute("ROLLBACK TO sp_rec")
+                        conn.execute("RELEASE sp_rec")
                     except Exception as rb_err:
-                        logging.warning("[A→B] 回滚连接失败: %s", rb_err)
+                        logging.warning("[A→B] 回滚 SAVEPOINT 失败: %s", rb_err)
                     return "fail"
             else:
                 # B 区文件已存在但 WebDAV 路径不同 — 不覆盖，保护用户操作
@@ -635,10 +639,12 @@ class SyncService:
 
         # 8. 写入数据库（使用 bulk_connection）
         try:
+            conn.execute("SAVEPOINT sp_rec")
             self._bulk_upsert_b(conn, str(b_local), webdav_path,
                                 parent, local_path, fingerprint, mapping_id)
             self._bulk_upsert_identity(conn, fingerprint, webdav_path,
                                        local_path, str(b_local))
+            conn.execute("RELEASE sp_rec")
             self._cache_b_fp.add((mapping_id, fingerprint))
             # 去重延迟到事务提交后执行
             if dedup_queue is not None:
@@ -651,11 +657,12 @@ class SyncService:
             return "success"
         except Exception as e:
             logging.error("[A->B] 数据库写入失败 %s: %s", b_local, e)
-            # [已修复] P3: 显式回滚连接，防止事务提交不完整的记录
+            # T2: 只回滚到本记录 SAVEPOINT，保留同批其他成功行
             try:
-                conn.rollback()
+                conn.execute("ROLLBACK TO sp_rec")
+                conn.execute("RELEASE sp_rec")
             except Exception as rb_err:
-                logging.warning("[A→B] 回滚连接失败: %s", rb_err)
+                logging.warning("[A→B] 回滚 SAVEPOINT 失败: %s", rb_err)
             # 回滚：删除已拷贝的文件
             try:
                 if b_local.exists():

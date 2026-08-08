@@ -26,6 +26,10 @@ try:
 except ImportError:
     import tomli as tomllib  # type: ignore[no-redef]
 
+# T3: 规范化 A 根路径（a_strm_files.local_path 一律经 resolve() 写入，
+# 传原始配置串会导致 touch_verified_by_mapping 匹配 0 行、last_verified_at 永不推进）
+from config import normalize_local_root
+
 
 # ==================== PathAnalysis 定义 ====================
 
@@ -104,7 +108,13 @@ class RefreshService:
                         mid = str(getattr(m, 'mapping_id', '')).strip()
                         a_root = getattr(m, 'a_root', '')
                         if mid and a_root:
-                            self.app.db.touch_verified_by_mapping(mid, a_root, now)
+                            # T3: 传规范化后的 A 根（与 a_strm_files.local_path 写入口径一致）
+                            try:
+                                norm_a_root = str(normalize_local_root(a_root))
+                            except Exception:
+                                logging.warning("[主动刷新] 规范化 A 根失败，跳过该 mapping: %s", a_root)
+                                continue
+                            self.app.db.touch_verified_by_mapping(mid, norm_a_root, now)
                 except Exception:
                     logging.warning("[主动刷新] 更新 last_verified_at 失败", exc_info=True)
                     db_write_ok = False
@@ -156,7 +166,13 @@ class RefreshService:
                         mid = str(getattr(m, 'mapping_id', '')).strip()
                         a_root = getattr(m, 'a_root', '')
                         if mid and a_root:
-                            self.app.db.touch_verified_by_mapping(mid, a_root, now)
+                            # T3: 传规范化后的 A 根（与 a_strm_files.local_path 写入口径一致）
+                            try:
+                                norm_a_root = str(normalize_local_root(a_root))
+                            except Exception:
+                                logging.warning("[手动审计] 规范化 A 根失败，跳过该 mapping: %s", a_root)
+                                continue
+                            self.app.db.touch_verified_by_mapping(mid, norm_a_root, now)
                 except Exception:
                     logging.warning("[手动审计] 更新 last_verified_at 失败", exc_info=True)
                     db_write_ok = False

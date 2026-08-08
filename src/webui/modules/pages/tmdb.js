@@ -3,7 +3,7 @@ import { icon } from '../core/icons.js';
 import { esc, renderTmdbResults } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
 import { showCacheStaleModal } from '../components/dialog.js';
-import { navigate, isRenderStale } from '../core/router.js';
+import { navigate, captureRenderGuard } from '../core/router.js';
 import {
   CONFIG, _getCachedWatchlist, _setCachedWatchlist, _fetchPromises,
   _tmdbWebBase, _getUiConfig, _flippedCard, setFlippedCard,
@@ -127,11 +127,13 @@ function _initFlipCards() {
 }
 
 export async function renderTmdb(el, params) {
+  // N0: 代际快照工厂——在首次 await 前捕获
+  const isStale = captureRenderGuard();
   const [status, config] = await Promise.all([
     api('/api/tmdb/status'),
     api('/api/config')
   ]);
-  if (isRenderStale()) return;
+  if (isStale()) return;
 
   const watchlistEnabledRaw = config.tmdb_watchlist_enabled;
   const watchlistDisabled = watchlistEnabledRaw === false || watchlistEnabledRaw === 'false';
@@ -377,11 +379,11 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
     const searchContainer = document.getElementById('tmdb-search-results');
     api(`/api/tmdb/search?query=${encodeURIComponent(q)}`)
       .then(results => {
-        if (isRenderStale()) return;  // 双保险 1：页面代际校验
+        if (isStale()) return;  // 双保险 1：页面代际校验
         renderTmdbResults(results, "你可能还在找", q, searchContainer);  // 双保险 2：container.isConnected 在函数内校验
       })
       .catch(() => {
-        if (isRenderStale()) return;
+        if (isStale()) return;
         showToast('TMDB 在线搜索失败，请稍后重试', 'error');
       });
   }

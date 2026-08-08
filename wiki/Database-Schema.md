@@ -200,7 +200,7 @@ bridge.db 中包含三张 FTS5 虚拟表，使用 `simple` 或 `unicode61` 分�
 
 ## tmdb_watchlist.db — TMDB 缓存 + WebUI 配置
 
-由 `TmdbWatchlistDb` 类管理（`src/tmdb_watchlist_db.py`）。tmdb_watchlist.db 共 **6 张表**：5 张常规表（`movies`、`tv`、`meta`、`webui_config`、`tmdb_operation_log`）以及 1 张 FTS5 虚拟表 `tmdb_watchlist_fts`。
+由 `TmdbWatchlistDb` 类管理（`src/tmdb_watchlist_db.py`）。tmdb_watchlist.db 共 **7 张表**：5 张常规表（`movies`、`tv`、`meta`、`webui_config`、`tmdb_operation_log`）以及 2 张 FTS5 虚拟表 `movies_fts` 与 `tv_fts`。
 
 ### 全文搜索与中文分词（FTS5 / simple / unicode61 降级）
 
@@ -208,7 +208,7 @@ bridge.db 中包含三张 FTS5 虚拟表，使用 `simple` 或 `unicode61` 分�
 
 - **分词器加载**：`database.py` 的 `_load_simple_tokenizer`（在每次建立连接时通过 `conn.load_extension` 加载 `src/tokenizers/simple/simple.dll`）与 `tmdb_watchlist_db.py` 的 `_load_simple_into` 采用相同逻辑。加载成功后记录实际分词器名（`_fts_tokenizer = 'simple'`）并读取 `VERSION` 文件缓存版本到 `_simple_version`；失败（dll 缺失或加载异常）时仅记录 `logging.warning` **软降级**到 SQLite 内建的 `unicode61`，不阻断启动。
 - **降级风险**：`unicode61` 对中文不产生有效的 token，因此当 `simple.dll` 缺失而降级时，**中文搜索实际上会完全失效**。即便存在前缀查询（如 `黑*`），本项目的 FTS 查询转义逻辑（`_escape_fts5_query`）会移除 `*` 等通配符，所以前缀侥幸命中也不成立。换言之，**`simple` 分词器是中文搜索的硬依赖**，部署时必须保证 `src/tokenizers/simple/simple.dll` 存在且可被 `load_extension` 加载。
-- **FTS 虚拟表**：bridge.db 中包含 `a_strm_files_fts` / `b_strm_files_fts` / `c_ghost_files_fts`，tmdb_watchlist.db 中包含 `tmdb_watchlist_fts`。这些虚拟表使用上述选中的分词器（simple 优先，否则 unicode61），索引对应基表的 `local_path`/`webdav_path`（或 tmdb 的 `title`/`original_title`/`overview`）。
+- **FTS 虚拟表**：bridge.db 中包含 `a_strm_files_fts` / `b_strm_files_fts` / `c_ghost_files_fts`，tmdb_watchlist.db 中包含 `movies_fts` 与 `tv_fts`。这些虚拟表使用上述选中的分词器（simple 优先，否则 unicode61），索引对应基表的 `local_path`/`webdav_path`（或 tmdb 的 `title`/`original_title`/`overview`）。
 - **孤儿行清理**：当基表发生增删改时，通过 `_rebuild_fts_if_stale`（及 `_backfill_fts_if_empty`）比对 rowid 集合，删除 FTS 中已无对应基表行的孤儿记录，保证索引与数据一致。
 
 ### 表结构
@@ -301,9 +301,16 @@ bridge.db 中包含三张 FTS5 虚拟表，使用 `simple` 或 `unicode61` 分�
 
 **索引**：`idx_tmdb_log_ts`（ts DESC）
 
-#### `tmdb_watchlist_fts` — FTS5 全文搜索虚拟表
+#### `movies_fts` — FTS5 全文搜索虚拟表（电影）
 
-为 TMDB 待看列表（电影 `movies` / 电视剧 `tv`）提供全文搜索能力，建表语句见 `tmdb_watchlist_db.py` 的 `_init_schema` 方法（注意：`database.py` 中对应的建表方法名为 `_create_schema`，两者不同）。该虚拟表使用与 bridge.db 相同的分词器选择逻辑（`simple` 优先，失败降级 `unicode61`，见上文「全文搜索与中文分词」）。
+为 `movies` 表提供全文搜索能力，建表语句见 `tmdb_watchlist_db.py` 的 `_init_schema` 方法。使用与 bridge.db 相同的分词器选择逻辑（`simple` 优先，失败降级 `unicode61`，见上文「全文搜索与中文分词」）。
 
-- **索引字段**：`rowid`（关联基表主键 `id`）、`title`、`original_title`、`overview`，覆盖标题与简介的中英文检索。
-- **维护**：在电影/剧集写入、更新、删除时同步增删 FTS 行；通过 `DELETE ... WHERE rowid NOT IN (SELECT rowid FROM movies/tv)` 清除孤儿行，保证待看列表检索结果与真实数据一致。
+- **索引字段**：`title`（对应 `movies.title`）、`original_title`、`overview`，覆盖标题与简介的中英文检索。
+- **维护**：在电影写入、更新、删除时通过 `_upsert_movie` 同步增删 FTS 行；通过 `DELETE ... WHERE rowid NOT IN (SELECT id FROM movies)` 清除孤儿行。
+
+#### `tv_fts` — FTS5 全文搜索虚拟表（电视剧）
+
+为 `tv` 表提供全文搜索能力，建表与分词器逻辑同 `movies_fts`。
+
+- **索引字段**：`title`（对应 `tv.name`）、`original_title`（对应 `tv.original_name`）、`overview`。
+- **维护**：在电视剧写入、更新、删除时通过 `_upsert_tv` 同步增删 FTS 行；通过 `DELETE ... WHERE rowid NOT IN (SELECT id FROM tv)` 清除孤儿行。

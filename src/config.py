@@ -371,6 +371,12 @@ class AppConfig:
                     mappings_data = json.loads(db_cfg["a_b_mappings"])
                     parsed: list[ABMapping] = []
                     for m in mappings_data:
+                        # T17: 纵深防御——写入侧 _validate_a_b_mappings 已挡非 dict，
+                        # 此处仍跳过并记 warning，避免 AttributeError 中止全部 DB 覆盖
+                        if not isinstance(m, dict):
+                            logging.warning(
+                                "[Config] a_b_mappings 含非 dict 元素，跳过: %r", m)
+                            continue
                         a_root = m.get("a_root")
                         b_root = m.get("b_root")
                         if not a_root or not b_root:
@@ -607,10 +613,12 @@ class AppConfig:
                             paths=group_paths,
                             local_path=local_path,
                         )
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, TypeError):
+                    # T12: addition 为 None/dict 等非字符串时 json.loads 抛 TypeError，
+                    # 一并捕获并 str() 化日志入参，单条失败只跳过该条目，不中断整个加载
                     logging.warning(
                         "[STRM存储解析] 解析 addition 失败：%s",
-                        addition_str[:200],
+                        str(addition_str)[:200],
                     )
 
             # a_folders / 扫描范围严格只从用户配置的引擎派生；

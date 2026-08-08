@@ -31,44 +31,44 @@ A 区字幕文件由 `AAreaEventHandler` 监控，在 `handle_a_created_or_modif
 
 ## 语言检测
 
-### 完整语言检测表
+### 语言检测表
 
-> 以下为常用模式摘录，完整正则列表见 `media_renamer.py` 的 `LANGUAGE_PATTERNS` 和 `LANGUAGE_CONTENT_PATTERNS`。
+> 实现**仅覆盖中文相关**模式（`media_renamer.py` 的 `LANGUAGE_PATTERNS` 与 `LANGUAGE_CONTENT_PATTERNS`）。
+> 日文、韩文、英文、法文、德文、西文、意文、葡文、俄文、阿文、泰文、越文等语言后缀**未实现**，
+> 此类字幕按"未识别语言"处理（命名时语言代码回退为 `und`）。
+
+#### 后缀标识（`LANGUAGE_PATTERNS`）
 
 | 文件名模式 | 检测语言 | 代码 | 优先级 |
 |-----------|----------|------|--------|
-| `.sc` / `.chs` / `.scjp` | 简体中文 | `zho` | 高 |
-| `.tc` / `.cht` / `big-5` | 繁体中文 | `zho` | 中 |
-| `.jp` / `.ja` | 日语 | `jpn` | — |
-| `.en` / `.eng` | 英语 | `eng` | — |
-| `.ko` / `.kor` | 韩语 | `kor` | — |
-| `.fr` / `.fre` | 法语 | `fra` | — |
-| `.de` / `.ger` | 德语 | `deu` | — |
-| `.es` / `.spa` | 西班牙语 | `spa` | — |
-| `.it` / `.ita` | 意大利语 | `ita` | — |
-| `.pt` / `.por` | 葡萄牙语 | `por` | — |
-| `.ru` / `.rus` | 俄语 | `rus` | — |
-| `.ar` / `.ara` | 阿拉伯语 | `ara` | — |
-| `.th` / `.tha` | 泰语 | `tha` | — |
-| `.vi` / `.vie` | 越南语 | `vie` | — |
-| `简中` / `简体` / `中文` / `双语` / `中英` | 简体中文 | `zho` | 高 |
-| `繁体` / `繁中` / `正體` | 繁体中文 | `zho` | 中 |
-| 完整规则 | `LANGUAGE_PATTERNS` + `LANGUAGE_CONTENT_PATTERNS`（`media_renamer.py`） | — | — |
+| `.sc` / `.chs` / `.scjp` / `.sccht` | 简体中文 | `zho` | 1（最高） |
+| `.tc` / `.cht` / `.big5` | 繁体中文 | `zho` | 2 |
+| `.cn` / `.zh` | 中文 | `zho` | 3 |
+
+#### 内容关键词（`LANGUAGE_CONTENT_PATTERNS`）
+
+| 文件名模式 | 检测语言 | 代码 | 优先级 |
+|-----------|----------|------|--------|
+| `简中` / `简体` / `简体中文` / `简繁` / `简日` | 简体中文 | `zho` | 1 |
+| `繁中` / `繁体` / `繁体中文` / `繁體` / `cht` / `big-5` | 繁体中文 | `zho` | 2 |
+| `中日` / `日中` / `简日` / `日简` / `中日双语` / `日语双字` | 简体中文 | `zho` | 1 |
+| `中英` / `英中` / `中英双语` / `中英字幕` / `中英特效` / `上中下英` | 中文 | `zho` | 3 |
 
 ### 语言优先级
 
-同一视频存在多个字幕文件时：简体中文获得 `forced` 优先标记，繁体中文次级，其他语言按字母顺序。
+同一视频存在多个字幕文件时，按优先级数字（越小越优先）排序：简体中文（1）> 繁体中文（2）> 中文（3）。
+命名时**所有字幕统一加 `.forced.` 前缀**（与语言无关）；识别到语言时追加 `.代码.中文标签`，未识别时回退为 `.und`。
 
 ## 媒体类型检测
 
 `detect_media_type_from_path()`（`media_renamer.py`）基于路径关键词进行严格优先级判断。检查**文件名**和所有父目录名，先匹配 movie 模式再匹配 anime 模式：
 
 ### 电影检测（第一优先级）
-- 路径含关键词：`电影`、`movie`、`movies`、`film`、`films`、`cinema`、`片`、`国语`、`粤语`、`港片`、`外语片`、`好莱坞`
+- 路径含关键词：`电影`、`movie`、`film`、`cinema`、`片`、`国语`、`粤语`、`港片`、`外语片`、`好莱坞`
 - 匹配到即返回 `"movie"`，不会继续检查 anime
 
 ### 番剧检测（第二优先级）
-- 路径含关键词：`番剧`、`anime`、`show`、`tv`、`series`、`season`、`动漫`、`动画`、`cartoon`、`剧集`、`电视剧`、`国漫`、`日漫`、`美漫`、`韩漫`
+- 路径含关键词：`番剧`、`动漫`、`动画`、`anime`、`cartoon`、`show`、`tv.?series`、`series`、`剧集`、`电视剧`、`国漫`、`日漫`、`美漫`、`韩漫`
 - 仅当所有父目录均不匹配 movie 模式时才检查
 
 ### 无法判断
@@ -83,8 +83,8 @@ A 区字幕文件由 `AAreaEventHandler` 监控，在 `handle_a_created_or_modif
 系统使用 **`detect_media_type_from_path()`**（`media_renamer.py`）按严格优先级将字幕文件关联到对应的 STRM 媒体文件：
 
 **优先级判断（严格顺序，非并行）**：
-1. 路径关键词匹配 movie（`电影`/`movie`/`movies`/`film`/`films`）→ **电影模式**
-2. 路径关键词匹配 anime（`番剧`/`anime`/`show`/`tv`/`series`/`season`）→ **番剧模式**
+1. 路径关键词匹配 movie（`电影`/`movie`/`film`/`cinema`/`片`/`国语`/`粤语`/`港片`/`外语片`/`好莱坞`）→ **电影模式**
+2. 路径关键词匹配 anime（`番剧`/`动漫`/`动画`/`anime`/`cartoon`/`show`/`tv.?series`/`series`/`剧集`/`电视剧`/`国漫`/`日漫`/`美漫`/`韩漫`）→ **番剧模式**
 3. 无法从路径判断时返回 `None`，由 `SubtitleHandler` 内部使用 STRM 辅助判断
 4. STRM 辅助判断不会将已识别为 anime 的误降级为 movie
 
@@ -150,11 +150,11 @@ B 区：测试b\番剧\ShowName\Season 01\S01E01.strm
 S01E01.forced.zho.简体.ass
 ```
 
-**多语言**（同一集多个字幕文件）：
+**多语言**（同一集多个字幕文件，均带 `.forced.` 前缀）：
 ```
-S01E01.forced.zho.简体.ass    # 简体中文（forced）
-S01E01.zho.繁体.ass            # 繁体中文
-S01E01.jpn.日语.ass            # 日语
+S01E01.forced.zho.简体.ass    # 简体中文（优先级 1）
+S01E01.forced.zho.繁体.ass    # 繁体中文（优先级 2）
+S01E01.forced.und.ass         # 未识别语言（如日文/韩文等未实现后缀）
 ```
 
 ## 数据库跟踪

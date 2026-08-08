@@ -121,7 +121,9 @@ class TestSchemaInit:
     def test_fts_table_created(self, db):
         names = {r[0] for r in _raw_rows(
             db, "SELECT name FROM sqlite_master WHERE type='table'")}
-        assert "tmdb_watchlist_fts" in names
+        # T1: 拆分 movies_fts / tv_fts 分表，旧单表 tmdb_watchlist_fts 已移除
+        assert {"movies_fts", "tv_fts"} <= names
+        assert "tmdb_watchlist_fts" not in names
 
     def test_match_columns_present(self, db):
         cols = {r[1] for r in _raw_rows(db, "PRAGMA table_info(movies)")}
@@ -313,7 +315,7 @@ class TestUpsert:
         now = time.time()
         for _ in range(3):
             db._upsert_movie(_movie(1, title="重复"), now)
-        rows = _raw_rows(db, "SELECT COUNT(*) FROM tmdb_watchlist_fts")
+        rows = _raw_rows(db, "SELECT COUNT(*) FROM movies_fts")
         assert rows[0][0] == 1
 
     def test_get_all_filters_by_media_type(self, db):
@@ -410,6 +412,22 @@ class TestSync:
         client.get_tv_details.return_value = None
         db.sync(client, force=True)
         assert {i["id"] for i in db.get_all("movie")} == {1}
+
+    def test_untrusted_retrieval_does_not_wipe_existing_movies(self, db):
+        """T5: 取回不可信（格式异常）时跳过删除，本地行数不变且日志含原因。
+
+        旧实现：格式异常 break 后 movie_ids 为空 → 走 DELETE FROM movies 全清。
+        """
+        db.sync(_client(movie_pages=[([_movie(1)], False)]), force=True)
+        client = MagicMock()
+        client.get_watchlist_movies.return_value = "not a tuple"
+        client.get_watchlist_tv.return_value = ([], False)
+        client.get_tv_details.return_value = None
+        db.sync(client, force=True)
+        assert {i["id"] for i in db.get_all("movie")} == {1}
+        ops = db.get_tmdb_logs(limit=50)
+        assert any("取回不可信" in (log.get("msg") or "") for log in ops), \
+            "应记录取回不可信的 ERROR 日志"
 
     def test_both_failures_do_not_update_last_sync(self, db):
         client = MagicMock()

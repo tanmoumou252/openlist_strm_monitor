@@ -18,7 +18,6 @@ import json
 import os
 import socket
 import sys
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -1259,7 +1258,6 @@ class TestAreaRefreshAPI:
         server, base, session_token = webui_server
         # 模拟主程序运行
         mock_app_service = MagicMock()
-        mock_app_service._refresh_lock = threading.Lock()
         server._app_service = mock_app_service
 
         # 测试包含 .. 的路径
@@ -1284,7 +1282,6 @@ class TestAreaRefreshAPI:
         """危险字符应返回 400"""
         server, base, session_token = webui_server
         mock_app_service = MagicMock()
-        mock_app_service._refresh_lock = threading.Lock()
         server._app_service = mock_app_service
 
         # 测试各种危险字符
@@ -1311,7 +1308,6 @@ class TestAreaRefreshAPI:
         """超长媒体名应返回 400"""
         server, base, session_token = webui_server
         mock_app_service = MagicMock()
-        mock_app_service._refresh_lock = threading.Lock()
         server._app_service = mock_app_service
 
         # 测试超过 255 字符的媒体名
@@ -1343,7 +1339,6 @@ class TestAreaRefreshAPI:
         mock_db.read_connection.return_value = mock_conn
 
         mock_app_service = MagicMock()
-        mock_app_service._refresh_lock = threading.Lock()
         mock_app_service.db = mock_db
         mock_app_service.config = None
         # 新契约：映射到引擎入口路径 + 逐条 A→B 同步
@@ -1393,7 +1388,6 @@ class TestAreaRefreshAPI:
         mock_db.read_connection.return_value = mock_conn
 
         mock_app_service = MagicMock()
-        mock_app_service._refresh_lock = threading.Lock()
         mock_app_service.db = mock_db
         mock_app_service.config = None
         # 新契约：映射到引擎入口路径 + 逐条 A→B 同步
@@ -1443,7 +1437,6 @@ class TestAreaRefreshAPI:
         mock_db.read_connection.return_value = mock_conn
 
         mock_app_service = MagicMock()
-        mock_app_service._refresh_lock = threading.Lock()
         mock_app_service.db = mock_db
         mock_app_service.config = None
         mock_app_service._cloud_path_to_engine_paths.return_value = ["/strm/webdav"]

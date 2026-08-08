@@ -658,10 +658,16 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         if not self._check_auth("POST"):
             return
         # [已修复] N-P0-1: do_POST 请求体解析在路由 try/except 之外 → 畸形请求挂起连接
-        # Content-Length 非数字或负值会抛 ValueError/IOError，导致无 HTTP 响应 → 客户端挂起
+        # Content-Length 非数字会抛 ValueError/TypeError，导致无 HTTP 响应 → 客户端挂起
         try:
             content_length = int(self.headers.get("Content-Length", 0))
         except (ValueError, TypeError):
+            self._send_json({"error": "invalid Content-Length"}, 400)
+            return
+        # T4: 负数 Content-Length 会绕过 413 上限（int("-1") 正常返回、bool(-1) 为真），
+        # 使 rfile.read(-1) 读到 EOF 挂起线程；ThreadingHTTPServer 无 socket 超时，
+        # /api/login 又在白名单内，未鉴权即可挂线程。显式拒绝负值。
+        if content_length < 0:
             self._send_json({"error": "invalid Content-Length"}, 400)
             return
         # 防止恶意超大请求体耗尽内存（DoS）— 配置类 JSON 载荷不会超过此值
@@ -780,6 +786,9 @@ class WebUIServer:
         self._match_refresh_lock = threading.Lock()
         self._match_refresh_running = False
         self._match_refresh_result: dict | None = None
+        # T13: 媒体刷新互斥锁预建（原 handle_area_refresh 懒初始化非原子，
+        # 两个并发请求各建各的 Lock 会绕过 409 互斥）
+        self._refresh_lock = threading.Lock()
         self._index_audit_lock = threading.Lock()
         self._index_audit_running = False
         self._index_audit_result: dict | None = None

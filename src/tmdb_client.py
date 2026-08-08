@@ -264,7 +264,18 @@ class TmdbClient:
             except urllib.error.HTTPError as e:
                 # 429 速率限制：重试
                 if e.code == 429 and attempt < retries - 1:
-                    retry_after = float(e.headers.get("Retry-After", backoff * (2 ** attempt)))
+                    default_wait = backoff * (2 ** attempt)
+                    try:
+                        retry_after = float(e.headers.get("Retry-After", default_wait))
+                    except (ValueError, TypeError):
+                        # T14: RFC 允许 Retry-After 为 HTTP-date（如 "Wed, 21 Oct 2015 07:28:00 GMT"），
+                        # float() 会抛 ValueError 逃逸重试逻辑；回退默认指数退避
+                        retry_after = default_wait
+                    # T14: 等待秒数设上限并拒绝负值，防止异常/恶意 Retry-After 无限挂起线程
+                    if retry_after < 0:
+                        retry_after = default_wait
+                    elif retry_after > 60.0:
+                        retry_after = 60.0
                     logging.warning("[TMDB] 速率限制，等待 %.1f 秒后重试 (%d/%d)",
                                    retry_after, attempt + 1, retries)
                     time.sleep(retry_after)
@@ -376,52 +387,60 @@ class TmdbClient:
         获取待看电影列表（分页）。
         api_key-only 模式返回空列表。
         返回 (items, has_next_page)
+
+        T5: 取回失败（api_key 模式、无 account_id、响应缺 results、请求异常）
+        一律 raise，不再返回 ([], False) 与"清单真为空"同形——否则 sync() 会据此
+        全清本地表。
         """
         if self._use_api_key_auth:
-            logging.debug("[TMDB] api_key 模式不支持 watchlist")
-            return [], False
+            raise RuntimeError("api_key 模式不支持 watchlist")
         aid = self.account_id
         if not aid:
-            return [], False
+            raise RuntimeError("未配置 account_id，无法拉取 watchlist")
         try:
             data = self.request(
                 f"/3/account/{aid}/watchlist/movies",
                 {"page": str(page)},
             )
             if not data or "results" not in data:
-                return [], False
+                raise RuntimeError("watchlist 响应缺少 results")
             items = data["results"]
             has_next = data.get("page", 1) < data.get("total_pages", 1)
             return items, has_next
         except Exception as e:
             logging.error("[TMDB] 获取电影待看列表请求失败: %s", e)
-            return [], False
+            if isinstance(e, RuntimeError):
+                raise
+            raise RuntimeError(f"获取电影待看列表请求失败: {e}") from e
 
     def get_watchlist_tv(self, page: int = 1) -> tuple[list[dict], bool]:
         """
         获取待看剧集列表（分页）。
         api_key-only 模式返回空列表。
         返回 (items, has_next_page)
+
+        T5: 同 get_watchlist_movies，取回失败一律 raise。
         """
         if self._use_api_key_auth:
-            logging.debug("[TMDB] api_key 模式不支持 watchlist")
-            return [], False
+            raise RuntimeError("api_key 模式不支持 watchlist")
         aid = self.account_id
         if not aid:
-            return [], False
+            raise RuntimeError("未配置 account_id，无法拉取 watchlist")
         try:
             data = self.request(
                 f"/3/account/{aid}/watchlist/tv",
                 {"page": str(page)},
             )
             if not data or "results" not in data:
-                return [], False
+                raise RuntimeError("watchlist 响应缺少 results")
             items = data["results"]
             has_next = data.get("page", 1) < data.get("total_pages", 1)
             return items, has_next
         except Exception as e:
             logging.error("[TMDB] 获取剧集待看列表请求失败: %s", e)
-            return [], False
+            if isinstance(e, RuntimeError):
+                raise
+            raise RuntimeError(f"获取剧集待看列表请求失败: {e}") from e
 
     def fetch_all_watchlist_movies(self) -> list[dict]:
         """获取全部待看电影"""

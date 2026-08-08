@@ -124,7 +124,7 @@ JWT 认证的 OpenList Admin API 客户端：
 
 - **分词器**：中文使用 `simple` 分词器（cppjieba 封装，源于 wangfenjin/simple，内置版本见 `src/tokenizers/simple/VERSION`，约 v0.7.1）。`database.py` 的 `_load_simple_tokenizer` 与 `tmdb_watchlist_db.py` 的 `_load_simple_into` 在连接建立时通过 `conn.load_extension` 加载 `src/tokenizers/simple/simple.dll`；加载成功后切换为 `simple` 并记录版本，失败则**软降级**到内建 `unicode61`（仅 warning，不阻断启动）。
 - **降级风险**：`unicode61` 不会对中文切分出有效 token，因此 `simple.dll` 缺失时中文搜索实际完全失效。本项目的 FTS 查询转义会移除 `*` 等通配符，前缀 `黑*` 之类的侥幸命中也不成立——**`simple` 是中文搜索的硬依赖**。
-- **FTS 虚拟表**：bridge.db 的 `a_strm_files_fts` / `b_strm_files_fts` / `c_ghost_files_fts` 索引 STRM/幽灵文件的 `local_path`、`webdav_path`；tmdb_watchlist.db 的 `tmdb_watchlist_fts` 索引待看列表的 `title`、`original_title`、`overview`。
+- **FTS 虚拟表**：bridge.db 的 `a_strm_files_fts` / `b_strm_files_fts` / `c_ghost_files_fts` 索引 STRM/幽灵文件的 `local_path`、`webdav_path`；tmdb_watchlist.db 的 `movies_fts` / `tv_fts` 分别索引待看列表电影（`movies.title`/`original_title`/`overview`）与电视剧（`tv.name`/`tv.original_name`/`overview`）。
 - **一致性**：`Database._rebuild_fts_if_stale` / `_backfill_fts_if_empty` 以及 `tmdb_watchlist_db.py` 中的孤儿清理，负责在基表变更后清理 FTS 中悬空的孤儿行，保证索引与基表一致。
 
 ## 首次启动引导（Onboarding）

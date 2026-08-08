@@ -168,6 +168,75 @@ class TestAreaRefreshMappingId:
         assert len(filtered) == 3
 
 
+class TestAreaRefreshMappingIdNormalization:
+    """F2 回归测试：_do_media_refresh 的 mapping_id 过滤必须对 a_root 做路径规范化。
+
+    背景：ABMapping.a_root 存用户原始输入（如 Windows 前斜杠 `D:/x`），而
+    `a_strm_files.local_path` 存规范化路径（反斜杠 `D:\\x`）。若用原始 a_root
+    构造 LIKE，分隔符不一致时过滤静默失效，返回"未找到相关记录"。修复后应命中。
+    """
+
+    def test_refresh_mapping_id_matches_normalized_a_root(self, tmp_path, db: Database):
+        """a_root 用前斜杠原始形态时，LIKE 过滤仍应命中规范化 local_path。"""
+        # 构造 A 区记录：local_path 一律用 os 原生分隔符（规范化形态）
+        a_dir_m1 = tmp_path / "a" / "m1"
+        a_dir_m1.mkdir(parents=True, exist_ok=True)
+        movie1 = a_dir_m1 / "movie1.strm"
+        movie1.write_text("strm")
+        movie2 = a_dir_m1 / "movie2.strm"
+        movie2.write_text("strm")
+        # 属于另一 mapping 的记录，不应被 m1 过滤命中
+        a_dir_m2 = tmp_path / "a" / "m2"
+        a_dir_m2.mkdir(parents=True, exist_ok=True)
+        movie3 = a_dir_m2 / "movie3.strm"
+        movie3.write_text("strm")
+
+        with db.connection() as conn:
+            conn.execute(
+                "INSERT INTO a_strm_files (local_path, webdav_path, parent_webdav_path, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (str(movie1.resolve()), "/m1/movie1.strm", "/m1", time.time()),
+            )
+            conn.execute(
+                "INSERT INTO a_strm_files (local_path, webdav_path, parent_webdav_path, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (str(movie2.resolve()), "/m1/movie2.strm", "/m1", time.time()),
+            )
+            conn.execute(
+                "INSERT INTO a_strm_files (local_path, webdav_path, parent_webdav_path, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (str(movie3.resolve()), "/m2/movie3.strm", "/m2", time.time()),
+            )
+            conn.commit()
+
+        # mapping.a_root 存"原始"路径：用 as_posix()（前斜杠），与规范化 local_path 分隔符不同
+        mapping = MagicMock()
+        mapping.mapping_id = "m1"
+        mapping.a_root = a_dir_m1.resolve().as_posix()
+
+        app_service = MagicMock()
+        app_service.db = db
+        app_service.config = None
+        app_service.a_b_mappings = [mapping]
+        app_service.admin_api = MagicMock()
+        app_service.admin_api.list_directory.return_value = {
+            "code": 0,
+            "data": {"content": [{"name": "movie1.strm"}, {"name": "movie2.strm"}]},
+        }
+        app_service._cloud_path_to_engine_paths.return_value = ["/strm/m1"]
+        app_service.copy_a_record_to_b_if_needed.return_value = True
+        app_service.cleanup_b_zombies_under_folder = MagicMock()
+
+        from webui.routes import _do_media_refresh
+        result = _do_media_refresh(app_service, "a", "movie", mapping_id="m1")
+
+        # 关键断言：mapping 过滤命中规范化路径，不应返回"未找到相关记录"
+        assert result.get("ok") is True
+        assert result.get("message") != "未找到相关记录"
+        # 应命中 2 条（movie1、movie2），movie3 属于 m2 被过滤
+        assert result.get("synced") == 2
+
+
 class TestMappingMetadataList:
     """测试 _get_mapping_metadata_list 函数。"""
 

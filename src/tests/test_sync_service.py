@@ -1009,6 +1009,54 @@ class TestSyncServiceSyncOneRecord:
         assert result == "fail"
         assert not b_file.exists()
 
+    def test_sync_one_record_failure_preserves_prior_batch_rows(self, tmp_path):
+        """T2: 单条失败只回滚本记录，不抹掉同批已成功写入的行。
+
+        旧实现：except 分支执行连接级 conn.rollback()，在 use_bulk=True 单事务
+        模式下会抹掉同批所有已落盘 B 区且已计 success 的行，形成
+        "代次已推进 + DB 行缺失 + 磁盘有文件"三方不一致。
+        """
+        from database import Database
+        db = Database(str(tmp_path / "sync_t2.db"))
+
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+
+        a1 = a_root / "one.strm"
+        a1.write_text("/m/one.mp4", encoding="utf-8")
+        a2 = a_root / "two.strm"
+        a2.write_text("/m/two.mp4", encoding="utf-8")
+
+        b1 = b_root / "one.strm"
+        b2 = b_root / "two.strm"
+        app.build_b_path_from_a.side_effect = [b1, b2]
+        app.get_mapping_for_a.return_value = ("m1", a_root, b_root)
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        with db.bulk_connection() as conn:
+            # 第 1 条：正常成功（SAVEPOINT 已 RELEASE，写入保留在事务中）
+            r1 = svc._sync_one_record(
+                _make_a_record(str(a1), "/m/one.mp4", "/m"), None, conn, mapping_id="m1")
+            assert r1 == "success"
+
+            # 第 2 条：注入 _bulk_upsert_b 抛异常，触发 ROLLBACK TO sp_rec
+            with patch.object(svc, "_bulk_upsert_b", side_effect=RuntimeError("db error")):
+                r2 = svc._sync_one_record(
+                    _make_a_record(str(a2), "/m/two.mp4", "/m"), None, conn, mapping_id="m1")
+                assert r2 == "fail"
+
+        # bulk_connection 正常退出后统一 commit：第 1 条必须仍在，第 2 条不得残留
+        with db.connection() as conn:
+            rows = conn.execute("SELECT local_path FROM b_strm_files").fetchall()
+        paths = {r[0] for r in rows}
+        assert str(b1) in paths, "第 1 条成功行不应被第 2 条失败回滚"
+        assert str(b2) not in paths, "第 2 条失败行不应残留"
+
 
 # ===========================================================================
 # TestSyncServiceBulkUpsertHelpers

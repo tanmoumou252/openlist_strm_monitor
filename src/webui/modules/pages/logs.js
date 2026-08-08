@@ -2,10 +2,14 @@ import { api } from '../core/api.js';
 import { icon } from '../core/icons.js';
 import { esc, fmtTime } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
-import { isRenderStale } from '../core/router.js';
+import { captureRenderGuard } from '../core/router.js';
 
 // 当前日志类型：'tmdb' = TMDB 操作日志（主日志，默认），'main' = 主程序日志
 let currentLogType = 'tmdb';
+
+// N0/T9 残留：标签切换与刷新不经 router、不推进 _renderGen，代际护栏无法拦截
+// "切标签后旧响应回填"。模块级 _logsGeneration 在切换/刷新时自增，响应写入前比对。
+let _logsGeneration = 0;
 
 // TMDB 操作类型 → 中文标签映射（覆盖后端所有 op code）
 const opLabel = {
@@ -64,14 +68,21 @@ export async function renderLogs(el) {
 }
 
 async function _fetchAndRenderLogs(el) {
-  const url = currentLogType === 'tmdb' ? '/api/tmdb/logs' : '/api/logs';
+  // N0: 代际快照工厂——在首次 await 前捕获
+  const isStale = captureRenderGuard();
+  // N0/T9: 快照起始时刻的类型与请求代际，全程使用；await 后若已变化则丢弃响应
+  const logType = currentLogType;
+  const url = logType === 'tmdb' ? '/api/tmdb/logs' : '/api/logs';
+  const gen = _logsGeneration;
   const data = await api(url);
 
   // 导航期间在途请求返回后，若页面代际已变则丢弃，避免覆盖新页面
-  if (isRenderStale()) return;
+  if (isStale()) return;
+  // N0/T9: 标签切换/刷新期间又发起新请求 -> 旧响应作废，避免回填错位
+  if (currentLogType !== logType || _logsGeneration !== gen) return;
 
   let logs, totalCount;
-  if (currentLogType === 'tmdb') {
+  if (logType === 'tmdb') {
     logs = data.logs || [];
     totalCount = data.count || logs.length;
   } else {
@@ -84,7 +95,7 @@ async function _fetchAndRenderLogs(el) {
   const levelLabel = { 'info': '信息', 'success': '成功', 'warn': '警告', 'error': '错误' };
 
   const rows = logs.map(log => {
-    if (currentLogType === 'main') {
+    if (logType === 'main') {
       return `<tr><td>${esc(log.msg)}</td></tr>`;
     } else {
       const lv = log.level || 'info';
@@ -102,19 +113,19 @@ async function _fetchAndRenderLogs(el) {
     }
   }).join('');
 
-  const mainActive = currentLogType === 'main' ? 'active' : '';
-  const tmdbActive = currentLogType === 'tmdb' ? 'active' : '';
+  const mainActive = logType === 'main' ? 'active' : '';
+  const tmdbActive = logType === 'tmdb' ? 'active' : '';
 
   // 下载按钮文案根据当前日志类型动态变化
-  const downloadLabel = currentLogType === 'tmdb'
+  const downloadLabel = logType === 'tmdb'
     ? '下载当前 TMDB 日志'
     : '下载当前主程序日志';
 
   // tab 按钮上直接显示条数
-  const tmdbTabLabel = currentLogType === 'tmdb'
+  const tmdbTabLabel = logType === 'tmdb'
     ? `TMDB 操作日志 (${totalCount})`
     : 'TMDB 操作日志';
-  const mainTabLabel = currentLogType === 'main'
+  const mainTabLabel = logType === 'main'
     ? `主程序日志 (${totalCount})`
     : '主程序日志';
 
@@ -144,6 +155,8 @@ async function _fetchAndRenderLogs(el) {
       if (!btn) return;
       const newType = btn.dataset.logType;
       if (newType && newType !== currentLogType) {
+        // N0/T9: 切换标签时自增请求代际，使在途旧响应作废
+        _logsGeneration++;
         currentLogType = newType;
         _fetchAndRenderLogs(el);
       }
@@ -158,6 +171,8 @@ async function _fetchAndRenderLogs(el) {
       refreshBtn.disabled = true;
       refreshBtn.innerHTML = '刷新中...';
       try {
+        // N0/T9: 手动刷新时自增请求代际，使在途旧响应作废
+        _logsGeneration++;
         await _fetchAndRenderLogs(el);
       } catch (e) {
         showToast('刷新失败: ' + e.message, 'error');

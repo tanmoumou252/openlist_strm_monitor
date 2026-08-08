@@ -213,7 +213,7 @@ Ping OpenList API。**免 Token**。
 获取 OpenList 路径配置。响应字段：
 
 - `a_folders` — A 区根目录列表（由 STRM 引擎自动发现）
-- `a_b_mappings` — A↔B 映射列表，每个元素含 `a_root`（A 区根路径）、`b_root`（对应的 B 区根路径）、`label`（标签）和 `mapping_id`（映射唯一标识符）
+- `a_b_mappings` — A↔B 映射列表，每个元素含 `a_root`（A 区根路径）、`b_root`（对应的 B 区根路径）、`label`（标签）。**不含 `mapping_id`**：该端点直接回吐 DB 原始 JSON，前端仅提交 `a_root`/`b_root`/`label`，`mapping_id` 由 `config.update_from_db` 在内存中按 A 根规范化路径补齐、不写回 DB
 - `b_root` — 全局 B 区根目录（兼容旧配置）
 - `c_root` — C 区根目录
 
@@ -240,7 +240,7 @@ Ping OpenList API。**免 Token**。
 - `GET /api/tmdb/watchlist/movies?q=关键词`
 - `GET /api/tmdb/watchlist/tv?q=关键词`
 
-`q` 经 `_escape_fts5_query` 转义后匹配 `tmdb_watchlist_fts` 虚拟表（按 TMDB ID 关联）。`q` 为空时返回该类型的全部条目（不做过滤）。FTS5 异常时回退到内存子串过滤（标题 / 原标题 / 简介，大小写不敏感）作为软降级。可配合 `all=1` 一次性取回全量并过滤。
+`q` 经 `_escape_fts5_query` 转义后匹配对应类型的 FTS5 虚拟表（电影端点匹配 `movies_fts`，电视剧端点匹配 `tv_fts`，按 TMDB ID 关联）。`q` 为空时返回该类型的全部条目（不做过滤）。FTS5 异常时回退到内存子串过滤（标题 / 原标题 / 简介，大小写不敏感）作为软降级。可配合 `all=1` 一次性取回全量并过滤。
 
 ### `GET /api/tmdb/search/movie`、`GET /api/tmdb/search/tv`、`GET /api/tmdb/search`
 

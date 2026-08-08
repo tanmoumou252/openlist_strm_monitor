@@ -58,13 +58,25 @@ function normalizeSpaEntryPath() {
 
 /**
  * 渲染代际（F-3）：每次 router() 调用递增。
- * 页面渲染函数可在其内部 await 后调用 isRenderStale() 判断是否已被更新导航取代。
+ * 页面渲染函数可在其内部 await 后判断是否已被更新导航取代。
+ *
+ * N0：原实现用模块级单变量 _pageRenderGen 表达"每个异步入口各自的代际"，
+ * 赋 myGen 时恒 false（护栏空转），赋 -1 后恒 true（整站白屏），两者皆错。
+ * 改为代际快照工厂 captureRenderGuard()：每个异步入口在同步起始处捕获
+ * 当前代际，得到只对自身生效的 stale 判定闭包。后续 agent 勿再退回模块级
+ * 单变量方案（无论赋 myGen 还是 -1 都是错的）。
  */
 let _renderGen = 0;
-let _pageRenderGen = -1;
 let _lastPage = null;  // 跟踪上一个页面（不含参数）
-export function isRenderStale() {
-  return _pageRenderGen !== _renderGen;
+
+/**
+ * 代际快照工厂：在异步入口的同步起始处调用，返回 isStale() 判定闭包。
+ * 该闭包捕获"调用时刻"的 _renderGen，此后若发生新导航（_renderGen 递增）
+ * 即认为当前异步流程已过时，应放弃渲染。
+ */
+export function captureRenderGuard() {
+  const g = _renderGen;
+  return () => g !== _renderGen;
 }
 
 export async function router() {
@@ -75,12 +87,6 @@ export async function router() {
   // 渲染护栏（F-3）：每次导航递增代际，被 await 挂起的旧渲染在恢复时
   // 发现代际不匹配即中止，避免快速切换页面时旧页覆盖新页 + 定时器泄漏。
   const myGen = ++_renderGen;
-  // M9: 原实现 `_pageRenderGen = myGen` 使 isRenderStale() 恒返回 false
-  // （_pageRenderGen === _renderGen），12 处页面渲染护栏全部失效。
-  // 改为 -1：router() 一开始即标记"已有更新导航"，任何 await 恢复的旧页
-  // （包括新页自身在首次 await 后）isRenderStale() 均返回 true 并退出；
-  // 自身代际判断由闭包 isStale() 承担。
-  _pageRenderGen = -1;
   const isStale = () => myGen !== _renderGen;
 
   // Auth guard：未初始化密码状态时，非登录页跳转至 login 等待初始化

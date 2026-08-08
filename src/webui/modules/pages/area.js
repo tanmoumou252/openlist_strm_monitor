@@ -1,7 +1,7 @@
 import { api } from '../core/api.js';
 import { icon } from '../core/icons.js';
 import { esc, fmtTime, createSortLink, renderTmdbResults, formatTimestamp } from '../core/utils.js';
-import { navigate, isRenderStale } from '../core/router.js';
+import { navigate, captureRenderGuard } from '../core/router.js';
 import { showToast } from '../components/toast.js';
 import { showConfirmDialog } from '../components/dialog.js';
 
@@ -21,6 +21,8 @@ export async function renderArea(el, area, params) {
 }
 
 async function renderAreaList(el, area, params) {
+  // N0: 代际快照工厂——在首次 await 前捕获
+  const isStale = captureRenderGuard();
   const kind = params.kind || 'anime';
   const q = params.q || '';
   const sort = params.sort || 'name';
@@ -38,7 +40,7 @@ async function renderAreaList(el, area, params) {
   if (qs.length) url += '?' + qs.join('&');
 
   const d = await api(url);
-  if (isRenderStale()) return;
+  if (isStale()) return;
   const kindLabel = d.kind_label;
 
   // Category tabs
@@ -121,11 +123,11 @@ ${pagerHtml}
     const searchContainer = document.getElementById('tmdb-search-results');
     api(`/api/tmdb/search?query=${encodeURIComponent(q)}`)
       .then(results => {
-        if (isRenderStale()) return;  // 双保险 1：页面代际校验
+        if (isStale()) return;  // 双保险 1：页面代际校验
         renderTmdbResults(results, "你可能还在找", q, searchContainer);  // 双保险 2：container.isConnected 在函数内校验
       })
       .catch(() => {
-        if (isRenderStale()) return;
+        if (isStale()) return;
         showToast('TMDB 在线搜索失败，请稍后重试', 'error');
       });
   }
@@ -166,6 +168,8 @@ ${pagerHtml}
 }
 
 async function renderAreaDetail(el, area, params) {
+  // N0: 代际快照工厂——在首次 await 前捕获
+  const isStale = captureRenderGuard();
   const media = params.media;
   const kind = params.kind || '';
   const sort = params.sort || 'name';
@@ -184,7 +188,7 @@ async function renderAreaDetail(el, area, params) {
   // [已修复] F2: mapping_id 已从 URL 中移除（后端不消费该参数）
 
   const d = await api(url);
-  if (isRenderStale()) return;
+  if (isStale()) return;
   const areaLabels = { a: 'A 区', b: 'B 区', c: 'C 区' };
   const areaLabel = areaLabels[area] || area.toUpperCase() + ' 区';
   
@@ -202,7 +206,7 @@ async function renderAreaDetail(el, area, params) {
   <a href="#area_${area}${kindPart}" class="back-icon-btn" title="返回列表">${icon('back')}</a>
   <span style="color:var(--text-main);font-size:14px;font-weight:600">${esc(media)}</span>
   <span style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px)">· ${d.total} 个文件</span>
-  ${(area === 'a' || area === 'b' && !isMultiMapping) ? `<button class="toolbar-btn refresh-media-btn" data-mapping-id="${esc(d.mapping_id || '')}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button>` : ''}
+  ${((area === 'a' || area === 'b') && !isMultiMapping) ? `<button class="toolbar-btn refresh-media-btn" data-mapping-id="${esc(d.mapping_id || '')}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button>` : ''}
 </div>`;
 
   // Task 2: 多 mapping 场景渲染
@@ -245,11 +249,11 @@ async function renderAreaDetail(el, area, params) {
       if (mapping.total_pages > 1) {
         html += '<div class="pager">';
         if (mapping.page > 1) {
-          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}">${icon('chevron_l')} 上一页</a>`;
+          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">${icon('chevron_l')} 上一页</a>`;
         }
         html += `<span class="current">第 ${mapping.page} / ${mapping.total_pages} 页</span>`;
         if (mapping.page < mapping.total_pages) {
-          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}">下一页 ${icon('chevron_r')}</a>`;
+          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">下一页 ${icon('chevron_r')}</a>`;
         }
         // F2: 请求页码超出该 mapping 记录数被 clamp 时，明确提示而非静默截断
         if (mapping.clamped) {
@@ -293,11 +297,11 @@ async function renderAreaDetail(el, area, params) {
     if (d.total_pages > 1) {
       html += '<div class="pager">';
       if (d.page > 1) {
-        html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}">${icon('chevron_l')} 上一页</a>`;
+        html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">${icon('chevron_l')} 上一页</a>`;
       }
       html += `<span class="current">第 ${d.page} / ${d.total_pages} 页</span>`;
       if (d.page < d.total_pages) {
-        html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}">下一页 ${icon('chevron_r')}</a>`;
+        html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">下一页 ${icon('chevron_r')}</a>`;
       }
       html += '</div>';
     }

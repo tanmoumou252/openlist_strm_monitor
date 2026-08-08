@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 from watchlist_match import (
     _compute_media_root, _extract_season_from_local_path,
 )
+from config import normalize_local_root
 from utils import escape_like
 from utils.password_utils import hash_password
 
@@ -307,29 +308,29 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
             )
             opener = _build_img_opener(handler, use_proxy=not bool(_host))
-            resp = opener.open(ava_req, timeout=10)
+            # T6: with 确保 resp 在 413 提前返回/正常返回/异常三路径下均 close，防 FD 泄漏
+            with opener.open(ava_req, timeout=10) as resp:
+                # 检查 Content-Length（如果服务端返回）
+                content_length = int(resp.headers.get("Content-Length", 0))
+                if content_length > MAX_IMG_SIZE:
+                    handler._send_json({"error": "Image too large"}, 413)
+                    return True
 
-            # 检查 Content-Length（如果服务端返回）
-            content_length = int(resp.headers.get("Content-Length", 0))
-            if content_length > MAX_IMG_SIZE:
-                handler._send_json({"error": "Image too large"}, 413)
+                # [已修复] F7: 分块读取，防止无界 read() 导致内存耗尽 DoS
+                img_data = resp.read(MAX_IMG_SIZE + 1)
+                if len(img_data) > MAX_IMG_SIZE:
+                    handler._send_json({"error": "Image too large"}, 413)
+                    return True
+
+                handler.send_response(200)
+                handler.send_header("Content-Type", "image/png")
+                handler.send_header("Content-Length", str(len(img_data)))
+                handler.send_header("Cache-Control", "public, max-age=86400")
+                handler.send_header("X-Content-Type-Options", "nosniff")
+                handler.send_header("X-Frame-Options", "DENY")
+                handler.end_headers()
+                handler.wfile.write(img_data)
                 return True
-
-            # [已修复] F7: 分块读取，防止无界 read() 导致内存耗尽 DoS
-            img_data = resp.read(MAX_IMG_SIZE + 1)
-            if len(img_data) > MAX_IMG_SIZE:
-                handler._send_json({"error": "Image too large"}, 413)
-                return True
-
-            handler.send_response(200)
-            handler.send_header("Content-Type", "image/png")
-            handler.send_header("Content-Length", str(len(img_data)))
-            handler.send_header("Cache-Control", "public, max-age=86400")
-            handler.send_header("X-Content-Type-Options", "nosniff")
-            handler.send_header("X-Frame-Options", "DENY")
-            handler.end_headers()
-            handler.wfile.write(img_data)
-            return True
         except Exception as e:
             logging.warning("[TMDB] 头像代理失败: %s", e)
             handler._send_json({"error": "avatar fetch failed"}, 502)
@@ -361,35 +362,35 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
             )
             opener = _build_img_opener(handler, use_proxy=True)
-            resp = opener.open(poster_req, timeout=15)
+            # T6: with 确保 resp 在 413 提前返回/正常返回/异常三路径下均 close，防 FD 泄漏
+            with opener.open(poster_req, timeout=15) as resp:
+                # 检查 Content-Length（如果服务端返回）
+                content_length = int(resp.headers.get("Content-Length", 0))
+                if content_length > MAX_IMG_SIZE:
+                    handler._send_json({"error": "Image too large"}, 413)
+                    return True
 
-            # 检查 Content-Length（如果服务端返回）
-            content_length = int(resp.headers.get("Content-Length", 0))
-            if content_length > MAX_IMG_SIZE:
-                handler._send_json({"error": "Image too large"}, 413)
+                # [已修复] F7: 分块读取，防止无界 read() 导致内存耗尽 DoS
+                img_data = resp.read(MAX_IMG_SIZE + 1)
+                if len(img_data) > MAX_IMG_SIZE:
+                    handler._send_json({"error": "Image too large"}, 413)
+                    return True
+
+                content_type = resp.headers.get("Content-Type", "image/jpeg")
+                # 白名单 Content-Type，防止通过 Content-Type 头注入恶意内容
+                allowed_types = {"image/jpeg", "image/png", "image/webp"}
+                if content_type not in allowed_types:
+                    content_type = "image/jpeg"
+
+                handler.send_response(200)
+                handler.send_header("Content-Type", content_type)
+                handler.send_header("Content-Length", str(len(img_data)))
+                handler.send_header("Cache-Control", "public, max-age=604800")
+                handler.send_header("X-Content-Type-Options", "nosniff")
+                handler.send_header("X-Frame-Options", "DENY")
+                handler.end_headers()
+                handler.wfile.write(img_data)
                 return True
-
-            # [已修复] F7: 分块读取，防止无界 read() 导致内存耗尽 DoS
-            img_data = resp.read(MAX_IMG_SIZE + 1)
-            if len(img_data) > MAX_IMG_SIZE:
-                handler._send_json({"error": "Image too large"}, 413)
-                return True
-
-            content_type = resp.headers.get("Content-Type", "image/jpeg")
-            # 白名单 Content-Type，防止通过 Content-Type 头注入恶意内容
-            allowed_types = {"image/jpeg", "image/png", "image/webp"}
-            if content_type not in allowed_types:
-                content_type = "image/jpeg"
-
-            handler.send_response(200)
-            handler.send_header("Content-Type", content_type)
-            handler.send_header("Content-Length", str(len(img_data)))
-            handler.send_header("Cache-Control", "public, max-age=604800")
-            handler.send_header("X-Content-Type-Options", "nosniff")
-            handler.send_header("X-Frame-Options", "DENY")
-            handler.end_headers()
-            handler.wfile.write(img_data)
-            return True
         except Exception as e:
             logging.warning("[TMDB] 海报代理失败: %s", e)
             handler._send_json({"error": "poster fetch failed"}, 502)
@@ -507,7 +508,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                         escaped_query = _escape_fts5_query(search_query)
                         with _wdb._conn() as conn:
                             fts_ids = conn.execute(
-                                "SELECT rowid FROM tmdb_watchlist_fts WHERE tmdb_watchlist_fts MATCH ?",
+                                "SELECT rowid FROM movies_fts WHERE movies_fts MATCH ?",
                                 (escaped_query,)
                             ).fetchall()
                             fts_id_set = {row[0] for row in fts_ids}
@@ -549,7 +550,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                         escaped_query = _escape_fts5_query(search_query)
                         with _wdb._conn() as conn:
                             fts_ids = conn.execute(
-                                "SELECT rowid FROM tmdb_watchlist_fts WHERE tmdb_watchlist_fts MATCH ?",
+                                "SELECT rowid FROM movies_fts WHERE movies_fts MATCH ?",
                                 (escaped_query,)
                             ).fetchall()
                             fts_id_set = {row[0] for row in fts_ids}
@@ -589,7 +590,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                         escaped_query = _escape_fts5_query(search_query)
                         with _wdb._conn() as conn:
                             fts_ids = conn.execute(
-                                "SELECT rowid FROM tmdb_watchlist_fts WHERE tmdb_watchlist_fts MATCH ?",
+                                "SELECT rowid FROM tv_fts WHERE tv_fts MATCH ?",
                                 (escaped_query,)
                             ).fetchall()
                             fts_id_set = {row[0] for row in fts_ids}
@@ -630,7 +631,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                         escaped_query = _escape_fts5_query(search_query)
                         with _wdb._conn() as conn:
                             fts_ids = conn.execute(
-                                "SELECT rowid FROM tmdb_watchlist_fts WHERE tmdb_watchlist_fts MATCH ?",
+                                "SELECT rowid FROM tv_fts WHERE tv_fts MATCH ?",
                                 (escaped_query,)
                             ).fetchall()
                             fts_id_set = {row[0] for row in fts_ids}
@@ -1513,7 +1514,8 @@ def _handle_openlist_ping(handler, webui_server) -> None:
         from webdav_client import OpenListAdminClient
         client = OpenListAdminClient(host, user, password, totp_secret=totp_secret)
         if client.login(force=True):
-            handler._send_json({"success": True, "status": "online", "host": host})
+            # T11: 不返回 host（与 /api/openlist/status 一致，避免白名单端点泄露配置）
+            handler._send_json({"success": True, "status": "online"})
         else:
             error_type = client.last_error_type or "unknown"
             status_map = {
@@ -3007,11 +3009,8 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
         return
 
     # 获取 refresh_lock，防止同一媒体并发刷新
-    refresh_lock = getattr(app_service, '_refresh_lock', None)
-    if refresh_lock is None:
-        # 懒初始化（首次使用时创建）
-        app_service._refresh_lock = threading.Lock()
-        refresh_lock = app_service._refresh_lock
+    # T13: 锁在 WebUIServer.__init__ 预建，避免懒初始化非原子导致 409 互斥被绕过
+    refresh_lock = handler.webui._refresh_lock
 
     if not refresh_lock.acquire(blocking=False):
         handler._send_json({"error": "刷新进行中，请稍后再试"}, 409)
@@ -3065,7 +3064,7 @@ def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str |
                 a_root = None
                 for m in getattr(app_service, 'a_b_mappings', []):
                     if str(getattr(m, 'mapping_id', '')).strip() == mapping_id:
-                        a_root = getattr(m, 'a_root', '')
+                        a_root = str(normalize_local_root(getattr(m, 'a_root', '')))
                         break
                 
                 if a_root:

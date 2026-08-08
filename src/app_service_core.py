@@ -237,8 +237,9 @@ class AppService:
         # 按 fingerprint 串行化 A→B 处理，避免 TOCTOU 竞争（P1-4）
         self._fingerprint_locks_lock = threading.Lock()
         self._fingerprint_locks: dict[str, threading.Lock] = {}
-        # WebUI 媒体刷新锁：防止同一媒体并发刷新
-        self._refresh_lock = threading.Lock()
+        # [已废弃] WebUI 媒体刷新锁已移至 WebUIServer._refresh_lock（server.py:791），
+        # routes.py 使用 handler.webui._refresh_lock。此处保留注释以说明迁移。
+        # self._refresh_lock = threading.Lock()
         # N1: Watchdog 健康状态标志 - 由 area_watchers 设置，dashboard 读取并显示
         self._watchers_healthy = True
         self.sync_service = SyncService(self)
@@ -1482,7 +1483,12 @@ class AppService:
         delete_success = False
         try:
             old_path_obj = Path(old_path)
-            if old_path_obj.exists() and str(old_path_obj.resolve()) != str(Path(new_path).resolve()):
+            if not old_path_obj.exists():
+                # T8: 正常重命名下旧路径已不存在，视为删除成功（无残留需清理），
+                # 否则 delete_success 保持 False 会被误判为"删除失败"，
+                # 落入 else 打出"需手动检查"并 return，跳过 ensure_single_visible_instance
+                delete_success = True
+            elif str(old_path_obj.resolve()) != str(Path(new_path).resolve()):
                 if safe_remove_file(old_path_obj):
                     logging.debug("[B区自同步] 删除旧路径物理文件: %s", old_path)
                     delete_success = True
@@ -2537,10 +2543,36 @@ class AppService:
                     # [设计取舍] #2: copyfile 在恢复锁外是有意设计（避免死锁）
                     # handle_b_deleted 在锁内检查，_restoring_generation 计数器防并发恢复竞争。勿把 copyfile 移入锁内。
                     move_file(local, c_target)
-                    self.db.move_b_record(local_path, str(c_target))
-                    self.db.mark_b_instance_status(str(c_target), "quarantined")
-                    logging.info("[B区越界恢复] 已将越界文件移入C区隔离: %s -> %s", local_path, c_target)
-                    return  # C区迁移成功，不删除DB记录
+                    moved = self.db.move_b_record(local_path, str(c_target))
+                    if moved:
+                        self.db.mark_b_instance_status(str(c_target), "quarantined")
+                        logging.info("[B区越界恢复] 已将越界文件移入C区隔离: %s -> %s", local_path, c_target)
+                        return  # C区迁移成功，不删除DB记录
+                    # T15: move_b_record 返回 False（目标被占/冲突）——对齐 B3-B 思路：
+                    # 回退物理移动或对齐 DB，避免「文件已在 C 区 / DB 行仍指向旧 B 路径」分叉
+                    try:
+                        Path(c_target).rename(local)
+                        logging.warning("[B区越界恢复] DB迁移失败，已回滚物理移动: %s", local_path)
+                    except OSError as revert_err:
+                        try:
+                            aligned = self.db.move_b_record(local_path, str(c_target))
+                            if aligned:
+                                self.db.mark_b_instance_status(str(c_target), "quarantined")
+                                logging.error(
+                                    "[B区越界恢复] 回滚失败，已将 DB 对齐到 C 区路径: %s -> %s",
+                                    local_path, c_target)
+                                return
+                            logging.error(
+                                "[B区越界恢复] 回滚失败且 DB 对齐 C 区路径也失败: %s -> %s",
+                                local_path, c_target)
+                        except Exception as align_err:
+                            logging.error(
+                                "[B区越界恢复] 回滚失败后 DB 对齐异常: %s -> %s: %s",
+                                local_path, c_target, align_err)
+                        logging.error(
+                            "[B区越界恢复] DB迁移失败且回滚物理移动失败: %s -> %s: %s",
+                            local_path, c_target, revert_err)
+                        raise
                 except Exception as e:
                     logging.warning("[B区越界恢复] C区迁移失败，回退到直接删除: %s", e)
         except Exception as e:

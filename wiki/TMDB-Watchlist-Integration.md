@@ -47,7 +47,7 @@ TMDB 集成由三个组件组成：
 
 ### 数据库
 
-六张表：`movies`、`tv`、`meta`、`webui_config`、`tmdb_operation_log`（操作日志，level 含 `success`）、`tmdb_watchlist_fts`（FTS5 虚拟表，用于标题搜索）。`TmdbWatchlistDb` 使用 `ThreadPoolExecutor` 仅用于 `_populate_tv_details` 批量补齐 TV 详情（非全量并行同步）。
+七张表：`movies`、`tv`、`meta`、`webui_config`、`tmdb_operation_log`（操作日志，level 含 `success`），以及 2 张 FTS5 虚拟表 `movies_fts`（索引 `movies.title`/`original_title`/`overview`）与 `tv_fts`（索引 `tv.name`/`tv.original_name`/`overview`），分别用于电影/电视剧标题搜索。`TmdbWatchlistDb` 使用 `ThreadPoolExecutor` 仅用于 `_populate_tv_details` 批量补齐 TV 详情（非全量并行同步）。
 
 ### 缓存 TTL
 

@@ -3,14 +3,16 @@ import { icon } from '../core/icons.js';
 import { esc, createField } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
 import { showConfirmDialog } from '../components/dialog.js';
-import { navigate, isRenderStale } from '../core/router.js';  // L6: 导入 isRenderStale 用于轮询竞态防护
+import { navigate, captureRenderGuard } from '../core/router.js';  // L6: 导入 captureRenderGuard 用于轮询竞态防护
 import { _tmdbCache, _getUiConfig, _setUiConfig } from '../core/state.js';
 import { _renderOpenListConfig } from './openlist.js';
 
 export async function renderConfig(el, params) {
+  // N0: 代际快照工厂——在首次 await 前捕获
+  const isStale = captureRenderGuard();
   const cfg = await api('/api/config');
   // L6: await 期间若发生新导航，放弃渲染，避免旧页覆盖
-  if (isRenderStale()) return;
+  if (isStale()) return;
   // /api/config 是白名单端点，代理 URL 已脱敏为 tmdb_proxy_configured（布尔值）。
   // 配置页需要回显代理 URL，从已认证的 /api/webui/config/tmdb 获取。
   if (cfg.tmdb_proxy_configured) {
@@ -408,6 +410,8 @@ try {
   });
 
   document.getElementById('cfg-tmdb-match-refresh').addEventListener('click', async () => {
+    // N0: 收录刷新轮询独立捕获代际，仅对该 handler 生效
+    const isStale = captureRenderGuard();
     const btn = document.getElementById('cfg-tmdb-match-refresh');
     btn.disabled = true;
     btn.innerHTML = '启动刷新中...';
@@ -420,8 +424,8 @@ try {
         const maxPolls = 120;
         for (let i = 0; i < maxPolls; i++) {
           await new Promise(r => setTimeout(r, 1000));
-          // [已修复] L6: 轮询循环含 isRenderStale 检查
-          if (isRenderStale()) return;
+          // [已修复] L6: 轮询循环含 isStale 检查
+          if (isStale()) return;
           try {
             const st = await api('/api/tmdb/watchlist/match/status');
             if (!st.running && st.result) {

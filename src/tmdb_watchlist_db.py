@@ -256,14 +256,33 @@ class TmdbWatchlistDb:
                     tokenizer = 'simple'
                     self._simple_version = loaded
 
-            conn.execute(f"""
-                CREATE VIRTUAL TABLE IF NOT EXISTS tmdb_watchlist_fts USING fts5(
-                    title,
-                    original_title,
-                    overview,
-                    tokenize='{tokenizer}'
-                )
-            """)
+            # T1: 拆分电影/剧集独立 FTS 表，修复 movies/tv 共用单表时的 rowid 冲突
+            # （movies/tv 均 id INTEGER PRIMARY KEY，rowid==id，同 id 会互相覆盖索引，
+            # 导致电影标题永远搜不到、同 id TV 写入抛 IntegrityError）。
+            # 先移除旧单表（仅首次迁移有效），再按类型幂等回填。
+            conn.execute("DROP TABLE IF EXISTS tmdb_watchlist_fts")
+            for table, fts, title_col, orig_col in (
+                ("movies", "movies_fts", "title", "original_title"),
+                ("tv", "tv_fts", "name", "original_name"),
+            ):
+                conn.execute(f"""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS {fts} USING fts5(
+                        title,
+                        original_title,
+                        overview,
+                        tokenize='{tokenizer}'
+                    )
+                """)
+                # 幂等回填：仅当目标 fts 为空且业务表非空时，一次性从业务表重建索引，
+                # 避免 TTL 未到时搜索出现空窗
+                fts_count = conn.execute(f"SELECT COUNT(*) FROM {fts}").fetchone()[0]
+                if fts_count == 0:
+                    table_count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    if table_count > 0:
+                        conn.execute(f"""
+                            INSERT INTO {fts}(rowid, title, original_title, overview)
+                            SELECT id, {title_col}, {orig_col}, overview FROM {table}
+                        """)
 
             conn.commit()
         logging.debug("[TMDB-DB] 数据库初始化完成: %s", self._db_path)
@@ -561,6 +580,9 @@ class TmdbWatchlistDb:
         # ---- Movies ----
         movie_ids: set[int] = set()
         movie_sync_ok = False
+        # T5: "本段取回可信"标志——仅在收到合法响应（含合法空清单）后置 True；
+        # 格式异常/接口失败时保持 False，删除动作以该标志为前置，避免误清本地表
+        movie_retrieval_trusted = False
         try:
             page = 1
             while True:
@@ -569,6 +591,7 @@ class TmdbWatchlistDb:
                         result, tuple) or len(result) != 2:
                     logging.warning("[TMDB] 电影 API 返回格式异常: %s", result)
                     break
+                movie_retrieval_trusted = True
                 items, has_next = result
                 if not items:
                     break
@@ -582,8 +605,13 @@ class TmdbWatchlistDb:
                 page += 1
                 time.sleep(0.3)
 
-            # 删除已移除的电影（使用临时表避免 SQLite 参数上限 P2-3）
-            if movie_ids:
+            if not movie_retrieval_trusted:
+                # T5: 取回不可信（格式异常/接口失败），跳过删除并记 ERROR
+                logging.error("[TMDB] 电影 watchlist 取回不可信，跳过删除，保留本地数据")
+                self.log_tmdb_operation(
+                    "sync_movies_error", "error",
+                    "电影 watchlist 取回不可信，跳过删除，保留本地数据")
+            elif movie_ids:
                 with self._conn() as conn:
                     conn.execute("CREATE TEMP TABLE IF NOT EXISTS _keep_movie_ids (id INTEGER)")
                     conn.execute("DELETE FROM _keep_movie_ids")
@@ -595,6 +623,7 @@ class TmdbWatchlistDb:
                         "DELETE FROM movies WHERE id NOT IN (SELECT id FROM _keep_movie_ids)")
                     conn.commit()
             else:
+                # 取回可信且清单为空：允许清空
                 with self._conn() as conn:
                     conn.execute("DELETE FROM movies")
                     conn.commit()
@@ -609,6 +638,7 @@ class TmdbWatchlistDb:
         # ---- TV ----
         tv_ids: set[int] = set()
         tv_sync_ok = False
+        tv_retrieval_trusted = False
         try:
             page = 1
             while True:
@@ -617,6 +647,7 @@ class TmdbWatchlistDb:
                         result, tuple) or len(result) != 2:
                     logging.warning("[TMDB] 剧集 API 返回格式异常: %s", result)
                     break
+                tv_retrieval_trusted = True
                 items, has_next = result
                 if not items:
                     break
@@ -630,7 +661,13 @@ class TmdbWatchlistDb:
                 page += 1
                 time.sleep(0.3)
 
-            if tv_ids:
+            if not tv_retrieval_trusted:
+                # T5: 取回不可信，跳过删除
+                logging.error("[TMDB] 剧集 watchlist 取回不可信，跳过删除，保留本地数据")
+                self.log_tmdb_operation(
+                    "sync_tv_error", "error",
+                    "剧集 watchlist 取回不可信，跳过删除，保留本地数据")
+            elif tv_ids:
                 with self._conn() as conn:
                     conn.execute("CREATE TEMP TABLE IF NOT EXISTS _keep_tv_ids (id INTEGER)")
                     conn.execute("DELETE FROM _keep_tv_ids")
@@ -642,6 +679,7 @@ class TmdbWatchlistDb:
                         "DELETE FROM tv WHERE id NOT IN (SELECT id FROM _keep_tv_ids)")
                     conn.commit()
             else:
+                # 取回可信且为空：清空
                 with self._conn() as conn:
                     conn.execute("DELETE FROM tv")
                     conn.commit()
@@ -653,14 +691,13 @@ class TmdbWatchlistDb:
             logging.warning("[TMDB] 剧集同步失败: %s", e)
             self.log_tmdb_operation("sync_tv_error", "error", f"剧集同步失败: {e}")
 
-        # ---- 统一清理 FTS 孤儿记录 ----
-        # H1: 电影/剧集两类 FTS 行共存于同一虚表，任何一类的内联 DELETE 都会误删另一类的行。
-        # 此处统一在两类同步（含异常路径）之后联合清理，仅删除两类数据库中都不存在的孤儿行。
+        # ---- 清理 FTS 孤儿记录（分表独立执行） ----
+        # T1: 拆分后每张 FTS 表只关联对应的业务表，删除各自业务表中不存在的孤儿行
         with self._conn() as conn:
-            conn.execute(
-                "DELETE FROM tmdb_watchlist_fts "
-                "WHERE rowid NOT IN (SELECT rowid FROM movies) "
-                "AND rowid NOT IN (SELECT rowid FROM tv)")
+            for fts, table in (("movies_fts", "movies"), ("tv_fts", "tv")):
+                conn.execute(
+                    f"DELETE FROM {fts} "
+                    f"WHERE rowid NOT IN (SELECT rowid FROM {table})")
             conn.commit()
 
         # ---- 批量补齐季数 ----
@@ -714,7 +751,7 @@ class TmdbWatchlistDb:
 
             # 删除旧的 FTS 记录
             conn.execute(
-                "DELETE FROM tmdb_watchlist_fts WHERE rowid = (SELECT rowid FROM movies WHERE id=?)",
+                "DELETE FROM movies_fts WHERE rowid = (SELECT rowid FROM movies WHERE id=?)",
                 (item["id"],),
             )
 
@@ -757,7 +794,7 @@ class TmdbWatchlistDb:
 
             # 插入新的 FTS 记录
             conn.execute(
-                """INSERT INTO tmdb_watchlist_fts(rowid, title, original_title, overview)
+                """INSERT INTO movies_fts(rowid, title, original_title, overview)
                 VALUES((SELECT rowid FROM movies WHERE id=?), ?, ?, ?)""",
                 (
                     item["id"],
@@ -792,7 +829,7 @@ class TmdbWatchlistDb:
 
             # 删除旧的 FTS 记录
             conn.execute(
-                "DELETE FROM tmdb_watchlist_fts WHERE rowid = (SELECT rowid FROM tv WHERE id=?)",
+                "DELETE FROM tv_fts WHERE rowid = (SELECT rowid FROM tv WHERE id=?)",
                 (item["id"],),
             )
 
@@ -844,7 +881,7 @@ class TmdbWatchlistDb:
 
             # 插入新的 FTS 记录（使用 name 作为 title）
             conn.execute(
-                """INSERT INTO tmdb_watchlist_fts(rowid, title, original_title, overview)
+                """INSERT INTO tv_fts(rowid, title, original_title, overview)
                 VALUES((SELECT rowid FROM tv WHERE id=?), ?, ?, ?)""",
                 (
                     item["id"],
