@@ -173,12 +173,12 @@ const data = await api('/api/endpoint');
 
 ### 渲染过时检测
 
-长时间运行的渲染器应检查过时：
+长时间运行的渲染器应检查过时。在异步入口的同步起始处调用 `captureRenderGuard()` 捕获代际快照，得到只对自身生效的 `isStale()` 判定闭包；每次 `await` 之后、写入 DOM 之前检查它，若检测到新导航则放弃渲染，避免旧页覆盖新页：
 ```javascript
-import { isRenderStale } from '../core/router.js';
-const gen = _renderGen;
+import { captureRenderGuard } from '../core/router.js';
+const isStale = captureRenderGuard();
 const data = await fetchData();
-if (isRenderStale(gen)) return; // 用户已导航离开
+if (isStale()) return; // 用户已导航离开，放弃渲染
 ```
 
 ## 常见陷阱

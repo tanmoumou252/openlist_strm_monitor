@@ -26,7 +26,8 @@
   "uptime": 3600,
   "refresh_healthy": true,
   "refresh_consecutive_failures": 0,
-  "refresh_last_error": ""
+  "refresh_last_error": "",
+  "watchers_healthy": true
 }
 ```
 
@@ -44,6 +45,7 @@
 - `refresh_healthy`（bool）— 刷新服务是否健康。**仅当主程序运行时存在**。
 - `refresh_consecutive_failures`（int）— 刷新连续失败次数。**仅当主程序运行时存在**。
 - `refresh_last_error`（str）— 最近一次刷新错误描述。**仅当主程序运行时存在**。
+- `watchers_healthy`（bool）— 文件系统监控器（Watchers）是否健康。**仅当主程序运行时存在**。
 
 ### `POST /api/main/start` / `POST /api/main/stop`
 启动/停止主程序。需要会话 Token。

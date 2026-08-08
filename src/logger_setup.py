@@ -154,12 +154,27 @@ def setup_logging(
     stderr_handler.setFormatter(formatter)
 
     # file: 按大小轮转
-    file_handler = RotatingFileHandler(
-        filename=str(final_log_path),
-        maxBytes=max_size_mb * 1024 * 1024,
-        backupCount=backup_count,
-        encoding="utf-8",
-    )
+    # [已修复] R11: 日志目标为只读文件/目录路径时 RotatingFileHandler 构造会抛
+    # OSError 导致整个启动崩溃。回退到系统临时目录，仅降级不阻断启动。
+    try:
+        file_handler = RotatingFileHandler(
+            filename=str(final_log_path),
+            maxBytes=max_size_mb * 1024 * 1024,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+    except OSError as e:
+        fallback_path = os.path.join(
+            tempfile.gettempdir(), "openlist_strm_bridge_fallback.log")
+        logging.warning(
+            "日志文件 %s 无法写入（%s），回退到临时目录 %s",
+            final_log_path, e, fallback_path)
+        file_handler = RotatingFileHandler(
+            filename=fallback_path,
+            maxBytes=max_size_mb * 1024 * 1024,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
     file_handler.setLevel(log_level)
     file_handler.setFormatter(formatter)
 

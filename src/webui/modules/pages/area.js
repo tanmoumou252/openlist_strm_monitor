@@ -162,7 +162,8 @@ ${pagerHtml}
   // Bind page size selector
   document.getElementById('page-size-select')?.addEventListener('change', (e) => {
     const newSize = e.target.value;
-    const newHash = `#area_${area}?kind=${encodeURIComponent(kind)}&sort=${sort}&order=${order}&page_size=${newSize}&page=1`;
+    // [已修复] R12 area.js 改页大小丢失搜索词 q
+    const newHash = `#area_${area}?kind=${encodeURIComponent(kind)}&sort=${sort}&order=${order}&page_size=${newSize}&page=1${q ? '&q=' + encodeURIComponent(q) : ''}`;
     navigate(newHash);
   });
 }

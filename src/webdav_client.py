@@ -54,8 +54,11 @@ def _generate_totp(secret: str, interval: int = 30, digits: int = 6) -> str:
         try:
             # M8: 无 padding 的 base64 密钥（如 URL 安全 base64 转换而来）会抛
             # binascii.Error 并被吞掉。先补全 padding 再解码。
+            # [已修复] R18: 注释宣称支持 URL 安全 base64，但原实现用
+            # base64.b64decode 无法解析 '-'/'_' 字符。改用 urlsafe_b64decode
+            # 使注释与实现一致（同时兼容标准 base64 与 URL 安全变体）。
             padded_b64 = secret + "=" * ((4 - len(secret) % 4) % 4)
-            secret_bytes = base64.b64decode(padded_b64, validate=True)
+            secret_bytes = base64.urlsafe_b64decode(padded_b64)
         except (binascii.Error, ValueError):
             secret_bytes = None
 
@@ -82,6 +85,13 @@ class OpenListAdminClient:
         self.totp_secret = totp_secret
         self.token: str | None = None
         self.session = requests.Session()
+        # [已修复] R3: 共享 Session + token 访问锁。同一 client 可能被
+        # AppService 主线程、refresh_service 线程、WebUI 路由线程并发使用；
+        # 无锁共享 session + 无锁读写 self.token 会引发 requests
+        # pool-full / 连接复用竞态与 token 中途替换。锁仅包 session.request、
+        # 401 重登、token 读写、login() 与 token 缓存文件写，不包业务解析。
+        # 使用 RLock：login() 会被 _do_request 在持锁状态下调用，需可重入。
+        self._http_lock = threading.RLock()
         self._fs_list_logged: set[str] = set()
         self._fs_list_logged_time: float = 0.0  # 上次清理时间
 
@@ -129,17 +139,20 @@ class OpenListAdminClient:
 
     def _save_token_to_cache(self, token: str) -> None:
         """将 Token 加密保存到本地文件"""
-        self.token = token
-        try:
-            import os
-            # 创建文件时设置权限为 0o600（仅所有者可读写）
-            fd = os.open(self.token_cache_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                # Token 加密存储（空 token 不加密）
-                encrypted_token = secret_manager.encrypt(token) if token else ""
-                json.dump({"token": encrypted_token, "ts": time.time()}, f)
-        except Exception as e:
-            log.warning(f"无法保存 Token 缓存: {e}")
+        # [已修复] R3: token 写 + .admin_token.json 文件写加锁，
+        # 避免并发 login 相互覆盖 token 缓存文件。RLock 可重入。
+        with self._http_lock:
+            self.token = token
+            try:
+                import os
+                # 创建文件时设置权限为 0o600（仅所有者可读写）
+                fd = os.open(self.token_cache_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    # Token 加密存储（空 token 不加密）
+                    encrypted_token = secret_manager.encrypt(token) if token else ""
+                    json.dump({"token": encrypted_token, "ts": time.time()}, f)
+            except Exception as e:
+                log.warning(f"无法保存 Token 缓存: {e}")
 
     def login(self, force: bool = False) -> bool:
         """登录获取 JWT。force=True 会无视缓存强制联网登录。
@@ -179,7 +192,10 @@ class OpenListAdminClient:
 
         try:
             # 登录是唯一不走 _do_request 的方法，避免死循环
-            res = self.session.post(url, json=payload, timeout=10)
+            # [已修复] R3: session.post 加锁（RLock 可重入，_do_request 持锁调用时安全），
+            # 防止并发登录与并发业务请求共享 session 触发连接竞态。
+            with self._http_lock:
+                res = self.session.post(url, json=payload, timeout=10)
 
             # 检查 HTTP 状态码
             if res.status_code != 200:
@@ -285,97 +301,103 @@ class OpenListAdminClient:
             self.last_error_type = "not_configured"
             return None
 
-        if not self.token:
-            if not self.login():
-                return None
+        # [已修复] R3: 整个 token 校验-注入-请求-401 重登关键区加锁。
+        # 多线程并发调用共享 session + 无锁读写 self.token 会引发连接复用
+        # 竞态、pool-full 及 token 中途被替换（请求 A 用旧 token 打到 401，
+        # 重登后 token 已变，请求 B 却读到了新 token）。锁内串行化，锁外
+        # 不含业务解析，串行化开销极小。
+        with self._http_lock:
+            if not self.token:
+                if not self.login():
+                    return None
 
-        # 注入 Header
-        headers = kwargs.get("headers", {})
-        # OpenList 的 JWT 认证不需要 "Bearer" 前缀，直接使用 token
-        headers["Authorization"] = self.token
-        headers["Content-Type"] = "application/json"
-        kwargs["headers"] = headers
+            # 注入 Header
+            headers = kwargs.get("headers", {})
+            # OpenList 的 JWT 认证不需要 "Bearer" 前缀，直接使用 token
+            headers["Authorization"] = self.token
+            headers["Content-Type"] = "application/json"
+            kwargs["headers"] = headers
 
-        try:
-            # 提取请求对象摘要（json payload 或 params），方便定位是哪个文件/路径
-            req_summary = ""
-            json_payload = kwargs.get("json")
-            if json_payload and isinstance(json_payload, dict):
-                # 取 path/dir/src_dir/names 等关键字段
-                keys_of_interest = ("path", "dir", "src_dir", "dst_dir", "names")
-                summary_parts = [f"{k}={json_payload[k]}" for k in keys_of_interest if k in json_payload]
-                if summary_parts:
-                    req_summary = " | " + ", ".join(summary_parts)
-            params = kwargs.get("params")
-            if params and isinstance(params, dict):
-                req_summary = " | params=" + str(params)
-            # /api/fs/list 日志精简：只输出一次路径扫描
-            _is_fs_list = url.endswith("/api/fs/list")
-            _fs_path = ""
-            if _is_fs_list and isinstance(json_payload, dict):
-                _fs_path = str(json_payload.get("path", "")).strip()
-
-            if _is_fs_list and _fs_path:
-                # 每 10 分钟清理一次日志缓存，防止无限增长
-                now = time.time()
-                if now - self._fs_list_logged_time > 600:  # 10 minutes
-                    self._fs_list_logged.clear()
-                    self._fs_list_logged_time = now
-
-                if _fs_path not in self._fs_list_logged:
-                    self._fs_list_logged.add(_fs_path)
-                    log.debug("[STRM] 扫描 %s", _fs_path)
-            else:
-                log.debug("[API请求] %s %s%s", method, url, req_summary)
-
-            res = self.session.request(method, url, **kwargs)
-
-            if not _is_fs_list:
-                log.debug("[API响应] 状态码=%s", res.status_code)
-
-            # 检查是否过期：HTTP 401 或业务 JSON code 401
-            should_retry = res.status_code == 401
-            if not should_retry:
-                try:
-                    if res.json().get("code") == 401:
-                        should_retry = True
-                except (ValueError, KeyError, AttributeError):
-                    pass
-
-            if should_retry:
-                log.warning("Token 已过期，尝试自动重新登录...")
-                if self.login(force=True):
-                    kwargs["headers"]["Authorization"] = self.token
-                    res = self.session.request(method, url, **kwargs)
-                    if not _is_fs_list:
-                        log.debug("[API重试] 重新登录后状态码=%s", res.status_code)
-                else:
-                    log.error("[API重试] 重新登录失败: %s", self.last_error_message or "未知错误")
-                    return res  # 登录失败，直接返回 401 结果
-
-            # 记录响应摘要（避免记录大响应体）
             try:
-                if res.status_code == 200:
-                    response_json = res.json()
-                    code = response_json.get('code', 'N/A')
-                    message = response_json.get('message', '')
-                    if not _is_fs_list:
-                        log.debug("[API结果] 业务码=%s, 消息=%s", code, message)
-            except (ValueError, KeyError, AttributeError):
-                if not _is_fs_list:
-                    log.debug("[API结果] 响应非JSON格式")
+                # 提取请求对象摘要（json payload 或 params），方便定位是哪个文件/路径
+                req_summary = ""
+                json_payload = kwargs.get("json")
+                if json_payload and isinstance(json_payload, dict):
+                    # 取 path/dir/src_dir/names 等关键字段
+                    keys_of_interest = ("path", "dir", "src_dir", "dst_dir", "names")
+                    summary_parts = [f"{k}={json_payload[k]}" for k in keys_of_interest if k in json_payload]
+                    if summary_parts:
+                        req_summary = " | " + ", ".join(summary_parts)
+                params = kwargs.get("params")
+                if params and isinstance(params, dict):
+                    req_summary = " | params=" + str(params)
+                # /api/fs/list 日志精简：只输出一次路径扫描
+                _is_fs_list = url.endswith("/api/fs/list")
+                _fs_path = ""
+                if _is_fs_list and isinstance(json_payload, dict):
+                    _fs_path = str(json_payload.get("path", "")).strip()
 
-            return res
-        except Exception as e:
-            # 使用错误翻译工具转换为易懂描述
-            user_msg = translate_network_error(e, f"请求 {method}")
-            err_name = type(e).__name__
-            if err_name in ("MissingSchema", "InvalidURL"):
-                log.error(
-                    "OpenList host 配置无效或未设置 scheme（应为 http:// 或 https:// 开头）")
-            else:
-                log.error(user_msg)
-            return None
+                if _is_fs_list and _fs_path:
+                    # 每 10 分钟清理一次日志缓存，防止无限增长
+                    now = time.time()
+                    if now - self._fs_list_logged_time > 600:  # 10 minutes
+                        self._fs_list_logged.clear()
+                        self._fs_list_logged_time = now
+
+                    if _fs_path not in self._fs_list_logged:
+                        self._fs_list_logged.add(_fs_path)
+                        log.debug("[STRM] 扫描 %s", _fs_path)
+                else:
+                    log.debug("[API请求] %s %s%s", method, url, req_summary)
+
+                res = self.session.request(method, url, **kwargs)
+
+                if not _is_fs_list:
+                    log.debug("[API响应] 状态码=%s", res.status_code)
+
+                # 检查是否过期：HTTP 401 或业务 JSON code 401
+                should_retry = res.status_code == 401
+                if not should_retry:
+                    try:
+                        if res.json().get("code") == 401:
+                            should_retry = True
+                    except (ValueError, KeyError, AttributeError):
+                        pass
+
+                if should_retry:
+                    log.warning("Token 已过期，尝试自动重新登录...")
+                    if self.login(force=True):
+                        kwargs["headers"]["Authorization"] = self.token
+                        res = self.session.request(method, url, **kwargs)
+                        if not _is_fs_list:
+                            log.debug("[API重试] 重新登录后状态码=%s", res.status_code)
+                    else:
+                        log.error("[API重试] 重新登录失败: %s", self.last_error_message or "未知错误")
+                        return res  # 登录失败，直接返回 401 结果
+
+                # 记录响应摘要（避免记录大响应体）
+                try:
+                    if res.status_code == 200:
+                        response_json = res.json()
+                        code = response_json.get('code', 'N/A')
+                        message = response_json.get('message', '')
+                        if not _is_fs_list:
+                            log.debug("[API结果] 业务码=%s, 消息=%s", code, message)
+                except (ValueError, KeyError, AttributeError):
+                    if not _is_fs_list:
+                        log.debug("[API结果] 响应非JSON格式")
+
+                return res
+            except Exception as e:
+                # 使用错误翻译工具转换为易懂描述
+                user_msg = translate_network_error(e, f"请求 {method}")
+                err_name = type(e).__name__
+                if err_name in ("MissingSchema", "InvalidURL"):
+                    log.error(
+                        "OpenList host 配置无效或未设置 scheme（应为 http:// 或 https:// 开头）")
+                else:
+                    log.error(user_msg)
+                return None
 
     # ================= 业务方法 (全量补全) =================
 

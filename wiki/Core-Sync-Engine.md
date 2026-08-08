@@ -30,7 +30,7 @@ AppService.__init__()
 │   ├── _fingerprint_locks_lock (按指纹锁的字典锁)
 │   ├── _fingerprint_locks (按指纹串行化)
 │   ├── _webdav_scan_logged (WebDAV 扫描日志去重集合)
-│   └── _refresh_lock (WebUI 媒体刷新锁)
+│   └── _refresh_lock (WebUI 媒体刷新锁，已迁移：由 WebUIServer 持有，见 server.py)
 ├── 解析 A/B/C 根路径
 ├── 创建 SyncService(self)
 └── 创建 SubtitleHandler(self)
@@ -298,7 +298,7 @@ WebUI 会话 token 绑定登录时客户端 IP：`_handle_login` 在登录时记
 | **周期审计** | `_maybe_run_full_audit` 周期窗口到达时 |
 | **手动审计** | `run_full_audit_now()` 手动触发时 |
 
-三者均调用 `complete_index_generation()` 推进 `_restoring_generation`，作为 B→C 恢复、幽灵保护等机制判断"当前代次"的依据。
+三者均调用 `complete_index_generation()` 推进 DB sync_control 的 index_generation 代次计数器，作为 B→C 恢复、幽灵保护等机制判断"当前代次"的依据。
 
 ### 三层验证清理
 
@@ -322,7 +322,7 @@ WebUI 会话 token 绑定登录时客户端 IP：`_handle_login` 在登录时记
 ### 锁机制
 
 - **`get_webdav_lock(namespace)`** — 命名空间隔离的 WebDAV 操作锁，防止不同引擎/路径的并发冲突。
-- **`_refresh_lock`** — 刷新周期互斥锁，防止并发刷新。
+- **`_refresh_lock`** — 刷新周期互斥锁，防止并发刷新（已迁移：由 WebUIServer 持有，见 server.py）。
 - **`get_fingerprint_lock(fingerprint)`** — 按指纹创建/复用锁，串行化同一指纹的并发创建操作。
 
 ### 安全方法

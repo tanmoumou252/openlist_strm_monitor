@@ -77,10 +77,16 @@ document.addEventListener('DOMContentLoaded', () => {
   }, 0);
 
   // 检查管理员密码状态（必须在 router() 之前完成，确保 auth guard 正确）
-  fetch('/api/admin/status').then(r => r.json()).then(d => {
+  // [已修复] N2 main.js 引导 fetch 无超时 + fail-open
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+  fetch('/api/admin/status', { signal: controller.signal }).then(r => r.json()).then(d => {
+    clearTimeout(timeoutId);
     setHasPassword(d.has_password);
   }).catch(() => {
-    setHasPassword(false);
+    clearTimeout(timeoutId);
+    setHasPassword(null);
   }).finally(() => {
     // 密码状态就绪后，再激活 hashchange 路由，避免 auth guard 竞争条件
     _bindHashchange();

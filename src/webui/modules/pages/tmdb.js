@@ -180,6 +180,8 @@ export async function renderTmdb(el, params) {
       _fetchPromises[apiType] = null;
       const retryUrl = `/api/tmdb/watchlist/${apiType}?all=1`;
       data = await api(retryUrl);
+      // [已修复] R9 tmdb.js await 后缺渲染护栏
+      if (isStale()) return;
       _setCachedWatchlist(apiType, data);
     }
   } else {
@@ -190,6 +192,8 @@ export async function renderTmdb(el, params) {
     data = await promise.finally(() => {
       if (_fetchPromises[apiType] === promise) _fetchPromises[apiType] = null;
     });
+    // [已修复] R9 tmdb.js await 后缺渲染护栏
+    if (isStale()) return;
     _setCachedWatchlist(apiType, data);
   }
   let items = data.results || [];
@@ -199,6 +203,8 @@ export async function renderTmdb(el, params) {
   if (q) {
     try {
       const filtered = await api(`/api/tmdb/watchlist/${apiType}?all=1&q=${encodeURIComponent(q)}`);
+      // [已修复] R9 tmdb.js await 后缺渲染护栏
+      if (isStale()) return;
       items = filtered.results || [];
     } catch (e) {
       // 后端搜索失败时回退到完整列表（不再做前端内存过滤）
@@ -276,7 +282,8 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
     const title = item.title || item.name || 'N/A';
     const originalTitle = item.original_title || item.original_name || '';
     const date = item.release_date || item.first_air_date || '';
-    const rating = item.vote_average || 0;
+    // [已修复] R17 tmdb.js rating.toFixed(1) 假设数值
+    const rating = Number(item.vote_average) || 0;
     const overview = item.overview || '';
     const posterPath = item.poster_path || '';
     const tmdbId = item.id;
@@ -419,6 +426,10 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
         
         if (response.success) {
           showToast('收录状态已更新', 'success');
+          // [已修复] R10 tmdb.js 手动覆盖/恢复自动不清缓存
+          if (_tmdbCache[apiType]) {
+            _tmdbCache[apiType] = null;
+          }
           // B'.2: 局部刷新：通过 hash 跳转触发 SPA 重新渲染当前页（与 clear 分支一致）
           const cur = window.location.hash;
           window.location.hash = '#tmdb';
@@ -449,6 +460,10 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
         });
         if (response.success) {
           showToast('人工覆盖已清除，将在下次刷新时重新计算', 'success');
+          // [已修复] R10 tmdb.js 手动覆盖/恢复自动不清缓存
+          if (_tmdbCache[apiType]) {
+            _tmdbCache[apiType] = null;
+          }
           // 局部刷新：通过 hash 跳转触发 SPA 重新渲染当前页
           const cur = window.location.hash;
           window.location.hash = '#tmdb';

@@ -197,13 +197,15 @@ class SyncService:
                     to_update.append((webdav_path, parent_webdav_path, now, local_path))
 
         # 执行 INSERT
+        # [已修复] R7: bulk 批量新增分支同时写 last_verified_at=now，
+        # 与单条 upsert 路径一致，避免启动全量同步新增记录 last_verified_at 恒为 0。
         if to_insert:
             conn.executemany(
                 """
-                INSERT INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO a_strm_files(local_path, webdav_path, parent_webdav_path, updated_at, last_verified_at)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                to_insert,
+                [(lp, wp, pp, now, now) for lp, wp, pp, _ in to_insert],
             )
 
         # 执行 UPDATE
@@ -417,7 +419,10 @@ class SyncService:
                 # 分批提交模式：每 1000 条提交一次，释放锁
                 if not use_bulk and batch_count >= BATCH_COMMIT_SIZE:
                     conn.commit()
-                    _flush_dedup_queue()
+                    # [已修复] R1: 移除此处的 _flush_dedup_queue() 调用。
+                    # 非 bulk 模式下此处位于 rw_lock.write_locked() 内，flush 会调
+                    # ensure_single_visible_instance → read_locked，因 _writers_active>0
+                    # 永久 wait → 全进程死锁。flush 延迟到锁外统一执行。
                     batch_count = 0
                     logging.debug("[初始化] 分批提交: 已处理 %d 条", idx)
 
@@ -437,8 +442,9 @@ class SyncService:
             # 提交剩余批次
             if batch_count > 0:
                 conn.commit()
-            # 单事务模式：bulk commit 后统一去重
-            _flush_dedup_queue()
+            # [已修复] R1: 从锁内移除 _flush_dedup_queue()。flush 在下方
+            # try/finally 之后统一调用（锁外），避免 rw_lock 写锁内调
+            # read_locked 造成自死锁。
 
         try:
             # [已修复] Task 1: use_bulk=False 进入 rw_lock 保护的标准写路径
@@ -461,6 +467,12 @@ class SyncService:
             # 清空后下次调用重新预加载，缓存不会残留跨调用。
             self._cache_ghost = None
             self._cache_b_fp = None
+
+        # [已修复] R1: 统一在锁外执行去重 flush。此时 rw_lock 写锁已释放，
+        # ensure_single_visible_instance 的 read_locked 可正常获取；flush 直查 DB
+        # 不依赖 L1 缓存，安全。保留 use_bulk 语义不变（use_bulk=True 启动路径
+        # 数据已 commit 可见，同样安全）。
+        _flush_dedup_queue()
 
         t_pass2_elapsed = time.time() - t_pass2
         c = counters
@@ -701,15 +713,18 @@ class SyncService:
 
         if old_row is None:
             # 新增记录
+            # [已修复] R7: bulk 新增分支同时写 last_verified_at=now，
+            # 与单条 upsert 路径(`upsert_b`)一致，避免启动全量同步新增
+            # B 记录 last_verified_at 恒为 0。
             conn.execute(
                 """
                 INSERT INTO b_strm_files(
                     local_path, webdav_path, parent_webdav_path,
-                    source_a_path, fingerprint, status, updated_at, mapping_id
-                ) VALUES (?, ?, ?, ?, ?, 'valid', ?, ?)
+                    source_a_path, fingerprint, status, updated_at, mapping_id, last_verified_at
+                ) VALUES (?, ?, ?, ?, ?, 'valid', ?, ?, ?)
                 """,
                 (local_path, webdav_path, parent_webdav_path,
-                 source_a_path, fingerprint, now, mapping_id),
+                 source_a_path, fingerprint, now, mapping_id, now),
             )
             # 插入 FTS
             new_row = conn.execute(

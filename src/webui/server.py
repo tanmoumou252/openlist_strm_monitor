@@ -24,6 +24,7 @@ import logging
 import os
 import random
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -288,6 +289,16 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # 静默默认日志
 
+    def setup(self):
+        # [已修复] R2: 慢速 body 耗尽线程（slowloris）。
+        # 原实现 ThreadingHTTPServer 无 socket 超时，/api/login 又在白名单
+        # 未鉴权，恶意客户端可只发 Content-Length 不发送 body 挂起线程池。
+        # 为连接设 30s 超时：超时后 rfile.read 抛 socket.timeout/OSError，
+        # 由调用方捕获并返回 408/关闭连接，不再永久占用线程。
+        BaseHTTPRequestHandler.setup(self)
+        if self.connection is not None:
+            self.connection.settimeout(30)
+
     # ----------------------------------------------------------
     # 安全
     # ----------------------------------------------------------
@@ -401,6 +412,8 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         # [已修复] S4: 已添加 X-Content-Type-Options: nosniff + X-Frame-Options: DENY
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
+        # [已修复] R4: API JSON 响应禁缓存，防止敏感配置/状态被浏览器或代理缓存
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:
@@ -679,6 +692,18 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             return
         try:
             body = self.rfile.read(content_length) if content_length else b"{}"
+        except (socket.timeout, TimeoutError):
+            # [已修复] R2: 慢速 body（slowloris）超时 → 408 Request Timeout，
+            # 并关闭连接释放线程，避免未鉴权白名单路径长期挂线程。
+            try:
+                self._send_json({"error": "request body read timed out"}, 408)
+            except Exception:
+                pass
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            return
         except Exception:
             self._send_json({"error": "request body read failed"}, 400)
             return

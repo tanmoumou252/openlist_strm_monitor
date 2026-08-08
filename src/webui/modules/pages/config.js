@@ -18,6 +18,8 @@ export async function renderConfig(el, params) {
   if (cfg.tmdb_proxy_configured) {
     try {
       const tmdbCfg = await api('/api/webui/config/tmdb');
+      // [已修复] N1 config.js 第二个 await 后缺渲染护栏
+      if (isStale()) return;
       if (tmdbCfg && tmdbCfg.config && typeof tmdbCfg.config.proxy_http === 'string') {
         cfg.tmdb_proxy_http = tmdbCfg.config.proxy_http;
       } else {

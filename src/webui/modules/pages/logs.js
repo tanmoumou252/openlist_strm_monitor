@@ -158,7 +158,8 @@ async function _fetchAndRenderLogs(el) {
         // N0/T9: 切换标签时自增请求代际，使在途旧响应作废
         _logsGeneration++;
         currentLogType = newType;
-        _fetchAndRenderLogs(el);
+        // [已修复] R13 logs.js 标签切换未 catch
+        _fetchAndRenderLogs(el).catch(e => showToast('加载失败: ' + e.message, 'error'));
       }
     });
   }

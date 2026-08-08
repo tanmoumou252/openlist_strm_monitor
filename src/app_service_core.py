@@ -254,6 +254,42 @@ class AppService:
             if str(getattr(m, "mapping_id", "")).strip()
         })
 
+    def _refresh_mapping_snapshot(self) -> None:
+        """OpenList 热更新后从当前 config 重新推导 mapping 快照。
+
+        [已修复] N3: 热更新只刷新了 config，未同步 AppService 内存中的
+        a_b_mappings/a_roots/_a_to_b_map/_mapping_version，导致引擎（血统快照、
+        清理、迁移）仍用旧路径/旧 mapping_version。原子更新：全部在同一调用内
+        从 config 重新推导，任一步失败不产生半更新状态。
+        """
+        config = self.config
+        a_b_mappings = getattr(config, "a_b_mappings", [])
+        new_mappings = (
+            a_b_mappings if isinstance(a_b_mappings, list) else [])
+        new_roots = [
+            normalize_local_root(m.a_root) for m in new_mappings]
+        new_a_to_b = {
+            str(normalize_local_root(m.a_root)): normalize_local_root(m.b_root)
+            for m in new_mappings
+            if getattr(m, "mapping_id", "")
+            and getattr(m, "a_root", "")
+            and getattr(m, "b_root", "")
+        }
+        new_version = mapping_version(new_mappings, self.c_root)
+        # 原子替换：先本地计算完，再一次性赋值，避免中途异常留下不一致状态。
+        self.a_b_mappings = new_mappings
+        self.a_roots = new_roots
+        self._a_to_b_map = new_a_to_b
+        self._mapping_version = new_version
+        # 与启动路径一致：新 mapping_version 持久化，供血统快照校验。
+        try:
+            self.db.set_mapping_version(new_version)
+        except Exception as e:
+            logging.warning("[热更新] mapping_version 持久化失败: %s", e)
+        logging.info(
+            "[热更新] mapping 快照已刷新: %d 组映射, mapping_version=%s",
+            len(new_mappings), new_version)
+
     # b_root 不作为生产同步、清理、迁移或血统推导的 fallback。
     # 保留只读属性以兼容外部旧调用，但调用方必须先解析唯一 mapping。
     @property
@@ -2298,6 +2334,9 @@ class AppService:
         return False
 
     def _b_file_score(self, path: str) -> tuple:
+        # [设计取舍] N8: match_count 升序偏好少匹配=更多用户改动=优先保留
+        # （已验证设计意图）。返回值若 match_count 大则排在后面，去重时
+        # 优先保留经过用户重命名（与云端 WebDAV 路径差异大）的实例。
         p = Path(path)
         name = p.name.lower()
         is_standard = self._is_standard_media_name(name)
@@ -3031,18 +3070,18 @@ class AppService:
         cloud_path = webdav_path
         action = self.config.behavior.action
         logging.info("[云盘操作] 路径=%s, 动作=%s", cloud_path, action)
-        
+
         if action == "MOVE":
             trash_path = self._build_trash_path(cloud_path)
             logging.info("[回收站] 目标=%s", trash_path)
             if not trash_path:
                 logging.error("[回收站] 无法构建路径: %s", cloud_path)
                 return False
-            
+
             if not self._ensure_trash_dirs(trash_path):
                 logging.error("[回收站] 创建目录失败: %s", trash_path)
                 return False
-            
+
             logging.debug("[云盘操作] 执行移动: %s -> %s", cloud_path, trash_path)
             ok = self.admin_api.move(cloud_path, trash_path)
             if not ok:
@@ -3053,17 +3092,28 @@ class AppService:
                 self.admin_api.invalidate_check_exists_cache(cloud_path)
                 self.admin_api.invalidate_check_exists_cache(trash_path)
             return ok
-        
-        # DELETE 操作
-        logging.debug("[云盘操作] 执行删除: %s (action=%s)", cloud_path, action)
-        ok = self.admin_api.remove(cloud_path)
-        if not ok:
-            logging.error("[云盘操作] 删除失败: %s", cloud_path)
-        else:
-            logging.info("[云盘操作] 删除成功: %s", cloud_path)
-            # [已修复] N-P1-2: 写操作后失效 check_exists 缓存，避免陈旧 True
-            self.admin_api.invalidate_check_exists_cache(cloud_path)
-        return ok
+
+        # [已修复] N4 (DEC-2): 只有显式 action == "DELETE" 才放行硬删除。
+        # 原实现把所有非 MOVE 值（含小写 "move"/"delete"、拼写错误、None 等）
+        # 一律落入 DELETE 分支，属 fail-open。未知/异常 action 一律 fail-closed：
+        # 返回 False + 高声告警，绝不执行不可逆的云端删除。
+        if action == "DELETE":
+            logging.debug("[云盘操作] 执行删除: %s (action=%s)", cloud_path, action)
+            ok = self.admin_api.remove(cloud_path)
+            if not ok:
+                logging.error("[云盘操作] 删除失败: %s", cloud_path)
+            else:
+                logging.info("[云盘操作] 删除成功: %s", cloud_path)
+                # [已修复] N-P1-2: 写操作后失效 check_exists 缓存，避免陈旧 True
+                self.admin_api.invalidate_check_exists_cache(cloud_path)
+            return ok
+
+        # 未知 action：fail-closed，软性告警，不硬删除。
+        logging.error(
+            "[云盘操作] ⚠ 未知/非法 action=%r，已拒绝执行。"
+            "仅支持 MOVE（回收站）与 DELETE（硬删除）。路径未做任何云端变更: %s",
+            action, cloud_path)
+        return False
 
     def migrate_b_under_root_to_c(self, root_path: str) -> None:
         root_path = root_path.rstrip("/") or "/"

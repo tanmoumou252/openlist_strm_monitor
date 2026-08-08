@@ -11,6 +11,7 @@ WebUI 路由与处理器模块（合并自 webui_routes.py + webui_handlers.py�
 from __future__ import annotations
 
 import html as html_module
+import ipaddress
 import json
 import logging
 import datetime as _dt
@@ -44,27 +45,22 @@ if TYPE_CHECKING:
 # ============================================================
 
 def _is_lan_ip(ip: str) -> bool:
-    """判断 IP 是否为局域网地址（含 localhost）"""
+    """判断 IP 是否为局域网地址（含 localhost 与局域网 IPv6）。
+
+    [已修复] R15: 改用 ipaddress.ip_address().is_private，正确识别局域网 IPv6
+    （如 fd00::/8、fe80::/10 链路本地），避免 RFC1918 手动匹配导致 IPv6 地址
+    被误判为非局域网而 403 拒绝。
+    """
     if ip in ("127.0.0.1", "::1", "localhost"):
         return True
-    if ip.startswith("::ffff:"):
-        ip = ip.rsplit(":", 1)[-1]
-    parts = ip.split(".")
-    if len(parts) != 4:
-        return False
     try:
-        a, b = int(parts[0]), int(parts[1])
+        addr = ipaddress.ip_address(ip.split("%")[0])
     except ValueError:
         return False
-    if a == 10:
-        return True
-    if a == 172 and 16 <= b <= 31:
-        return True
-    if a == 192 and b == 168:
-        return True
-    if a == 169 and b == 254:
-        return True
-    return False
+    # 兼容 IPv4-mapped IPv6（::ffff:192.168.1.5）
+    if addr.version == 6 and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    return addr.is_private or addr.is_loopback or addr.is_link_local
 
 def _human_size(size: int) -> str:
     """人类可读的文件大小"""
@@ -464,7 +460,13 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 "original_name") or ""
             date = item.get("release_date") or item.get("first_air_date") or ""
             # [已修复] Z-1: 处理 vote_average=None，避免 f"{None:.1f}" 抛 TypeError
-            rating = item.get("vote_average") or 0
+            # [已修复] N6: 强制转 float，防止 vote_average 为字符串（如 "8.5"）
+            # 时 f"{rating:.1f}" 抛 TypeError 导致整次 CSV 导出崩溃。
+            try:
+                rating = float(item.get("vote_average")) \
+                    if item.get("vote_average") is not None else 0.0
+            except (TypeError, ValueError):
+                rating = 0.0
             status_label = {
                 "in": "已收录",
                 "out": "待看",
@@ -1275,6 +1277,15 @@ def _hot_reload_openlist_config(webui_server) -> None:
             logging.warning("[HotReload] 重新加载 STRM 存储映射失败: %s", exc)
 
         app_service = getattr(webui_server, "_app_service", None)
+        # [已修复] N3: 热更新后同步刷新 AppService 内存中的 mapping 快照
+        # (a_b_mappings/a_roots/_a_to_b_map/_mapping_version)，否则引擎血统
+        # 校验、清理、迁移仍用旧路径/旧 mapping_version。c_root 为属性实时读取
+        # config.paths，无需额外刷新。
+        if app_service is not None and hasattr(app_service, "_refresh_mapping_snapshot"):
+            try:
+                app_service._refresh_mapping_snapshot()
+            except Exception as exc:
+                logging.warning("[HotReload] mapping 快照刷新失败: %s", exc)
         refresh_service = getattr(app_service, "refresh_service", None)
         if refresh_service is not None:
             refresh_service.reconfigure()
@@ -1861,8 +1872,23 @@ def _handle_restart_webui(handler, webui_server) -> None:
 
             # 3. 重启 HTTP 服务
             webui_server.stop()
-            webui_server.start()
-            logging.info("[Restart] HTTP 服务重启完成")
+            # [已修复] R6: start() 对端口占用/绑定失败只记录日志并返回（_server 仍为
+            # None），此前 _do_restart 不校验导致 WebUI 静默永久离线。重试绑定并高声告警。
+            for attempt in range(1, 4):
+                webui_server.start()
+                if webui_server._server is not None:
+                    break
+                logging.error(
+                    "[Restart] HTTP 服务第 %d 次绑定失败（端口可能被占用），"
+                    "2 秒后重试...", attempt)
+                time.sleep(2)
+            if webui_server._server is not None:
+                logging.info("[Restart] HTTP 服务重启完成")
+            else:
+                logging.error(
+                    "[Restart] ⚠ HTTP 服务重启失败：端口 %s 无法绑定，WebUI 当前离线。"
+                    "请手动关闭占用进程或修改端口后运行 server.py 恢复。",
+                    getattr(webui_server, "_port", "?"))
         except Exception as e:
             logging.error("[Restart] 重启失败: %s", e)
     threading.Thread(target=_do_restart, daemon=True).start()
@@ -2285,6 +2311,11 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
         password_ok = verify_password(password, stored)
         if not password_ok:
             with _login_attempts_lock:
+                # [已修复] R5: 重新读取最新失败记录再过滤追加，避免用密码校验前
+                # 读取的陈旧 attempts 覆盖并发线程刚写入的失败记录（丢失计数
+                # → 攻击者可绕过 5 次锁定）。读-过滤-追加-写回全程原子。
+                attempts = _login_attempts.get(client_ip, [])
+                attempts = [t for t in attempts if now - t < _LOGIN_LOCKOUT_SECONDS]
                 attempts.append(now)
                 _login_attempts[client_ip] = attempts
             handler._send_json({"error": "密码错误"}, 401)
@@ -3018,7 +3049,9 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
 
     try:
         result = _do_media_refresh(app_service, area, media_name, mapping_id=mapping_id)
-        handler._send_json(result)
+        # [已修复] N5: 业务失败返回 400 而非 200。前端 api.js 正确提取 err.error，
+        # 具体错误信息不丢失；但 HTTP 状态码此前恒为 200，掩盖了刷新失败。
+        handler._send_json(result, 200 if result.get("ok") else 400)
     except Exception as e:
         logging.exception("[Refresh] 刷新媒体 %s 失败: %s", media_name, e)
         handler._send_json({"error": "internal_error", "status": "error"}, 500)
@@ -3371,8 +3404,18 @@ def handle_download_log_api(handler, params: dict) -> None:
                     break
                 handler.wfile.write(chunk)
     except Exception as e:
+        # [已修复] N7: 流式写阶段 headers 已发送后不得再调 _send_json（会抛
+        # "headers already sent" 二次异常）。仅记录日志并关闭连接，客户端收到
+        # 截断的 body 即可判断失败。
         logging.exception("[WebUI] 下载日志文件失败: %s", e)
-        handler._send_json({"error": "internal_error"}, 500)
+        try:
+            handler.wfile.close()
+        except Exception:
+            pass
+        try:
+            handler.connection.close()
+        except Exception:
+            pass
 
 def handle_config_api(handler) -> None:
     """处理 GET /api/config — 归一化配置字段，兼容 WebUIConfig 和 AppConfig
