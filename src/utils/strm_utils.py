@@ -42,10 +42,10 @@ def parse_strm_content(content: str) -> str | None:
         if path.startswith("/d/"):
             path = "/" + path[3:]
 
-        # M7: 形如 http://host?sign=xxx 的内容 parsed.path 为空，
+        # 形如 http://host?sign=xxx 的内容 parsed.path 为空，
         # canonicalize_webdav_path 会抛 ValueError，而 read_strm_webdav_path
         # 的捕获元组不含 ValueError。畸形但可读的 STRM 应返回 None 而非崩溃。
-        # [已修复] R8: 用 not path.strip() 兜底纯空白路径（如 %20 编码空格），
+        # 用 not path.strip() 兜底纯空白路径（如 %20 编码空格），
         # 避免 canonicalize_webdav_path 对空白-only 路径抛 ValueError。
         if not path.strip():
             return None
@@ -124,7 +124,7 @@ def read_strm_webdav_path(file_path: str | Path) -> str | None:
         with open(file_path, "r", encoding="utf-8") as f:
             return parse_strm_content(f.read())
     except (FileNotFoundError, OSError, PermissionError, UnicodeDecodeError, ValueError):
-        # [已修复] R8: 捕获 ValueError（canonicalize_webdav_path 对空白/畸形
+        # 捕获 ValueError（canonicalize_webdav_path 对空白/畸形
         # 路径抛出），返回 None 而非崩溃。
         # 如果文件不存在、无法读取或包含非法字节，返回 None 而不是崩溃
         return None
@@ -138,5 +138,5 @@ def escape_like(value: str) -> str:
 
     本函数已转义全部 SQLite LIKE 元字符，勿添加 [] 转义。
     """
-    # [设计取舍] #12: LIKE 转义已完整（[] 非 SQLite 语法）
+    # LIKE 转义已完整（[] 非 SQLite 语法）
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

@@ -2,8 +2,8 @@
 """
 WebUI 管理员密码重置脚本。
 
-# [AUDIT-NOTE] 已接受：本地交互式维护 CLI。密码走 argv、手写参数解析、cwd rglob 回退
-# 对本地管理工具可接受。除非用户要求，不迁移 argparse/getpass。
+本地交互式维护 CLI：密码经 argv 传入，手写参数解析（不接受任何 - 前缀标志），
+数据库路径固定在项目根。用法: python reset_admin.py [新密码]
 """
 
 import os
@@ -29,9 +29,11 @@ def find_db_path() -> str:
 
 
 def main():
-    # [已修复] P1-3: 拒绝 --db 参数，数据库路径固定在项目根
-    if any(a.startswith("--db=") for a in sys.argv[1:]):
-        print("错误: --db 参数已移除，数据库路径固定在项目根 tmdb_watchlist.db")
+    # M18: 拒绝任何未知的 - 前缀标志（如 --db/--xxx），逐字参数仅允许密码
+    unknown = [a for a in sys.argv[1:] if a.startswith("-")]
+    if unknown:
+        print(f"错误: 未知参数: {' '.join(unknown)}")
+        print("本脚本不接受命令行标志。用法: python reset_admin.py [新密码]")
         sys.exit(1)
     db_path = find_db_path()
     

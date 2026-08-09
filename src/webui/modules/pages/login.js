@@ -31,7 +31,7 @@ export async function renderLogin(el) {
     localStorage.removeItem('session_token');
   }
 
-  // [已修复] R16 login.js 网络错误误显"未设置管理员密码"
+  // 网络错误误显"未设置管理员密码"
   if (!fetchSucceeded) {
     el.innerHTML = `
       <div style="display:flex;align-items:center;justify-content:center;min-height:60vh">
@@ -115,7 +115,7 @@ export async function renderLogin(el) {
   }
 
   async function doLogin() {
-    // [已修复] N-P2-6: 不 trim 密码（含首尾空格的密码应原样发送），仅判空
+    // 不 trim 密码（含首尾空格的密码应原样发送），仅判空
     const password = input.value;
     if (!password || !password.trim()) {
       showError('请输入管理员密码');
@@ -127,7 +127,7 @@ export async function renderLogin(el) {
     errorEl.style.display = 'none';
 
     try {
-      // [已修复] R14 login.js 裸 fetch 无超时
+      // 裸 fetch 无超时
       const loginController = new AbortController();
       const loginTimeoutId = setTimeout(() => loginController.abort(), 10000);
       let resp;

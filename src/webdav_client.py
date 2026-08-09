@@ -52,13 +52,16 @@ def _generate_totp(secret: str, interval: int = 30, digits: int = 6) -> str:
     # 回退到 base64
     if secret_bytes is None:
         try:
-            # M8: 无 padding 的 base64 密钥（如 URL 安全 base64 转换而来）会抛
+            # 无 padding 的 base64 密钥（如 URL 安全 base64 转换而来）会抛
             # binascii.Error 并被吞掉。先补全 padding 再解码。
-            # [已修复] R18: 注释宣称支持 URL 安全 base64，但原实现用
-            # base64.b64decode 无法解析 '-'/'_' 字符。改用 urlsafe_b64decode
-            # 使注释与实现一致（同时兼容标准 base64 与 URL 安全变体）。
-            padded_b64 = secret + "=" * ((4 - len(secret) % 4) % 4)
-            secret_bytes = base64.urlsafe_b64decode(padded_b64)
+            # URL 安全 base64 的 '-'/'_' 先规范化为 '+'/'/'，再用
+            # b64decode(validate=True) 严格校验非法字符。不能用
+            # urlsafe_b64decode——它不接受 validate 参数，且默认宽松解码会把
+            # 非法字符（如 "invalid-secret!!!" 的 '!'）静默忽略，导致坏密钥
+            # 被当作有效 secret 解码出垃圾字节而不报错。
+            normalized = secret.replace("-", "+").replace("_", "/")
+            padded_b64 = normalized + "=" * ((4 - len(normalized) % 4) % 4)
+            secret_bytes = base64.b64decode(padded_b64, validate=True)
         except (binascii.Error, ValueError):
             secret_bytes = None
 
@@ -85,7 +88,7 @@ class OpenListAdminClient:
         self.totp_secret = totp_secret
         self.token: str | None = None
         self.session = requests.Session()
-        # [已修复] R3: 共享 Session + token 访问锁。同一 client 可能被
+        # 共享 Session + token 访问锁。同一 client 可能被
         # AppService 主线程、refresh_service 线程、WebUI 路由线程并发使用；
         # 无锁共享 session + 无锁读写 self.token 会引发 requests
         # pool-full / 连接复用竞态与 token 中途替换。锁仅包 session.request、
@@ -96,7 +99,7 @@ class OpenListAdminClient:
         self._fs_list_logged_time: float = 0.0  # 上次清理时间
 
         # True=权威存在/不存在；None=列表不可信（fail-closed，不得当「不存在」）
-        # [已修复] Task 2: 只缓存 True；False/None 不缓存（避免陈旧 False 误导清理）
+        # 只缓存 True；False/None 不缓存（避免陈旧 False 误导清理）
         self._check_exists_cache: dict[str, tuple[float, bool]] = {}
         self._check_exists_cache_ttl: int = 60  # 缓存 60 秒
         self._check_exists_cache_max: int = 5000  # 缓存容量上限，超出时淘汰最旧项
@@ -139,7 +142,7 @@ class OpenListAdminClient:
 
     def _save_token_to_cache(self, token: str) -> None:
         """将 Token 加密保存到本地文件"""
-        # [已修复] R3: token 写 + .admin_token.json 文件写加锁，
+        # token 写 + .admin_token.json 文件写加锁，
         # 避免并发 login 相互覆盖 token 缓存文件。RLock 可重入。
         with self._http_lock:
             self.token = token
@@ -192,7 +195,7 @@ class OpenListAdminClient:
 
         try:
             # 登录是唯一不走 _do_request 的方法，避免死循环
-            # [已修复] R3: session.post 加锁（RLock 可重入，_do_request 持锁调用时安全），
+            # session.post 加锁（RLock 可重入，_do_request 持锁调用时安全），
             # 防止并发登录与并发业务请求共享 session 触发连接竞态。
             with self._http_lock:
                 res = self.session.post(url, json=payload, timeout=10)
@@ -301,7 +304,7 @@ class OpenListAdminClient:
             self.last_error_type = "not_configured"
             return None
 
-        # [已修复] R3: 整个 token 校验-注入-请求-401 重登关键区加锁。
+        # 整个 token 校验-注入-请求-401 重登关键区加锁。
         # 多线程并发调用共享 session + 无锁读写 self.token 会引发连接复用
         # 竞态、pool-full 及 token 中途被替换（请求 A 用旧 token 打到 401，
         # 重登后 token 已变，请求 B 却读到了新 token）。锁内串行化，锁外
@@ -529,13 +532,10 @@ class OpenListAdminClient:
 
     # 4. 创建目录 (FS API)
     def _invalidate_check_exists_cache(self, path: str) -> None:
-        """[已修复] Task 2 + N-P1-2: 写操作后失效相关缓存（含父路径）。"""
-        with self._check_exists_cache_lock:
-            normalized = path.rstrip("/") if path else "/"
-            self._check_exists_cache.pop(normalized, None)
-            # 同时失效父路径缓存（移动/删除可能影响父目录列表）
-            parent = os.path.dirname(normalized) or "/"
-            self._check_exists_cache.pop(parent, None)
+        """统一调强版本 invalidate_check_exists_cache，
+        失效指定路径及其所有祖先目录，避免 move/remove 等写操作后祖先目录
+        check_exists 命中至多 60 秒的陈旧 True 缓存。"""
+        self.invalidate_check_exists_cache(path)
 
     def mkdir(self, path: str) -> bool:
         """创建目录。
@@ -671,7 +671,7 @@ class OpenListAdminClient:
         分页 per_page=100（对齐 OpenAPI maximum 与 Issue7 列表契约）。
         """
         now = time.time()
-        # [已修复] Task 2: 统一 key 规范化（strip 尾斜杠），避免 /path 与 /path/ 双 key
+        # 统一 key 规范化（strip 尾斜杠），避免 /path 与 /path/ 双 key
         cache_key = path.rstrip("/") if path else "/"
         with self._check_exists_cache_lock:
             if cache_key in self._check_exists_cache:
@@ -733,7 +733,7 @@ class OpenListAdminClient:
                 log.error("check_exists 异常: %s - %s", path, e)
                 result = None
 
-        # [已修复] Task 2: 只缓存 True（权威存在）；False/None 不缓存（避免陈旧 False 误导清理）
+        # 只缓存 True（权威存在）；False/None 不缓存（避免陈旧 False 误导清理）
         if result is True:
             with self._check_exists_cache_lock:
                 self._check_exists_cache[cache_key] = (now, result)
@@ -747,7 +747,7 @@ class OpenListAdminClient:
     def invalidate_check_exists_cache(self, path: str) -> None:
         """使 check_exists 缓存失效。
         
-        [已修复] N-P1-2: 写操作后失效 check_exists 缓存，避免陈旧 True
+        写操作后失效 check_exists 缓存，避免陈旧 True
         
         清除指定路径及其所有父路径的缓存条目，确保写操作（MOVE/DELETE/mkdir）
         后的缓存一致性。
@@ -757,18 +757,21 @@ class OpenListAdminClient:
         """
         if not path:
             return
-            
+
         keys_to_remove: list[str] = []
-        
-        # 生成该路径及其所有父路径的缓存键
-        path = path.rstrip("/")
-        while path:
-            keys_to_remove.append(path)
-            parent = "/".join(path.split("/")[:-1])
-            if parent == path:
+
+        # 用 os.path.dirname 逐级向上生成路径及所有祖先的缓存键。
+        # 原实现用 "/".join(path.split("/")[:-1])，在根 "/" 处会卡死（parent="",
+        # path=parent or "/", 永远等于 "/"，无限循环）。dirname("/") == "/" 为
+        # 终止条件，安全。
+        norm = path.rstrip("/") or "/"
+        while True:
+            keys_to_remove.append(norm)
+            parent = os.path.dirname(norm)
+            if parent == norm:
                 break
-            path = parent or "/"
-        
+            norm = parent or "/"
+
         with self._check_exists_cache_lock:
             for key in keys_to_remove:
                 if key in self._check_exists_cache:

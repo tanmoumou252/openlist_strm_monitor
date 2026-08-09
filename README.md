@@ -181,7 +181,7 @@ flowchart TD
 | **番剧** | 路径含"番剧/anime"等关键词，或STRM/文件名可提取季集 | `Season XX/` 子目录 | `S01E01.forced.zho.简体.ass` |
 
 - 字幕语言自动识别：支持 `.sc`、`.chs`、`.tc`、`.cht` 等后缀标识，以及"简中""繁体"等关键词
-- 多语种时简中优先标记 `forced`
+- 所有字幕统一加 `.forced.` 前缀（与语言无关），识别到语言时追加 `.代码.中文标签`，未识别时回退 `.und`
 - 无法识别语言时回退为 `.forced.und`（undetermined）
 - 使用数据库 `subtitles` 表追踪处理状态，避免重复处理
 
@@ -245,7 +245,7 @@ python src/webui/server.py
 # 全套测试
 python -m pytest src/tests/ -v
 
-# 日志风险模拟专项测试（Issue1–Issue8，55+ 个测试）
+# 日志风险模拟专项测试（Issue1–Issue8，90 个测试）
 python -m pytest src/tests/test_log_issues_simulation.py -v
 
 # ##26 全新用户模拟 E2E（七步全链路正向测试）

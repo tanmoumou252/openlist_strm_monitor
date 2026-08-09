@@ -141,6 +141,7 @@ PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
 | `mapping_version` | mapping 配置 + C 根的稳定摘要字符串，用于 `b_lineage_snapshot` 失效判断 |
 | `mapping_version_generated_at` | mapping_version 生成时间戳 |
 | `last_full_audit_at` | 最后一次全量审计时间戳（float）。由 `RefreshService` 周期审计与 `run_full_audit_now` 手动审计写入，供下一轮周期判断是否需要再次审计。 |
+| `last_full_index_at` | 最后一次完整索引生成时间戳（float）。由 `complete_index_generation()` 写入，与 `last_full_audit_at` 不同——后者由 `RefreshService` 的审计流程写入，供 Dashboard / API 展示索引健康状态。 |
 
 `get_index_metadata()` 方法返回上述键值的聚合快照，供 Dashboard 展示索引健康状态。
 

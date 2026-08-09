@@ -138,7 +138,7 @@ class TestConcurrency:
         server = WebUIServer(cfg.webui, bridge_db, app_config=cfg)
         server._has_password = True
 
-        # 添加有效 session（[已修复] 预存 bug：需存 tuple (expiry, stored_ip)，非纯 float）
+        # 添加有效 session（预存 bug：需存 tuple (expiry, stored_ip)，非纯 float）
         server._sessions["valid_token"] = (time.time() + 3600, "")
 
         port = _free_port()

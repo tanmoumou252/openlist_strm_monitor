@@ -5,7 +5,7 @@ import sqlite3
 import threading
 import time
 import logging
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator
@@ -229,7 +229,7 @@ class Database:
 
     def _probe_writeable(self, conn: sqlite3.Connection) -> None:
         """用 BEGIN IMMEDIATE / ROLLBACK 探测连接是否可写（不变更 schema）。
-        # [设计取舍] #6: 与 connection() 探针模式一致且安全
+        # 与 connection() 探针模式一致且安全
 
         BEGIN IMMEDIATE 会尝试获取 RESERVED 锁，在文件只读或 query_only
         模式下均会抛 OperationalError。
@@ -340,7 +340,7 @@ class Database:
         finally:
             conn.close()
 
-    def __init__(self, db_path: str) -> None:  # [设计取舍] 路径参数仅测试注入与内部隔离，生产固定项目根 bridge.db
+    def __init__(self, db_path: str) -> None:  # 路径参数仅测试注入与内部隔离，生产固定项目根 bridge.db
         self.db_path = db_path
         self.rw_lock = ReadWriteLock()
         self._last_ghost_cleanup = 0.0
@@ -971,10 +971,12 @@ class Database:
                 """)
             return [BRecord(*row) for row in cur.fetchall()]
 
-    def get_all_b_fingerprints(self, mapping_id: str) -> set[str]:
+    def get_all_b_fingerprints(self, mapping_id: str, skip_read_lock: bool = False) -> set[str]:
         """获取指定 mapping 下的所有非空指纹。"""
         mapping_id = self._require_mapping_id(mapping_id)
-        with self.rw_lock.read_locked(), self.read_connection() as conn:
+        lock_cm = (nullcontext() if skip_read_lock
+                   else self.rw_lock.read_locked())
+        with lock_cm, self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT DISTINCT fingerprint FROM b_strm_files WHERE fingerprint IS NOT NULL AND mapping_id = ?",
                 (mapping_id,),
@@ -1072,9 +1074,14 @@ class Database:
             row = cur.fetchone()
             return bool(row and row[0] > now)
 
-    def get_all_ghost_protected_paths(self) -> set[str]:
+    def get_all_ghost_protected_paths(self, skip_read_lock: bool = False) -> set[str]:
         now = time.time()
-        with self.rw_lock.read_locked(), self.read_connection() as conn:
+        # 调用方已持有 rw_lock.write_locked()（如批量同步预加载）时传
+        # skip_read_lock=True，跳过 read_locked() 以避免 _writers_active>0
+        # 永久等待自死锁；此时持有写锁，读取是安全的。
+        lock_cm = (nullcontext() if skip_read_lock
+                   else self.rw_lock.read_locked())
+        with lock_cm, self.read_connection() as conn:
             cur = conn.execute(
                 "SELECT webdav_path FROM ghost_protection WHERE expire_time > ?", (now,))
             return {row[0] for row in cur.fetchall()}

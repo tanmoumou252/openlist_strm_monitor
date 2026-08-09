@@ -67,8 +67,8 @@ def build_mock_app(
     app.config.behavior.ghost_protect_seconds = ghost_protect_seconds
     app.admin_api = app_cls()
     app.db = app_cls()
-    app.db.rw_lock = ReadWriteLock()  # [已修复] Task 1: 提供真实 ReadWriteLock 供 use_bulk=False 上下文管理器
-    # [已修复] Task 1: connection/read_connection 需支持上下文管理器协议
+    app.db.rw_lock = ReadWriteLock()  # 提供真实 ReadWriteLock 供 use_bulk=False 上下文管理器
+    # connection/read_connection 需支持上下文管理器协议
     _conn_mock = MagicMock()
     _conn_mock.__enter__ = Mock(return_value=_conn_mock)
     _conn_mock.__exit__ = Mock(return_value=False)
@@ -84,7 +84,7 @@ def build_mock_app(
     app._verify_b_path_lineage = app_cls(return_value=True)
     app.ensure_single_visible_instance = app_cls()
     app.handle_a_created_or_modified = app_cls()
-    # get_fingerprint_lock 必须返回真正的 Lock 对象，支持上下文管理器协议（P1-4）
+    # get_fingerprint_lock 必须返回真正的 Lock 对象，支持上下文管理器协议
     app.get_fingerprint_lock = lambda _fp: Lock()
     app.get_a_root_for_path = app_cls()
 

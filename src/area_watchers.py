@@ -30,11 +30,11 @@ class AAreaEventHandler(FileSystemEventHandler):
             func(*args)
             # 成功时重置失败计数
             self._failure_count = 0
-            # [已修复] P7b: 成功时恢复健康标志，防止健康状态永久锁定为 False
+            # 成功时恢复健康标志，防止健康状态永久锁定为 False
             if hasattr(self.app, '_watchers_healthy'):
                 self.app._watchers_healthy = True
         except Exception:
-            # [设计取舍] #4: 吞异常是有意设计（抛出将杀死 watchdog 线程）
+            # 吞异常是有意设计（抛出将杀死 watchdog 线程）
             # 加失败计数 + _watchers_healthy 健康信号。勿改为 re-raise 或移除 try/except。
             # M-9: 记录失败并监控健康状态
             self._failure_count += 1
@@ -47,7 +47,7 @@ class AAreaEventHandler(FileSystemEventHandler):
                     "[A区] 连续失败 %d 次，可能存在系统性问题，请检查日志",
                     self._failure_count
                 )
-                # [设计取舍] N1: 此标志由 dashboard 状态 API 消费，勿当死代码删除
+                # 此标志由 dashboard 状态 API 消费，勿当死代码删除
                 if hasattr(self.app, '_watchers_healthy'):
                     self.app._watchers_healthy = False
 
@@ -85,7 +85,7 @@ class BAreaEventHandler(FileSystemEventHandler):
             func(*args)
             # 成功时重置失败计数
             self._failure_count = 0
-            # [已修复] P7b: 成功时恢复健康标志，防止健康状态永久锁定为 False
+            # 成功时恢复健康标志，防止健康状态永久锁定为 False
             if hasattr(self.app, '_watchers_healthy'):
                 self.app._watchers_healthy = True
         except Exception:
@@ -100,7 +100,7 @@ class BAreaEventHandler(FileSystemEventHandler):
                     "[B区] 连续失败 %d 次，可能存在系统性问题，请检查日志",
                     self._failure_count
                 )
-                # [设计取舍] N1: 此标志由 dashboard 状态 API 消费，勿当死代码删除
+                # 此标志由 dashboard 状态 API 消费，勿当死代码删除
                 if hasattr(self.app, '_watchers_healthy'):
                     self.app._watchers_healthy = False
 

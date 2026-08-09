@@ -130,14 +130,14 @@ class TmdbConfig:
     host: str = ""
     api_key: str = ""
     csv_watchlist_file: str = ""
-    # [已修复] P1-3: watchlist_db 字段已移除，数据库路径固定在项目根 tmdb_watchlist.db
+    # watchlist_db 字段已移除，数据库路径固定在项目根 tmdb_watchlist.db
     watchlist_cache_ttl: float = 604800  # 默认 7 天
     fuzzy_threshold: float = 0.60
     anime_min_ep_ratio: float = 0.3
     anime_max_season_diff: float = 0.3  # 新增：动漫最大季度差异阈值
     # > total_seasons + 1）。已在 wiki/Configuration-Reference.md 注明运行时无效。为配置兼容保留。
     # 除非同时移除 WebUI 字段与文档，否则勿当死代码删除。
-    anime_min_season_ratio: float = 0.3  # [设计取舍] N5: 保留但运行时未读取（watchlist_match.py 未引用）
+    anime_min_season_ratio: float = 0.3  # 保留但运行时未读取（watchlist_match.py 未引用）
     proxy: TmdbProxyConfig = field(default_factory=TmdbProxyConfig)
     # 扁平化代理字段（供前端/测试 WebUI 直接读写，与嵌套 proxy 双向同步）
     proxy_enabled: bool = False
@@ -149,7 +149,7 @@ class LocalConfig:
     a_dir: str
     b_dir: str
     c_dir: str
-    db_file: str = ""  # [已修复] P1-3: 固定项目根 bridge.db，from_file 强制填充
+    db_file: str = ""  # 固定项目根 bridge.db，from_file 强制填充
 
 @dataclass(slots=True)
 class PathsConfig:
@@ -433,8 +433,8 @@ class AppConfig:
         if c_root and not Path(c_root).is_absolute():
             logging.warning("[Config] c_root 不是绝对路径: %s", c_root)
 
-        # [已修复] P1-3: bridge.db 固定在项目根，[local].db_file 不再从 config.toml 读取
-        # [设计取舍] 仅测试注入，生产固定项目根
+        # bridge.db 固定在项目根，[local].db_file 不再从 config.toml 读取
+        # 仅测试注入，生产固定项目根
         local = LocalConfig(
             base_dir=base_dir,
             a_dir="",  # 默认为空，需在 WebUI 配置

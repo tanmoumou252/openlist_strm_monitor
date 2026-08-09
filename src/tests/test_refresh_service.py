@@ -101,7 +101,7 @@ class TestRefreshServiceStartStop:
 
         svc.stop()
         assert svc._running is False
-        mock_thread.join.assert_called_once_with(timeout=2)
+        mock_thread.join.assert_called_once_with(timeout=5)
 
     def test_stop_no_thread_is_safe(self):
         """stop 在没有线程时不抛异常"""

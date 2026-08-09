@@ -65,3 +65,102 @@ class TestMainEntry:
 
         fake_app.start.assert_called_once()
         fake_app.stop.assert_called_once()
+
+
+class TestMainLogConfigReinit:
+    """R31: DB 覆盖日志配置后重新调用 setup_logging 重建日志处理器。"""
+
+    def test_log_config_reinit_on_db_change(self):
+        """DB 覆盖日志配置 → setup_logging 被调用两次（初始 + 重建）。"""
+        import main as main_module
+        from unittest.mock import MagicMock
+
+        config = MagicMock()
+        config.local.db_file = "bridge.db"
+        config.log.level = "INFO"
+        config.log.file = "test.log"
+        config.log.max_size_mb = 1
+        config.log.backup_count = 1
+        config.webdav.host = "host"
+        config.webdav.user = "user"
+        config.webdav.password = "pass"
+        config.webdav.totp_secret = ""
+
+        def _update_from_db(db):
+            # 模拟 DB 覆盖了日志级别和文件
+            config.log.level = "DEBUG"
+            config.log.file = "changed.log"
+
+        config.update_from_db = _update_from_db
+
+        fake_app = MagicMock()
+        fake_app.validate_strm_storages.return_value = {}
+
+        setup_logging_calls = []
+
+        def _track_setup_logging(*args, **kwargs):
+            setup_logging_calls.append(kwargs)
+
+        with patch.object(main_module.AppConfig, "from_file", return_value=config), \
+             patch.object(main_module, "setup_logging", side_effect=_track_setup_logging), \
+             patch.object(main_module, "Database"), \
+             patch.object(main_module, "OpenListAdminClient") as client_cls, \
+             patch.object(main_module, "AppService", return_value=fake_app), \
+             patch("config.migrate_config_to_db"), \
+             patch("sys.argv", ["main.py"]), \
+             patch("builtins.input", return_value="q"):
+            client_cls.return_value.login.return_value = True
+            client_cls.return_value.check_exists.return_value = True
+            main_module.main()
+
+        # 初始 logging + DB 覆盖后重建 = 2 次
+        assert len(setup_logging_calls) == 2, \
+            f"期望 2 次 setup_logging，实际 {len(setup_logging_calls)}"
+        # 第二次调用使用 DB 覆盖后的配置
+        assert setup_logging_calls[1]["level"] == "DEBUG"
+        assert setup_logging_calls[1]["log_file"] == "changed.log"
+
+    def test_log_config_unchanged_calls_setup_logging_once(self):
+        """DB 不覆盖日志配置 → setup_logging 仅调用一次（初始）。"""
+        import main as main_module
+        from unittest.mock import MagicMock
+
+        config = MagicMock()
+        config.local.db_file = "bridge.db"
+        config.log.level = "INFO"
+        config.log.file = "test.log"
+        config.log.max_size_mb = 1
+        config.log.backup_count = 1
+        config.webdav.host = "host"
+        config.webdav.user = "user"
+        config.webdav.password = "pass"
+        config.webdav.totp_secret = ""
+
+        def _update_from_db(db):
+            # DB 不覆盖日志配置
+            pass
+
+        config.update_from_db = _update_from_db
+
+        fake_app = MagicMock()
+        fake_app.validate_strm_storages.return_value = {}
+
+        setup_logging_calls = []
+
+        def _track_setup_logging(*args, **kwargs):
+            setup_logging_calls.append(kwargs)
+
+        with patch.object(main_module.AppConfig, "from_file", return_value=config), \
+             patch.object(main_module, "setup_logging", side_effect=_track_setup_logging), \
+             patch.object(main_module, "Database"), \
+             patch.object(main_module, "OpenListAdminClient") as client_cls, \
+             patch.object(main_module, "AppService", return_value=fake_app), \
+             patch("config.migrate_config_to_db"), \
+             patch("sys.argv", ["main.py"]), \
+             patch("builtins.input", return_value="q"):
+            client_cls.return_value.login.return_value = True
+            client_cls.return_value.check_exists.return_value = True
+            main_module.main()
+
+        assert len(setup_logging_calls) == 1, \
+            f"日志配置不变时，期望 1 次 setup_logging，实际 {len(setup_logging_calls)}"

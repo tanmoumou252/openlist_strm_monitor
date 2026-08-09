@@ -77,7 +77,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }, 0);
 
   // 检查管理员密码状态（必须在 router() 之前完成，确保 auth guard 正确）
-  // [已修复] N2 main.js 引导 fetch 无超时 + fail-open
+  // 引导 fetch 无超时 + fail-open
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
 

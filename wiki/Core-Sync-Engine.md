@@ -267,11 +267,11 @@ def notify_config_changed(self) -> None:
 #### 周期全量审计（`_maybe_run_full_audit`）
 
 - 由配置 `refresh.full_audit_interval_days` 控制（设为 `0` 关闭）。
-- 在常规刷新周期的第 7 步（`_scan_and_sync`）之后、第 8 步（`_persist_snapshot`）之前判断是否到达周期窗口。
+- 在 `execute_refresh_cycle()` 开头（第 1 步 `_sync_and_scan_protected_roots` 之前）判断是否到达周期窗口；到达时执行全量审计，并跳过常规周期的第 7 步（`_scan_and_sync`）以避免重复扫描。
 - 到达时执行完整序列：
   1. `initial_scan_a()` — 多线程并发读取 A 区 `.strm`，批量写入数据库
   2. `scan_a_to_b_full_sync()` — A→B 全量同步（`use_bulk=False` 分批提交模式）
-  3. `complete_index_generation()` — 推进代次计数器（`_restoring_generation`）
+  3. `complete_index_generation()` — 推进代次计数器（`index_generation`）
   4. `touch_verified_by_mapping()` — 为本次审计覆盖的所有 mapping 写入 `last_verified_at`
   5. 记录 `last_full_audit_at` 控制键（`set_control`），供下一轮周期判断使用
 

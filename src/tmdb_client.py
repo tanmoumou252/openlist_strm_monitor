@@ -28,7 +28,7 @@ from pathlib import Path
 BASE_URL = "https://api.themoviedb.org"
 
 # 缓存文件路径：与 src/.admin_token.json 同级
-# [设计取舍] S6: 本地缓存 PII（account_id），通过 .gitignore + 0600 权限保护
+# 本地缓存 PII（account_id），通过 .gitignore + 0600 权限保护
 _CACHE_DIR = Path(__file__).parent
 _CACHE_FILE = _CACHE_DIR / ".tmdb_account.json"
 

@@ -102,6 +102,20 @@ STATIC_DIR = PROJECT_ROOT / "dist"
 # POST 请求体大小上限（10 MB），防止 Content-Length 攻击导致 OOM（B-5）
 _MAX_CONTENT_LENGTH = 10 * 1024 * 1024
 
+# Content-Security-Policy：LAN 管理面板的安全策略
+# 仅允许 self 脚本/样式（含内联）、TMDB 图片、Google Fonts 字体/CSS
+_CSP_HEADER = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "img-src 'self' data: https://image.tmdb.org; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
+
 # 检查 dist/ 是否存在
 if not STATIC_DIR.exists():
     logger.warning(
@@ -290,7 +304,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         pass  # 静默默认日志
 
     def setup(self):
-        # [已修复] R2: 慢速 body 耗尽线程（slowloris）。
+        # 慢速 body 耗尽线程（slowloris）。
         # 原实现 ThreadingHTTPServer 无 socket 超时，/api/login 又在白名单
         # 未鉴权，恶意客户端可只发 Content-Length 不发送 body 挂起线程池。
         # 为连接设 30s 超时：超时后 rfile.read 抛 socket.timeout/OSError，
@@ -339,9 +353,9 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         # 登录接口放行
         if path == "/api/login":
             return True
-        # 密码状态查询放行（M5 双语义）：
-        # - 无 token → 白名单直通（router.js:105 依赖 200 + has_password 做变更检测）
-        # - 带 token → 走标准 token 校验，无效返回 401（过期/撤销的 token 不再得到 200）
+# 密码状态查询放行（双语义）：
+            # - 无 token → 白名单直通（router.js:105 依赖 200 + has_password 做变更检测）
+            # - 带 token → 走标准 token 校验，无效返回 401（过期/撤销的 token 不再得到 200）
         if path == "/api/admin/status":
             token = self.headers.get("X-Session-Token", "")
             if token:
@@ -362,7 +376,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         if path in ("/api/tmdb/avatar", "/api/tmdb/poster",
                     "/api/openlist/status", "/api/openlist/ping"):
             return True
-        # [设计取舍] #13: 白名单 GET-only 是有意设计（SPA/onboarding 登录前需读取）
+        # 白名单 GET-only 是有意设计（SPA/onboarding 登录前需读取）
         if method.upper() == "GET" and path in ("/api/config", "/api/webui/config/ui"):
             return True
         # 验证 session token
@@ -408,11 +422,11 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        # 安全响应头：防止浏览器 MIME 类型嗅探和 iframe 嵌入
-        # [已修复] S4: 已添加 X-Content-Type-Options: nosniff + X-Frame-Options: DENY
+        # 安全响应头：防止浏览器 MIME 类型嗅探、iframe 嵌入和 XSS
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
-        # [已修复] R4: API JSON 响应禁缓存，防止敏感配置/状态被浏览器或代理缓存
+        self.send_header("Content-Security-Policy", _CSP_HEADER)
+        # API JSON 响应禁缓存，防止敏感配置/状态被浏览器或代理缓存
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -426,9 +440,9 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
-        # [已修复] S4: 已添加 X-Content-Type-Options: nosniff + X-Frame-Options: DENY
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", _CSP_HEADER)
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         try:
@@ -483,9 +497,9 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         else:
             self.send_header("Cache-Control", "no-store")
         # 注意：静态资源文件（字体、图片）也应有这些头，防止浏览器 MIME 嗅探
-        # [已修复] S4: 已添加 X-Content-Type-Options: nosniff + X-Frame-Options: DENY
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", _CSP_HEADER)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:
@@ -503,6 +517,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Content-Security-Policy", _CSP_HEADER)
             body = (
                 f"<html><head><title>Error {code}</title></head>"
                 f"<body><h1>{code} {html_module.escape(str(message or 'Error'))}</h1></body></html>"
@@ -609,9 +624,9 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
                 else:
                     self._proxy_google_font_file(path)
             elif path.endswith(".woff2") or path.endswith(".woff") or path.endswith(".ttf"):
-                # Font files served from static/
+                # Font files served from static/ (support subdirectories for Vite-built assets)
                 fname = path.lstrip("/")
-                if ".." in fname or "/" in fname or "\\" in fname:
+                if ".." in fname or "\\" in fname:
                     self._send_json({"error": "invalid path"}, 400)
                 else:
                     self._send_static_file(fname)
@@ -670,14 +685,14 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
             return
         if not self._check_auth("POST"):
             return
-        # [已修复] N-P0-1: do_POST 请求体解析在路由 try/except 之外 → 畸形请求挂起连接
+        # do_POST 请求体解析在路由 try/except 之外 → 畸形请求挂起连接
         # Content-Length 非数字会抛 ValueError/TypeError，导致无 HTTP 响应 → 客户端挂起
         try:
             content_length = int(self.headers.get("Content-Length", 0))
         except (ValueError, TypeError):
             self._send_json({"error": "invalid Content-Length"}, 400)
             return
-        # T4: 负数 Content-Length 会绕过 413 上限（int("-1") 正常返回、bool(-1) 为真），
+        # 负数 Content-Length 会绕过 413 上限（int("-1") 正常返回、bool(-1) 为真），
         # 使 rfile.read(-1) 读到 EOF 挂起线程；ThreadingHTTPServer 无 socket 超时，
         # /api/login 又在白名单内，未鉴权即可挂线程。显式拒绝负值。
         if content_length < 0:
@@ -693,7 +708,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         try:
             body = self.rfile.read(content_length) if content_length else b"{}"
         except (socket.timeout, TimeoutError):
-            # [已修复] R2: 慢速 body（slowloris）超时 → 408 Request Timeout，
+            # 慢速 body（slowloris）超时 → 408 Request Timeout，
             # 并关闭连接释放线程，避免未鉴权白名单路径长期挂线程。
             try:
                 self._send_json({"error": "request body read timed out"}, 408)
@@ -811,7 +826,7 @@ class WebUIServer:
         self._match_refresh_lock = threading.Lock()
         self._match_refresh_running = False
         self._match_refresh_result: dict | None = None
-        # T13: 媒体刷新互斥锁预建（原 handle_area_refresh 懒初始化非原子，
+        # 媒体刷新互斥锁预建（原 handle_area_refresh 懒初始化非原子，
         # 两个并发请求各建各的 Lock 会绕过 409 互斥）
         self._refresh_lock = threading.Lock()
         self._index_audit_lock = threading.Lock()
@@ -941,7 +956,7 @@ class WebUIServer:
             logging.debug("[WebUI] TMDB 客户端初始化失败: %s", e)
 
     def _reinit_watchlist_db(self) -> None:
-        # [已修复] P1-3: 数据库路径固定在项目根，不再读取 tmdb_cfg.watchlist_db
+        # 数据库路径固定在项目根，不再读取 tmdb_cfg.watchlist_db
         """据当前配置重建 TMDB 待看列表 SQLite 数据库。
 
         DB 无条件创建（用于存储 webui_config 配置），
@@ -1273,8 +1288,10 @@ class WebUIServer:
                 return {"success": True, "message": "主程序已启动"}
 
             except Exception as e:
-                logging.error("[Main] 启动失败: %s", e)
-                return {"success": False, "message": f"启动失败: {e}",
+                logging.error("[Main] 启动失败: %s", e, exc_info=True)
+                # 不回传原始异常文本（可能含内部路径/服务器细节），
+                # 与 M-13 实践一致。详细异常只写日志。
+                return {"success": False, "message": "启动失败，请查看服务端日志",
                         "error_type": "exception"}
 
     def stop_main(self) -> dict:
@@ -1298,8 +1315,9 @@ class WebUIServer:
                 return {"success": True, "message": "主程序已停止"}
 
             except Exception as e:
-                logging.error("[Main] 停止失败: %s", e)
-                return {"success": False, "message": f"停止失败: {e}",
+                logging.error("[Main] 停止失败: %s", e, exc_info=True)
+                # 不回传原始异常文本，详细异常只写日志。
+                return {"success": False, "message": "停止失败，请查看服务端日志",
                         "error_type": "exception"}
 
     def get_main_status(self) -> dict:
@@ -1321,7 +1339,7 @@ class WebUIServer:
                 result["refresh_healthy"] = rs._consecutive_failures == 0
                 result["refresh_consecutive_failures"] = rs._consecutive_failures
                 result["refresh_last_error"] = rs._last_error_summary
-            # [已修复] P7b: 返回 watcher 健康状态供前端轮询更新 banner
+            # 返回 watcher 健康状态供前端轮询更新 banner
             result["watchers_healthy"] = getattr(self._app_service, '_watchers_healthy', True)
         else:
             result["watchers_healthy"] = True  # 主程序未运行时默认健康

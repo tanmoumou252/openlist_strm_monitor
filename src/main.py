@@ -31,15 +31,9 @@ from webdav_client import OpenListAdminClient
 from logger_setup import setup_logging
 from database import Database
 from config import AppConfig
-from webui.server import WebUIServer
 
 import logging
 import time
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 # autopep8: on
 # isort: on
@@ -85,7 +79,21 @@ def main() -> None:
         _migrate_wdb = TmdbWatchlistDb(_migrate_db_path)
         migrate_config_to_db(config, _migrate_wdb)
         # 从 DB 加载配置覆盖（优先级: DB > config.toml）
+        # 记录 DB 覆盖前的日志配置，若 DB 覆盖了 log.level/file，
+        # 需重新调用 setup_logging 重建日志处理器，否则 DB 覆盖不生效。
+        _log_before = (config.log.level, config.log.file,
+                       config.log.max_size_mb, config.log.backup_count)
         config.update_from_db(_migrate_wdb)
+        _log_after = (config.log.level, config.log.file,
+                      config.log.max_size_mb, config.log.backup_count)
+        if _log_before != _log_after:
+            logging.info("[Migration] DB 覆盖日志配置，重建日志处理器: %s", _log_after)
+            setup_logging(
+                level=config.log.level,
+                log_file=config.log.file,
+                max_size_mb=config.log.max_size_mb,
+                backup_count=config.log.backup_count,
+            )
     except Exception as exc:
         logging.warning("[Migration] 迁移过程异常: %s", exc)
     # ---------------------------------------------------

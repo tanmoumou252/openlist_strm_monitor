@@ -92,7 +92,7 @@ class RefreshService:
             logging.warning("[主动刷新] 触发兜底全量审计，可能访问所有 A 区磁盘")
             self.app.initial_scan_a(use_bulk=False, a_roots=None)
             self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
-            # [已修复] P1: _last_full_audit_at 必须在所有 DB 写入成功后才更新，
+            # _last_full_audit_at 必须在所有 DB 写入成功后才更新，
             # 防止 DB 写失败时时间戳已推进导致后续周期静默跳过审计
             db_write_ok = True
             mapping_ids = self.app._current_mapping_ids()
@@ -151,7 +151,7 @@ class RefreshService:
             logging.warning("[手动审计] 触发全量审计，可能访问所有 A 区磁盘")
             self.app.initial_scan_a(use_bulk=False, a_roots=None)
             self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
-            # [已修复] P1: _last_full_audit_at 必须在所有 DB 写入成功后才更新
+            # _last_full_audit_at 必须在所有 DB 写入成功后才更新
             db_write_ok = True
             mapping_ids = self.app._current_mapping_ids()
             if mapping_ids:
@@ -223,10 +223,15 @@ class RefreshService:
                 self.notify_config_changed()
             elif enabled:
                 if self._thread and self._thread.is_alive():
-                    old_thread = self._thread
-                self._running = True
-                self._thread = threading.Thread(target=self._worker, daemon=True)
-                self._thread.start()
+                    # M-11: 旧线程仍在运行，避免双 worker 并发——不启动新线程，
+                    # 仅恢复运行标志并通知配置变更，让仍在运行的旧 worker 拾取新配置。
+                    logging.warning("[主动刷新] reconfigure: 旧线程仍在运行，推迟启动新线程")
+                    self._running = True
+                    self.notify_config_changed()
+                else:
+                    self._running = True
+                    self._thread = threading.Thread(target=self._worker, daemon=True)
+                    self._thread.start()
         if old_thread and old_thread.is_alive():
             old_thread.join(timeout=2)
 
@@ -605,7 +610,7 @@ class RefreshService:
             valid_engine_paths=snapshot_paths)
 
     def _cleanup_a_for_update_mode(self, accessible_engines: set[str]) -> None:
-        """[设计取舍] N5: 死代码——原 update 模式冗余清理，现已被
+        """死代码——原 update 模式冗余清理，现已被
         `cleanup_a_redundant_using_api`（WebUI 手动刷新 / watchdog 触发）取代，
         保留仅为兼容旧调用路径，勿当作活跃清理逻辑调用。"""
         for engine_path in accessible_engines:

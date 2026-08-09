@@ -14,8 +14,8 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_app_service_core.py` | 核心同步引擎 `AppService` 主流程与状态机测试（含 **M6** `_extract_save_local_mode` 对 `SaveLocalMode: null` 返回 `""` 的守卫测试） |
-| `test_sync_service.py` | A→B 同步服务（`initial_scan_a` 批量索引、`scan_a_to_b_full_sync` 双模式同步、`_bulk_upsert_b` FTS 孤儿行处理）测试 |
+| `test_app_service_core.py` | 核心同步引擎 `AppService` 主流程与状态机测试（含 **M6** `_extract_save_local_mode` 对 `SaveLocalMode: null` 返回 `""` 的守卫测试、**R23 回归** `TestRestoreBFromAAfterViolation` 验证 B 区指纹违规后 A 重构恢复） |
+| `test_sync_service.py` | A→B 同步服务（`initial_scan_a` 批量索引、`scan_a_to_b_full_sync` 双模式同步、`_bulk_upsert_b` FTS 孤儿行处理）测试。**R24 回归**：`test_full_sync_concurrent_no_typeerror` 验证批量同步并发安全性。 |
 | `test_area_watchers.py` | A/B/C 三区文件系统监视器事件处理测试 |
 | `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试（含 `TestLastVerifiedAtWiring`） |
 | `test_refresh_service.py` | 周期性 WebDAV 刷新服务测试（含 `TestFullAuditTouchVerified`、`TestRunFullAuditNow`） |

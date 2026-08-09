@@ -236,3 +236,51 @@ class TestMasterKeyFile:
         sm.encrypt("x")
         mode = stat.S_IMODE(os.stat(key_file).st_mode)
         assert mode == 0o600, f"期望 0o600，实际 {oct(mode)}"
+
+
+class TestFernetConcurrentInit:
+    """R34: 并发 _get_fernet 首次调用只生成一个 key 文件。"""
+
+    def test_concurrent_get_fernet_produces_one_key(self, isolated_key_file):
+        """8 线程并发调 _get_fernet → _load_or_create_master_key 只调用一次。"""
+        import threading
+        import secret_manager as sm
+
+        sm.reset_master_key_for_testing()
+
+        call_count = [0]
+        original_load = sm._load_or_create_master_key
+
+        def _counting_load():
+            call_count[0] += 1
+            return original_load()
+
+        sm._load_or_create_master_key = _counting_load
+
+        try:
+            results = []
+            errors = []
+
+            def _worker():
+                try:
+                    f = sm._get_fernet()
+                    results.append(f)
+                except Exception as e:
+                    errors.append(e)
+
+            threads = [threading.Thread(target=_worker) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            assert not errors, f"并发 _get_fernet 异常: {errors}"
+            assert call_count[0] == 1, \
+                f"并发首次调用应只生成 1 个 key，实际 {call_count[0]} 次"
+            # 所有线程返回同一 Fernet 实例
+            assert len(set(id(r) for r in results)) == 1
+        finally:
+            # 恢复 _load_or_create_master_key
+            sm._load_or_create_master_key = original_load
+            sm.reset_master_key_for_testing()
+            sm._cryptography_available = None

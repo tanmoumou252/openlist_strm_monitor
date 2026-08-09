@@ -253,7 +253,7 @@ class TestSyncServiceScanAToBFullSync:
         mock_conn = Mock()
         mock_conn.__enter__ = Mock(return_value=mock_conn)
         mock_conn.__exit__ = Mock(return_value=False)
-        # [已修复] Task 1: use_bulk=False 走 self.db.connection()，需同时 mock
+        # use_bulk=False 走 self.db.connection()，需同时 mock
         app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
         app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
         app.db.connection.return_value.__enter__ = Mock(return_value=mock_conn)
@@ -597,6 +597,50 @@ class TestSyncServiceScanAToBFullSync:
         with patch.object(svc, "_sync_one_record", return_value="success"):
             svc.scan_a_to_b_full_sync()
         app.admin_api.check_exists.assert_not_called()
+
+    def test_full_sync_concurrent_no_typeerror(self, tmp_path):
+        """R24: 并发 scan_a_to_b_full_sync(use_bulk=False) 不因缓存生命周期竞态抛错误。
+
+        手动审计(run_full_audit_now) 与周期 _scan_and_sync 可并发调用本方法。
+        修复前预加载与 finally 清空都在 rw_lock.write_locked() 之外，线程 A 的
+        finally 把 _cache_ghost 置 None 时线程 B 正在 pass1/pass2 访问 → TypeError。
+        修复后预加载+索引+执行+清空全程纳入 write_locked 串行化，不再交错。
+        """
+        import threading
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        records = [
+            _make_a_record(str(a_root / f"f{i}.strm"), f"/m/f{i}.mp4", "/m")
+            for i in range(5)
+        ]
+        self._setup_records(app, records, tmp_path)
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        app.build_b_path_from_a.side_effect = (
+            lambda lp, webdav=None: b_root / f"{Path(lp).stem}.strm")
+
+        svc = SyncService(app)
+        self._make_bulk_conn_mock(app)
+
+        with patch.object(svc, "_sync_one_record", return_value="success"):
+            errors: list[Exception] = []
+
+            def _run():
+                try:
+                    svc.scan_a_to_b_full_sync(use_bulk=False)
+                except Exception as e:  # 期待无 TypeError/AttributeError
+                    errors.append(e)
+
+            threads = [threading.Thread(target=_run) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        assert errors == [], f"并发全量同步出现异常: {errors}"
+        # 缓存已清空
+        assert svc._cache_ghost is None
+        assert svc._cache_b_fp is None
 
 
 # ===========================================================================

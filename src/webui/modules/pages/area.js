@@ -162,7 +162,7 @@ ${pagerHtml}
   // Bind page size selector
   document.getElementById('page-size-select')?.addEventListener('change', (e) => {
     const newSize = e.target.value;
-    // [已修复] R12 area.js 改页大小丢失搜索词 q
+    // 改页大小丢失搜索词 q
     const newHash = `#area_${area}?kind=${encodeURIComponent(kind)}&sort=${sort}&order=${order}&page_size=${newSize}&page=1${q ? '&q=' + encodeURIComponent(q) : ''}`;
     navigate(newHash);
   });
@@ -178,7 +178,7 @@ async function renderAreaDetail(el, area, params) {
   const page = parseInt(params.page) || 1;
   const q = params.q || '';
 
-  // [已修复] F1: 构造 kindPart 用于返回按钮，保留筛选参数
+  // 构造 kindPart 用于返回按钮，保留筛选参数
   const kindPart = kind ? `?kind=${encodeURIComponent(kind)}${q ? '&q=' + encodeURIComponent(q) : ''}` : (q ? `?q=${encodeURIComponent(q)}` : '');
 
   let url = `/api/area/${area}/detail?media=${encodeURIComponent(media)}`;
@@ -186,7 +186,7 @@ async function renderAreaDetail(el, area, params) {
   if (order) url += '&order=' + encodeURIComponent(order);
   if (kind) url += '&kind=' + encodeURIComponent(kind);
   url += '&page=' + page;
-  // [已修复] F2: mapping_id 已从 URL 中移除（后端不消费该参数）
+  // mapping_id 已从 URL 中移除（后端不消费该参数）
 
   const d = await api(url);
   if (isStale()) return;
@@ -236,7 +236,7 @@ async function renderAreaDetail(el, area, params) {
       if (strmEngineRoot) html += `<div class="path-line"><span class="path-label">STRM 入口：</span><span class="path-value mono">${esc(strmEngineRoot)}</span></div>`;
       html += `</div>`;
       
-      // [已修复] N-P2-7: 多 mapping 模式下使用 class 而非重复 id（HTML 要求 id 唯一）
+      // 多 mapping 模式下使用 class 而非重复 id（HTML 要求 id 唯一）
       if (area === 'a' || area === 'b') {
         html += `<div class="toolbar" style="margin-top:8px;justify-content:flex-end"><button class="toolbar-btn refresh-media-btn" data-mapping-id="${esc(mappingId)}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button></div>`;
       }
@@ -246,7 +246,7 @@ async function renderAreaDetail(el, area, params) {
       html += _renderSeasons(area, mapping.seasons || [], sort, order, kind, q, media, localRoot, webdavRoot);
       
       // 分页（独立）
-      // [已修复] F2: 删除死参数 mapping_id，后端分区由记录自身 mapping_id 列派生
+      // 删除死参数 mapping_id，后端分区由记录自身 mapping_id 列派生
       if (mapping.total_pages > 1) {
         html += '<div class="pager">';
         if (mapping.page > 1) {
@@ -270,7 +270,7 @@ async function renderAreaDetail(el, area, params) {
     const strmEngineRoot = d.strm_engine_root || '';
     const mappingId = d.mapping_id || '';
     const indexMetadata = d.index_metadata;
-    // [已修复] N-P2-8: 删除外层死定义（areaLabels 和 areaLabel 已在函数开头定义）
+    // 删除外层死定义（areaLabels 和 areaLabel 已在函数开头定义）
     
     // 索引元数据（单 mapping）
     if (indexMetadata && indexMetadata.mapping_index_generation) {
@@ -328,7 +328,7 @@ async function renderAreaDetail(el, area, params) {
   setDetailToggleState(document.querySelectorAll('.season-details').length > 0);
 
   // 绑定刷新按钮事件（支持多 mapping 模式下的多个刷新按钮）
-  // [已修复] N-P2-7: 选择器改为 class（HTML 按钮用 class="refresh-media-btn"，非 id）
+  // 选择器改为 class（HTML 按钮用 class="refresh-media-btn"，非 id）
   document.querySelectorAll('.refresh-media-btn').forEach(refreshBtn => {
     const btnMappingId = refreshBtn.dataset.mappingId || '';
     const doRefresh = async () => {

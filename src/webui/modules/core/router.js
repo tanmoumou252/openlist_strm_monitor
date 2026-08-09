@@ -118,7 +118,7 @@ export async function router() {
           navigate('#login');
           return;
         }
-        // [已修复] F3: 同步前端 _hasPassword 与服务端 has_password 状态
+        // 同步前端 _hasPassword 与服务端 has_password 状态
         // 管理员重置密码后，前端需要感知并强制重新登录
         const data = await resp.json();
         if (data && typeof data.has_password === 'boolean' && data.has_password !== _hasPassword) {

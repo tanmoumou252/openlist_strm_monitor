@@ -77,6 +77,7 @@ def _make_admin_client(tmp_path: Path, host: str = "http://openlist:5244") -> Op
         client._check_exists_cache_ttl = 60
         client._check_exists_cache_max = 5000
         client._check_exists_cache_lock = threading.Lock()
+        client._http_lock = threading.RLock()
         client.last_error_message = None
         client.last_error_type = None
         client.token_cache_path = str(tmp_path / ".admin_token.json")
@@ -128,7 +129,7 @@ class TestGenerateTotp:
         assert code.isdigit()
 
     def test_unpadded_base64_secret_works(self):
-        # M8: 无 padding 的 base64 密钥（如 URL 安全 base64 转换而来）解码必须成功
+        # 无 padding 的 base64 密钥（如 URL 安全 base64 转换而来）解码必须成功
         # "dGVzdHNlY3JldA" 对应 bytes "testsecret"（无 = padding，4 的倍数余 2）
         code = _generate_totp("dGVzdHNlY3JldA")
         assert len(code) == 6
@@ -939,6 +940,52 @@ class TestAdminCheckExists:
         assert "/test/file0.txt" not in client._check_exists_cache
         # Newest entry should exist
         assert new_path in client._check_exists_cache
+
+
+class TestInvalidateCheckExistsCache:
+    """R33: invalidate_check_exists_cache 失效指定路径及其所有祖先目录缓存。"""
+
+    def test_invalidate_cache_clears_ancestors(self, tmp_path):
+        client = _make_admin_client(tmp_path)
+        client._check_exists_cache = {}
+        client._check_exists_cache_lock = threading.Lock()
+        # 预填缓存：祖先 + 兄弟 + 自身
+        cache_entries = {
+            "/": True,
+            "/cloud": True,
+            "/cloud/番剧": True,
+            "/cloud/番剧/进击的巨人": True,
+            "/cloud/番剧/其他": True,
+            "/cloud/其他": True,
+        }
+        for path, val in cache_entries.items():
+            client._check_exists_cache[path] = (time.time(), val)
+
+        # 失效 /cloud/番剧/进击的巨人
+        client.invalidate_check_exists_cache("/cloud/番剧/进击的巨人")
+
+        # 自身 + 祖先失效
+        assert "/cloud/番剧/进击的巨人" not in client._check_exists_cache
+        assert "/cloud/番剧" not in client._check_exists_cache
+        assert "/cloud" not in client._check_exists_cache
+        assert "/" not in client._check_exists_cache
+        # 兄弟和无关路径保留
+        assert "/cloud/番剧/其他" in client._check_exists_cache
+        assert "/cloud/其他" in client._check_exists_cache
+
+    def test_invalidate_cache_root_path(self, tmp_path):
+        """根路径失效不卡死（R33 修复了 dirname 死循环）。"""
+        client = _make_admin_client(tmp_path)
+        client._check_exists_cache = {}
+        client._check_exists_cache_lock = threading.Lock()
+        client._check_exists_cache["/"] = (time.time(), True)
+        client._check_exists_cache["/cloud"] = (time.time(), True)
+
+        client.invalidate_check_exists_cache("/")
+
+        assert "/" not in client._check_exists_cache
+        # /cloud 是 / 的子节点而非祖先，不会被失效
+        assert "/cloud" in client._check_exists_cache
 
 
 class TestAdminListContents:

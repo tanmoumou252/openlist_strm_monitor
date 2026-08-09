@@ -37,16 +37,10 @@ If InStr(output, "Python") = 0 Then
 End If
 
 ' B3: 检查 Python 版本 >= 3.11
-' [已修复] B3: Python >=3.11 版本检查（用 sys.exit 而非 exit，兼容禁用 site 的嵌入式 Python）
-Dim versionTest
-Set versionTest = WshShell.Exec("cmd /c " & quotedPythonPath & " -c ""import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)""")
-Dim versionOutput
-versionOutput = ""
-Do While Not versionTest.StdOut.AtEndOfStream
-    versionOutput = versionOutput & versionTest.StdOut.ReadLine
-Loop
-versionTest.StdOut.Close
-If versionTest.ExitCode <> 0 Then
+' [已修复] 使用 Run 方法替代 cmd /c + Exec，避免超过 2 个引号时 cmd.exe 剥离首尾引号导致命令失败
+Dim exitCode
+exitCode = WshShell.Run(quotedPythonPath & " -c ""import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)""", 0, True)
+If exitCode <> 0 Then
     MsgBox "Python 版本过低，需要 3.11 或更高版本。" & vbCrLf & vbCrLf & _
            "当前版本: " & output, _
            vbCritical, "启动错误"

@@ -158,7 +158,7 @@ async function _fetchAndRenderLogs(el) {
         // N0/T9: 切换标签时自增请求代际，使在途旧响应作废
         _logsGeneration++;
         currentLogType = newType;
-        // [已修复] R13 logs.js 标签切换未 catch
+        // 标签切换未 catch
         _fetchAndRenderLogs(el).catch(e => showToast('加载失败: ' + e.message, 'error'));
       }
     });
@@ -178,7 +178,7 @@ async function _fetchAndRenderLogs(el) {
       } catch (e) {
         showToast('刷新失败: ' + e.message, 'error');
       } finally {
-        // [已修复] N-P1-6: 恢复按钮状态（_fetchAndRenderLogs 可能重建 DOM，需重新获取引用）
+        // 恢复按钮状态（_fetchAndRenderLogs 可能重建 DOM，需重新获取引用）
         const btn = document.getElementById('logs-refresh');
         if (btn) {
           btn.disabled = false;

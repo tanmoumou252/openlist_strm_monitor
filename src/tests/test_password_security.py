@@ -1,25 +1,26 @@
 """
 密码安全专项测试。
 
-覆盖 P1-P18 密码安全检查清单中标记"无直接测试"的项：
-  P1  PBKDF2-HMAC-SHA256 600k 迭代哈希格式
-  P2  密码验证正确性（正确/错误）
-  P3  时序安全已修复：使用 hmac.compare_digest（M-5/H-5），=== 比较已移除
-  P5  /api/webui/config/ui GET 不泄露 admin_password
-  P6  明文密码写入 DB 时自动哈希
-  P11 首次启动生成随机密码
-  P13 reset_admin.py 密码长度 >= 4
-  P14 密码仅输出到控制台（print），不写入日志文件
+覆盖密码安全检查清单中标记"无直接测试"的项：
+  哈希与验证  PBKDF2-HMAC-SHA256 600k 迭代哈希格式
+  密码验证正确性（正确/错误）
+  时序安全已修复：使用 hmac.compare_digest（M-5/H-5），=== 比较已移除
+  /api/webui/config/ui GET 不泄露 admin_password
+  明文密码写入 DB 时自动哈希
+  首次启动生成随机密码
+  reset_admin.py 密码长度 >= 4
+  密码仅输出到控制台（print），不写入日志文件
 
-P4/P7-P10/P12/P15-P18 已由 test_integration_security.py / test_webui_http.py /
+会话绑定、跨站请求伪造、暴力破解速率限制、超时限制、旧密码验证、
+测试模式安全、错误消息披露等已由 test_integration_security.py / test_webui_http.py /
 test_real_server.py 覆盖，此处不重复。
 
 测试策略：
-  - P1/P2/P3：直接调用 WebUIServer 静态方法，无需服务器
-  - P5/P6：启动真实 WebUIServer + 真实 TmdbWatchlistDb（tmp_path 隔离）
-  - P11：构造无密码 DB，调用 _init_admin_password，验证 _has_password=True
-  - P13：调用 reset_admin.main()，验证短密码触发 sys.exit
-  - P14：捕获 logging 输出，验证密码明文不出现在日志记录中
+  - 哈希与验证：直接调用 WebUIServer 静态方法，无需服务器
+  - 泄露防护：启动真实 WebUIServer + 真实 TmdbWatchlistDb（tmp_path 隔离）
+  - 初始化：构造无密码 DB，调用 _init_admin_password，验证 _has_password=True
+  - 重置：调用 reset_admin.main()，验证短密码触发 sys.exit
+  - 日志：捕获 logging 输出，验证密码明文不出现在日志记录中
 """
 
 from __future__ import annotations
@@ -158,11 +159,11 @@ def _http_post(base_url: str, path: str, data: dict, session_token: str | None =
 
 
 # ============================================================
-# P1/P2/P3: 哈希算法与验证（无需服务器）
+# 哈希算法与验证（无需服务器）
 # ============================================================
 
 class TestPasswordHashing:
-    """密码哈希算法测试（P1/P2/P3）。"""
+    """密码哈希算法测试。"""
 
     def test_p1_hash_format(self):
         """P1: PBKDF2-HMAC-SHA256 600k 迭代哈希格式验证。
@@ -221,7 +222,7 @@ class TestPasswordHashing:
 
 
 # ============================================================
-# P5/P6: 密码泄露防护与自动哈希（需真实服务器 + 真实 DB）
+# 密码泄露防护与自动哈希（需真实服务器 + 真实 DB）
 # ============================================================
 
 @pytest.fixture
@@ -276,12 +277,13 @@ def webui_server_real_db(tmp_path):
 
 
 class TestPasswordLeakPrevention:
-    """密码泄露防护测试（P5/P6）。"""
+    """密码泄露防护测试。"""
 
     def test_p5_ui_config_get_no_password_leak(self, webui_server_real_db):
-        """P5: GET /api/webui/config/ui 不泄露 admin_password。
+        """P5: GET /api/webui/config/ui 不泄露 admin_password 明文。
 
-        routes.py:863-864 在返回前 pop 掉 admin_password。
+        敏感凭据只返回布尔值（已配置/未配置），不返回明文哈希。
+        admin_password 若存在必须是 bool，绝不能是真实密码哈希/明文。
         """
         server, base, token = webui_server_real_db
         status, _, body = _http_get(base, "/api/webui/config/ui", token)
@@ -289,9 +291,10 @@ class TestPasswordLeakPrevention:
         assert body.get("success") is True, f"响应异常: {body}"
         config = body.get("config", {})
         assert isinstance(config, dict), f"config 应为 dict: {config}"
-        # admin_password 不应出现在响应中
-        assert "admin_password" not in config, \
-            f"admin_password 不应通过 GET 泄露: {config}"
+        # admin_password 若出现必须是布尔标志，绝不能是明文/哈希（脱敏）
+        if "admin_password" in config:
+            assert isinstance(config["admin_password"], bool), \
+                f"admin_password 不应泄露明文/哈希: {config['admin_password']!r}"
 
     def test_p6_plaintext_password_auto_hash(self, webui_server_real_db):
         """P6: 明文密码写入 DB 时自动哈希。
@@ -336,14 +339,14 @@ class TestPasswordLeakPrevention:
 
 
 # ============================================================
-# P11: 首次启动生成随机密码
+# 首次启动生成随机密码
 # ============================================================
 
 class TestPasswordInitialization:
-    """密码初始化测试（P11）。"""
+    """密码初始化测试。"""
 
     def test_p11_first_run_generates_random_password(self, tmp_path):
-        """P11: 首次启动（无密码 DB）生成随机密码。
+        """首次启动（无密码 DB）生成随机密码。
 
         server.py:950 使用 secrets.token_urlsafe(12) 生成随机密码。
         """
@@ -372,7 +375,7 @@ class TestPasswordInitialization:
         assert parts[1] == "600000", f"迭代次数应为 600000: {parts[1]}"
 
     def test_p11_existing_password_not_regenerated(self, tmp_path):
-        """P11 补充: 已有密码时不重新生成。
+        """已有密码时不重新生成。
 
         server.py:927-928 检测到已有密码时跳过生成。
         """
@@ -395,7 +398,7 @@ class TestPasswordInitialization:
         assert server._has_password is True
 
     def test_p11_test_mode_uses_env_password(self, tmp_path):
-        """P11 补充: 测试模式使用环境变量密码。
+        """测试模式使用环境变量密码。
 
         server.py:942-943 当 WEBUI_TEST_MODE=1 时使用
         WEBUI_ADMIN_PASSWORD_FOR_TEST 环境变量。
@@ -420,11 +423,11 @@ class TestPasswordInitialization:
 
 
 # ============================================================
-# P13: reset_admin.py 密码长度检查
+# reset_admin.py 密码长度检查
 # ============================================================
 
 class TestResetAdminPassword:
-    """reset_admin.py 密码重置测试（P13）。"""
+    """reset_admin.py 密码重置测试。"""
 
     def test_p13_short_password_rejected(self, tmp_path, monkeypatch):
         """P13: reset_admin.py 拒绝长度 < 4 的密码。
@@ -444,7 +447,7 @@ class TestResetAdminPassword:
         reset_admin = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(reset_admin)
 
-        # [已修复] P1-3: patch find_db_path 到 tmp_path，移除 --db 参数
+        # patch find_db_path 到 tmp_path，移除 --db 参数
         monkeypatch.setattr(reset_admin, "find_db_path", lambda: str(db_path))
 
         # 模拟命令行参数：短密码（不带 --db）
@@ -473,7 +476,7 @@ class TestResetAdminPassword:
         reset_admin = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(reset_admin)
 
-        # [已修复] P1-3: patch find_db_path 到 tmp_path，移除 --db 参数
+        # patch find_db_path 到 tmp_path，移除 --db 参数
         monkeypatch.setattr(reset_admin, "find_db_path", lambda: str(db_path))
 
         valid_password = "validpass123"
@@ -511,7 +514,7 @@ class TestResetAdminPassword:
             "reset_admin.py 生成的哈希应可被 WebUIServer._check_password 验证"
 
     def test_p13_db_param_rejected(self, tmp_path, monkeypatch):
-        """[已修复] P1-3: reset_admin.py 拒绝 --db 参数。"""
+        """reset_admin.py 拒绝 --db 参数。"""
         reset_admin_path = Path(__file__).resolve().parent.parent.parent / "reset_admin.py"
         import importlib.util
         spec = importlib.util.spec_from_file_location("reset_admin", reset_admin_path)
@@ -528,7 +531,7 @@ class TestResetAdminPassword:
 
 
 # ============================================================
-# P14: 密码不写入日志文件
+# 密码不写入日志文件
 # ============================================================
 
 class TestPasswordLogging:

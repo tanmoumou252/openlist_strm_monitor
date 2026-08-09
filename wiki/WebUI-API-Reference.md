@@ -35,7 +35,8 @@
 ```json
 {
   "running": false,
-  "uptime": null
+  "uptime": null,
+  "watchers_healthy": true
 }
 ```
 
@@ -45,7 +46,7 @@
 - `refresh_healthy`（bool）— 刷新服务是否健康。**仅当主程序运行时存在**。
 - `refresh_consecutive_failures`（int）— 刷新连续失败次数。**仅当主程序运行时存在**。
 - `refresh_last_error`（str）— 最近一次刷新错误描述。**仅当主程序运行时存在**。
-- `watchers_healthy`（bool）— 文件系统监控器（Watchers）是否健康。**仅当主程序运行时存在**。
+- `watchers_healthy`（bool）— 文件系统监控器（Watchers）是否健康。主程序运行时反映真实状态；主程序未运行时默认返回 `True`（始终存在）。
 
 ### `POST /api/main/start` / `POST /api/main/stop`
 启动/停止主程序。需要会话 Token。
@@ -122,7 +123,7 @@
 ### `POST /api/index/audit`
 触发手动全量审计（初始扫描 + A→B 全量同步 + 索引代次推进）。需要会话 Token。
 
-- 与周期审计（`_maybe_run_full_audit`）共享互斥锁，任一方进行中另一方返回 `{"ok": true, "status": "already_running", "message": "审计已在进行中"}`。
+- 与周期审计（`_maybe_run_full_audit`）共享互斥锁，任一方进行中另一方返回 `{"ok": false, "status": "already_running", "message": "审计已在进行中"}`。
 - 审计完成后重置周期审计时钟（`_last_full_audit_at` + `set_control`），避免周期审计立即再跑一遍。
 - 重操作，耗时取决于 A 区库大小，会扫描全部 A 区根目录（含机械硬盘）。
 - 成功返回 `{"ok": true, "status": "started", "message": "审计已启动"}`（异步触发，立即返回）。
@@ -153,7 +154,7 @@
 保存 UI 配置。Body：`{ "key": "value", ... }`。
 
 ### `GET /api/webui/config/{scope}`
-获取指定 scope 的配置。`{scope}` 为 `ui`、`tmdb`、`openlist` 或 `migration`。`ui` scope 的 GET 响应会剥离 `admin_password` 字段（安全相关，不对外暴露哈希）。
+获取指定 scope 的配置。`{scope}` 为 `ui`、`tmdb`、`openlist` 或 `migration`。所有 scope 的敏感凭据（`ui` 的 `admin_password`、`tmdb` 的 `access_token`/`api_key`、`openlist` 的 `webdav_password`/`webdav_totp_secret`）只返回布尔值 `true`/`false`（已配置/未配置），不返回明文。
 
 ### `POST /api/webui/config/{scope}`
 保存指定 scope 的配置。Body 为键值对 JSON。
@@ -197,10 +198,14 @@
 ### `GET /api/openlist/status`
 返回 OpenList 配置状态（`configured` / `unconfigured`），仅判断是否已配置 host，**不解耦在线性**。连通性探测请用 `/api/openlist/ping`。**免 Token**。
 
-响应：已配置 `{"success": true, "status": "configured", "host": "..."}`；未配置 `{"success": true, "status": "unconfigured"}`。
+响应：已配置 `{"success": true, "status": "configured"}`；未配置 `{"success": true, "status": "unconfigured"}`。
 
 ### `GET /api/openlist/ping`
-Ping OpenList API。**免 Token**。
+Ping OpenList API，使用存储凭据发起真实登录验证在线性。**免 Token**。
+
+**速率限制**：IP 级 10 次/分钟。超限返回 429 `{"success": false, "status": "rate_limited", "message": "请求过于频繁，请在 N 秒后重试"}`。
+
+正常响应：`{"success": true, "status": "online"}` / `"offline"` / `"auth_failed_password"` / `"auth_failed_2fa"` / `"auth_failed"`。
 
 ### `POST /api/openlist/test-connection`
 测试提供的凭据的 WebDAV 连接。

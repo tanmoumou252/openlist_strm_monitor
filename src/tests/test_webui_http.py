@@ -19,6 +19,7 @@ import os
 import socket
 import sys
 import time
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -1129,6 +1130,272 @@ class TestSecurity:
             f"期望 5 条失败记录（第 6 次被 429 拒绝不追加），实际: {len(_login_attempts[ip])}"
 
 
+class TestWebuiConfigGetSanitization:
+    """R25: GET /api/webui/config/{scope} 敏感凭据只返回布尔值，不返回明文。"""
+
+    def _make_handler(self, scope_cfg: dict):
+        wdb = MagicMock()
+        wdb.get_all_config.return_value = dict(scope_cfg)
+        server = MagicMock()
+        server._watchlist_db = wdb
+        handler = MagicMock()
+        handler.client_address = ("127.0.0.1", 12345)
+        return handler, server
+
+    def test_tmdb_scope_sanitizes_sensitive(self):
+        from webui.routes import _handle_webui_config_get
+        handler, server = self._make_handler({
+            "access_token": "secret_token_abc",
+            "api_key": "secret_key_xyz",
+            "language": "zh-CN",
+        })
+        _handle_webui_config_get(handler, server, "tmdb")
+        payload = handler._send_json.call_args[0][0]
+        assert payload["success"] is True
+        cfg = payload["config"]
+        assert cfg["access_token"] is True
+        assert cfg["api_key"] is True
+        assert "secret_token_abc" not in json.dumps(payload)
+        assert cfg["language"] == "zh-CN"
+
+    def test_openlist_scope_sanitizes_sensitive(self):
+        from webui.routes import _handle_webui_config_get
+        handler, server = self._make_handler({
+            "webdav_password": "p@ssw0rd_secret",
+            "webdav_totp_secret": "JBSWY3DPEHPK3PXP_secret",
+            "webdav_host": "http://openlist:5244",
+        })
+        _handle_webui_config_get(handler, server, "openlist")
+        payload = handler._send_json.call_args[0][0]
+        cfg = payload["config"]
+        assert cfg["webdav_password"] is True
+        assert cfg["webdav_totp_secret"] is True
+        assert "p@ssw0rd_secret" not in json.dumps(payload)
+        assert cfg["webdav_host"] == "http://openlist:5244"
+
+    def test_ui_scope_sanitizes_admin_password(self):
+        from webui.routes import _handle_webui_config_get
+        handler, server = self._make_handler({
+            "admin_password": "pbkdf2$100000$secret_hash",
+        })
+        _handle_webui_config_get(handler, server, "ui")
+        payload = handler._send_json.call_args[0][0]
+        cfg = payload["config"]
+        assert cfg["admin_password"] is True
+        assert "pbkdf2" not in json.dumps(payload)
+
+
+class TestOpenListPingRateLimit:
+    """R26: /api/openlist/ping 的 IP 级 10 次/分钟速率限制。"""
+
+    @staticmethod
+    def _last_status(handler) -> int:
+        """提取 _send_json 最后一次调用的 HTTP 状态码（位置参数或 kwargs）。"""
+        args, kwargs = handler._send_json.call_args
+        return kwargs.get("status", args[1] if len(args) > 1 else 200)
+
+    def test_prefilled_attempts_immediately_429(self):
+        from webui.routes import _handle_openlist_ping, _ping_attempts, _ping_attempts_lock
+        _ping_attempts.clear()
+        try:
+            handler = MagicMock()
+            handler.client_address = ("192.168.1.50", 12345)
+            server = MagicMock()
+            now = time.time()
+            with _ping_attempts_lock:
+                _ping_attempts["192.168.1.50"] = [now - i for i in range(10)]
+            _handle_openlist_ping(handler, server)
+            status = self._last_status(handler)
+            payload = handler._send_json.call_args[0][0]
+            assert status == 429
+            assert payload["status"] == "rate_limited"
+            assert payload["success"] is False
+        finally:
+            _ping_attempts.clear()
+
+    def test_eleventh_call_returns_429(self):
+        """速率限制检查在 host 检查之前，故第 11 次仍 429。"""
+        from webui.routes import _handle_openlist_ping, _ping_attempts
+        _ping_attempts.clear()
+        try:
+            handler = MagicMock()
+            handler.client_address = ("192.168.1.60", 12345)
+            server = MagicMock(name="no-host-server")
+            fake_client = MagicMock()
+            fake_client.login.return_value = True
+            with patch("webui.routes._openlist_merged_webdav_cfg",
+                       return_value=("http://openlist:5244", "u", "p", "")), \
+                 patch("webdav_client.OpenListAdminClient", return_value=fake_client):
+                for i in range(10):
+                    _handle_openlist_ping(handler, server)
+                    status = self._last_status(handler)
+                    assert status != 429, f"第 {i + 1} 次不应限流"
+                _handle_openlist_ping(handler, server)
+                status = self._last_status(handler)
+                payload = handler._send_json.call_args[0][0]
+                assert status == 429, f"第 11 次应返回 429，实际 {status}"
+                assert payload["status"] == "rate_limited"
+        finally:
+            _ping_attempts.clear()
+
+
+class TestLoginToctouDoubleCheck:
+    """R27: 登录失败双重检查锁定——已达上限时 429 且不追加记录。"""
+
+    def _make_handler(self):
+        handler = MagicMock()
+        handler.client_address = ("127.0.0.1", 9999)
+        server = MagicMock()
+        server._watchlist_db = MagicMock()
+        server._watchlist_db.get_config.return_value = "salt$100000$hash"
+        return handler, server
+
+    def test_locked_out_returns_429_without_appending(self):
+        from webui.routes import _handle_login, _login_attempts, _login_attempts_lock
+        _login_attempts.clear()
+        try:
+            handler, server = self._make_handler()
+            now = time.time()
+            with _login_attempts_lock:
+                _login_attempts["127.0.0.1"] = [now] * 5
+            _handle_login(handler, server, b'{"password":"wrong"}')
+            status = handler._send_json.call_args[0][1]
+            payload = handler._send_json.call_args[0][0]
+            assert status == 429
+            assert "登录尝试过于频繁" in payload.get("error", "")
+            with _login_attempts_lock:
+                assert len(_login_attempts["127.0.0.1"]) == 5
+        finally:
+            _login_attempts.clear()
+
+    def test_double_check_blocks_toctou_race(self):
+        """模拟 TOCTOU：初始检查通过（4 条），verify 期间并发补满第 5 条，
+        双重检查应返回 429 且不追加——验证 R27 修复分支。"""
+        import webui.routes as routes
+        _login_attempts = routes._login_attempts
+        _login_attempts.clear()
+        try:
+            handler, server = self._make_handler()
+            now = time.time()
+            with routes._login_attempts_lock:
+                _login_attempts["127.0.0.1"] = [now - 1] * 4  # 初始检查通过
+
+            def _race_verify(password, stored):
+                # 模拟并发请求在慢哈希期间补满第 5 条
+                with routes._login_attempts_lock:
+                    cur = _login_attempts.get("127.0.0.1", [])
+                    cur.append(time.time())
+                    _login_attempts["127.0.0.1"] = cur
+                return False
+
+            with patch("utils.password_utils.verify_password", side_effect=_race_verify):
+                routes._handle_login(handler, server, b'{"password":"wrong"}')
+            status = handler._send_json.call_args[0][1]
+            payload = handler._send_json.call_args[0][0]
+            assert status == 429, f"双重检查应返回 429，实际 {status}"
+            assert "登录尝试过于频繁" in payload.get("error", "")
+            with routes._login_attempts_lock:
+                assert len(_login_attempts["127.0.0.1"]) == 5, \
+                    "双重检查已达上限应 429 且不追加"
+        finally:
+            _login_attempts.clear()
+
+
+class TestConfigApiUnifiedSession:
+    """R28: handle_config_api 用统一 _validate_session_token 校验（滑动续期 + 空 IP 兼容）。"""
+
+    def _make_handler(self, tmp_path):
+        from config import AppConfig
+        toml_path = tmp_path / "config.toml"
+        toml_path.write_text('[local]\ndb_file = "bridge.db"\n', encoding="utf-8")
+        cfg = AppConfig.from_file(str(toml_path))
+        handler = MagicMock()
+        handler.webui._config = cfg
+        handler.webui._tmdb_client = None
+        handler.webui._watchlist_db = FakeConfigDb()
+        handler.webui._has_password = True
+        handler.webui._sessions = {}
+        handler.webui._sessions_lock = threading.Lock()
+        handler.client_address = ("192.168.1.10", 12345)
+        handler.headers = {"X-Session-Token": "valid-token"}
+
+        # 真实 _validate_session_token 实现（含滑动续期 + 空 IP 兼容）
+        def _validate_token(token: str, client_ip: str) -> bool:
+            import hmac
+            webui = handler.webui
+            now = time.time()
+            with webui._sessions_lock:
+                if token in webui._sessions:
+                    expiry, stored_ip = webui._sessions[token]
+                    if now < expiry and (stored_ip == "" or stored_ip == client_ip):
+                        webui._sessions[token] = (now + 604800, client_ip)
+                        return True
+            return False
+
+        handler._validate_session_token = _validate_token
+        return handler
+
+    def test_valid_token_authenticates_and_slides_expiry(self, tmp_path):
+        from webui.routes import handle_config_api
+        handler = self._make_handler(tmp_path)
+        token = "valid-token"
+        old_expiry = time.time() + 3600
+        handler.webui._sessions[token] = (old_expiry, "192.168.1.10")
+        handle_config_api(handler)
+        payload = handler._send_json.call_args[0][0]
+        assert payload["_authenticated"] is True
+        # 滑动续期：过期时间被推进 ~7 天
+        new_expiry, stored_ip = handler.webui._sessions[token]
+        assert new_expiry > old_expiry + 600000, "有效会话应被滑动续期"
+        assert stored_ip == "192.168.1.10"
+
+    def test_empty_stored_ip_compatible(self, tmp_path):
+        from webui.routes import handle_config_api
+        handler = self._make_handler(tmp_path)
+        handler.webui._sessions["valid-token"] = (time.time() + 3600, "")
+        handle_config_api(handler)
+        payload = handler._send_json.call_args[0][0]
+        assert payload["_authenticated"] is True
+
+    def test_invalid_token_not_authenticated(self, tmp_path):
+        from webui.routes import handle_config_api
+        handler = self._make_handler(tmp_path)
+        handler.webui._sessions["other-token"] = (time.time() + 3600, "192.168.1.10")
+        handle_config_api(handler)
+        payload = handler._send_json.call_args[0][0]
+        assert payload["_authenticated"] is False
+
+
+class TestMainStartHidesExceptionDetail:
+    """R29: start_main 异常时不回传内部路径/异常文本。"""
+
+    def test_start_main_returns_generic_message_on_exception(self, tmp_path):
+        from config import ABMapping
+        cfg = _make_mock_config(tmp_path)
+        cfg.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+        db = _make_mock_db(tmp_path)
+
+        internal_path = str(tmp_path / "secret" / "config.py")
+
+        def _boom(*args, **kwargs):
+            raise FileNotFoundError(f"No such file: {internal_path}")
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"), \
+             patch("webdav_client.OpenListAdminClient", side_effect=_boom):
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            result = server.start_main()
+
+        assert result["success"] is False
+        assert result["message"] == "启动失败，请查看服务端日志"
+        assert result.get("error_type") == "exception"
+        assert internal_path not in result["message"]
+        assert "FileNotFoundError" not in json.dumps(result)
+
+
 # ============================================================
 # 工具函数
 # ============================================================
@@ -1887,6 +2154,10 @@ class TestConfigApiFreshInstall:
         handler.webui._config = cfg
         handler.webui._tmdb_client = None
         handler.webui._watchlist_db = FakeConfigDb()  # 空 DB = 首次运行
+        # handle_config_api 改用 handler._validate_session_token 统一校验。
+        # 首次安装未设置管理员密码 → _has_password=False，模拟真实"未认证"场景，
+        # 避免 MagicMock 默认真值导致 _authenticated 误判。
+        handler.webui._has_password = False
         return handler
 
     def test_from_file_initializes_mapping_fields(self, tmp_path):
@@ -1904,7 +2175,7 @@ class TestConfigApiFreshInstall:
         handle_config_api(handler)  # 修复前抛 AttributeError
         handler._send_json.assert_called_once()
         payload = handler._send_json.call_args[0][0]
-        # N4: 未认证响应不泄露 port/bind/counts
+        # 未认证响应不泄露 port/bind/counts
         assert "_authenticated" in payload
         assert payload["_authenticated"] is False
         assert "a_b_mappings_count" not in payload
@@ -2229,12 +2500,12 @@ class TestDBInitFailure:
 
 
 # ============================================================
-# P1-3 回归：数据库路径固定 + watchlist_db 移除
+# 数据库路径固定 + watchlist_db 移除
 # ============================================================
 
 
 class TestP13WatchlistDbRemoved:
-    """P1-3 回归：watchlist_db 字段已从配置中移除，验证各入口的拒绝/剥离行为。"""
+    """回归验证：watchlist_db 字段已从配置中移除，验证各入口的拒绝/剥离行为。"""
 
     def test_tmdb_configure_rejects_watchlist_db(self, webui_server):
         """POST /api/tmdb/configure 含 watchlist_db → 400"""

@@ -257,7 +257,7 @@ class AppService:
     def _refresh_mapping_snapshot(self) -> None:
         """OpenList 热更新后从当前 config 重新推导 mapping 快照。
 
-        [已修复] N3: 热更新只刷新了 config，未同步 AppService 内存中的
+        热更新只刷新了 config，未同步 AppService 内存中的
         a_b_mappings/a_roots/_a_to_b_map/_mapping_version，导致引擎（血统快照、
         清理、迁移）仍用旧路径/旧 mapping_version。原子更新：全部在同一调用内
         从 config 重新推导，任一步失败不产生半更新状态。
@@ -354,7 +354,7 @@ class AppService:
                 lock = threading.Lock()
                 self._path_locks[key] = lock
             # L1: 容量上限 - 超过 10000 时告警（弃用 clear 防锁引用失效）
-            # [已修复] L1: 锁字典容量告警（已弃用 clear 方案）
+            # 锁字典容量告警（已弃用 clear 方案）
             if len(self._path_locks) > 10000:
                 logging.warning("[Lock] _path_locks 容量 %d", len(self._path_locks))
         return lock
@@ -374,7 +374,7 @@ class AppService:
                 lock = threading.Lock()
                 self._path_locks[key] = lock
             # L1: 容量上限 - 超过 10000 时告警（弃用 clear 防锁引用失效）
-            # [已修复] L1: 锁字典容量告警（已弃用 clear 方案）
+            # 锁字典容量告警（已弃用 clear 方案）
             if len(self._path_locks) > 10000:
                 logging.warning("[Lock] _path_locks 容量 %d", len(self._path_locks))
         return lock
@@ -387,7 +387,7 @@ class AppService:
                 lock = threading.Lock()
                 self._fingerprint_locks[fingerprint] = lock
             # L1: 容量上限 - 超过 10000 时告警（弃用 clear 防锁引用失效）
-            # [已修复] L1: 锁字典容量告警（已弃用 clear 方案）
+            # 锁字典容量告警（已弃用 clear 方案）
             if len(self._fingerprint_locks) > 10000:
                 logging.warning("[Lock] _fingerprint_locks 容量 %d", len(self._fingerprint_locks))
         return lock
@@ -1248,7 +1248,7 @@ class AppService:
             if not s_webdav:
                 logging.warning("[单兵审判] 无法读取 STRM 的 WebDAV 路径，跳过删除: %s", bad_file)
                 return
-            # [已修复] N4: fail-closed 云端二次核验
+            # fail-closed 云端二次核验
             # fail-closed 云端核验：30s 观察期基于纯 DB 状态，期间云端可能被恢复，需二次确认
             # check_exists 三态：True=云端仍在→取消, False=权威缺失→删除, None=不可信→取消
             try:
@@ -1514,7 +1514,7 @@ class AppService:
         if identity and identity.current_b_path == old_path:
             self.db.update_identity_b_path(fingerprint, new_path)
         
-        # [已修复] N3: 物理删除失败已回滚 DB move（保持磁盘↔DB 一致性）
+        # 物理删除失败已回滚 DB move（保持磁盘↔DB 一致性）
         # 物理删除失败的孤儿处理 - 回滚 DB move 保持磁盘↔DB 一致性
         delete_success = False
         try:
@@ -1596,7 +1596,7 @@ class AppService:
                 )
                 self.refresh_identity_current_b_path(fingerprint, mapping_id)
                 self._store_valid_lineage_snapshot(disk_path, fingerprint)
-                # [已修复] P2: 捕获 ensure_single_visible_instance 异常，防止磁盘满/杀毒锁
+                # 捕获 ensure_single_visible_instance 异常，防止磁盘满/杀毒锁
                 # 导致启动阶段整个应用崩溃（B3-B raise 路径）
                 if fingerprint:
                     try:
@@ -2074,7 +2074,7 @@ class AppService:
         remove_empty_dirs(self.c_root)
 
     def cleanup_a_deleted_on_cloud(self, engine_path: str) -> None:
-        """[设计取舍] N5: 死代码——原 update 模式冗余清理，现已被
+        """死代码——原 update 模式冗余清理，现已被
         `cleanup_a_redundant_using_api` 取代，保留仅为兼容旧调用路径。"""
         if not engine_path:
             return
@@ -2252,7 +2252,7 @@ class AppService:
                             logging.warning("[A区清理] 物理删除失败，跳过DB删除: %s", a_local_path)
                     return
             # H-1: 把 copy_a_record_to_b 移入 fp_lock 块内，避免 TOCTOU 竞争
-            # [已修复] Z-7: 增加 try/except 记录 A 路径和 mapping 上下文
+            # 增加 try/except 记录 A 路径和 mapping 上下文
             try:
                 self.copy_a_record_to_b(str(local), webdav_path, parent, mapping_id=mapping_id)
             except Exception:
@@ -2334,7 +2334,7 @@ class AppService:
         return False
 
     def _b_file_score(self, path: str) -> tuple:
-        # [设计取舍] N8: match_count 升序偏好少匹配=更多用户改动=优先保留
+        # match_count 升序偏好少匹配=更多用户改动=优先保留
         # （已验证设计意图）。返回值若 match_count 大则排在后面，去重时
         # 优先保留经过用户重命名（与云端 WebDAV 路径差异大）的实例。
         p = Path(path)
@@ -2574,12 +2574,15 @@ class AppService:
             # 检查是否有 mapping_id 和 root 信息可用于 C 区迁移
             mapping = self.get_mapping_for_b(local_path)
             if mapping:
-                mapping_id, a_root, b_root = mapping
+                # get_mapping_for_b 返回 (mapping_id, b_root, a_root)，
+                # 原解构写成 (mapping_id, a_root, b_root) 导致 b_root 实为 a_root、
+                # get_c_path_for_b 的 relative_to 永远失败、C 区隔离失效、回退直接删除。
+                mapping_id, b_root, _a_root = mapping
                 # M-18: 尝试迁移文件到 C 区（而非直接删除）
                 try:
                     c_target = self.get_c_path_for_b(mapping_id, local_path, b_root)
                     c_target.parent.mkdir(parents=True, exist_ok=True)
-                    # [设计取舍] #2: copyfile 在恢复锁外是有意设计（避免死锁）
+                    # copyfile 在恢复锁外是有意设计（避免死锁）
                     # handle_b_deleted 在锁内检查，_restoring_generation 计数器防并发恢复竞争。勿把 copyfile 移入锁内。
                     move_file(local, c_target)
                     moved = self.db.move_b_record(local_path, str(c_target))
@@ -2885,8 +2888,11 @@ class AppService:
         result = []
         for entry_path, mapping in self.config.strm_storage_map.items():
             for mp in mapping.paths:
-                if cloud_path.startswith(mp):
-                    relative = cloud_path[len(mp.rstrip("/")):].lstrip("/")
+                # 前缀匹配需带路径边界，避免 "/cloud/番剧" 误配
+                # "/cloud/番剧2/x.strm"。与其它前缀检查（prefix + "/"）口径一致。
+                mp_norm = mp.rstrip("/")
+                if cloud_path == mp_norm or cloud_path.startswith(mp_norm + "/"):
+                    relative = cloud_path[len(mp_norm):].lstrip("/")
                     engine_path = f"{entry_path.rstrip('/')}/{relative}" if relative else entry_path
                     result.append(engine_path)
                     break
@@ -2961,7 +2967,7 @@ class AppService:
                     local_path)
                 self.db.delete_b_by_local(str(local))
                 return
-            # [已修复] Task 4: 云端 MOVE/DELETE 成功才联动清理；失败保留 A 区/A 记录
+            # 云端 MOVE/DELETE 成功才联动清理；失败保留 A 区/A 记录
             if webdav_path:
                 ok = self._execute_webdav_deletion(webdav_path, parent_webdav_path)
                 if not ok:
@@ -3088,12 +3094,12 @@ class AppService:
                 logging.error("[云盘操作] 移动失败: %s -> %s", cloud_path, trash_path)
             else:
                 logging.info("[云盘操作] 移动成功: %s -> %s", cloud_path, trash_path)
-                # [已修复] N-P1-2: 写操作后失效 check_exists 缓存，避免陈旧 True
+                # 写操作后失效 check_exists 缓存，避免陈旧 True
                 self.admin_api.invalidate_check_exists_cache(cloud_path)
                 self.admin_api.invalidate_check_exists_cache(trash_path)
             return ok
 
-        # [已修复] N4 (DEC-2): 只有显式 action == "DELETE" 才放行硬删除。
+        # N4 (DEC-2): 只有显式 action == "DELETE" 才放行硬删除。
         # 原实现把所有非 MOVE 值（含小写 "move"/"delete"、拼写错误、None 等）
         # 一律落入 DELETE 分支，属 fail-open。未知/异常 action 一律 fail-closed：
         # 返回 False + 高声告警，绝不执行不可逆的云端删除。
@@ -3104,7 +3110,7 @@ class AppService:
                 logging.error("[云盘操作] 删除失败: %s", cloud_path)
             else:
                 logging.info("[云盘操作] 删除成功: %s", cloud_path)
-                # [已修复] N-P1-2: 写操作后失效 check_exists 缓存，避免陈旧 True
+                # 写操作后失效 check_exists 缓存，避免陈旧 True
                 self.admin_api.invalidate_check_exists_cache(cloud_path)
             return ok
 
@@ -3249,10 +3255,10 @@ class AppService:
         page = 1
         per_page = 100  # 对齐 docs maximum:100
 
-        # [设计取舍] P4: B 区僵尸清理保留 100 页安全阀。超过 10000 条时
+        # B 区僵尸清理保留 100 页安全阀。超过 10000 条时
         # 整个父目录 fail-closed 跳过，避免无界顺序请求及部分结果触发误删除。
         # A 区并发收集器按 total 获取全部页，性能模型不同，二者不强行对齐。
-        while page <= 100:  # [设计取舍] P4: 100 页上限是有意的安全阀，勿与 A 区并发版对齐
+        while page <= 100:  # 100 页上限是有意的安全阀，勿与 A 区并发版对齐
             res = self.admin_api.list_directory(
                 directory_path, page=page, per_page=per_page)
             parsed = self._parse_fs_list_content(res)
@@ -3377,7 +3383,7 @@ class AppService:
         if not local_path:
             return
         local = Path(local_path)
-        # [设计取舍] #3: 先删 DB 再删文件是设计如此（避免 watchdog 级联）
+        # 先删 DB 再删文件是设计如此（避免 watchdog 级联）
         # 物理删除为尽力而为。勿当作 M-8 未守卫删除标记。
         # B-7 删除归因：先删 DB 记录，再删物理文件。
         # 反序原顺序以消除竞态窗口：若先 safe_remove_file，其触发的 on_deleted
@@ -3457,7 +3463,7 @@ class AppService:
                     # mkdir 在目录已存在时仍返回 True（见 webdav_client.py）
                     # 如果真的创建失败，继续尝试下一层，最坏情况由 move API 报错
                 else:
-                    # [已修复] N-P1-2: mkdir 成功后失效父目录缓存
+                    # mkdir 成功后失效父目录缓存
                     parent_dir = "/".join(sub_path.rstrip("/").split("/")[:-1]) or "/"
                     self.admin_api.invalidate_check_exists_cache(parent_dir)
 

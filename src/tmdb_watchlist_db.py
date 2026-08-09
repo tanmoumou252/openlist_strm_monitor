@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 # 加载失败时各调用点会软降级到 SQLite 默认的 unicode61 分词器。
 _SIMPLE_DLL_PATH = Path(__file__).parent / "tokenizers" / "simple" / "simple.dll"
 _SIMPLE_VERSION_PATH = Path(__file__).parent / "tokenizers" / "simple" / "VERSION"
-# [设计取舍] simple 分词器加载日志去重：每连接需调用 load_extension，但仅首次记录日志
+# simple 分词器加载日志去重：每连接需调用 load_extension，但仅首次记录日志
 _simple_loaded_logged = False
 
 def _load_simple_into(conn: sqlite3.Connection) -> str | None:
@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS webui_config (
 class TmdbWatchlistDb:
     """TMDB 待看列表 SQLite 数据库管理器。"""
 
-    def __init__(self, db_path: str | Path, ttl: float = 604800, tmdb_log_max_rows: int = 1000) -> None:  # [设计取舍] 路径参数仅测试注入与内部隔离，生产固定项目根 tmdb_watchlist.db
+    def __init__(self, db_path: str | Path, ttl: float = 604800, tmdb_log_max_rows: int = 1000) -> None:  # 路径参数仅测试注入与内部隔离，生产固定项目根 tmdb_watchlist.db
         self._db_path = str(db_path)
         self._ttl = ttl
         self._tmdb_log_max_rows = tmdb_log_max_rows
@@ -231,6 +231,11 @@ class TmdbWatchlistDb:
                 "tv",
                 "_last_ep_episode",
                 "INTEGER DEFAULT 0")
+            # FTS 回填依赖列（旧 schema 可能缺失，迁移时补齐）
+            self._ensure_column(conn, "movies", "original_title", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "movies", "overview", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "tv", "original_name", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "tv", "overview", "TEXT DEFAULT ''")
             # TMDB 操作日志表
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS tmdb_operation_log (
@@ -338,7 +343,7 @@ class TmdbWatchlistDb:
         return result
 
     def _get_meta(self, key: str, default: str = "") -> str:
-        # [设计取舍] #9: meta 回退 default 是有意设计（损坏不阻塞启动）
+        # meta 回退 default 是有意设计（损坏不阻塞启动）
         try:
             with self._conn() as conn:
                 row = conn.execute(
@@ -370,7 +375,9 @@ class TmdbWatchlistDb:
         if column_name not in columns:
             conn.execute(
                 f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
-            conn.commit()
+            # 不在此处 commit：调用方应处于更大的事务块（如 _init_schema 的
+            # `with self._conn() as conn:`），退出时统一提交，避免中途提交
+            # 破坏调用方的事务边界。
 
     # ----------------------------------------------------------
     # 查询
@@ -583,6 +590,7 @@ class TmdbWatchlistDb:
         # T5: "本段取回可信"标志——仅在收到合法响应（含合法空清单）后置 True；
         # 格式异常/接口失败时保持 False，删除动作以该标志为前置，避免误清本地表
         movie_retrieval_trusted = False
+        all_pages_ok = True
         try:
             page = 1
             while True:
@@ -590,8 +598,8 @@ class TmdbWatchlistDb:
                 if not result or not isinstance(
                         result, tuple) or len(result) != 2:
                     logging.warning("[TMDB] 电影 API 返回格式异常: %s", result)
+                    all_pages_ok = False
                     break
-                movie_retrieval_trusted = True
                 items, has_next = result
                 if not items:
                     break
@@ -604,6 +612,8 @@ class TmdbWatchlistDb:
                     break
                 page += 1
                 time.sleep(0.3)
+
+            movie_retrieval_trusted = all_pages_ok
 
             if not movie_retrieval_trusted:
                 # T5: 取回不可信（格式异常/接口失败），跳过删除并记 ERROR
@@ -630,7 +640,11 @@ class TmdbWatchlistDb:
 
             logging.info("[TMDB] 电影同步完成 (%d 项)", len(movie_ids))
             self.log_tmdb_operation("sync_movies_done", "info", f"电影同步完成 ({len(movie_ids)} 项)")
-            movie_sync_ok = True
+            # 仅当取回可信时才标记成功。不可信取回（API 返回畸形数据）
+            # 时跳过删除，但若仍置 movie_sync_ok=True，下方会更新 last_sync 时间戳，
+            # 导致 7 天内不重试。保持 False 以便下次同步重试。
+            if movie_retrieval_trusted:
+                movie_sync_ok = True
         except Exception as e:
             logging.warning("[TMDB] 电影同步失败: %s", e)
             self.log_tmdb_operation("sync_movies_error", "error", f"电影同步失败: {e}")
@@ -639,6 +653,7 @@ class TmdbWatchlistDb:
         tv_ids: set[int] = set()
         tv_sync_ok = False
         tv_retrieval_trusted = False
+        all_tv_pages_ok = True
         try:
             page = 1
             while True:
@@ -646,8 +661,8 @@ class TmdbWatchlistDb:
                 if not result or not isinstance(
                         result, tuple) or len(result) != 2:
                     logging.warning("[TMDB] 剧集 API 返回格式异常: %s", result)
+                    all_tv_pages_ok = False
                     break
-                tv_retrieval_trusted = True
                 items, has_next = result
                 if not items:
                     break
@@ -660,6 +675,8 @@ class TmdbWatchlistDb:
                     break
                 page += 1
                 time.sleep(0.3)
+
+            tv_retrieval_trusted = all_tv_pages_ok
 
             if not tv_retrieval_trusted:
                 # T5: 取回不可信，跳过删除
@@ -686,7 +703,9 @@ class TmdbWatchlistDb:
 
             logging.info("[TMDB] 剧集同步完成 (%d 项)", len(tv_ids))
             self.log_tmdb_operation("sync_tv_done", "info", f"剧集同步完成 ({len(tv_ids)} 项)")
-            tv_sync_ok = True
+            # 仅当取回可信时才标记成功，避免不可信取回仍推进 last_sync。
+            if tv_retrieval_trusted:
+                tv_sync_ok = True
         except Exception as e:
             logging.warning("[TMDB] 剧集同步失败: %s", e)
             self.log_tmdb_operation("sync_tv_error", "error", f"剧集同步失败: {e}")
@@ -808,18 +827,20 @@ class TmdbWatchlistDb:
 
     def _upsert_tv(self, item: dict, synced_at: float) -> None:
         with self._conn() as conn:
-            # 先查已有 _season_count, _episode_count 和匹配状态，保留旧值
+            # 先查已有 _season_count, _episode_count, _last_ep_* 和匹配状态，保留旧值
             existing = conn.execute(
-                "SELECT _season_count, _episode_count, match_status, match_reason, match_updated_at, manual_override_at, manual_override_by FROM tv WHERE id=?",
+                "SELECT _season_count, _episode_count, _last_ep_season, _last_ep_episode, match_status, match_reason, match_updated_at, manual_override_at, manual_override_by FROM tv WHERE id=?",
                 (item["id"],),
             ).fetchone()
             season_count = existing[0] if existing else 0
             episode_count = existing[1] if existing else 0
-            match_status = existing[2] if existing else "uncomputed"
-            match_reason = existing[3] if existing else ""
-            match_updated_at = existing[4] if existing else 0.0
-            manual_override_at = existing[5] if existing else 0.0
-            manual_override_by = existing[6] if existing else ""
+            last_ep_season = existing[2] if existing else 0
+            last_ep_episode = existing[3] if existing else 0
+            match_status = existing[4] if existing else "uncomputed"
+            match_reason = existing[5] if existing else ""
+            match_updated_at = existing[6] if existing else 0.0
+            manual_override_at = existing[7] if existing else 0.0
+            manual_override_by = existing[8] if existing else ""
 
             # 如果 item 有 number_of_seasons/number_of_episodes（watchlist API），始终更新计数（P2-2）
             if item.get("number_of_seasons") is not None:
@@ -867,8 +888,8 @@ class TmdbWatchlistDb:
                     self._val(item, "original_language"),
                     season_count,
                     episode_count,
-                    0,  # _last_ep_season — 由 _populate_tv_details 填充
-                    0,  # _last_ep_episode — 由 _populate_tv_details 填充
+                    last_ep_season,  # _last_ep_season — 保留已有值，避免覆盖 _populate_tv_details 结果
+                    last_ep_episode,  # _last_ep_episode — 同上
                     "tv",
                     synced_at,
                     match_status,
@@ -925,14 +946,15 @@ class TmdbWatchlistDb:
                     return details
                 return None
             except Exception as e:
-                # [已修复] N2: 详情写失败已记录日志
+                # 详情写失败已记录日志
                 logging.warning("[TMDB-DB] 获取剧集详情失败 tv_id=%s: %s", tid, e)
                 return None
 
         fetched = 0
-        for start in range(0, len(ids_to_fetch), BATCH_SIZE):
-            batch = ids_to_fetch[start:start + BATCH_SIZE]
-            with ThreadPoolExecutor(max_workers=10) as pool:
+        # 线程池在批次循环外创建一次，跨批次复用，避免每批新建线程池的开销
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            for start in range(0, len(ids_to_fetch), BATCH_SIZE):
+                batch = ids_to_fetch[start:start + BATCH_SIZE]
                 futures = {pool.submit(_fetch, tid): tid for tid in batch}
                 for future in as_completed(futures):
                     details = future.result()
@@ -968,8 +990,8 @@ class TmdbWatchlistDb:
                         except Exception as exc:
                             # N2: 记录 DB 写失败日志，便于诊断 SQLite 锁/磁盘满等问题
                             logging.warning("[TMDB-DB] 详情更新失败 (tid=%d): %s", tid, exc)
-            if start + BATCH_SIZE < len(ids_to_fetch):
-                time.sleep(BATCH_SLEEP)
+                if start + BATCH_SIZE < len(ids_to_fetch):
+                    time.sleep(BATCH_SLEEP)
 
         if fetched:
             logging.info(

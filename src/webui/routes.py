@@ -47,9 +47,10 @@ if TYPE_CHECKING:
 def _is_lan_ip(ip: str) -> bool:
     """判断 IP 是否为局域网地址（含 localhost 与局域网 IPv6）。
 
-    [已修复] R15: 改用 ipaddress.ip_address().is_private，正确识别局域网 IPv6
-    （如 fd00::/8、fe80::/10 链路本地），避免 RFC1918 手动匹配导致 IPv6 地址
-    被误判为非局域网而 403 拒绝。
+    用显式局域网范围替代 is_private。is_private 对 TEST-NET
+    （203.0.113.0/24，RFC 5737 文档保留地址）也返回 True，导致公网文档地址被
+    误判为局域网而放行。显式列出 RFC1918 与 IPv6 ULA（fc00::/7）+ loopback +
+    link-local，避免 is_private 的宽泛判定，同时正确识别局域网 IPv6。
     """
     if ip in ("127.0.0.1", "::1", "localhost"):
         return True
@@ -57,10 +58,17 @@ def _is_lan_ip(ip: str) -> bool:
         addr = ipaddress.ip_address(ip.split("%")[0])
     except ValueError:
         return False
+    if addr.is_loopback or addr.is_link_local:
+        return True
     # 兼容 IPv4-mapped IPv6（::ffff:192.168.1.5）
     if addr.version == 6 and addr.ipv4_mapped:
         addr = addr.ipv4_mapped
-    return addr.is_private or addr.is_loopback or addr.is_link_local
+    if addr.version == 4:
+        return (addr in ipaddress.ip_network('10.0.0.0/8')
+                or addr in ipaddress.ip_network('172.16.0.0/12')
+                or addr in ipaddress.ip_network('192.168.0.0/16'))
+    # IPv6 局域网：唯一本地地址 ULA (fc00::/7)
+    return addr in ipaddress.ip_network('fc00::/7')
 
 def _human_size(size: int) -> str:
     """人类可读的文件大小"""
@@ -70,7 +78,7 @@ def _human_size(size: int) -> str:
         size //= 1024
     return f"{size:.1f} TB"
 
-# [已修复] P16: CSV 单元格安全——防止公式注入
+# CSV 单元格安全——防止公式注入
 # 以 =, +, -, @ 开头的文本在电子表格中会被解释为公式，添加前缀使其作为文本处理
 _CSV_FORMULA_PREFIXES = frozenset("=+-@")
 
@@ -287,7 +295,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         if not avatar_hash:
             handler._send_json({"error": "missing hash"}, 400)
             return True
-        # N6: avatar_hash 应为十六进制字符串（MD5 或 SHA 哈希）- 防止路径注入
+        # avatar_hash 应为十六进制字符串（MD5 或 SHA 哈希）- 防止路径注入
         if not all(c in "0123456789abcdefABCDEF" for c in avatar_hash):
             handler._send_json({"error": "invalid hash format (must be hex)"}, 400)
             return True
@@ -297,14 +305,14 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         else:
             avatar_url = f"https://www.gravatar.com/avatar/{avatar_hash}?d=identicon&s=80"
         try:
-            # [已修复] F7: 添加大小限制（10MB），防止内存耗尽 DoS
+            # 添加大小限制（10MB），防止内存耗尽 DoS
             MAX_IMG_SIZE = 10 * 1024 * 1024  # 10MB
             ava_req = urllib.request.Request(
                 avatar_url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
             )
             opener = _build_img_opener(handler, use_proxy=not bool(_host))
-            # T6: with 确保 resp 在 413 提前返回/正常返回/异常三路径下均 close，防 FD 泄漏
+            # with 确保 resp 在 413 提前返回/正常返回/异常三路径下均 close，防 FD 泄漏
             with opener.open(ava_req, timeout=10) as resp:
                 # 检查 Content-Length（如果服务端返回）
                 content_length = int(resp.headers.get("Content-Length", 0))
@@ -312,7 +320,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                     handler._send_json({"error": "Image too large"}, 413)
                     return True
 
-                # [已修复] F7: 分块读取，防止无界 read() 导致内存耗尽 DoS
+                # 分块读取，防止无界 read() 导致内存耗尽 DoS
                 img_data = resp.read(MAX_IMG_SIZE + 1)
                 if len(img_data) > MAX_IMG_SIZE:
                     handler._send_json({"error": "Image too large"}, 413)
@@ -339,7 +347,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         if not poster_path:
             handler._send_json({"error": "missing path"}, 400)
             return True
-        # N6: poster_path 应为 TMDB 路径格式（/t/p/xxx 或类似），限制字符集防注入
+        # poster_path 应为 TMDB 路径格式（/t/p/xxx 或类似），限制字符集防注入
         # 追加 '..' 检查：字符类允许连续点，需显式拒绝路径穿越
         if not re.match(r'^/[A-Za-z0-9._/\-]+$', poster_path) or '..' in poster_path:
             handler._send_json({"error": "invalid poster path format"}, 400)
@@ -351,14 +359,14 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
         poster_url = f"{img_base}/w{width}{poster_path}"
         logging.debug("[TMDB] Poster Request - path: %s, url: %s", poster_path, poster_url)
         try:
-            # [已修复] F7: 添加大小限制（10MB），防止内存耗尽 DoS
+            # 添加大小限制（10MB），防止内存耗尽 DoS
             MAX_IMG_SIZE = 10 * 1024 * 1024  # 10MB
             poster_req = urllib.request.Request(
                 poster_url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
             )
             opener = _build_img_opener(handler, use_proxy=True)
-            # T6: with 确保 resp 在 413 提前返回/正常返回/异常三路径下均 close，防 FD 泄漏
+            # with 确保 resp 在 413 提前返回/正常返回/异常三路径下均 close，防 FD 泄漏
             with opener.open(poster_req, timeout=15) as resp:
                 # 检查 Content-Length（如果服务端返回）
                 content_length = int(resp.headers.get("Content-Length", 0))
@@ -366,7 +374,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                     handler._send_json({"error": "Image too large"}, 413)
                     return True
 
-                # [已修复] F7: 分块读取，防止无界 read() 导致内存耗尽 DoS
+                # 分块读取，防止无界 read() 导致内存耗尽 DoS
                 img_data = resp.read(MAX_IMG_SIZE + 1)
                 if len(img_data) > MAX_IMG_SIZE:
                     handler._send_json({"error": "Image too large"}, 413)
@@ -447,7 +455,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                      else [])
 # CSV 使用的 items 没有经过 _STATUS_MAP 映射（watchlist/movies?all=1 路由才有）
         # 在此补上映射；_status 不存在时通过 match_status 回退
-        # 在 CSV 写入循环中内联计算，避免原地修改共享缓存（P1-5）
+        # 在 CSV 写入循环中内联计算，避免原地修改共享缓存
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(["状态", "TMDB ID", "类型", "标题", "原标题", "发布日期", "评分"])
@@ -459,8 +467,8 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
             orig = item.get("original_title") or item.get(
                 "original_name") or ""
             date = item.get("release_date") or item.get("first_air_date") or ""
-            # [已修复] Z-1: 处理 vote_average=None，避免 f"{None:.1f}" 抛 TypeError
-            # [已修复] N6: 强制转 float，防止 vote_average 为字符串（如 "8.5"）
+            # 处理 vote_average=None，避免 f"{None:.1f}" 抛 TypeError
+            # 强制转 float，防止 vote_average 为字符串（如 "8.5"）
             # 时 f"{rating:.1f}" 抛 TypeError 导致整次 CSV 导出崩溃。
             try:
                 rating = float(item.get("vote_average")) \
@@ -863,7 +871,7 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
     try:
         changed = False
         applied = {}  # 只记录实际生效的值
-        # [已修复] P1-3: watchlist_db 已从允许字段中移除，请求体含该键时返回 400
+        # watchlist_db 已从允许字段中移除，请求体含该键时返回 400
         if "watchlist_db" in data:
             handler._send_json(
                 {"success": False, "error": "该路径配置已移除，请使用固定项目根路径"},
@@ -977,8 +985,8 @@ def _handler_reinit_tmdb(webui_server, tmdb_cfg) -> None:
     except Exception as e:
         logging.warning("[TMDB] 重新初始化客户端失败: %s", e)
         webui_server._tmdb_client = None
-    # [已修复] P1-3: 数据库路径固定在项目根，watchlist_db 字段已移除
-    # [设计取舍] 仅测试注入，生产固定项目根
+    # 数据库路径固定在项目根，watchlist_db 字段已移除
+    # 仅测试注入，生产固定项目根
     db_path = str(project_root / "tmdb_watchlist.db")
     ttl = float(getattr(tmdb_cfg, "watchlist_cache_ttl", 604800))
     try:
@@ -1016,9 +1024,18 @@ def _handle_webui_config_get(handler, webui_server, scope: str) -> None:
         return
     try:
         cfg = _wdb.get_all_config(scope)
-        # 敏感信息过滤：UI scope 的 admin_password 哈希不对 GET 暴露
-        if scope == "ui" and isinstance(cfg, dict):
-            cfg.pop("admin_password", None)
+        # 统一脱敏，与 handle_config_api 对齐。所有敏感凭据
+        # 只返回布尔值（已配置/未配置），不返回明文。
+        _SENSITIVE_KEYS = {
+            "ui": {"admin_password"},
+            "tmdb": {"access_token", "api_key"},
+            "openlist": {"webdav_password", "webdav_totp_secret"},
+        }
+        if isinstance(cfg, dict):
+            sensitive = _SENSITIVE_KEYS.get(scope, set())
+            for key in sensitive:
+                if key in cfg:
+                    cfg[key] = bool(cfg[key])
         handler._send_json({"success": True, "scope": scope, "config": cfg})
     except Exception as e:
         logging.exception("[WebUI] 读取配置失败 (scope=%s): %s", scope, e)
@@ -1147,13 +1164,13 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
         # 在写入循环前统一处理，避免循环内重复哈希。
         # 密码长度校验（≥4）：防止管理员把 password 设为空串导致认证失效
         # 整数等非字符串类型必须拒绝，避免 str(val) 写入字面量导致永久锁死
-        # [已修复] S2: 密码类型/长度校验，防空密码旁路认证
+        # 密码类型/长度校验，防空密码旁路认证
         if scope == "ui" and "admin_password" in data:
             _pw = data["admin_password"]
             if not isinstance(_pw, str):
                 handler._send_json({"success": False, "error": "密码必须为字符串"}, 400)
                 return
-            # [已修复] N-P1-8: 用严格哈希正则判断"已哈希"，而非简单 "$" in _pw
+            # 用严格哈希正则判断"已哈希"，而非简单 "$" in _pw
             # 密码如 My$ecret 含 $ 但不符合哈希格式，必须重新哈希，否则登录永久锁死
             if re.match(r'^[0-9a-f]{32}\$[0-9]+\$[0-9a-f]{64}$', _pw):
                 pass  # 已哈希，原样写入
@@ -1163,7 +1180,7 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
                         {"success": False, "error": "密码长度至少 4 个字符"}, 400)
                     return
                 data["admin_password"] = hash_password(_pw)
-        # [已修复] P1-3: tmdb scope 收到 watchlist_db 键时宽容剥离，避免写入 DB 孤儿键
+        # tmdb scope 收到 watchlist_db 键时宽容剥离，避免写入 DB 孤儿键
         if scope == "tmdb" and "watchlist_db" in data:
             logging.warning("[WebUI] tmdb scope 配置收到已移除的 watchlist_db 键，已剥离")
             data.pop("watchlist_db", None)
@@ -1187,7 +1204,7 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
             except Exception:
                 pass
 
-        # [已修复] N-P2-4: tmdb scope 写入后重新初始化 TMDB 客户端 + 重载 DB 配置
+        # tmdb scope 写入后重新初始化 TMDB 客户端 + 重载 DB 配置
         if scope == "tmdb":
             try:
                 webui_server._load_db_config()
@@ -1196,7 +1213,7 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
                 logging.warning("[WebUI] tmdb scope 热更新失败: %s", e)
 
         # 更新 _has_password 缓存（ui scope 管理密码变更时）
-        # M4: 改密后清空全部会话，使旧 token 立即失效（旧 token 最长 7 天）
+        # 改密后清空全部会话，使旧 token 立即失效（旧 token 最长 7 天）
         if scope == "ui" and "admin_password" in data:
             webui_server._has_password = bool(data.get("admin_password"))
             with webui_server._sessions_lock:
@@ -1277,7 +1294,7 @@ def _hot_reload_openlist_config(webui_server) -> None:
             logging.warning("[HotReload] 重新加载 STRM 存储映射失败: %s", exc)
 
         app_service = getattr(webui_server, "_app_service", None)
-        # [已修复] N3: 热更新后同步刷新 AppService 内存中的 mapping 快照
+        # 热更新后同步刷新 AppService 内存中的 mapping 快照
         # (a_b_mappings/a_roots/_a_to_b_map/_mapping_version)，否则引擎血统
         # 校验、清理、迁移仍用旧路径/旧 mapping_version。c_root 为属性实时读取
         # config.paths，无需额外刷新。
@@ -1328,7 +1345,7 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
     password = data.get("password", cfg.webdav.password)
     totp_secret = data.get("totp_secret", cfg.webdav.totp_secret)
 
-    # [已修复] F6: 限制 host 参数，仅允许测试当前配置的 host，防止 SSRF
+    # 限制 host 参数，仅允许测试当前配置的 host，防止 SSRF
     # 忽略请求体中的 host，始终使用当前配置的 host
     host = cfg.webdav.host
 
@@ -1516,16 +1533,39 @@ def _handle_openlist_ping(handler, webui_server) -> None:
 
     仅用于在线性检测，不影响"是否已配置"状态。
     返回 status: online / auth_failed_password / auth_failed_2fa / auth_failed / offline。
+
+    该端点为白名单免 Token，但每次调用都会用存储凭据对 OpenList
+    发起真实登录。加 IP 级 10 次/分钟速率限制，防止 LAN 客户端无限制调用触发
+    OpenList 反暴力破解账户锁定。
     """
+    # ---- IP 级速率限制 ----
+    client_ip = handler.client_address[0] if handler.client_address else "unknown"
+    now = time.time()
+    _PING_LIMIT = 10
+    _PING_WINDOW = 60
+    with _ping_attempts_lock:
+        ping_attempts = _ping_attempts  # 模块级 dict，见文件底部初始化
+        ip_attempts = ping_attempts.get(client_ip, [])
+        ip_attempts = [t for t in ip_attempts if now - t < _PING_WINDOW]
+        if len(ip_attempts) >= _PING_LIMIT:
+            retry_after = int(_PING_WINDOW - (now - ip_attempts[0]))
+            handler._send_json(
+                {"success": False, "status": "rate_limited",
+                 "message": f"请求过于频繁，请在 {retry_after} 秒后重试"},
+                429)
+            return
+        ip_attempts.append(now)
+        ping_attempts[client_ip] = ip_attempts
+    # ---- 速率限制结束 ----
     host, user, password, totp_secret = _openlist_merged_webdav_cfg(webui_server)
     if not host:
-        handler._send_json({"success": True, "status": "unconfigured"})
+        handler._send_json({"success": False, "status": "unconfigured"})
         return
     try:
         from webdav_client import OpenListAdminClient
         client = OpenListAdminClient(host, user, password, totp_secret=totp_secret)
         if client.login(force=True):
-            # T11: 不返回 host（与 /api/openlist/status 一致，避免白名单端点泄露配置）
+            # 不返回 host（与 /api/openlist/status 一致，避免白名单端点泄露配置）
             handler._send_json({"success": True, "status": "online"})
         else:
             error_type = client.last_error_type or "unknown"
@@ -1539,10 +1579,10 @@ def _handle_openlist_ping(handler, webui_server) -> None:
                 "unknown": "auth_failed",
             }
             status = status_map.get(error_type, "auth_failed")
-            handler._send_json({"success": True, "status": status})
+            handler._send_json({"success": False, "status": status})
     except Exception as e:
         logging.exception("[OpenList] 状态检查失败: %s", e)
-        handler._send_json({"success": True, "status": "offline", "error": "internal_error"})
+        handler._send_json({"success": False, "status": "offline", "error": "internal_error"})
 
 def _handle_openlist_paths(handler, webui_server) -> None:
     """处理 GET /api/openlist/paths — 路径自动获取。
@@ -1815,7 +1855,7 @@ def _handle_tmdb_watchlist_bg_sync(handler, webui_server) -> None:
 def _do_bg_sync(webui_server) -> None:
     """后台执行待看列表同步。"""
     try:
-        # [已修复] Z-6: 显式检查 TMDB 客户端引用，防止未来重构移除 try/except 兜底
+        # 显式检查 TMDB 客户端引用，防止未来重构移除 try/except 兜底
         tmdb_client = getattr(webui_server, '_tmdb_client', None)
         if tmdb_client is None:
             logging.warning("[TMDB] 后台同步中止：_tmdb_client 未初始化")
@@ -1872,7 +1912,7 @@ def _handle_restart_webui(handler, webui_server) -> None:
 
             # 3. 重启 HTTP 服务
             webui_server.stop()
-            # [已修复] R6: start() 对端口占用/绑定失败只记录日志并返回（_server 仍为
+            # start() 对端口占用/绑定失败只记录日志并返回（_server 仍为
             # None），此前 _do_restart 不校验导致 WebUI 静默永久离线。重试绑定并高声告警。
             for attempt in range(1, 4):
                 webui_server.start()
@@ -2057,7 +2097,7 @@ def handle_dashboard(handler) -> None:
         index_metadata = db.get_index_metadata()
         mapping_metadata = _get_mapping_metadata_list(handler)
         
-        # N1: 从 app_service 获取 watchdog 健康状态
+        # 从 app_service 获取 watchdog 健康状态
         app_service = handler.webui._app_service
         watchers_healthy = getattr(app_service, '_watchers_healthy', True) if app_service else True
         
@@ -2069,7 +2109,7 @@ def handle_dashboard(handler) -> None:
             "b_duplicate": b_status.get("duplicate", 0),
             "b_quarantined": b_status.get("quarantined", 0),
             "tmdb_configured": bool(handler.webui._tmdb_client),
-            # N1: Watchdog 健康状态 - 前端据此显示降级指示
+            # Watchdog 健康状态 - 前端据此显示降级指示
             "watchers_healthy": watchers_healthy,
             # 遗留字段（保持向后兼容）
             "table_counts": counts,
@@ -2127,7 +2167,7 @@ _KIND_SQL = """
 """
 
 # 提取媒体名称：找到分类目录后的第一段目录名
-# M3: 覆盖 _KIND_SQL 中归为 电影/番剧 的全部别名目录（/movies/ /movie/ /anime/ /动漫/ /动画/），
+# 覆盖 _KIND_SQL 中归为 电影/番剧 的全部别名目录（/movies/ /movie/ /anime/ /动漫/ /动画/），
 # 否则别名目录下的标题会坍缩进 '未分类'。偏移量 = 匹配串长度（含首尾斜杠）。
 _MEDIA_NAME_SQL = f"""
     CASE
@@ -2249,11 +2289,16 @@ _KIND_FILTER_MAP = {
 # UI scope 写入白名单：仅允许这些 key 通过 POST /api/webui/config/ui 写入
 _UI_CONFIG_ALLOWED_KEYS = {"tmdb_cache_never_remind", "tmdb_match_toast_disabled", "admin_password", "onboarding_completed", "onboarding_skipped"}
 
-# 登录速率限制 (P2-13)
+# 登录速率限制
 _login_attempts: dict[str, list[float]] = {}
 _login_attempts_lock = threading.Lock()
 _LOGIN_MAX_ATTEMPTS = 5
 _LOGIN_LOCKOUT_SECONDS = 300
+
+# /api/openlist/ping 的 IP 级速率限制（10 次/分钟），
+# 防止白名单端点被无限制调用触发 OpenList 账户锁定。
+_ping_attempts: dict[str, list[float]] = {}
+_ping_attempts_lock = threading.Lock()
 
 def _handle_login(handler, webui_server, body: bytes) -> None:
     """处理 POST /api/login — 密码登录验证。"""
@@ -2284,7 +2329,7 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
         _login_attempts[client_ip] = attempts
     try:
         data = json.loads(body)
-        # [已修复] P5: 校验 JSON body 必须为对象，防止非对象体导致 AttributeError
+        # 校验 JSON body 必须为对象，防止非对象体导致 AttributeError
         # 安全权衡：畸形请求不计入 _login_attempts（攻击者无法通过批量畸形请求触发锁定）
         if not isinstance(data, dict):
             handler._send_json({"error": "请求体须为 JSON 对象"}, 400)
@@ -2311,13 +2356,22 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
         password_ok = verify_password(password, stored)
         if not password_ok:
             with _login_attempts_lock:
-                # [已修复] R5: 重新读取最新失败记录再过滤追加，避免用密码校验前
-                # 读取的陈旧 attempts 覆盖并发线程刚写入的失败记录（丢失计数
-                # → 攻击者可绕过 5 次锁定）。读-过滤-追加-写回全程原子。
-                attempts = _login_attempts.get(client_ip, [])
-                attempts = [t for t in attempts if now - t < _LOGIN_LOCKOUT_SECONDS]
-                attempts.append(now)
-                _login_attempts[client_ip] = attempts
+                # 双重检查锁定。初始限流检查（上方）释放锁后、
+                # 密码哈希（慢 ~100ms）执行期间，N 个并发请求都可能通过初始检查；
+                # 此处重新获锁后再次校验计数，已达上限则直接 429，不再追加，
+                # 突破 5 次锁定上限。
+                current = _login_attempts.get(client_ip, [])
+                current = [t for t in current if now - t < _LOGIN_LOCKOUT_SECONDS]
+                if len(current) >= _LOGIN_MAX_ATTEMPTS:
+                    retry_after = int(
+                        _LOGIN_LOCKOUT_SECONDS - (now - current[0]))
+                    handler._send_json(
+                        {"error": f"登录尝试过于频繁，请在 {retry_after} 秒后重试"},
+                        429)
+                    return
+                # 读-过滤-追加-写回全程原子，避免覆盖并发失败记录
+                current.append(now)
+                _login_attempts[client_ip] = current
             handler._send_json({"error": "密码错误"}, 401)
             return
         # 登录成功，清除失败记录
@@ -2841,7 +2895,7 @@ def handle_area_detail(handler, area, params) -> None:
             mappings_result.append(mapping_meta)
         
         # 单一 mapping 向后兼容（扁平响应）
-        # Fix R3: 使用 mappings_result[0]["mapping_id"] 而非循环残留变量 mid
+        # 使用 mappings_result[0]["mapping_id"] 而非循环残留变量 mid
         if len(mappings_result) == 1:
             result = mappings_result[0]
             result["area"] = area
@@ -2873,7 +2927,7 @@ def handle_area_detail(handler, area, params) -> None:
                 "mappings": mappings_result,
             })
     else:
-        # C 区：不按 mapping 分区，但复用分页切片逻辑（Fix R2）
+        # C 区：不按 mapping 分区，但复用分页切片逻辑
         local_root = ""
         webdav_root = ""
         strm_engine_root = ""
@@ -2949,7 +3003,7 @@ def _process_mapping_partition(
     # 独立分页
     total = len(records)
     total_pages = max(1, ceil(total / PAGE_SIZE)) if total else 1
-    # F2: 记录请求页码是否被 clamp（多 mapping 时各分区记录数不同，静默截断会让用户看到错误页）
+    # 记录请求页码是否被 clamp（多 mapping 时各分区记录数不同，静默截断会让用户看到错误页）
     requested_page = page
     page = max(1, min(page, total_pages))
     clamped = page != requested_page
@@ -3040,7 +3094,7 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
         return
 
     # 获取 refresh_lock，防止同一媒体并发刷新
-    # T13: 锁在 WebUIServer.__init__ 预建，避免懒初始化非原子导致 409 互斥被绕过
+    # 锁在 WebUIServer.__init__ 预建，避免懒初始化非原子导致 409 互斥被绕过
     refresh_lock = handler.webui._refresh_lock
 
     if not refresh_lock.acquire(blocking=False):
@@ -3049,7 +3103,7 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
 
     try:
         result = _do_media_refresh(app_service, area, media_name, mapping_id=mapping_id)
-        # [已修复] N5: 业务失败返回 400 而非 200。前端 api.js 正确提取 err.error，
+        # 业务失败返回 400 而非 200。前端 api.js 正确提取 err.error，
         # 具体错误信息不丢失；但 HTTP 状态码此前恒为 200，掩盖了刷新失败。
         handler._send_json(result, 200 if result.get("ok") else 400)
     except Exception as e:
@@ -3346,7 +3400,7 @@ def _read_log_file_tail(log_file: Path | str, lines_req: int) -> list[str]:
 
 def handle_logs_api(handler, params: dict) -> None:
     """处理 GET /api/logs"""
-    # [已修复] F5: 限制 lines 参数范围，防止 DoS（内存耗尽）
+    # 限制 lines 参数范围，防止 DoS（内存耗尽）
     lines_req = max(1, min(_safe_int(params.get("lines", ["200"])[0], 200), 5000))
 
     # 确定日志文件路径
@@ -3389,7 +3443,7 @@ def handle_download_log_api(handler, params: dict) -> None:
         return
 
     try:
-        # [已修复] N-P2-5: 分块流式写 + Content-Length，避免整文件读入内存
+        # 分块流式写 + Content-Length，避免整文件读入内存
         file_size = log_file_path.stat().st_size
         handler.send_response(200)
         handler.send_header('Content-Type', 'application/octet-stream')
@@ -3404,7 +3458,7 @@ def handle_download_log_api(handler, params: dict) -> None:
                     break
                 handler.wfile.write(chunk)
     except Exception as e:
-        # [已修复] N7: 流式写阶段 headers 已发送后不得再调 _send_json（会抛
+        # 流式写阶段 headers 已发送后不得再调 _send_json（会抛
         # "headers already sent" 二次异常）。仅记录日志并关闭连接，客户端收到
         # 截断的 body 即可判断失败。
         logging.exception("[WebUI] 下载日志文件失败: %s", e)
@@ -3442,21 +3496,15 @@ def handle_config_api(handler) -> None:
         getattr(tmdb_cfg, "access_token", "") if tmdb_cfg else "")
     token_configured = bool(token)
 
-    # 检查是否已认证（通过检查 X-Session-Token 头）
+    # 统一调用 handler._validate_session_token 做会话校验，
+    # 与 server._check_auth 的常规路径一致：含滑动过期续期（7 天）与
+    # stored_ip=="" 兼容。原自定义实现既不滑动续期、又要求 stored_ip 严格
+    # 相等，导致客户端只轮询 /api/config 时 7 天过期不滑动、空 IP 会话被误拒。
     token_header = getattr(handler.headers, 'get', lambda k, d=None: d)('X-Session-Token', '')
     is_authenticated = False
     if token_header and handler.webui._has_password:
-        from time import time as _time
-        with handler.webui._sessions_lock:
-            import hmac as _hmac
-            for stored_token in handler.webui._sessions:
-                if _hmac.compare_digest(token_header.encode('utf-8'), stored_token.encode('utf-8')):
-                    expiry, stored_ip = handler.webui._sessions[stored_token]
-                    client_ip = handler.client_address[0] if handler.client_address else ""
-                    # M-4: session 绑定客户端 IP，防止 token 跨 IP 复用
-                    if _time() < expiry and stored_ip == client_ip:
-                        is_authenticated = True
-                    break
+        client_ip = handler.client_address[0] if handler.client_address else ""
+        is_authenticated = handler._validate_session_token(token_header, client_ip)
 
     if not is_authenticated:
         # M-3: 未认证时只返回最基本的状态 booleans，防止信息泄露
@@ -3479,7 +3527,7 @@ def handle_config_api(handler) -> None:
     # 认证通过，返回完整配置
     token_configured = bool(token)
 
-    # [已修复] P1-3: db_file 固定在项目根，仅返回固定路径 + 存在状态，只读
+    # db_file 固定在项目根，仅返回固定路径 + 存在状态，只读
     project_root = (getattr(handler.webui, '_project_root', None)
                     or Path(__file__).resolve().parent.parent.parent)
     db_file = os.path.normpath(str(project_root / "bridge.db"))
@@ -3590,7 +3638,7 @@ def handle_config_api(handler) -> None:
             tmdb_cfg,
             "proxy_enabled",
             False) if tmdb_cfg else False
-    # [已修复] P1-3: tmdb_watchlist_db 固定在项目根，只读，不从 webui_config 读取
+    # tmdb_watchlist_db 固定在项目根，只读，不从 webui_config 读取
     tmdb_watchlist_db = str(project_root / "tmdb_watchlist.db")
     # TMDB Watchlist 启用/禁用开关 — DB 优先，默认启用
     tmdb_watchlist_enabled_raw = db_tmdb_cfg.get("watchlist_enabled", "")
@@ -3605,8 +3653,10 @@ def handle_config_api(handler) -> None:
         str(getattr(tmdb_cfg, "fuzzy_threshold", "0.60")) if tmdb_cfg else "0.60")
     tmdb_anime_min_ep_ratio = db_tmdb_cfg.get("anime_min_ep_ratio", "") or (
         str(getattr(tmdb_cfg, "anime_min_ep_ratio", "0.30")) if tmdb_cfg else "0.30")
+    # 回退默认值统一为 0.3，与 config.py 的
+    # anime_max_season_diff: float = 0.3 一致（原为 "1"）。
     tmdb_anime_max_season_diff = db_tmdb_cfg.get("anime_max_season_diff", "") or (
-        str(getattr(tmdb_cfg, "anime_max_season_diff", "1")) if tmdb_cfg else "1")
+        str(getattr(tmdb_cfg, "anime_max_season_diff", "0.3")) if tmdb_cfg else "0.3")
     tmdb_anime_min_season_ratio = db_tmdb_cfg.get("anime_min_season_ratio", "") or (
         str(getattr(tmdb_cfg, "anime_min_season_ratio", "0.3")) if tmdb_cfg else "0.3")
     tmdb_cache_ttl = db_tmdb_cfg.get("watchlist_cache_ttl", "") or (
@@ -3644,7 +3694,7 @@ def handle_config_api(handler) -> None:
         "b_root": b_root,
         "c_root": c_root,
         "a_folders": a_folders,
-        # [已修复] Task 5: a_b_mappings 补充 mapping_id，与 dashboard 一致
+        # a_b_mappings 补充 mapping_id，与 dashboard 一致
         "a_b_mappings": [
             {"a_root": m.a_root, "b_root": m.b_root, "label": m.label,
              "mapping_id": m.mapping_id}

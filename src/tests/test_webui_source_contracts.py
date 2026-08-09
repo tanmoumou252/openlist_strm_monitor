@@ -257,18 +257,17 @@ def test_shipped_docs_have_no_line_number_references():
 
 
 def test_router_render_guard_not_always_stale_free():
-    """M9: router.js 必须将 _pageRenderGen 置为 -1，使 isRenderStale() 正确失效旧页。
+    """N0: router.js 导出 captureRenderGuard() 工厂，页面渲染护栏用代际快照防陈旧覆盖。
 
     旧实现 `_pageRenderGen = myGen` 使 `_pageRenderGen === _renderGen` 恒成立，
     isRenderStale() 恒返回 false，12 处页面渲染护栏全部失效。
+    AUDIT-REPAIR-NOTES 第五节 N0 约束：不要退回模块级单变量 isRenderStale。
     """
     source = _read("modules/core/router.js")
-    # isRenderStale 依赖 _pageRenderGen !== _renderGen
-    assert "return _pageRenderGen !== _renderGen" in source
-    # router() 内必须把 _pageRenderGen 置为 -1（而非同步为 myGen）
-    assert "_pageRenderGen = -1" in source, (
-        "router.js 应把 _pageRenderGen 置为 -1（原 `= myGen` 使 isRenderStale() 恒 false）"
-    )
+    # captureRenderGuard() 工厂是当前渲染护栏的基础
+    assert "captureRenderGuard" in source
+    # 废弃的单变量 _pageRenderGen 模式不得作为渲染护栏存在
+    assert "return _pageRenderGen !== _renderGen" not in source
     # 旧实现 `_pageRenderGen = myGen;` 作为赋值语句不得存在
     # （注释中提及旧实现属正常，故用语句级关键词限定）
     assert "_pageRenderGen = myGen;" not in source

@@ -154,7 +154,7 @@ def setup_logging(
     stderr_handler.setFormatter(formatter)
 
     # file: 按大小轮转
-    # [已修复] R11: 日志目标为只读文件/目录路径时 RotatingFileHandler 构造会抛
+    # 日志目标为只读文件/目录路径时 RotatingFileHandler 构造会抛
     # OSError 导致整个启动崩溃。回退到系统临时目录，仅降级不阻断启动。
     try:
         file_handler = RotatingFileHandler(

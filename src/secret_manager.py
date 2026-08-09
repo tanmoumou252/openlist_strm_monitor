@@ -25,6 +25,7 @@ import platform
 import secrets
 import stat
 import sys
+import threading
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,10 @@ _KEY_BYTE_LEN = 32
 
 # 模块级缓存，避免每次调用都读磁盘
 _cached_fernet = None
+
+# 保护 _cached_fernet 首次创建（_load_or_create_master_key 用
+# O_TRUNC 截断写文件），防止多线程并发首次调用生成多个互不兼容的 key 文件。
+_fernet_lock = threading.RLock()
 
 # cryptography 是否可用（首次调用时检测）
 _cryptography_available: bool | None = None
@@ -100,7 +105,7 @@ def _load_or_create_master_key() -> bytes:
     首次调用时生成 32 字节随机密钥并以 URL-safe base64 写入 ``.secret_key``；
     后续调用直接读取。Unix 下尝试 chmod 600；Windows 尽力而为。
     """
-    # [设计取舍] #8: 完整性 sidecar 不在范围内（解密失败暴露）
+    # 完整性 sidecar 不在范围内（解密失败暴露）
     if os.path.exists(_KEY_FILE):
         with open(_KEY_FILE, "rb") as f:
             key = f.read().strip()
@@ -112,8 +117,14 @@ def _load_or_create_master_key() -> bytes:
     raw = secrets.token_bytes(_KEY_BYTE_LEN)
     key = base64.urlsafe_b64encode(raw)
 
-    # 写入文件
-    fd = os.open(_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # 原子写入：O_EXCL 确保跨进程互斥——若另一进程同时首次启动并先创建了
+    # 密钥文件，则此处 EEXIST 失败，回退为读取对方的密钥，避免 O_TRUNC 互相覆盖。
+    try:
+        fd = os.open(_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        log.info("[SecretManager] 密钥文件已被另一进程创建，改用已有密钥: %s", _KEY_FILE)
+        with open(_KEY_FILE, "rb") as f:
+            return f.read().strip()
     try:
         os.write(fd, key)
     finally:
@@ -130,7 +141,13 @@ def _load_or_create_master_key() -> bytes:
     return key
 
 def _get_fernet():
-    """获取 Fernet 实例（带模块级缓存）。若 cryptography 不可用返回 None。"""
+    """获取 Fernet 实例（带模块级缓存）。若 cryptography 不可用返回 None。
+
+    首次创建受模块级锁保护。原实现无锁，多线程并发调用时，
+    _load_or_create_master_key 用 O_TRUNC 截断写文件，线程 A 写 key_A、
+    线程 B 截断写 key_B，线程 A 缓存 Fernet(key_A)，下次启动加载 key_B，
+    导致 key_A 加密的值无法解密。加锁后首次创建只生成一个 key 文件。
+    """
     global _cached_fernet
     if _cached_fernet is not None:
         return _cached_fernet
@@ -138,9 +155,17 @@ def _get_fernet():
         return None
     from cryptography.fernet import Fernet
 
-    key = _load_or_create_master_key()
-    _cached_fernet = Fernet(key)
-    return _cached_fernet
+    with _fernet_lock:
+        # 双重检查：等待锁期间可能已被其它线程创建
+        if _cached_fernet is not None:
+            return _cached_fernet
+        key = _load_or_create_master_key()
+        try:
+            _cached_fernet = Fernet(key)
+        except ValueError as e:
+            log.warning("[SecretManager] 主密钥文件损坏，无法创建 Fernet: %s", e)
+            return None
+        return _cached_fernet
 
 def is_encrypted(value: str) -> bool:
     """判断值是否已被本模块加密（以 ``ENC:`` 开头）。"""

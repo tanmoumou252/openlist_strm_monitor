@@ -103,7 +103,7 @@ class TestParseStrmContent:
         assert result == "/mount/file.mp4"
 
     def test_parse_http_url_with_empty_path_returns_none(self):
-        # M7: http://host?sign=xxx 时 parsed.path 为空，不应抛 ValueError
+        # http://host?sign=xxx 时 parsed.path 为空，不应抛 ValueError
         assert parse_strm_content("http://host?sign=xxx") is None
         assert parse_strm_content("https://host?token=abc") is None
 

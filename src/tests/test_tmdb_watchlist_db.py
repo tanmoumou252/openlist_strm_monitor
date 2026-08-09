@@ -121,7 +121,7 @@ class TestSchemaInit:
     def test_fts_table_created(self, db):
         names = {r[0] for r in _raw_rows(
             db, "SELECT name FROM sqlite_master WHERE type='table'")}
-        # T1: 拆分 movies_fts / tv_fts 分表，旧单表 tmdb_watchlist_fts 已移除
+        # 拆分 movies_fts / tv_fts 分表，旧单表 tmdb_watchlist_fts 已移除
         assert {"movies_fts", "tv_fts"} <= names
         assert "tmdb_watchlist_fts" not in names
 
@@ -454,6 +454,16 @@ class TestSync:
         db.override_match_state("movie", 1, "in_library", "用户确认")
         db.sync(_client(movie_pages=[([_movie(1)], False)]), force=True)
         assert db.get_match_state("movie", 1)["match_status"] == "in_library"
+
+    def test_untrusted_movie_does_not_advance_last_sync(self, db):
+        """R32: 电影取回不可信时 movie_sync_ok 保持 False，不推进 last_sync。"""
+        client = MagicMock()
+        client.get_watchlist_movies.return_value = "not a tuple"  # 不可信
+        client.get_watchlist_tv.side_effect = RuntimeError("tv api down")  # TV 也失败
+        client.get_tv_details.return_value = None
+        db.sync(client, force=True)
+        assert db.get_cache_status()["cache_last_sync"] == 0, \
+            "不可信取回不得推进 last_sync，以便下次同步重试"
 
 
 # ============================================================

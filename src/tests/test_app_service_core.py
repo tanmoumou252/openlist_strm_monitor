@@ -90,7 +90,7 @@ class TestStrmStorageManager:
         assert mode == "update"
 
     def test_extract_save_local_mode_null_returns_empty(self):
-        # M6: 远端 API 返回 "SaveLocalMode": null 时 .get 默认值不生效，
+        # 远端 API 返回 "SaveLocalMode": null 时 .get 默认值不生效，
         # 必须显式类型守卫返回 ""，否则 is_sync_mode 调 .lower() 抛 AttributeError
         assert self.manager._extract_save_local_mode('{"SaveLocalMode": null}') == ""
         assert self.manager._extract_save_local_mode('{"SaveLocalMode": 123}') == ""
@@ -1450,7 +1450,7 @@ class TestInitialScanB:
         )
         self.db.get_all_b_records.return_value = [record]
 
-        # [设计取舍] 有意冒烟测试，断言代码路径执行，非行为正确性验证
+        # 有意冒烟测试，断言代码路径执行，非行为正确性验证
         with caplog.at_level(logging.INFO), \
              patch.object(self.app, "_verify_b_path_lineage", return_value=True):
             self.app.initial_scan_b()
@@ -1458,7 +1458,7 @@ class TestInitialScanB:
         assert any("B 区历史记录核对开始" in msg for msg in caplog.messages)
         assert any("B 区历史记录核对完成" in msg for msg in caplog.messages)
 
-    # [设计取舍] 有意冒烟测试，断言代码路径执行，非行为正确性验证
+    # 有意冒烟测试，断言代码路径执行，非行为正确性验证
     def test_reconcile_pre_call_debug_logs(self, caplog):
         """B 区历史核对中关键函数调用前有 DEBUG 日志包含路径"""
         import logging
@@ -2113,6 +2113,81 @@ class TestRestoreBFileFromA:
                 str(self.b_dir / "target.strm"), webdav_path, "/mount", None)
 
         assert result is True
+
+
+# ===========================================================================
+# TestRestoreBFromAAfterViolation
+# ===========================================================================
+
+
+class TestRestoreBFromAAfterViolation:
+    """_restore_b_from_a_after_violation 的 C 区隔离解构修复测试。
+
+    get_mapping_for_b 返回 (mapping_id, b_root, a_root)；原实现解构成
+    (mapping_id, a_root, b_root)，导致 get_c_path_for_b 拿到 a_root 当 b_root、
+    relative_to 永远失败、C 区隔离失效、回退直接删除。本测试 mock
+    get_mapping_for_b 返回 (mid, b_root, a_root)，验证文件被移入 C 区而非删除。
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = Path(self.tmp) / "a"
+        self.b_dir = Path(self.tmp) / "b"
+        self.c_dir = Path(self.tmp) / "c"
+        for d in [self.a_dir, self.b_dir, self.c_dir]:
+            d.mkdir()
+
+        config = Mock(spec=AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [ABMapping(
+            mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
+        config.paths = Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.behavior = Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.strm_engine_paths = []
+
+        db = Mock(spec=Database)
+        db.init_subtitle_table = Mock()
+        db.move_b_record.return_value = True
+        db.mark_b_instance_status = Mock()
+        self.db = db
+
+        with patch("app_service_core.RefreshService"), \
+              patch("app_service_core.SyncService"), \
+              patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, Mock())
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_c_zone_isolation_uses_correct_b_root(self):
+        """get_mapping_for_b 返回 (mid, b_root, a_root) → 文件移入 C 区而非删除。"""
+        b_file = self.b_dir / "show" / "ep.strm"
+        b_file.parent.mkdir(parents=True, exist_ok=True)
+        b_file.write_text("/mount/show/ep.mp4", encoding="utf-8")
+
+        # 模拟 get_mapping_for_b 返回 (mapping_id, b_root, a_root)
+        with patch.object(self.app, "get_mapping_for_b",
+                          return_value=("test_m1", str(self.b_dir), str(self.a_dir))):
+            with patch.object(self.app, "get_c_path_for_b",
+                              wraps=self.app.get_c_path_for_b) as mock_c:
+                self.app._restore_b_from_a_after_violation(
+                    b_file, "/mount/show/ep.mp4", "dummy-fingerprint")
+
+        # get_c_path_for_b 必须收到 b_root=self.b_dir（而非 a_dir）
+        assert mock_c.call_count == 1
+        _mid, _b_path, b_root_arg = mock_c.call_args[0]
+        assert str(b_root_arg) == str(self.b_dir)
+
+        # 文件应被隔离到 C 区（相对路径 show/ep.strm 保留），而非删除
+        c_target = self.c_dir / "test_m1" / "show" / "ep.strm"
+        assert c_target.exists()
+        assert not b_file.exists()
+        self.db.mark_b_instance_status.assert_called_once()
+        # 未回退到直接删除
+        self.db.delete_b_by_local.assert_not_called()
 
 
 # ===========================================================================
@@ -3312,6 +3387,62 @@ class TestRefreshPathMappingScopedFailClosed:
         """storage map 为空时 engine paths 也应为空列表。"""
         result = self.app.get_engine_paths_for_a_roots([Path(self.a_dir)])
         assert result == []
+
+
+class TestCloudPathToEnginePathsBoundary:
+    """R30: _cloud_path_to_engine_paths 前缀匹配需带路径边界。
+
+    避免 "/cloud/番剧" 误配 "/cloud/番剧2/x.strm"。
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.a_dir = Path(self.tmp) / "a"
+        self.b_dir = Path(self.tmp) / "b"
+        self.c_dir = Path(self.tmp) / "c"
+        for d in [self.a_dir, self.b_dir, self.c_dir]:
+            d.mkdir()
+
+        config = Mock(spec=AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [
+            ABMapping(mapping_id="m1", a_root=str(self.a_dir), b_root=str(self.b_dir)),
+        ]
+        # entry_path="engine" 映射到挂载路径 ["/cloud/番剧"]
+        config.strm_storage_map = {
+            "engine": StrmStorageMapping(
+                mount_path="/engine", paths=["/cloud/番剧"], local_path=str(self.a_dir)),
+        }
+        config.paths = Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.behavior = Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.strm_engine_paths = []
+
+        db = Mock(spec=Database)
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SyncService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = AppService(config, db, Mock())
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_prefix_boundary_not_fuzzy_match(self):
+        """"/cloud/番剧2/x" 不得匹配 "/cloud/番剧" 前缀。"""
+        result = self.app._cloud_path_to_engine_paths("/cloud/番剧2/x.strm")
+        assert result == []
+
+    def test_exact_match_returns_engine_root(self):
+        """精确等于挂载路径时返回引擎根路径。"""
+        result = self.app._cloud_path_to_engine_paths("/cloud/番剧")
+        assert result == ["engine"]
+
+    def test_child_match_builds_engine_path(self):
+        """子路径匹配时拼接相对路径到引擎路径。"""
+        result = self.app._cloud_path_to_engine_paths("/cloud/番剧/进击的巨人/x.strm")
+        assert result == ["engine/进击的巨人/x.strm"]
 
 
 # ===========================================================================

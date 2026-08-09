@@ -224,166 +224,53 @@ class SyncService:
     def scan_a_to_b_full_sync(
             self, valid_engine_paths: list[str] | None = None,
             use_bulk: bool = False) -> None:
-        """A -> B 全量同步（两遍结构：索引 + 执行）。
+        """A -> B 全量同步，两遍结构（索引 + 执行）。
 
-        第一遍（索引阶段）：遍历所有 A 记录，计算目标路径，建立
-        target_path -> [source_info, ...] 索引，并检测目标路径冲突。
-        只读操作（ghost/fp 缓存检查），不产生文件复制或 DB 写入。
+        第一遍（索引阶段）：遍历所有 A 记录，计算目标路径，构建
+        target_path -> [source_info, ...] 的索引并检测目标路径冲突。
+        只读操作（ghost/fp 预检），不触发任何文件复制或 DB 写入。
 
-        冲突检测：第一遍完成后，遍历索引，标记存在多个不同 WebDAV
-        身份的目标为冲突，全部安全跳过。
+        冲突解决：第一遍完成后，凡存在多个不同 WebDAV 身份指向同一
+        目标路径的目标视为冲突，全部安全跳过。
 
-        第二遍（执行阶段）：遍历原始记录，对非冲突目标调用
-        _sync_one_record 执行现有同步逻辑；对冲突目标跳过。
+        第二遍（执行阶段）：遍历原始记录，对非冲突目标路径调用
+        _sync_one_record 执行同步逻辑；对冲突目标路径跳过。
 
         Args:
-            valid_engine_paths: 限制同步范围。
-            use_bulk: True 用单事务提交（首次启动，无并发）。
-                      False 用分批提交（主动刷新，有并发，每 1000 条提交一次）。
+            valid_engine_paths: 限定同步范围。
+            use_bulk: True 用 bulk_connection 批量提交（首次启动，无并发）。
+                      False 用分批提交（刷新/审计），有并发，每 1000 条提交一次。
 
         并发安全说明
         -----------
-        批量同步使用 bulk_connection 绕过 rw_lock，写入未提交前对其他连接不可见。
-        _sync_one_record 不使用指纹锁，依赖三层防御：
-        - L1: 内存缓存 _cache_b_fp（处理同批次重复）
-        - L2: 文件系统检查 b_local.exists()（磁盘文件可见）
-        - L3: ensure_single_visible_instance（兜底去重，通过 dedup_queue 延迟到提交后执行）
+        批量同步使用 bulk_connection 绕过 rw_lock，写盘未提交前其它连接不可见，
+        _sync_one_record 不依赖指纹锁，靠三层防御：
+        - L1: 内存缓存 _cache_b_fp，拦截同指纹重复。
+        - L2: 文件系统检查 b_local.exists()，磁盘文件对多线程可见。
+        - L3: ensure_single_visible_instance（兜底去重，通过 dedup_queue 延迟到提交后执行）。
         """
         BATCH_COMMIT_SIZE = 1000  # 分批提交大小
-        MAX_CONFLICT_EXAMPLES = 5  # 汇总输出最多示例数
+        MAX_CONFLICT_EXAMPLES = 5  # 冲突示例显示上限
         SLOW_OP_THRESHOLD = 3.0  # 慢操作告警阈值（秒）
 
         logging.info("[初始化] A -> B 全量同步开始 (%s)",
-                     "单事务模式" if use_bulk else "分批提交模式")
+                     "批量模式" if use_bulk else "分批提交模式")
         if valid_engine_paths is not None:
-            logging.info("[初始化] 限制同步范围: %s", valid_engine_paths)
+            logging.info("[初始化] 限定同步范围: %s", valid_engine_paths)
 
         t0 = time.time()
         all_a_records = self.db.get_all_a_records()
         total_count = len(all_a_records)
         logging.info("[初始化] A -> B 同步: 共 %d 条待处理", total_count)
 
-        # 预加载读缓存（两种模式都受益）
-        self._cache_ghost = self.db.get_all_ghost_protected_paths()
-        self._cache_b_fp = set()
-        for m in self.app.a_b_mappings:
-            fps = self.db.get_all_b_fingerprints(m.mapping_id)
-            for fp in fps:
-                self._cache_b_fp.add((m.mapping_id, fp))
-        logging.info("[初始化] 预加载: ghost=%d, B指纹=%d (%.1fs)",
-                     len(self._cache_ghost), len(self._cache_b_fp),
-                     time.time() - t0)
+        # use_bulk=True（首次启动，无并发）直接执行；use_bulk=False 整体包在
+        # rw_lock.write_locked() 内串行化（预加载只读 DB，锁内开销可控）。
+        #
+        # 说明：去重 flush（ensure_single_visible_instance → read_locked）必须在
+        # rw_lock 写锁释放后执行（R1），因此 _flush_dedup_queue 在锁外统一调用。
 
-        # ===================================================================
-        # 第一遍：索引阶段 —— 计算目标路径，检测冲突
-        # ===================================================================
-        t_pass1 = time.time()
-        # target_path -> [(source_a_path, webdav_path, fingerprint, original_index), ...]
-        target_index: dict[str, list[tuple[str, str, str, int]]] = {}
-        target_conflicts: set[str] = set()  # 存在多个不同 WebDAV 的目标
-        # 记录每条 A 记录对应的 target_path 和 mapping_id（第二遍复用）
-        rec_target_map: list[str | None] = [None] * total_count
-        rec_mapping_map: list[str | None] = [None] * total_count
-        pass1_skipped = {"skip_ghost": 0, "skip_fp": 0, "skip_missing": 0,
-                         "skip_filtered": 0}
-
-        for idx, rec in enumerate(all_a_records):
-            local_path = rec.local_path
-            webdav_path = rec.webdav_path
-
-            # 与 _sync_one_record 一致的预检
-            if not Path(local_path).exists():
-                pass1_skipped["skip_missing"] += 1
-                continue
-
-            if valid_engine_paths is not None:
-                if not any(webdav_path == p or webdav_path.startswith(p + "/")
-                           for p in valid_engine_paths):
-                    pass1_skipped["skip_filtered"] += 1
-                    continue
-
-            if webdav_path in self._cache_ghost:
-                pass1_skipped["skip_ghost"] += 1
-                continue
-
-            # 解析 mapping 上下文
-            mapping = self.app.get_mapping_for_a(local_path)
-            if mapping is None:
-                logging.debug("[A->B] 无法解析 A 路径的映射上下文, 跳过: %s", local_path)
-                continue
-            mapping_id, _, _ = mapping
-            rec_mapping_map[idx] = mapping_id
-
-            fingerprint = make_strm_fingerprint(webdav_path)
-            if (mapping_id, fingerprint) in self._cache_b_fp:
-                pass1_skipped["skip_fp"] += 1
-                continue
-
-            # 计算目标路径（只读，无副作用）
-            try:
-                b_local = self.app.build_b_path_from_a(local_path, webdav_path)
-            except ValueError:
-                continue
-
-            target_path = str(b_local)
-            rec_target_map[idx] = target_path
-
-            if target_path not in target_index:
-                target_index[target_path] = []
-            target_index[target_path].append(
-                (local_path, webdav_path, fingerprint, idx))
-
-            # 冲突检测：同目标 + 不同 WebDAV 身份
-            existing_webdavs = {info[1] for info in target_index[target_path]}
-            if len(existing_webdavs) > 1:
-                target_conflicts.add(target_path)
-
-        t_pass1_elapsed = time.time() - t_pass1
-        logging.info(
-            "[初始化] A -> B 索引阶段完成: %d 条索引, %d 个唯一目标, "
-            "%d 个冲突目标, 预跳过=%d (%.1fs)",
-            total_count - sum(pass1_skipped.values()),
-            len(target_index), len(target_conflicts),
-            sum(pass1_skipped.values()), t_pass1_elapsed)
-
-        # 输出冲突示例（限量，避免日志洪水）
-        # 不可逆边界说明：如果 OpenList 上游已将同名不同扩展名（如 .mkv/.mp4）
-        # 覆盖成同一个 .strm，桥接程序只能观察到当前剩余的单个 .strm，无法证明
-        # 第二个源曾存在，也不能从云端或 B 区猜测恢复。此处只处理桥接仍能观察到
-        # 的冲突（同批次多条 A 记录计算出相同 target_path 但 WebDAV 不同），全部
-        # 安全跳过，不输出猜测性“已检测上游覆盖”警告。
-        if target_conflicts:
-            for i, ct in enumerate(sorted(target_conflicts)[:MAX_CONFLICT_EXAMPLES]):
-                sources = target_index[ct]
-                webdavs = sorted(set(info[1] for info in sources))
-                logging.warning(
-                    "[初始化] 目标路径冲突 (%d 个不同 WebDAV): %s | "
-                    "WebDAV: %s | 来源数: %d",
-                    len(webdavs), ct, webdavs, len(sources))
-            if len(target_conflicts) > MAX_CONFLICT_EXAMPLES:
-                logging.warning(
-                    "[初始化] ... 还有 %d 个冲突目标未显示",
-                    len(target_conflicts) - MAX_CONFLICT_EXAMPLES)
-
-        # ===================================================================
-        # 第二遍：执行阶段 —— 对非冲突目标执行同步
-        # ===================================================================
-        counters = {
-            "success": 0,
-            "skip_ghost": pass1_skipped["skip_ghost"],
-            "skip_fp": pass1_skipped["skip_fp"],
-            "skip_missing": pass1_skipped["skip_missing"],
-            "skip_filtered": pass1_skipped["skip_filtered"],
-            "skip_exists_diff": 0,
-            "skip_target_conflict": 0,
-            "fail": 0,
-        }
-        log_interval = max(100, total_count // 100)
-        batch_count = 0
-        dedup_queue: list[tuple[str, str, str]] = []  # (mapping_id, fingerprint, b_path)
-
-        def _flush_dedup_queue():
-            """提交后执行延迟的去重操作（此时数据已可见）"""
+        def _flush_dedup_queue(dedup_queue: list[tuple[str, str, str]]) -> None:
+            """提交后执行延迟的去重操作（此时数据已可见，且位于写锁外）"""
             if not dedup_queue:
                 return
             for mid, fp, b_path in dedup_queue:
@@ -391,106 +278,236 @@ class SyncService:
                     self.app.ensure_single_visible_instance(fp, b_path, mapping_id=mid)
                 except Exception as e:
                     logging.warning("[A->B] 去重失败 %s: %s", b_path, e)
-            dedup_queue.clear()
 
-        t_pass2 = time.time()
+        def _run_index_and_execute() -> list[tuple[str, str, str]]:
+            """预加载 + 第一遍索引 + 第二遍执行 + 清空缓存，返回延迟去重队列。
 
-        def _run_pass2(conn):
-            """Pass 2 执行阶段（提取为函数以便 use_bulk 分支复用）。"""
-            # [已修复] Task 1: batch_count 在外层作用域定义，此处需 nonlocal 才能修改
-            nonlocal batch_count
-            for idx, rec in enumerate(all_a_records, 1):
-                target_path = rec_target_map[idx - 1]
+            该函数在 use_bulk=False 时被外层 rw_lock.write_locked() 包裹，
+            保证对实例级缓存 _cache_ghost/_cache_b_fp 的预加载与清空不会与
+            其它并发全量同步交错（R24）。
+            """
+            # 预加载读缓存。注意：此处位于 rw_lock.write_locked() 内（use_bulk=False），
+            # 必须用 skip_read_lock=True 跳过 read_locked()，否则因 _writers_active>0
+            # 永久等待自死锁；此时持有写锁，读取是安全的。
+            self._cache_ghost = self.db.get_all_ghost_protected_paths(skip_read_lock=True)
+            self._cache_b_fp = set()
+            for m in self.app.a_b_mappings:
+                fps = self.db.get_all_b_fingerprints(m.mapping_id, skip_read_lock=True)
+                for fp in fps:
+                    self._cache_b_fp.add((m.mapping_id, fp))
+            logging.info("[初始化] 预加载: ghost=%d, B指纹=%d (%.1fs)",
+                         len(self._cache_ghost), len(self._cache_b_fp),
+                         time.time() - t0)
 
-                # Pass 1 中被跳过的记录（ghost/fp/missing/filtered/mapping）target_path 为 None
-                if target_path is None:
+            # ===================================================================
+            # 第一遍：索引阶段 —— 计算目标路径，检测冲突
+            # ===================================================================
+            t_pass1 = time.time()
+            # target_path -> [(source_a_path, webdav_path, fingerprint, original_index), ...]
+            target_index: dict[str, list[tuple[str, str, str, int]]] = {}
+            target_conflicts: set[str] = set()  # 存在多个不同 WebDAV 的目标
+            # 记录每条 A 记录对应的 target_path 和 mapping_id（第二遍复用）
+            rec_target_map: list[str | None] = [None] * total_count
+            rec_mapping_map: list[str | None] = [None] * total_count
+            pass1_skipped = {"skip_ghost": 0, "skip_fp": 0, "skip_missing": 0,
+                             "skip_filtered": 0}
+
+            for idx, rec in enumerate(all_a_records):
+                local_path = rec.local_path
+                webdav_path = rec.webdav_path
+
+                # 与 _sync_one_record 一致的预检
+                if not Path(local_path).exists():
+                    pass1_skipped["skip_missing"] += 1
                     continue
 
-                if target_path in target_conflicts:
-                    counters["skip_target_conflict"] += 1
+                if valid_engine_paths is not None:
+                    if not any(webdav_path == p or webdav_path.startswith(p + "/")
+                               for p in valid_engine_paths):
+                        pass1_skipped["skip_filtered"] += 1
+                        continue
+
+                if webdav_path in self._cache_ghost:
+                    pass1_skipped["skip_ghost"] += 1
                     continue
 
-                result = self._sync_one_record(rec, valid_engine_paths, conn,
-                                               dedup_queue,
-                                               mapping_id=rec_mapping_map[idx - 1])
-                counters[result] = counters.get(result, 0) + 1
-                batch_count += 1
+                # 解析 mapping 上下文
+                mapping = self.app.get_mapping_for_a(local_path)
+                if mapping is None:
+                    logging.debug("[A->B] 无法解析 A 路径的映射上下文, 跳过: %s", local_path)
+                    continue
+                mapping_id, _, _ = mapping
+                rec_mapping_map[idx] = mapping_id
 
-                # 分批提交模式：每 1000 条提交一次，释放锁
-                if not use_bulk and batch_count >= BATCH_COMMIT_SIZE:
+                fingerprint = make_strm_fingerprint(webdav_path)
+                if (mapping_id, fingerprint) in self._cache_b_fp:
+                    pass1_skipped["skip_fp"] += 1
+                    continue
+
+                # 计算目标路径（只读，无副作用）
+                try:
+                    b_local = self.app.build_b_path_from_a(local_path, webdav_path)
+                except ValueError:
+                    continue
+
+                target_path = str(b_local)
+                rec_target_map[idx] = target_path
+
+                if target_path not in target_index:
+                    target_index[target_path] = []
+                target_index[target_path].append(
+                    (local_path, webdav_path, fingerprint, idx))
+
+                # 冲突检测：同目标 + 不同 WebDAV 身份
+                existing_webdavs = {info[1] for info in target_index[target_path]}
+                if len(existing_webdavs) > 1:
+                    target_conflicts.add(target_path)
+
+            t_pass1_elapsed = time.time() - t_pass1
+            logging.info(
+                "[初始化] A -> B 索引阶段完成: %d 条索引, %d 个唯一目标, "
+                "%d 个冲突目标, 预跳过=%d (%.1fs)",
+                total_count - sum(pass1_skipped.values()),
+                len(target_index), len(target_conflicts),
+                sum(pass1_skipped.values()), t_pass1_elapsed)
+
+            # 输出冲突示例（限量，避免日志洪水）
+            # 不可逆边界说明：如果 OpenList 上游已将同名不同扩展名（如 .mkv/.mp4）
+            # 覆盖成同一个 .strm，桥接程序只能观察到当前剩余的单个 .strm，无法证明
+            # 第二个源曾存在，也不能从云端或 B 区猜测恢复。此处只处理桥接仍能观察到
+            # 的冲突（同批次多条 A 记录计算出相同 target_path 但 WebDAV 不同），全部
+            # 安全跳过，不输出猜测性"已检测上游覆盖"警告。
+            if target_conflicts:
+                for i, ct in enumerate(sorted(target_conflicts)[:MAX_CONFLICT_EXAMPLES]):
+                    sources = target_index[ct]
+                    webdavs = sorted(set(info[1] for info in sources))
+                    logging.warning(
+                        "[初始化] 目标路径冲突 (%d 个不同 WebDAV): %s | "
+                        "WebDAV: %s | 来源数: %d",
+                        len(webdavs), ct, webdavs, len(sources))
+                if len(target_conflicts) > MAX_CONFLICT_EXAMPLES:
+                    logging.warning(
+                        "[初始化] ... 还有 %d 个冲突目标未显示",
+                        len(target_conflicts) - MAX_CONFLICT_EXAMPLES)
+
+            # ===================================================================
+            # 第二遍：执行阶段 —— 对非冲突目标执行同步
+            # ===================================================================
+            counters = {
+                "success": 0,
+                "skip_ghost": pass1_skipped["skip_ghost"],
+                "skip_fp": pass1_skipped["skip_fp"],
+                "skip_missing": pass1_skipped["skip_missing"],
+                "skip_filtered": pass1_skipped["skip_filtered"],
+                "skip_exists_diff": 0,
+                "skip_target_conflict": 0,
+                "fail": 0,
+            }
+            log_interval = max(100, total_count // 100)
+            batch_count = 0
+            dedup_queue: list[tuple[str, str, str]] = []  # (mapping_id, fingerprint, b_path)
+
+            t_pass2 = time.time()
+
+            def _run_pass2(conn):
+                """Pass 2 执行阶段（提取为函数以便 use_bulk 分支复用）。"""
+                # batch_count 在外层作用域定义，此处需 nonlocal 才能修改
+                nonlocal batch_count
+                for idx, rec in enumerate(all_a_records, 1):
+                    target_path = rec_target_map[idx - 1]
+
+                    # Pass 1 中被跳过的记录（ghost/fp/missing/filtered/mapping）target_path 为 None
+                    if target_path is None:
+                        continue
+
+                    if target_path in target_conflicts:
+                        counters["skip_target_conflict"] += 1
+                        continue
+
+                    result = self._sync_one_record(rec, valid_engine_paths, conn,
+                                                   dedup_queue,
+                                                   mapping_id=rec_mapping_map[idx - 1])
+                    counters[result] = counters.get(result, 0) + 1
+                    batch_count += 1
+
+                    # 分批提交模式：每 1000 条提交一次
+                    if not use_bulk and batch_count >= BATCH_COMMIT_SIZE:
+                        conn.commit()
+                        # 移除此处的 _flush_dedup_queue() 调用。
+                        # 非 bulk 模式下此处位于 rw_lock.write_locked() 内，flush 会调
+                        # ensure_single_visible_instance → read_locked，因 _writers_active>0
+                        # 永久 wait → 全进程死锁。flush 延迟到锁外统一执行。
+                        batch_count = 0
+                        logging.debug("[初始化] 分批提交: 已处理 %d 条", idx)
+
+                    if idx % log_interval == 0:
+                        c = counters
+                        total_skip_2 = (
+                            c["skip_ghost"] + c["skip_fp"] + c["skip_missing"]
+                            + c["skip_filtered"] + c["skip_exists_diff"]
+                            + c["skip_target_conflict"])
+                        logging.info(
+                            "[初始化] A -> B 进度: %d/%d (%.0f%%) %.1fs | "
+                            "成功=%d 跳过=%d 冲突=%d 失败=%d",
+                            idx, total_count, idx / total_count * 100,
+                            time.time() - t0, c["success"],
+                            total_skip_2, c["skip_target_conflict"], c["fail"])
+
+                # 提交剩余批次
+                if batch_count > 0:
                     conn.commit()
-                    # [已修复] R1: 移除此处的 _flush_dedup_queue() 调用。
-                    # 非 bulk 模式下此处位于 rw_lock.write_locked() 内，flush 会调
-                    # ensure_single_visible_instance → read_locked，因 _writers_active>0
-                    # 永久 wait → 全进程死锁。flush 延迟到锁外统一执行。
-                    batch_count = 0
-                    logging.debug("[初始化] 分批提交: 已处理 %d 条", idx)
+                # 从锁内移除 _flush_dedup_queue()。flush 在下方
+                # try/finally 之后统一调用（锁外），避免 rw_lock 写锁内调
+                # read_locked 造成自死锁。
 
-                if idx % log_interval == 0:
-                    c = counters
-                    total_skip_2 = (
-                        c["skip_ghost"] + c["skip_fp"] + c["skip_missing"]
-                        + c["skip_filtered"] + c["skip_exists_diff"]
-                        + c["skip_target_conflict"])
-                    logging.info(
-                        "[初始化] A -> B 进度: %d/%d (%.0f%%) %.1fs | "
-                        "成功=%d 跳过=%d 冲突=%d 失败=%d",
-                        idx, total_count, idx / total_count * 100,
-                        time.time() - t0, c["success"],
-                        total_skip_2, c["skip_target_conflict"], c["fail"])
+            try:
+                if use_bulk:
+                    # use_bulk=True（启动时，无并发）：bulk_connection 绕过 rw_lock
+                    with self.db.bulk_connection() as conn:
+                        _run_pass2(conn)
+                else:
+                    # use_bulk=False（刷新/审计时）：外层已持有 rw_lock.write_locked()，
+                    # 此处用标准连接即可（不再重复获取写锁，避免非可重入锁死锁 R24）。
+                    with self.db.connection() as conn:
+                        _run_pass2(conn)
+            finally:
+                # 无论事务成功或失败，finally 均清空 L1 缓存。
+                # 若 bulk/分批 commit 回滚，DB 已恢复但缓存若不清理会残留本次新增的
+                # 指纹，导致后续合法记录被 skip_fp 跳过（A→B 复制遗漏）。
+                # 清空后下次调用重新预加载，缓存不会残留跨调用。
+                self._cache_ghost = None
+                self._cache_b_fp = None
 
-            # 提交剩余批次
-            if batch_count > 0:
-                conn.commit()
-            # [已修复] R1: 从锁内移除 _flush_dedup_queue()。flush 在下方
-            # try/finally 之后统一调用（锁外），避免 rw_lock 写锁内调
-            # read_locked 造成自死锁。
+            t_pass2_elapsed = time.time() - t_pass2
+            c = counters
+            total_skip = (c["skip_ghost"] + c["skip_fp"] + c["skip_missing"]
+                          + c["skip_filtered"] + c["skip_exists_diff"]
+                          + c["skip_target_conflict"])
+            logging.info(
+                "[初始化] A -> B 全量同步完成 (%.1fs) | "
+                "成功=%d 跳过=%d(ghost=%d fp=%d 不存在=%d 过滤=%d "
+                "路径不同=%d 目标冲突=%d) 失败=%d",
+                time.time() - t0, c["success"], total_skip,
+                c["skip_ghost"], c["skip_fp"], c["skip_missing"],
+                c["skip_filtered"], c["skip_exists_diff"],
+                c["skip_target_conflict"], c["fail"])
 
-        try:
-            # [已修复] Task 1: use_bulk=False 进入 rw_lock 保护的标准写路径
-            if use_bulk:
-                # use_bulk=True（启动时，无并发）：bulk_connection 绕过 rw_lock
-                with self.db.bulk_connection() as conn:
-                    _run_pass2(conn)
-            else:
-                # [已修复] N-P1-1: use_bulk=False 走 rw_lock.write_locked()，
-                # 与周期刷新(_scan_and_sync)和手动审计(run_full_audit_now)共享
-                # 同进程互斥边界，避免并发访问 self._cache_ghost/_cache_b_fp
-                # 命中被对方 finally 置 None 的对象（AttributeError → 回滚）。
-                # use_bulk=False（刷新/审计时，有并发）：rw_lock + 标准连接
-                with self.db.rw_lock.write_locked(), self.db.connection() as conn:
-                    _run_pass2(conn)
-        finally:
-            # [已修复] N-P1-4: 无论事务成功或失败，finally 均清空 L1 缓存。
-            # 若 bulk/分批 commit 回滚，DB 已恢复但缓存若不清理会残留本次新增的
-            # 指纹，导致后续合法记录被 skip_fp 跳过（A→B 复制遗漏）。
-            # 清空后下次调用重新预加载，缓存不会残留跨调用。
-            self._cache_ghost = None
-            self._cache_b_fp = None
+            # 生成人工处理清单（冲突目标）
+            if target_conflicts:
+                self._write_manual_review_list(target_index, target_conflicts)
 
-        # [已修复] R1: 统一在锁外执行去重 flush。此时 rw_lock 写锁已释放，
+            return dedup_queue
+
+        if use_bulk:
+            dedup_queue = _run_index_and_execute()
+        else:
+            with self.db.rw_lock.write_locked():
+                dedup_queue = _run_index_and_execute()
+
+        # 去重 flush 在写锁外统一执行。此时 rw_lock 写锁已释放，
         # ensure_single_visible_instance 的 read_locked 可正常获取；flush 直查 DB
-        # 不依赖 L1 缓存，安全。保留 use_bulk 语义不变（use_bulk=True 启动路径
-        # 数据已 commit 可见，同样安全）。
-        _flush_dedup_queue()
-
-        t_pass2_elapsed = time.time() - t_pass2
-        c = counters
-        total_skip = (c["skip_ghost"] + c["skip_fp"] + c["skip_missing"]
-                      + c["skip_filtered"] + c["skip_exists_diff"]
-                      + c["skip_target_conflict"])
-        logging.info(
-            "[初始化] A -> B 全量同步完成 (%.1fs) | "
-            "成功=%d 跳过=%d(ghost=%d fp=%d 不存在=%d 过滤=%d "
-            "路径不同=%d 目标冲突=%d) 失败=%d",
-            time.time() - t0, c["success"], total_skip,
-            c["skip_ghost"], c["skip_fp"], c["skip_missing"],
-            c["skip_filtered"], c["skip_exists_diff"],
-            c["skip_target_conflict"], c["fail"])
-
-        # 生成人工处理清单（冲突目标）
-        if target_conflicts:
-            self._write_manual_review_list(target_index, target_conflicts)
+        # 不依赖 L1 缓存，安全。保留 use_bulk 语义不变。
+        _flush_dedup_queue(dedup_queue)
 
     def _write_manual_review_list(self, target_index: dict, target_conflicts: set) -> None:
         """将冲突跳过的 A 源清单写入 B 区根目录的清单文件。

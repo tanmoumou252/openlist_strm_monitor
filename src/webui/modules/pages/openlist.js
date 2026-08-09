@@ -45,7 +45,7 @@ function _olHelpIcon(key, tooltipBelow = false) {
 export async function _renderOpenListConfig(cfg) {
   // N0: 代际快照工厂——在首次 await 前捕获
   const isStale = captureRenderGuard();
-  // [已修复] N-P1-7: 在 await 前捕获容器引用，避免异步竞态将旧 HTML 插入当前子页
+  // 在 await 前捕获容器引用，避免异步竞态将旧 HTML 插入当前子页
   const subpage = document.getElementById('config-subpage');
   if (!subpage || !subpage.isConnected) return;
 
@@ -307,7 +307,7 @@ export async function _renderOpenListConfig(cfg) {
   html += `</div>`;
   html += `</div>`;
 
-  // [已修复] N-P1-7: openlist.js 异步竞态，await 后检查容器连接状态和渲染代际
+  // openlist.js 异步竞态，await 后检查容器连接状态和渲染代际
   if (subpage && subpage.isConnected && !isStale()) {
     const backBtn = subpage.querySelector('.config-back-btn');
     if (backBtn) {
@@ -726,7 +726,7 @@ function _refreshEngineTable() {
         tagsHtml += `<span class="tag">${esc(p)}<button class="tag-remove" data-row="${idx}" data-pi="${pi}" title="删除">×</button></span>`;
       });
     }
-    // [已修复] Z-3: 删除死变量 deleteDisabled，直接在模板中渲染
+    // 删除死变量 deleteDisabled，直接在模板中渲染
     html += `<tr data-row-idx="${idx}">
       <td><select class="engine-select" data-row="${idx}"${disabledAttr}>${engineOptions}</select></td>
       <td><div class="tag-container" data-row="${idx}" id="tag-container-${idx}">${tagsHtml || '<span style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px)">选择引擎后自动填充</span>'}</div></td>

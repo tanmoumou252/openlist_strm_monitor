@@ -177,10 +177,19 @@ export async function renderTmdb(el, params) {
   } else if (_fetchPromises[apiType]) {
     try { data = await _fetchPromises[apiType]; }
     catch (e) {
-      _fetchPromises[apiType] = null;
+      // 共享重试：共享 promise 失败后仅由首个 catch 调用方发起重试并写回
+      // _fetchPromises[apiType]，其余并发等待者复用同一重试 promise，
+      // 避免 N 个并发调用各发一次冗余请求。
       const retryUrl = `/api/tmdb/watchlist/${apiType}?all=1`;
-      data = await api(retryUrl);
-      // [已修复] R9 tmdb.js await 后缺渲染护栏
+      if (!_fetchPromises[apiType]) {
+        const retryPromise = api(retryUrl);
+        _fetchPromises[apiType] = retryPromise;
+        retryPromise.finally(() => {
+          if (_fetchPromises[apiType] === retryPromise) _fetchPromises[apiType] = null;
+        });
+      }
+      data = await _fetchPromises[apiType];
+      // await 后渲染护栏
       if (isStale()) return;
       _setCachedWatchlist(apiType, data);
     }
@@ -188,11 +197,11 @@ export async function renderTmdb(el, params) {
     const url = `/api/tmdb/watchlist/${apiType}?all=1`;
     const promise = api(url);
     _fetchPromises[apiType] = promise;
-    // [已修复] P13: 用 promise.finally 替代 setTimeout，防止 Promise 挂起导致条目永驻
+    // 用 promise.finally 替代 setTimeout，防止 Promise 挂起导致条目永驻
     data = await promise.finally(() => {
       if (_fetchPromises[apiType] === promise) _fetchPromises[apiType] = null;
     });
-    // [已修复] R9 tmdb.js await 后缺渲染护栏
+    // await 后缺渲染护栏
     if (isStale()) return;
     _setCachedWatchlist(apiType, data);
   }
@@ -203,7 +212,7 @@ export async function renderTmdb(el, params) {
   if (q) {
     try {
       const filtered = await api(`/api/tmdb/watchlist/${apiType}?all=1&q=${encodeURIComponent(q)}`);
-      // [已修复] R9 tmdb.js await 后缺渲染护栏
+      // await 后缺渲染护栏
       if (isStale()) return;
       items = filtered.results || [];
     } catch (e) {
@@ -253,7 +262,7 @@ export async function renderTmdb(el, params) {
   const legendItems = [['in', '已收录', 'badge_in'], ['out', '未收录', 'badge_out'], ['que', '存疑', 'badge_que']];
   legendItems.forEach(([sv, sl, si]) => {
     const activeCls = statusFilter === sv ? ' active' : '';
-    const href = `#tmdb?type=${mediaType}&status=${sv}`;
+    const href = `#tmdb?type=${esc(mediaType)}&status=${sv}`;
     html += `<a class="legend-badge ${sv}${activeCls}" href="${href}">${icon(si)} ${sl} (${statusCounts[sv] || 0})</a>`;
   });
   html += '</div>';
@@ -282,7 +291,7 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
     const title = item.title || item.name || 'N/A';
     const originalTitle = item.original_title || item.original_name || '';
     const date = item.release_date || item.first_air_date || '';
-    // [已修复] R17 tmdb.js rating.toFixed(1) 假设数值
+    // rating.toFixed(1) 假设数值
     const rating = Number(item.vote_average) || 0;
     const overview = item.overview || '';
     const posterPath = item.poster_path || '';
@@ -298,7 +307,7 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
     const backdropUrl = backdropPath ? `/api/tmdb/poster?path=${encodeURIComponent(backdropPath)}&w=780` : '';
     const detailUrl = `${_tmdbOfficialBase}/${mediaType}/${tmdbId}`;
     const manualBadge = isManual ? `<span class="tmdb-manual-badge" title="手动设置">${icon('edit')}</span>` : '';
-    html += `<div class="tmdb-flip-wrapper" data-tmdb-id="${tmdbId}" data-tmdb-type="${mediaType}" data-backdrop="${esc(backdropUrl || '')}">
+    html += `<div class="tmdb-flip-wrapper" data-tmdb-id="${tmdbId}" data-tmdb-type="${esc(mediaType)}" data-backdrop="${esc(backdropUrl || '')}">
   ${seasonBarsHtml}
   <!-- Front face -->
      <div class="tmdb-flip-front">
@@ -343,12 +352,12 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
     </div>
     <div class="tt-override-section">
       <div class="tt-override-label">手动设置收录状态：</div>
-      <div class="tt-override-segmented" data-tmdb-id="${tmdbId}" data-tmdb-type="${mediaType}">
+      <div class="tt-override-segmented" data-tmdb-id="${tmdbId}" data-tmdb-type="${esc(mediaType)}">
         <button class="seg-btn seg-in${st === 'in' ? ' active' : ''}" data-status="matched" title="标记为已收录">${icon('badge_in')} 已收录</button>
         <button class="seg-btn seg-que${st === 'que' ? ' active' : ''}" data-status="fuzzy" title="标记为存疑">${icon('badge_que')} 存疑</button>
         <button class="seg-btn seg-out${st === 'out' ? ' active' : ''}" data-status="unmatched" title="标记为未收录">${icon('badge_out')} 未收录</button>
       </div>
-      ${isManual ? `<button class="tt-restore-auto-btn tmdb-restore-auto-btn" data-tmdb-id="${tmdbId}" data-tmdb-type="${mediaType}" title="清除人工覆盖，恢复自动判断">恢复自动判断</button>` : ''}
+      ${isManual ? `<button class="tt-restore-auto-btn tmdb-restore-auto-btn" data-tmdb-id="${tmdbId}" data-tmdb-type="${esc(mediaType)}" title="清除人工覆盖，恢复自动判断">恢复自动判断</button>` : ''}
     </div>
   </div>
 </div>`;
@@ -359,9 +368,9 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
   const sp = statusFilter ? '&status=' + statusFilter : '';
   const qp = q ? '&q=' + encodeURIComponent(q) : '';
   html += '<div class="pager">';
-  if (curPage > 1) html += `<a class="pager-btn" href="#tmdb?type=${mediaType}&page=${curPage - 1}${qp}${sp}">${icon('chevron_l')} 上一页</a>`;
+  if (curPage > 1) html += `<a class="pager-btn" href="#tmdb?type=${esc(mediaType)}&page=${curPage - 1}${qp}${sp}">${icon('chevron_l')} 上一页</a>`;
   html += `<span class="tmdb-page-info">第 ${curPage} / ${totalPages} 页</span>`;
-  if (curPage < totalPages) html += `<a class="pager-btn" href="#tmdb?type=${mediaType}&page=${curPage + 1}${qp}${sp}">下一页 ${icon('chevron_r')}</a>`;
+  if (curPage < totalPages) html += `<a class="pager-btn" href="#tmdb?type=${esc(mediaType)}&page=${curPage + 1}${qp}${sp}">下一页 ${icon('chevron_r')}</a>`;
   html += '</div>';
 
   // TMDB 在线搜索结果容器（位于分页器之后，匹配 area.js 的 DOM 顺序）
@@ -373,7 +382,7 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
 
   document.getElementById('tmdb-search-btn').addEventListener('click', () => {
     const val = document.getElementById('tmdb-search').value.trim();
-    let h = `#tmdb?type=${mediaType}`;
+    let h = `#tmdb?type=${esc(mediaType)}`;
     if (val) h += '&q=' + encodeURIComponent(val);
     navigate(h);
   });
@@ -426,7 +435,7 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
         
         if (response.success) {
           showToast('收录状态已更新', 'success');
-          // [已修复] R10 tmdb.js 手动覆盖/恢复自动不清缓存
+          // 手动覆盖/恢复自动不清缓存
           if (_tmdbCache[apiType]) {
             _tmdbCache[apiType] = null;
           }
@@ -460,7 +469,7 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
         });
         if (response.success) {
           showToast('人工覆盖已清除，将在下次刷新时重新计算', 'success');
-          // [已修复] R10 tmdb.js 手动覆盖/恢复自动不清缓存
+          // 手动覆盖/恢复自动不清缓存
           if (_tmdbCache[apiType]) {
             _tmdbCache[apiType] = null;
           }

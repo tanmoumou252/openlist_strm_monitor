@@ -310,7 +310,7 @@ export async function updateMainStatus() {
       if (stopBtn) stopBtn.style.display = 'none';
     }
 
-    // [已修复] P7b: 轮询更新 watcher 健康横幅，后端恢复时隐藏 banner
+    // 轮询更新 watcher 健康横幅，后端恢复时隐藏 banner
     if (status.watchers_healthy !== false) {
       const banner = document.querySelector('.dashboard-warning-banner');
       if (banner) banner.remove();
@@ -560,7 +560,7 @@ function _shortenPath(path) {
         const maxPolls = 300;
         for (let i = 0; i < maxPolls; i++) {
           await new Promise(r => setTimeout(r, 2000));
-          // [已修复] L6: 轮询循环含 isStale 检查
+          // 轮询循环含 isStale 检查
           if (isStale()) return;
           try {
             const st = await api('/api/index/audit/status');
@@ -572,7 +572,7 @@ function _shortenPath(path) {
               return;
             }
             if (!st.running && st.result) {
-              // [已修复] N-P2-10: 显式判断 status === 'completed' 再读 generation，
+              // 显式判断 status === 'completed' 再读 generation，
               // 避免用 `!error` 推断成功、`|| 0` 掩盖缺 generation 的脆弱性
               if (st.result.status === 'completed') {
                 if (auditStatusText) auditStatusText.textContent = '审计完成，索引代次 #' + (st.result.index_generation || 0);

@@ -1,4 +1,4 @@
-import{L as e,c as t,o as n}from"./core-DkUlJFY3.js";async function r(r){let i=!1,a=!1;try{i=(await t(`/api/admin/status`)).has_password,a=!0}catch{}let o=localStorage.getItem(`session_token`);if(o&&i&&a){n(`#dashboard`);return}if(o&&!i&&a&&localStorage.removeItem(`session_token`),!a){r.innerHTML=`
+import{L as e,c as t,o as n}from"./core-nA5dXoti.js";async function r(r){let i=!1,a=!1;try{i=(await t(`/api/admin/status`)).has_password,a=!0}catch{}let o=localStorage.getItem(`session_token`);if(o&&i&&a){n(`#dashboard`);return}if(o&&!i&&a&&localStorage.removeItem(`session_token`),!a){r.innerHTML=`
       <div style="display:flex;align-items:center;justify-content:center;min-height:60vh">
         <div class="page-card" style="max-width:420px;width:100%;text-align:center;padding:40px 32px">
           <div style="font-size:48px;margin-bottom:16px;color:var(--text-error)">${e(`warn`)}</div>

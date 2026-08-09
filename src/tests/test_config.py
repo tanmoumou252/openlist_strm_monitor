@@ -249,12 +249,12 @@ class TestAppConfigFromFile:
         assert cfg.base_dir == str(tmp_path)
 
     def test_db_file_is_normalized_absolute(self, tmp_path):
-        # [已修复] P1-3: db_file 固定在项目根，[local].db_file 不再从 config.toml 读取
+        # db_file 固定在项目根，[local].db_file 不再从 config.toml 读取
         cfg = AppConfig.from_file(_write_toml(tmp_path, _MINIMAL_TOML))
         assert Path(cfg.local.db_file) == tmp_path / "bridge.db"
 
     def test_db_file_ignores_custom_local_db_file(self, tmp_path):
-        # [已修复] P1-3: 即使 TOML 含 [local] db_file，运行路径仍为 base_dir/bridge.db
+        # 即使 TOML 含 [local] db_file，运行路径仍为 base_dir/bridge.db
         toml = _MINIMAL_TOML + '\n[local]\ndb_file = "custom.db"\n'
         cfg = AppConfig.from_file(_write_toml(tmp_path, toml))
         assert Path(cfg.local.db_file) == tmp_path / "bridge.db"

@@ -18,7 +18,7 @@ export async function renderConfig(el, params) {
   if (cfg.tmdb_proxy_configured) {
     try {
       const tmdbCfg = await api('/api/webui/config/tmdb');
-      // [已修复] N1 config.js 第二个 await 后缺渲染护栏
+      // 第二个 await 后缺渲染护栏
       if (isStale()) return;
       if (tmdbCfg && tmdbCfg.config && typeof tmdbCfg.config.proxy_http === 'string') {
         cfg.tmdb_proxy_http = tmdbCfg.config.proxy_http;
@@ -162,7 +162,7 @@ html += field('cfg-tmdb-token', 'Access Token', tokenValue, '输入 TMDB Access 
   html += field('cfg-tmdb-proxy', 'HTTP 代理', proxyValue, '例: http://127.0.0.1:7890', 'text', true);
   html += field('cfg-tmdb-fuzzy', '模糊匹配阈值', cfg.tmdb_fuzzy_threshold || '0.60', '0.0~1.0', 'text', false, false, '', '模糊匹配相似度阈值（0.0~1.0）。越高要求越严格，建议 0.60。');
     html += field('cfg-tmdb-ep-ratio', '番剧最少集数比例', cfg.tmdb_anime_min_ep_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少集数占总集数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。');
-    html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '1', '', 'text', false, false, '', '番剧最大允许季数差。超过此差值视为未收录，建议 1。当前版本未接入匹配逻辑（保留待用）。');
+    html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '0.3', '', 'text', false, false, '', '番剧最大允许季数差。超过此差值视为未收录，建议 1。当前版本未接入匹配逻辑（保留待用）。');
     html += field('cfg-tmdb-min-season-ratio', '番剧最少季数比例', cfg.tmdb_anime_min_season_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少季数占总季数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。当前版本未接入匹配逻辑（保留待用）。');
     html += field('cfg-tmdb-cache-ttl', '缓存 TTL（秒）', cfg.tmdb_cache_ttl || '604800', '', 'text', false, false, '', 'TMDB 缓存有效期（秒）。过期后重新从 TMDB 拉取数据，建议 604800（7 天）。');
     html += `</div>`;
@@ -382,7 +382,7 @@ const data = await api('/api/tmdb/configure', {
     btn.disabled = true;
     btn.innerHTML = '启动同步中...';
     try {
-      // [已修复] P18: 缩进对齐（原列 0，现缩进 6 空格）
+      // 缩进对齐（原列 0，现缩进 6 空格）
       const data = await api('/api/tmdb/watchlist/sync', { method: 'POST' });
       if (data.success) showToast('待看列表同步已启动', 'success');
       else showToast('同步失败: ' + (data.error || '未知错误'), 'error');
@@ -418,7 +418,7 @@ try {
     btn.disabled = true;
     btn.innerHTML = '启动刷新中...';
     try {
-      // [已修复] P18: 缩进对齐（原列 0，现缩进 6 空格）
+      // 缩进对齐（原列 0，现缩进 6 空格）
       const data = await api('/api/tmdb/watchlist/match/refresh', { method: 'POST' });
       if (data.success) {
         showToast(data.message || '后台收录状态刷新已启动', 'info');
@@ -426,7 +426,7 @@ try {
         const maxPolls = 120;
         for (let i = 0; i < maxPolls; i++) {
           await new Promise(r => setTimeout(r, 1000));
-          // [已修复] L6: 轮询循环含 isStale 检查
+          // 轮询循环含 isStale 检查
           if (isStale()) return;
           try {
             const st = await api('/api/tmdb/watchlist/match/status');
@@ -434,7 +434,7 @@ try {
               const r = st.result;
               if (r.error) {
                 showToast('收录状态刷新失败: ' + r.error, 'error');
-                // [已修复] N-P1-5: 匹配刷新失败时 break，避免错误toast风暴
+                // 匹配刷新失败时 break，避免错误toast风暴
                 break;
               } else {
                 const manualInfo = r.skipped_manual > 0 ? ` · 跳过 ${r.skipped_manual} 个人工覆盖` : '';

@@ -1031,7 +1031,14 @@ class TestAreaSearchE2E:
         """含 [限制级] 的番剧名，经 _escape_fts5_query 转义（方括号→空格）后 FTS5 命中主名。
 
         与 test_area_list_search_chinese_hit 同样绕过 HTTP 跨线程 WAL 延迟，
-        直接经 db 读连接验证转义后的查询词 '进击的巨人' 能命中。
+        直接经 db 读连接验证转义后的查询词能命中。
+
+        说明（R17 校正）：_escape_fts5_query 自提交 1ab6826 起有意用引号包裹
+        （AUDIT-REPAIR-NOTES #15，使 FTS5 按短语精确匹配），因此转义断言需匹配
+        带引号的输出。但 FTS5 索引按 simple 分词器以整条 local_path/webdav_path
+        分词，"进击的巨人 限制级" 不是索引上的连续短语（方括号内容被分词器切分为
+        独立 token），所以整串带引号查询命中 0 行。媒体主名短语 "进击的巨人" 才是
+        FTS 实际索引的连续短语，命中 1 行——本测试据此验证方括号转义 + 主名短语可搜。
         """
         from webui.routes import _escape_fts5_query
         server, base, token, db = real_webui_server
@@ -1043,16 +1050,25 @@ class TestAreaSearchE2E:
 
         # 路由对 q 的处理：先 lower() 再 _escape_fts5_query（中文不受影响）
         escaped = _escape_fts5_query("进击的巨人[限制级]")
-        assert escaped == "进击的巨人 限制级", f"转义结果应为 '进击的巨人 限制级'，实际 {escaped!r}"
-
+        assert escaped == '"进击的巨人 限制级"', f"转义结果应为 '\"进击的巨人 限制级\"'，实际 {escaped!r}"
+        # 整串带引号是精确短语；方括号内容被 simple 分词器切分，故不是连续短语，命中 0 行。
         with db.read_connection() as conn:
-            rows = conn.execute(
+            full_rows = conn.execute(
                 "SELECT local_path FROM a_strm_files WHERE rowid IN ("
                 "SELECT rowid FROM a_strm_files_fts WHERE a_strm_files_fts MATCH ?)",
                 (escaped,),
             ).fetchall()
-        assert len(rows) == 1, f"转义后搜索应命中 1 条，实际 {len(rows)}"
-        # 主名（媒体名）由 _MEDIA_NAME_SQL 取分类目录后第一级，即「进击的巨人」
+        assert len(full_rows) == 0, f"整串精确短语应命中 0 行（非连续短语），实际 {len(full_rows)}"
+
+        # 媒体主名短语（_MEDIA_NAME_SQL 取分类目录后第一级，即「进击的巨人」）命中 1 行。
+        media_phrase = '"进击的巨人"'
+        with db.read_connection() as conn:
+            rows = conn.execute(
+                "SELECT local_path FROM a_strm_files WHERE rowid IN ("
+                "SELECT rowid FROM a_strm_files_fts WHERE a_strm_files_fts MATCH ?)",
+                (media_phrase,),
+            ).fetchall()
+        assert len(rows) == 1, f"主名短语搜索应命中 1 条，实际 {len(rows)}"
         assert "进击的巨人" in rows[0][0]
 
     def test_area_list_kind_filter(self, real_webui_server):

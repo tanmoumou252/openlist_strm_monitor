@@ -37,7 +37,7 @@ export function showCacheStaleModal(itemCount, lastSync) {
     if (cb.checked) _setUiConfig('tmdb_cache_never_remind', '1');
     overlay.remove();
     showToast('后台同步已启动...', 'info');
-    // [已修复] P18: 缩进对齐（原列 0，现缩进 4 空格）
+    // 缩进对齐（原列 0，现缩进 4 空格）
     try {
       const data = await api('/api/tmdb/watchlist/sync', { method: 'POST' });
       if (data.success) showToast('同步完成后刷新页面即可看到最新数据', 'success');
@@ -55,10 +55,10 @@ export function showConfirmDialog(title, message, onConfirm, onCancel, options =
   const overlay = document.createElement('div');
   overlay.id = 'confirm-dialog';
   overlay.className = 'modal-overlay';
-  // [设计取舍] S7: htmlContent 直接注入 innerHTML - 调用者须确保 content 为可信数据（非用户输入）。
+  // htmlContent 直接注入 innerHTML - 调用者须确保 content 为可信数据（非用户输入）。
   // 当前仅用于内部富文本预检消息；如需支持用户内容，应使用 textContent 或 esc() 转义。
   if (options.htmlContent) {
-    // [已修复] F4: 添加运行时守卫，防止 htmlContent 接受未转义的用户数据
+    // 添加运行时守卫，防止 htmlContent 接受未转义的用户数据
     // 允许 <br> 和 <br/> 作为合法换行标签，其他 <xxx 标签视为可疑
     console.assert(
       typeof message === 'string' && !/<(?!br\s*\/?>)[a-z]/i.test(message),
