@@ -123,9 +123,9 @@ def read_strm_webdav_path(file_path: str | Path) -> str | None:
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             return parse_strm_content(f.read())
-    except (FileNotFoundError, OSError, PermissionError, UnicodeDecodeError, ValueError):
-        # 捕获 ValueError（canonicalize_webdav_path 对空白/畸形
-        # 路径抛出），返回 None 而非崩溃。
+    except (FileNotFoundError, OSError, PermissionError, UnicodeDecodeError, ValueError, TypeError):
+        # 捕获 ValueError / TypeError（canonicalize_webdav_path 对空白/畸形
+        # 路径或非 str 类型抛出），返回 None 而非崩溃。
         # 如果文件不存在、无法读取或包含非法字节，返回 None 而不是崩溃
         return None
 

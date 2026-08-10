@@ -251,9 +251,9 @@ def test_refresh_writes_both_types():
     ])
     bdb = _StubDb([
         ("/root/电影/Movie A/test.strm",
-         "/root/电影/Movie A/test.strm", "", "", "", "valid", 0.0),
+         "/root/电影/Movie A/test.strm", "", "", "", "valid", 0.0, "mapping_1"),
         ("/root/番剧/Show B/第1季/E01.strm",
-         "/root/番剧/Show B/第1季/E01.strm", "", "", "", "valid", 0.0),
+         "/root/番剧/Show B/第1季/E01.strm", "", "", "", "valid", 0.0, "mapping_1"),
     ])
     counts = _refresh_watchlist_match_state(_StubWebUI(wdb, bdb))
     assert counts["total"] == 2
@@ -414,7 +414,7 @@ class TestRefreshStatsFourBuckets:
         # 构造 B 区快照: Movie2 精确命中; Movie1 无候选; Movie3 有候选但不应被覆盖
         b_rows = [
             ("/b/电影/Movie2/Movie2.strm", "/b/电影/Movie2/Movie2.strm",
-             "/b/电影/Movie2", "", "", "valid", 0.0),
+             "/b/电影/Movie2", "", "", "valid", 0.0, "mapping_1"),
         ]
         bdb = _StubDb(b_rows)
 
@@ -443,9 +443,9 @@ class TestRefreshStatsFourBuckets:
 
         b_rows = [
             ("/b/电影/Exact/Exact.strm", "/b/电影/Exact/Exact.strm",
-             "/b/电影/Exact", "", "", "valid", 0.0),
+             "/b/电影/Exact", "", "", "valid", 0.0, "mapping_1"),
             ("/b/电影/Fuzzy/Fuzzy.strm", "/b/电影/Fuzzy/Fuzzy.strm",
-             "/b/电影/Fuzzy", "", "", "valid", 0.0),
+             "/b/电影/Fuzzy", "", "", "valid", 0.0, "mapping_1"),
         ]
         bdb = _StubDb(b_rows)
 
@@ -480,7 +480,7 @@ class TestRefreshStatsFourBuckets:
         db._upsert_movie({"id": 1, "title": "Normal", "original_title": "Normal"}, now)
         b_rows = [
             ("/b/电影/Normal/Normal.strm", "/b/电影/Normal/Normal.strm",
-             "/b/电影/Normal", "", "", "valid", 0.0),
+             "/b/电影/Normal", "", "", "valid", 0.0, "mapping_1"),
         ]
         bdb = _StubDb(b_rows)
         webui = _StubWebUI(db, bdb)
@@ -498,9 +498,9 @@ class TestRefreshStatsFourBuckets:
         db.override_match_state("movie", 3, "total", "manual")
         b_rows = [
             ("/b/电影/M1/M1.strm", "/b/电影/M1/M1.strm",
-             "/b/电影/M1", "", "", "valid", 0.0),
+             "/b/电影/M1", "", "", "valid", 0.0, "mapping_1"),
             ("/b/电影/M2/M2.strm", "/b/电影/M2/M2.strm",
-             "/b/电影/M2", "", "", "valid", 0.0),
+             "/b/电影/M2", "", "", "valid", 0.0, "mapping_1"),
         ]
         bdb = _StubDb(b_rows)
         webui = _StubWebUI(db, bdb)

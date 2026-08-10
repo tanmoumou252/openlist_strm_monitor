@@ -535,7 +535,7 @@ class TestResetAdminPassword:
 # ============================================================
 
 class TestPasswordLogging:
-    """密码日志安全测试（P14）。"""
+    """密码日志安全测试。"""
 
     def test_p14_password_not_in_log_records(self, tmp_path, capsys, caplog):
         """P14: 密码明文不写入 logging 记录。

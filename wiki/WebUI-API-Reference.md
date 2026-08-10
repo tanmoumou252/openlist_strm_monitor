@@ -138,7 +138,7 @@
 ### `GET /api/config`
 获取应用配置（非敏感字段）。响应为扁平对象，包含约 30 个字段，主要分组如下：
 
-- **数据库**：`db_file`（固定项目根路径，仅读）、`db_exists`
+- **数据库**：`db_file`（固定项目根路径，仅读）、`db_exists`、`tmdb_watchlist_db`（TMDB 缓存数据库路径，仅读）
 - **WebUI**：`webui_port`、`webui_bind`
 - **TMDB**：`tmdb_configured`、`tmdb_token_configured`、`tmdb_language`、`tmdb_host`、`tmdb_api_key`（**布尔值**，已脱敏）、`tmdb_api_key_configured`、`tmdb_proxy_configured`、`tmdb_proxy_enabled`、`tmdb_account_id`、`tmdb_watchlist_enabled`、`tmdb_fuzzy_threshold`、`tmdb_anime_min_ep_ratio`、`tmdb_anime_max_season_diff`（**运行时未读取**）、`tmdb_anime_min_season_ratio`（**运行时未读取**）、`tmdb_cache_ttl`
 - **A/B/C 区**：`a_b_mappings`（A↔B 映射列表，每个元素含 `a_root`、`b_root`、`label` 和 `mapping_id`）、`b_root`、`c_root`、`a_folders`、`strm_engine_paths`、`refresh_paths`
@@ -146,6 +146,12 @@
 - **刷新/行为**：`refresh_enabled`、`refresh_interval`、`behavior_action`、`ghost_protect_seconds`
 
 > 注：`webdav_password`、`webdav_totp_secret`、`tmdb_api_key` 三个敏感字段均返回布尔值（表示是否已配置），不返回明文。`access_token` 不在响应中返回。
+
+> **双语义（M5 同款）**：无 token 请求（或 token 无效）时只返回 7 个状态布尔字段——`tmdb_configured`、`tmdb_token_configured`、`tmdb_api_key_configured`、`tmdb_proxy_configured`、`webdav_configured`、`_authenticated`（恒为 `false`）、`_message`（提示文案）。返回完整配置（上列约 30 个字段）**必须**携带有效 `X-Session-Token`。该端点用于 SPA/onboarding 在登录前渲染，完整配置不泄露给未认证请求。
+>
+> **请求语义**：`/api/config` 是免 Token 白名单端点，但仅无 token/无效 token 请求走上述精简响应；携带有效 token 时 `_check_auth()` 仍会执行标准会话校验，并返回完整配置。无效或过期 token 不会被静默当作匿名成功，而是按白名单规则返回精简状态，前端随后可通过其他受保护端点发现会话已失效。
+>
+> `tmdb_watchlist_db` 是只读路径字段，仅在完整配置响应中出现；精简响应不包含该字段。
 
 ### `GET /api/webui/config/ui`
 获取 UI 配置（主题偏好等）。**免 Token**。
@@ -365,7 +371,7 @@ TMDB 头像/海报图片代理。**免 Token**。
 > 注：本端点不读取 `level`/`limit`/`search`/`type` 参数。日志文件不存在时返回 `{"lines": [], "count": 0}`。
 
 ### `GET /api/logs/download`
-下载系统日志文件。参数：`type`（`main` 或 `tmdb`）。
+下载系统日志文件。TMDB 日志使用独立端点 `/api/tmdb/logs/download`。
 
 ## 新手引导（Onboarding）
 

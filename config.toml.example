@@ -1,4 +1,4 @@
-# 配置模板：程序读取本文件 [paths]/[webdav]/[refresh]/[behavior]/[log]/[webui] 段；
+# 配置模板：本文件仅含 [webui]，其余配置在 WebUI/DB；
 # bridge.db/tmdb_watchlist.db 固定在项目根，[local].db_file 已移除；
 # 其余功能配置（OpenList、TMDB、路径、刷新、行为等）通过 WebUI 管理面板
 # （配置页面）在数据库中维护，本文件不承载。

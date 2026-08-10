@@ -3,22 +3,22 @@ import { icon } from '../core/icons.js';
 import { esc, createField } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
 import { showConfirmDialog } from '../components/dialog.js';
-import { navigate, captureRenderGuard } from '../core/router.js';  // L6: 导入 captureRenderGuard 用于轮询竞态防护
-import { _tmdbCache, _getUiConfig, _setUiConfig } from '../core/state.js';
+import { navigate, captureRenderGuard } from '../core/router.js';  // 导入 captureRenderGuard 用于轮询竞态防护
+import { _tmdbCache, _fetchPromises, _getUiConfig, _setUiConfig } from '../core/state.js';
 import { _renderOpenListConfig } from './openlist.js';
 
 export async function renderConfig(el, params) {
-  // N0: 代际快照工厂——在首次 await 前捕获
+  // 代际快照工厂——在首次 await 前捕获
   const isStale = captureRenderGuard();
   const cfg = await api('/api/config');
-  // L6: await 期间若发生新导航，放弃渲染，避免旧页覆盖
+  // await 期间若发生新导航，放弃渲染，避免旧页覆盖
   if (isStale()) return;
   // /api/config 是白名单端点，代理 URL 已脱敏为 tmdb_proxy_configured（布尔值）。
   // 配置页需要回显代理 URL，从已认证的 /api/webui/config/tmdb 获取。
   if (cfg.tmdb_proxy_configured) {
     try {
       const tmdbCfg = await api('/api/webui/config/tmdb');
-      // 第二个 await 后缺渲染护栏
+      // 第二个 await 后已有渲染护栏（isStale 代际校验）
       if (isStale()) return;
       if (tmdbCfg && tmdbCfg.config && typeof tmdbCfg.config.proxy_http === 'string') {
         cfg.tmdb_proxy_http = tmdbCfg.config.proxy_http;
@@ -85,7 +85,7 @@ export async function renderConfig(el, params) {
     setTimeout(go, 350);
   });
   if (sub === 'config') _bindConfigFormEvents(cfg);
-  if (sub === 'openlist') _renderOpenListConfig(cfg);
+  if (sub === 'openlist') _renderOpenListConfig(cfg).catch(e => console.warn('[Config] 渲染 OpenList 配置子页失败:', e));
 }
 
 function _renderConfigContent(cfg) {
@@ -348,27 +348,27 @@ async function _bindConfigFormEvents(cfg) {
       const langValue = langChoice === 'custom' ? (document.getElementById('cfg-tmdb-lang').value || 'zh-CN') : langChoice;
       const _wmActiveBtn = document.querySelector('#cfg-tmdb-watchlist-enabled-switch button.active');
       const watchlistEnabled = !(_wmActiveBtn && _wmActiveBtn.dataset.value === 'off');
-const body = {
-          language: langValue,
-          host: document.getElementById('cfg-tmdb-host').value,
-          proxy_http: document.getElementById('cfg-tmdb-proxy').value,
+      const body = {
+        language: langValue,
+        host: document.getElementById('cfg-tmdb-host').value,
+        proxy_http: document.getElementById('cfg-tmdb-proxy').value,
         proxy_enabled: document.getElementById('cfg-tmdb-proxy').value.trim() !== '',
         watchlist_enabled: watchlistEnabled ? 'true' : 'false',
-          fuzzy_threshold: document.getElementById('cfg-tmdb-fuzzy').value || '0.60',
-          anime_min_ep_ratio: document.getElementById('cfg-tmdb-ep-ratio').value || '0.30',
-          anime_max_season_diff: document.getElementById('cfg-tmdb-season-diff').value || '1',
-          anime_min_season_ratio: document.getElementById('cfg-tmdb-min-season-ratio').value || '0.30',
-          watchlist_cache_ttl: document.getElementById('cfg-tmdb-cache-ttl').value || '604800',
-        };
+        fuzzy_threshold: document.getElementById('cfg-tmdb-fuzzy').value || '0.60',
+        anime_min_ep_ratio: document.getElementById('cfg-tmdb-ep-ratio').value || '0.30',
+        anime_max_season_diff: document.getElementById('cfg-tmdb-season-diff').value || '1',
+        anime_min_season_ratio: document.getElementById('cfg-tmdb-min-season-ratio').value || '0.30',
+        watchlist_cache_ttl: document.getElementById('cfg-tmdb-cache-ttl').value || '604800',
+      };
       // token 已配置时若输入框为空则不上传，避免截断预览覆盖真实 token
       if (tokenInput.value.trim()) body.access_token = tokenInput.value;
       if (document.getElementById('cfg-tmdb-apikey').value.trim()) body.api_key = document.getElementById('cfg-tmdb-apikey').value;
-const data = await api('/api/tmdb/configure', {
-          method: 'POST',
-          body,
-        });
-        if (data.success === false) throw new Error(data.error || data.message || '保存失败');
-        showToast(data.message || '已保存', 'success');
+      const data = await api('/api/tmdb/configure', {
+        method: 'POST',
+        body,
+      });
+      if (data.success === false) throw new Error(data.error || data.message || '保存失败');
+      showToast(data.message || '已保存', 'success');
     } catch (e) {
       showToast('保存失败: ' + e.message, 'error');
     } finally {
@@ -412,7 +412,7 @@ try {
   });
 
   document.getElementById('cfg-tmdb-match-refresh').addEventListener('click', async () => {
-    // N0: 收录刷新轮询独立捕获代际，仅对该 handler 生效
+    // 收录刷新轮询独立捕获代际，仅对该 handler 生效
     const isStale = captureRenderGuard();
     const btn = document.getElementById('cfg-tmdb-match-refresh');
     btn.disabled = true;
@@ -442,6 +442,8 @@ try {
                 showToast(`收录状态已刷新: ${r.matched} 已收录 / ${r.fuzzy} 待确认 / ${r.unmatched} 未收录${uncomputedInfo} (共 ${r.total} 项)${manualInfo}`, 'success');
                 _tmdbCache.movies = null;
                 _tmdbCache.tv = null;
+                _fetchPromises.movies = null;
+                _fetchPromises.tv = null;
               }
               break;
             }

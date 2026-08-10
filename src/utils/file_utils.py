@@ -9,6 +9,33 @@ import time
 from pathlib import Path
 
 
+# 中文数字映射
+CN_NUMBERS = {
+    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+    "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15
+}
+
+
+def cn_to_int(s: str) -> int | None:
+    """将中文数字转换为整数"""
+    s = s.strip()
+    if s.isdigit():
+        return int(s)
+    if s.startswith("十"):
+        if len(s) == 1:
+            return 10
+        rest = s[1:]
+        return 10 + (cn_to_int(rest) or 0)
+    if "十" in s:
+        parts = s.split("十")
+        if len(parts) == 2:
+            left = cn_to_int(parts[0]) or 0
+            right = cn_to_int(parts[1]) or 0
+            return left * 10 + right
+    return CN_NUMBERS.get(s)
+
+
 def ensure_parent(path: str | Path) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 

@@ -39,8 +39,9 @@ export async function api(path, options = {}) {
     const resp = await fetch(path, fetchOptions);
     if (resp.status === 401) {
       localStorage.removeItem('session_token');
+      localStorage.setItem('session_token_expired', '1');
       navigate('#login');
-      // 抛出可识别错误（F-2）：调用方解构会自然中断，router 抑制此错误，
+      // 抛出可识别错误：调用方解构会自然中断，router 抑制此错误，
       // 避免旧的 return null 导致所有调用方解构 null 触发 TypeError。
       throw new ApiAuthError();
     }

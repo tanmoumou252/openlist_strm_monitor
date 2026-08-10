@@ -34,29 +34,8 @@ class _MatchHost(Protocol):
     _db: Database
 
 
-# ============================================================
-# 中文数字
-# ============================================================
-
-_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
-           "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15}
-
-
-def _cn_to_int(s: str) -> int | None:
-    s = s.strip()
-    if s.isdigit():
-        return int(s)
-    if s.startswith("十"):
-        if len(s) == 1:
-            return 10
-        return 10 + (_cn_to_int(s[1:]) or 0)
-    if "十" in s:
-        parts = s.split("十")
-        if len(parts) == 2:
-            return (_cn_to_int(parts[0]) or 0) * \
-                10 + (_cn_to_int(parts[1]) or 0)
-    return _CN_NUM.get(s)
+# P2-16: 移至 utils.file_utils 共享模块
+from utils.file_utils import cn_to_int as _cn_to_int
 
 
 def _extract_season_int(part: str) -> int | None:
@@ -287,14 +266,17 @@ def _split_aliases(*values: object) -> list[str]:
 def collect_b_media_snapshot(db: Database) -> dict[str, list[dict]]:
     """收集 B 区媒体快照，按 movie / tv 分组，同一媒体名聚合为一条候选。
 
-    聚合规则：同 (kind, name) 的多条记录合并为一条候选，
+    聚合规则：同 (mapping_id, kind, name) 的多条记录合并为一条候选，
     season_num 取最大值，episode_hint 取 OR。
+
+    聚合键加入 mapping_id，避免不同映射根下同名媒体被跨根合并，
+    从而误判"已收录"状态与季数统计。
     """
-    # 聚合字典: (kind, name) -> aggregated item
-    agg: dict[tuple[str, str], dict] = {}
+    # 聚合字典: (mapping_id, kind, name) -> aggregated item
+    agg: dict[tuple[str, str, str], dict] = {}
     with db.read_connection() as conn:
         rows = conn.execute(
-            "SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at FROM b_strm_files"
+            "SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id FROM b_strm_files"
         ).fetchall()
     for row in rows:
         record = {
@@ -306,6 +288,7 @@ def collect_b_media_snapshot(db: Database) -> dict[str, list[dict]]:
             "status": row[5],
             "updated_at": row[6],
         }
+        mapping_id = row[7] or ""
         kind, name = _media_info(record)
         if not _is_top_level_category(kind):
             continue
@@ -331,7 +314,7 @@ def collect_b_media_snapshot(db: Database) -> dict[str, list[dict]]:
                 r"\b(?:s\d{1,2}e\d{1,3}|ep\d{1,3}|e\d{1,3}|第\d+集|第\d+话)\b", joined):
             episode_hint = True
 
-        key = (kind, name)
+        key = (mapping_id, kind, name)
         if key not in agg:
             agg[key] = {
                 "kind": kind,

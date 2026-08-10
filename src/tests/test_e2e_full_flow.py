@@ -1034,7 +1034,7 @@ class TestAreaSearchE2E:
         直接经 db 读连接验证转义后的查询词能命中。
 
         说明（R17 校正）：_escape_fts5_query 自提交 1ab6826 起有意用引号包裹
-        （AUDIT-REPAIR-NOTES #15，使 FTS5 按短语精确匹配），因此转义断言需匹配
+        （docs/否决方案.md，使 FTS5 按短语精确匹配），因此转义断言需匹配
         带引号的输出。但 FTS5 索引按 simple 分词器以整条 local_path/webdav_path
         分词，"进击的巨人 限制级" 不是索引上的连续短语（方括号内容被分词器切分为
         独立 token），所以整串带引号查询命中 0 行。媒体主名短语 "进击的巨人" 才是

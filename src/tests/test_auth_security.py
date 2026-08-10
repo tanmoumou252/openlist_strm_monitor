@@ -87,6 +87,24 @@ class TestLoginRateLimit:
             call_args = handler._send_json.call_args
             assert call_args[0][1] == 400
 
+    def test_non_json_content_type_is_rejected_before_password_processing(self):
+        """登录请求必须声明 application/json，且错误类型直接返回 400。"""
+        from webui.routes import _handle_login, _login_attempts
+
+        _login_attempts.clear()
+        handler = MagicMock()
+        handler.client_address = ("127.0.0.1",)
+        handler.headers = {"Content-Type": "text/plain"}
+        webui_server = MagicMock()
+
+        _handle_login(handler, webui_server, b'{"password": "wrong"}')
+
+        handler._send_json.assert_called_once_with(
+            {"error": "Content-Type 必须为 application/json"}, 400
+        )
+        webui_server._watchlist_db.get_config.assert_not_called()
+        _login_attempts.clear()
+
     def test_wrong_password_counts_toward_limit(self):
         """错误密码返回 401 且 _login_attempts[ip] 增长"""
         from webui.routes import _handle_login, _login_attempts
@@ -95,6 +113,7 @@ class TestLoginRateLimit:
 
         handler = MagicMock()
         handler.client_address = ("127.0.0.1",)
+        handler.headers = {"Content-Type": "application/json; charset=utf-8"}
         webui_server = MagicMock()
         # 设置一个真实哈希，但密码不匹配
         stored_hash = hash_password("correct_password")
@@ -106,6 +125,7 @@ class TestLoginRateLimit:
         assert len(_login_attempts["127.0.0.1"]) == 1
         handler._send_json.assert_called_once()
         assert handler._send_json.call_args[0][1] == 401
+        _login_attempts.clear()
 
 
 class TestPasswordHash:

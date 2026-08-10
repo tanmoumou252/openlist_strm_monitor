@@ -7,7 +7,7 @@ import { navigate, captureRenderGuard } from '../core/router.js';
 import {
   CONFIG, _getCachedWatchlist, _setCachedWatchlist, _fetchPromises,
   _tmdbWebBase, _getUiConfig, _flippedCard, setFlippedCard,
-  _getGenreCache, _setGenreCache
+  _getGenreCache, _setGenreCache, _tmdbCache
 } from '../core/state.js';
 
 const _POSTER_FALLBACK_SVG = '<svg class="tt-poster-fallback-svg" viewBox="0 0 60 90" fill="none"><rect x="2" y="2" width="56" height="86" rx="4" stroke="currentColor" stroke-width="1.5" opacity="0.35"/><path d="M22 32v26l18-13-18-13z" fill="currentColor" opacity="0.25"/></svg>';
@@ -255,7 +255,7 @@ export async function renderTmdb(el, params) {
 
   let html = `<div class="status-legend" style="justify-content:flex-start;align-items:center;gap:8px;padding:10px 14px">
   <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-<h2 class="tmdb-header-title" style="font-size:17px;margin:0;color:var(--text-main);display:flex;align-items:center;gap:8px;white-space:nowrap"><span class="tmdb-header-logo-box"><img src="${esc(tmdbLogoUrl)}" alt="TMDB" class="tmdb-header-logo" onerror="this.src='${_TMDB_LOGO_FALLBACK}'" loading="lazy"></span><span>待看列表</span></h2>
+<h2 class="tmdb-header-title" style="font-size:17px;margin:0;color:var(--text-main);display:flex;align-items:center;gap:8px;white-space:nowrap"><span class="tmdb-header-logo-box"><img src="${esc(tmdbLogoUrl)}" alt="TMDB" class="tmdb-header-logo" loading="lazy"></span><span>待看列表</span></h2>
     ${avatarUrl ? `<a href="${esc(avatarLinkUrl)}" target="_blank" rel="noopener" title="查看待看列表" style="line-height:0;display:flex"><img class="tmdb-avatar" src="${avatarUrl}" alt="avatar" referrerpolicy="no-referrer"></a>` : ''}
   </div>
   <div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap">`;
@@ -307,7 +307,7 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
     const backdropUrl = backdropPath ? `/api/tmdb/poster?path=${encodeURIComponent(backdropPath)}&w=780` : '';
     const detailUrl = `${_tmdbOfficialBase}/${mediaType}/${tmdbId}`;
     const manualBadge = isManual ? `<span class="tmdb-manual-badge" title="手动设置">${icon('edit')}</span>` : '';
-    html += `<div class="tmdb-flip-wrapper" data-tmdb-id="${tmdbId}" data-tmdb-type="${esc(mediaType)}" data-backdrop="${esc(backdropUrl || '')}">
+    html += `<div class="tmdb-flip-wrapper" data-tmdb-id="${esc(tmdbId)}" data-tmdb-type="${esc(mediaType)}" data-backdrop="${esc(backdropUrl || '')}">
   ${seasonBarsHtml}
   <!-- Front face -->
      <div class="tmdb-flip-front">
@@ -321,7 +321,7 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
          · ${esc(date)}
           <span class="tmdb-card-status-inline ${st}">${icon(stIcon)} ${esc(stLabel)}${manualBadge}</span>
           <a class="tmdb-jump-btn" href="${esc(detailUrl)}" target="_blank" rel="noopener" title="前往 TMDB 查看详情">
-            <img class="tmdb-jump-logo" src="${esc(_resolveTmdbLogoUrl(status, 'card'))}" alt="TMDB" onerror="this.src='${_TMDB_LOGO_FALLBACK}'" loading="lazy">
+            <img class="tmdb-jump-logo" src="${esc(_resolveTmdbLogoUrl(status, 'card'))}" alt="TMDB" loading="lazy">
            <svg class="tmdb-jump-icon" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
          </a>
        </div>
@@ -342,7 +342,7 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
           ${rating > 0 ? `<span class="tt-tag">\u2605 ${rating.toFixed(1)}</span>` : ''}
           ${date ? `<span class="tt-tag">${esc(date)}</span>` : ''}
         </div>
-        <div class="tt-genre-tags" id="genre-${tmdbId}">
+        <div class="tt-genre-tags" id="genre-${esc(tmdbId)}">
           <span class="tt-tag tt-loading">加载中…</span>
         </div>
       </div>
@@ -352,12 +352,12 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
     </div>
     <div class="tt-override-section">
       <div class="tt-override-label">手动设置收录状态：</div>
-      <div class="tt-override-segmented" data-tmdb-id="${tmdbId}" data-tmdb-type="${esc(mediaType)}">
+      <div class="tt-override-segmented" data-tmdb-id="${esc(tmdbId)}" data-tmdb-type="${esc(mediaType)}">
         <button class="seg-btn seg-in${st === 'in' ? ' active' : ''}" data-status="matched" title="标记为已收录">${icon('badge_in')} 已收录</button>
         <button class="seg-btn seg-que${st === 'que' ? ' active' : ''}" data-status="fuzzy" title="标记为存疑">${icon('badge_que')} 存疑</button>
         <button class="seg-btn seg-out${st === 'out' ? ' active' : ''}" data-status="unmatched" title="标记为未收录">${icon('badge_out')} 未收录</button>
       </div>
-      ${isManual ? `<button class="tt-restore-auto-btn tmdb-restore-auto-btn" data-tmdb-id="${tmdbId}" data-tmdb-type="${esc(mediaType)}" title="清除人工覆盖，恢复自动判断">恢复自动判断</button>` : ''}
+      ${isManual ? `<button class="tt-restore-auto-btn tmdb-restore-auto-btn" data-tmdb-id="${esc(tmdbId)}" data-tmdb-type="${esc(mediaType)}" title="清除人工覆盖，恢复自动判断">恢复自动判断</button>` : ''}
     </div>
   </div>
 </div>`;
@@ -379,6 +379,16 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
   }
 
   el.innerHTML = html;
+
+  // P0-3: 内联 onerror 改为 addEventListener（CSP 已移除 'unsafe-inline'）。
+  // 头部 logo 与卡片跳转 logo 加载失败时回退到内联 SVG 占位。
+  el.querySelectorAll('img.tmdb-header-logo, img.tmdb-jump-logo').forEach(img => {
+    img.addEventListener('error', () => {
+      if (img.src !== _TMDB_LOGO_FALLBACK) {
+        img.src = _TMDB_LOGO_FALLBACK;
+      }
+    });
+  });
 
   document.getElementById('tmdb-search-btn').addEventListener('click', () => {
     const val = document.getElementById('tmdb-search').value.trim();

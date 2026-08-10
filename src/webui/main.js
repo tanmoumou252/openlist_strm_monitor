@@ -62,7 +62,7 @@ document.addEventListener('DOMContentLoaded', () => {
         import('./modules/pages/dashboard.js').then(m => {
           if (generation !== _visibilityGeneration || document.hidden || !document.getElementById('uptime-val')) return;
           setMainStatusTimer(setInterval(m.updateMainStatus, CONFIG.MAIN_STATUS_POLL_INTERVAL));
-        });
+        }).catch(() => console.warn('[Main] 加载 dashboard 模块失败，uptime 轮询中断'));
       }
       startUptimeTimer();
     }

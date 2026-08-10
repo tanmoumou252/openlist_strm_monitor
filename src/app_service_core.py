@@ -112,7 +112,7 @@ class StrmStorageManager:
             return ""
         try:
             addition_dict = json.loads(addition)
-            # M6: 远端 API 可能返回 "SaveLocalMode": null，.get 默认值不生效，
+            # 远端 API 可能返回 "SaveLocalMode": null，.get 默认值不生效，
             # 需显式类型守卫，否则 is_sync_mode 调 .lower() 会抛 AttributeError
             val = addition_dict.get("SaveLocalMode")
             return val if isinstance(val, str) else ""
@@ -234,13 +234,13 @@ class AppService:
         self._lineage_log_lock = threading.Lock()
         self._lineage_log_keys: set[str] = set()
         self._webdav_scan_logged: set[str] = set()
-        # 按 fingerprint 串行化 A→B 处理，避免 TOCTOU 竞争（P1-4）
+        # 按 fingerprint 串行化 A→B 处理，避免 TOCTOU 竞争
         self._fingerprint_locks_lock = threading.Lock()
         self._fingerprint_locks: dict[str, threading.Lock] = {}
         # [已废弃] WebUI 媒体刷新锁已移至 WebUIServer._refresh_lock（server.py:791），
         # routes.py 使用 handler.webui._refresh_lock。此处保留注释以说明迁移。
         # self._refresh_lock = threading.Lock()
-        # N1: Watchdog 健康状态标志 - 由 area_watchers 设置，dashboard 读取并显示
+        # Watchdog 健康状态标志 - 由 area_watchers 设置，dashboard 读取并显示
         self._watchers_healthy = True
         self.sync_service = SyncService(self)
         self.subtitle_handler = SubtitleHandler(self)
@@ -301,7 +301,7 @@ class AppService:
         return Path(self.config.paths.c_root).resolve() if self.config.paths.c_root else Path()
 
     def _mark_engine_internal(self, fingerprint: str) -> None:
-        """标记 fingerprint 为引擎内部删除（B-7）。
+        """标记 fingerprint 为引擎内部删除。
 
         handle_b_deleted 检测到此标记即跳过不可逆的云删除 + A 区删除。
         与 _restoring_markers 共用 _restoring_lock 串行化。
@@ -314,7 +314,7 @@ class AppService:
                     self._engine_internal_generation.get(fingerprint, 0) + 1
 
     def _clear_engine_internal(self, fingerprint: str) -> None:
-        """清除引擎内部删除标记（B-7）。"""
+        """清除引擎内部删除标记。"""
         if fingerprint:
             with self._restoring_lock:
                 self._engine_internal_markers.discard(fingerprint)
@@ -353,7 +353,7 @@ class AppService:
             if lock is None:
                 lock = threading.Lock()
                 self._path_locks[key] = lock
-            # L1: 容量上限 - 超过 10000 时告警（弃用 clear 防锁引用失效）
+            # 容量上限 - 超过 10000 时告警（弃用 clear 防锁引用失效）
             # 锁字典容量告警（已弃用 clear 方案）
             if len(self._path_locks) > 10000:
                 logging.warning("[Lock] _path_locks 容量 %d", len(self._path_locks))
@@ -373,7 +373,7 @@ class AppService:
             if lock is None:
                 lock = threading.Lock()
                 self._path_locks[key] = lock
-            # L1: 容量上限 - 超过 10000 时告警（弃用 clear 防锁引用失效）
+            # 容量上限 - 超过 10000 时告警（弃用 clear 防锁引用失效）
             # 锁字典容量告警（已弃用 clear 方案）
             if len(self._path_locks) > 10000:
                 logging.warning("[Lock] _path_locks 容量 %d", len(self._path_locks))
@@ -386,7 +386,7 @@ class AppService:
             if lock is None:
                 lock = threading.Lock()
                 self._fingerprint_locks[fingerprint] = lock
-            # L1: 容量上限 - 超过 10000 时告警（弃用 clear 防锁引用失效）
+            # 容量上限 - 超过 10000 时告警（弃用 clear 防锁引用失效）
             # 锁字典容量告警（已弃用 clear 方案）
             if len(self._fingerprint_locks) > 10000:
                 logging.warning("[Lock] _fingerprint_locks 容量 %d", len(self._fingerprint_locks))
@@ -396,7 +396,7 @@ class AppService:
         if not path or path == "/":
             return False
         normalized_path = path.rstrip("/") or "/"
-        # Windows 下路径大小写不敏感，统一小写比较 (P2-9)
+        # Windows 下路径大小写不敏感，统一小写比较
         if sys.platform == "win32":
             normalized_path = normalized_path.lower()
         for root in roots:
@@ -599,7 +599,7 @@ class AppService:
             self.db.set_control("last_full_audit_at", str(audit_now))
             if hasattr(self.refresh_service, "_last_full_audit_at"):
                 self.refresh_service._last_full_audit_at = audit_now
-        # L2: set_control 为 SQLite 写，Windows AV 锁/磁盘瞬时只读可抛 OperationalError
+        # set_control 为 SQLite 写，Windows AV 锁/磁盘瞬时只读可抛 OperationalError
         except (AttributeError, OSError, sqlite3.OperationalError):
             logging.warning("[启动] 保存全量审计时间失败")
         
@@ -1520,7 +1520,7 @@ class AppService:
         try:
             old_path_obj = Path(old_path)
             if not old_path_obj.exists():
-                # T8: 正常重命名下旧路径已不存在，视为删除成功（无残留需清理），
+                # 正常重命名下旧路径已不存在，视为删除成功（无残留需清理），
                 # 否则 delete_success 保持 False 会被误判为"删除失败"，
                 # 落入 else 打出"需手动检查"并 return，跳过 ensure_single_visible_instance
                 delete_success = True
@@ -1597,7 +1597,7 @@ class AppService:
                 self.refresh_identity_current_b_path(fingerprint, mapping_id)
                 self._store_valid_lineage_snapshot(disk_path, fingerprint)
                 # 捕获 ensure_single_visible_instance 异常，防止磁盘满/杀毒锁
-                # 导致启动阶段整个应用崩溃（B3-B raise 路径）
+                # 导致启动阶段整个应用崩溃
                 if fingerprint:
                     try:
                         self.ensure_single_visible_instance(fingerprint, disk_path, mapping_id=self._mapping_id_for_b(disk_path))
@@ -2078,7 +2078,7 @@ class AppService:
         `cleanup_a_redundant_using_api` 取代，保留仅为兼容旧调用路径。"""
         if not engine_path:
             return
-        # 规范化路径前缀，避免 /movies 误匹配 /movies_extra (P2-8)
+        # 规范化路径前缀，避免 /movies 误匹配 /movies_extra
         prefix = engine_path.rstrip("/") + "/"
         # 遍历 A 区，找出指向该引擎路径下但云端已不存在的 STRM 文件
         a_records = self.db.get_all_a_records()
@@ -2157,7 +2157,7 @@ class AppService:
         self.db.upsert_a(str(local), webdav_path, parent)
         self.db.save_known_folder(parent, source="a")
         fingerprint = make_strm_fingerprint(webdav_path)
-        # 按 fingerprint 串行化，避免并发创建 B 实例的 TOCTOU 竞争（P1-4）
+        # 按 fingerprint 串行化，避免并发创建 B 实例的 TOCTOU 竞争
         fp_lock = self.get_fingerprint_lock(fingerprint)
         with fp_lock:
             exists = self.admin_api.check_exists(webdav_path)
@@ -2168,7 +2168,7 @@ class AppService:
                 return
             if exists is False:
                 logging.warning("[A区即时清理] WebDAV 已不存在，删除本地冗余 STRM: %s", local)
-                # M-8: 检查物理删除结果，避免物理/DB不一致
+                # 检查物理删除结果，避免物理/DB不一致
                 if safe_remove_file(str(local)):
                     self.db.delete_a_by_local(str(local))
                     self.db.set_ghost_protection(
@@ -2197,7 +2197,7 @@ class AppService:
                 fingerprint, mapping_id)
             if valid_b_instance:
                 existing_main_path = valid_b_instance.local_path
-                # 检查磁盘文件是否实际存在，避免基于已删除文件的评分比较（P1-2）
+                # 检查磁盘文件是否实际存在，避免基于已删除文件的评分比较
                 if not Path(existing_main_path).exists():
                     self.db.mark_b_instance_status(existing_main_path, "stale")
                     logging.info(
@@ -2240,7 +2240,7 @@ class AppService:
                         webdav_path)
                     a_local_path = str(local)
                     if local.exists():
-                        # M-8: 检查物理删除结果，避免物理/DB不一致
+                        # 检查物理删除结果，避免物理/DB不一致
                         if safe_remove_file(a_local_path):
                             logging.info("[A区清理] 删除冗余STRM: %s", a_local_path)
                             self.db.delete_a_by_local(a_local_path)
@@ -2384,7 +2384,7 @@ class AppService:
         Args:
             fingerprint: 文件指纹
             trigger_path: 触发检查的路径
-            prefer_path: 可选，评分相同时优先保留的路径（P2-10）
+            prefer_path: 可选，评分相同时优先保留的路径
         """
         if not mapping_id:
             resolved = self.get_mapping_for_b(trigger_path)
@@ -2436,13 +2436,13 @@ class AppService:
                         # 保持 DB local_path 与文件系统一致，避免两者分叉。
                         try:
                             Path(quarantined).rename(dup)
-                            # B3-A: mark_other 已把 status 标为 duplicate，
+                            # mark_other 已把 status 标为 duplicate，
                             # 物理已回滚到原 .strm → 恢复 valid，避免假 duplicate 死锁。
                             self.db.mark_b_instance_status(str(dup), "valid")
                             logging.warning(
                                 "[B区重复] DB迁移失败，已回滚物理改名: %s", dup)
                         except OSError as revert_err:
-                            # B3-B: 物理已在 quarantined，回滚失败 → 把 DB
+                            # 物理已在 quarantined，回滚失败 → 把 DB
                             # local_path 对齐到磁盘实际路径，避免「DB 指旧路径 /
                             # 磁盘在 .duplicate」分叉。
                             try:
@@ -2467,7 +2467,7 @@ class AppService:
                                 dup, quarantined, revert_err)
                             raise
                 else:
-                    # B3-A: 物理隔离失败时撤销 mark_other 留下的假 duplicate，
+                    # 物理隔离失败时撤销 mark_other 留下的假 duplicate，
                     # 恢复 status=valid，避免「DB=duplicate / 磁盘仍为 .strm」
                     # 导致 ensure 永不重试的死锁。
                     self.db.mark_b_instance_status(str(dup), "valid")
@@ -2552,7 +2552,7 @@ class AppService:
             if not self._verify_a_source_exists(
                     str(local), webdav_path, fingerprint):
                 logging.warning("[B区拦截] A区无对应源文件，拒绝非法strm: %s", local)
-                # M-8: 检查物理删除结果，避免物理/DB不一致
+                # 检查物理删除结果，避免物理/DB不一致
                 if safe_remove_file(local):
                     if row:
                         self.db.delete_b_by_local(str(local))
@@ -2569,7 +2569,7 @@ class AppService:
     def _restore_b_from_a_after_violation(
             self, local: Path, webdav_path: str, fingerprint: str) -> None:
         local_path = str(local)
-        # M-18: 优先使用 C 区隔离而非直接删除（保留历史追溯能力）
+        # 优先使用 C 区隔离而非直接删除（保留历史追溯能力）
         try:
             # 检查是否有 mapping_id 和 root 信息可用于 C 区迁移
             mapping = self.get_mapping_for_b(local_path)
@@ -2578,7 +2578,7 @@ class AppService:
                 # 原解构写成 (mapping_id, a_root, b_root) 导致 b_root 实为 a_root、
                 # get_c_path_for_b 的 relative_to 永远失败、C 区隔离失效、回退直接删除。
                 mapping_id, b_root, _a_root = mapping
-                # M-18: 尝试迁移文件到 C 区（而非直接删除）
+                # 尝试迁移文件到 C 区（而非直接删除）
                 try:
                     c_target = self.get_c_path_for_b(mapping_id, local_path, b_root)
                     c_target.parent.mkdir(parents=True, exist_ok=True)
@@ -2590,7 +2590,7 @@ class AppService:
                         self.db.mark_b_instance_status(str(c_target), "quarantined")
                         logging.info("[B区越界恢复] 已将越界文件移入C区隔离: %s -> %s", local_path, c_target)
                         return  # C区迁移成功，不删除DB记录
-                    # T15: move_b_record 返回 False（目标被占/冲突）——对齐 B3-B 思路：
+                    # move_b_record 返回 False（目标被占/冲突）——对齐 B3-B 思路：
                     # 回退物理移动或对齐 DB，避免「文件已在 C 区 / DB 行仍指向旧 B 路径」分叉
                     try:
                         Path(c_target).rename(local)
@@ -2942,7 +2942,7 @@ class AppService:
                 if fingerprint in self._restoring_markers:
                     logging.info("[B区删除] 检测到程序恢复操作，跳过追删: %s", local_path)
                     return
-                # 引擎内部删除标记（B-7）：隔离/去重/迁移等程序自身操作触发的
+                # 引擎内部删除标记：隔离/去重/迁移等程序自身操作触发的
                 # 物理删除，不应级联到不可逆的 WebDAV 源文件 + A 区源文件删除。
                 if fingerprint in self._engine_internal_markers:
                     logging.info(
@@ -3099,7 +3099,7 @@ class AppService:
                 self.admin_api.invalidate_check_exists_cache(trash_path)
             return ok
 
-        # N4 (DEC-2): 只有显式 action == "DELETE" 才放行硬删除。
+        # 只有显式 action == "DELETE" 才放行硬删除。
         # 原实现把所有非 MOVE 值（含小写 "move"/"delete"、拼写错误、None 等）
         # 一律落入 DELETE 分支，属 fail-open。未知/异常 action 一律 fail-closed：
         # 返回 False + 高声告警，绝不执行不可逆的云端删除。
@@ -3384,8 +3384,8 @@ class AppService:
             return
         local = Path(local_path)
         # 先删 DB 再删文件是设计如此（避免 watchdog 级联）
-        # 物理删除为尽力而为。勿当作 M-8 未守卫删除标记。
-        # B-7 删除归因：先删 DB 记录，再删物理文件。
+        # 物理删除为尽力而为。勿当作未守卫删除标记。
+        # 删除归因：先删 DB 记录，再删物理文件。
         # 反序原顺序以消除竞态窗口：若先 safe_remove_file，其触发的 on_deleted
         # 事件会让 handle_b_deleted 在 DB 行仍存在时找到记录并误判为用户删除，
         # 连带触发不可逆的 WebDAV 源文件 + A 区源文件删除。先删 DB 行后，

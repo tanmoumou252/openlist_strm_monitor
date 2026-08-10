@@ -7,7 +7,7 @@
   font-weight: 300 700;
   font-display: swap;
   src: url('../assets/fonts/NotoSansSC-Subset.woff2') format('woff2');
-  unicode-range: U+0020-007F, U+00A0-00FF, U+2014, U+2026, U+2190, U+2192, U+2194, U+2208, U+2550-2551, U+2554, U+2557, U+255A, U+255D, U+26A0, U+2713, U+3000-30FF, U+4E00-9FEF, U+FF00-FF9F, U+FFA1-FFEF; /* ASCII + Latin-1补充 + 网页符号(—…←→↔∈═┃╒╕╘╛⚠✓) + CJK标点 + 假名 + 中日 + 全角；U+25BE(▾) 源字体无字形，交由系统字体回退 */
+  unicode-range: U+0020-007F, U+00A0-00FF, U+3000-30FF, U+4E00-9FEF, U+FF00-FF9F, U+FFA1-FFEF; /* ASCII + Latin-1补充 + CJK标点 + 假名 + 中日 + 全角；源字体缺失的14个符号(—…←→↔∈═┃╒╕╘╛⚠✓)交由系统字体回退 */
 }
 
 /* CDN fallback（当本地字体不可用时） */

@@ -279,7 +279,7 @@ class TestCoreRoutes:
         status, _, body = _http_get(base, "/api/dashboard", session_token)
         # dashboard 调用 _db_get_table_counts / _db_get_b_status_counts / _db_get_db_file_size
         # mock 下可能因 MagicMock 属性访问返回非预期类型而 500
-        assert status in (200, 500)
+        assert status == 200
         assert isinstance(body, dict)
 
     def test_records_api_returns_list(self, webui_server):
@@ -1747,7 +1747,7 @@ class TestOnboardingAPI:
         assert resp["tmdb_configured"] is False
         assert resp["openlist_configured"] is False
         assert resp["main_running"] is False
-        assert resp["onboarding_completed"] is False
+        assert resp["onboarding_completed"] == "0"
 
     def test_config_status_partially_configured(self, webui_server):
         """部分配置时返回对应字段"""
@@ -1771,7 +1771,7 @@ class TestOnboardingAPI:
         assert resp["password_set"] is True
         assert resp["tmdb_configured"] is True
         assert resp["openlist_configured"] is True
-        assert resp["onboarding_completed"] is True
+        assert resp["onboarding_completed"] == "1"
 
     def test_config_validate_openlist_unconfigured(self, webui_server):
         """OpenList 未配置时返回 error"""
@@ -2314,7 +2314,7 @@ class TestManualFullIndexAuditAPI:
         body = {}
         status, _, resp = _http_post(base, "/api/index/audit", body, session_token)
         assert status == 200
-        assert resp.get("ok") is True
+        assert resp.get("ok") is False  # P1-3: 已在进行时应返回 ok: False
         assert resp.get("status") == "already_running"
 
         # 验证没有调用审计方法

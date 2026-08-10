@@ -261,7 +261,7 @@ def test_router_render_guard_not_always_stale_free():
 
     旧实现 `_pageRenderGen = myGen` 使 `_pageRenderGen === _renderGen` 恒成立，
     isRenderStale() 恒返回 false，12 处页面渲染护栏全部失效。
-    AUDIT-REPAIR-NOTES 第五节 N0 约束：不要退回模块级单变量 isRenderStale。
+    docs/否决方案.md N0 约束：不要退回模块级单变量 isRenderStale。
     """
     source = _read("modules/core/router.js")
     # captureRenderGuard() 工厂是当前渲染护栏的基础

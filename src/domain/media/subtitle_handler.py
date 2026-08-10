@@ -74,7 +74,7 @@ class SubtitleHandler:
             return
 
         # 2.5 如果是番剧（路径明确为番剧目录），直接走番剧模式
-        # 修复 L0：避免 anime 路径被后续 STRM 辅助判断误降级为 movie
+        # 避免 anime 路径被后续 STRM 辅助判断误降级为 movie
         if media_type == "anime":
             self._process_anime_subtitle(sub_file, a_root, fingerprint)
             return

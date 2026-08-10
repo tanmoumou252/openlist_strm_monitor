@@ -10,20 +10,39 @@ from watchdog.events import FileSystemEventHandler
 from utils import make_strm_fingerprint, read_strm_webdav_path
 
 class AAreaEventHandler(FileSystemEventHandler):
+    # 事件处理线程并发上限。事件风暴时不再无限创建线程，
+    # 超出上限的事件降级为在 watchdog 派发线程内同步执行（背压），
+    # 保证事件不丢失同时限制线程数。
+    _MAX_ASYNC_THREADS = 8
+
     def __init__(self, app) -> None:
         self.app = app
-        # M-9: 健康信号 - 失败计数
+        # 健康信号 - 失败计数
         self._failure_count = 0
         self._last_failure_time = 0
         self._HEALTH_THRESHOLD = 10  # 连续失败阈值
+        self._async_semaphore = threading.BoundedSemaphore(self._MAX_ASYNC_THREADS)
 
     def _run_async(self, func, *args) -> None:
-        """在独立线程中执行可能阻塞的处理函数，避免阻塞 watchdog 线程。"""
-        threading.Thread(
-            target=self._safe_call,
-            args=(func, *args),
-            daemon=True,
-        ).start()
+        """在独立线程中执行可能阻塞的处理函数，避免阻塞 watchdog 线程。
+
+        用信号量限制并发处理线程数量。信号量耗尽时同步降级执行，
+        形成背压，避免事件风暴导致线程爆炸。
+        """
+        if self._async_semaphore.acquire(blocking=False):
+            def _wrapped():
+                try:
+                    self._safe_call(func, *args)
+                finally:
+                    self._async_semaphore.release()
+            threading.Thread(target=_wrapped, daemon=True).start()
+        else:
+            # 并发已达上限：同步降级执行（watchdog 派发线程内），
+            # 事件不丢失，也不突破线程上限。
+            logging.warning(
+                "[A区] 并发处理线程已达上限(%d)，事件同步执行降级: %s",
+                self._MAX_ASYNC_THREADS, func.__name__)
+            self._safe_call(func, *args)
 
     def _safe_call(self, func, *args) -> None:
         try:
@@ -36,7 +55,7 @@ class AAreaEventHandler(FileSystemEventHandler):
         except Exception:
             # 吞异常是有意设计（抛出将杀死 watchdog 线程）
             # 加失败计数 + _watchers_healthy 健康信号。勿改为 re-raise 或移除 try/except。
-            # M-9: 记录失败并监控健康状态
+            # 记录失败并监控健康状态
             self._failure_count += 1
             self._last_failure_time = time.time()
             logging.exception("[A区事件处理异常] %s args=%s (连续失败: %d)", func.__name__, args, self._failure_count)
@@ -66,19 +85,37 @@ class AAreaEventHandler(FileSystemEventHandler):
             self._run_async(self.app.handle_a_deleted, event.src_path)
 
 class BAreaEventHandler(FileSystemEventHandler):
+    # 事件处理线程并发上限（同 A 区，见 AAreaEventHandler._MAX_ASYNC_THREADS）
+    _MAX_ASYNC_THREADS = 8
+
     def __init__(self, app) -> None:
         self.app = app
-        # M-9: 健康信号 - 失败计数
+        # 健康信号 - 失败计数
         self._failure_count = 0
         self._last_failure_time = 0
         self._HEALTH_THRESHOLD = 10  # 连续失败阈值
+        self._async_semaphore = threading.BoundedSemaphore(self._MAX_ASYNC_THREADS)
 
     def _run_async(self, func, *args) -> None:
-        threading.Thread(
-            target=self._safe_call,
-            args=(func, *args),
-            daemon=True,
-        ).start()
+        """在独立线程中执行可能阻塞的处理函数，避免阻塞 watchdog 线程。
+
+        用信号量限制并发处理线程数量。信号量耗尽时同步降级执行，
+        形成背压，避免事件风暴导致线程爆炸。
+        """
+        if self._async_semaphore.acquire(blocking=False):
+            def _wrapped():
+                try:
+                    self._safe_call(func, *args)
+                finally:
+                    self._async_semaphore.release()
+            threading.Thread(target=_wrapped, daemon=True).start()
+        else:
+            # 并发已达上限：同步降级执行（watchdog 派发线程内），
+            # 事件不丢失，也不突破线程上限。
+            logging.warning(
+                "[B区] 并发处理线程已达上限(%d)，事件同步执行降级: %s",
+                self._MAX_ASYNC_THREADS, func.__name__)
+            self._safe_call(func, *args)
 
     def _safe_call(self, func, *args) -> None:
         try:
@@ -89,7 +126,7 @@ class BAreaEventHandler(FileSystemEventHandler):
             if hasattr(self.app, '_watchers_healthy'):
                 self.app._watchers_healthy = True
         except Exception:
-            # M-9: 记录失败并监控健康状态
+            # 记录失败并监控健康状态
             self._failure_count += 1
             self._last_failure_time = time.time()
             logging.exception("[B区事件处理异常] %s args=%s (连续失败: %d)", func.__name__, args, self._failure_count)

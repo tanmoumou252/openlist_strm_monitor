@@ -516,13 +516,14 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 if _wdb:
                     try:
                         escaped_query = _escape_fts5_query(search_query)
-                        with _wdb._conn() as conn:
-                            fts_ids = conn.execute(
-                                "SELECT rowid FROM movies_fts WHERE movies_fts MATCH ?",
-                                (escaped_query,)
-                            ).fetchall()
-                            fts_id_set = {row[0] for row in fts_ids}
-                            items = [i for i in items if i.get("id") in fts_id_set]
+                        if escaped_query is not None:
+                            with _wdb._conn() as conn:
+                                fts_ids = conn.execute(
+                                    "SELECT rowid FROM movies_fts WHERE movies_fts MATCH ?",
+                                    (escaped_query,)
+                                ).fetchall()
+                                fts_id_set = {row[0] for row in fts_ids}
+                                items = [i for i in items if i.get("id") in fts_id_set]
                     except Exception as fts_err:
                         logging.warning("[TMDB] FTS5 搜索失败，回退到内存过滤: %s", fts_err)
                         # 回退到内存过滤
@@ -558,13 +559,14 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 if _wdb:
                     try:
                         escaped_query = _escape_fts5_query(search_query)
-                        with _wdb._conn() as conn:
-                            fts_ids = conn.execute(
-                                "SELECT rowid FROM movies_fts WHERE movies_fts MATCH ?",
-                                (escaped_query,)
-                            ).fetchall()
-                            fts_id_set = {row[0] for row in fts_ids}
-                            items = [i for i in items if i.get("id") in fts_id_set]
+                        if escaped_query is not None:
+                            with _wdb._conn() as conn:
+                                fts_ids = conn.execute(
+                                    "SELECT rowid FROM movies_fts WHERE movies_fts MATCH ?",
+                                    (escaped_query,)
+                                ).fetchall()
+                                fts_id_set = {row[0] for row in fts_ids}
+                                items = [i for i in items if i.get("id") in fts_id_set]
                     except Exception as fts_err:
                         logging.warning("[TMDB] FTS5 搜索失败，回退到内存过滤: %s", fts_err)
                         search_lower = search_query.lower()
@@ -598,13 +600,14 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 if _wdb:
                     try:
                         escaped_query = _escape_fts5_query(search_query)
-                        with _wdb._conn() as conn:
-                            fts_ids = conn.execute(
-                                "SELECT rowid FROM tv_fts WHERE tv_fts MATCH ?",
-                                (escaped_query,)
-                            ).fetchall()
-                            fts_id_set = {row[0] for row in fts_ids}
-                            items = [i for i in items if i.get("id") in fts_id_set]
+                        if escaped_query is not None:
+                            with _wdb._conn() as conn:
+                                fts_ids = conn.execute(
+                                    "SELECT rowid FROM tv_fts WHERE tv_fts MATCH ?",
+                                    (escaped_query,)
+                                ).fetchall()
+                                fts_id_set = {row[0] for row in fts_ids}
+                                items = [i for i in items if i.get("id") in fts_id_set]
                     except Exception as fts_err:
                         logging.warning("[TMDB] FTS5 搜索失败，回退到内存过滤: %s", fts_err)
                         search_lower = search_query.lower()
@@ -639,13 +642,14 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
                 if _wdb:
                     try:
                         escaped_query = _escape_fts5_query(search_query)
-                        with _wdb._conn() as conn:
-                            fts_ids = conn.execute(
-                                "SELECT rowid FROM tv_fts WHERE tv_fts MATCH ?",
-                                (escaped_query,)
-                            ).fetchall()
-                            fts_id_set = {row[0] for row in fts_ids}
-                            items = [i for i in items if i.get("id") in fts_id_set]
+                        if escaped_query is not None:
+                            with _wdb._conn() as conn:
+                                fts_ids = conn.execute(
+                                    "SELECT rowid FROM tv_fts WHERE tv_fts MATCH ?",
+                                    (escaped_query,)
+                                ).fetchall()
+                                fts_id_set = {row[0] for row in fts_ids}
+                                items = [i for i in items if i.get("id") in fts_id_set]
                     except Exception as fts_err:
                         logging.warning("[TMDB] FTS5 搜索失败，回退到内存过滤: %s", fts_err)
                         search_lower = search_query.lower()
@@ -782,13 +786,10 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
             tmdb_id = _safe_int(parts[5])
             genres: list[str] = []
             if webui_server:
-                # 优先用内存缓存（不触发全量重拉取）
-                items: list[dict] = []  # type: ignore[no-redef]
-                if hasattr(
-                        webui_server, '_watchlist_cache') and webui_server._watchlist_cache is not None:
-                    items = webui_server._watchlist_cache
-                elif hasattr(webui_server, 'get_watchlist_cached'):
-                    items = webui_server.get_watchlist_cached()
+                # P1-1: 删除 _watchlist_cache 死代码分支（整个代码库中从未被赋值）。
+                # 直接使用唯一的 get_watchlist_cached() 方法。
+                items: list[dict] = webui_server.get_watchlist_cached() if hasattr(
+                    webui_server, 'get_watchlist_cached') else []
                 for item in items:
                     if item.get("id") == tmdb_id:
                         gids = item.get("genre_ids", [])
@@ -878,6 +879,13 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
                 400,
             )
             return
+        # P0-4: 数值字段白名单。这些字段后续会被 float() 消费（如 watchlist_cache_ttl），
+        # 若写入非数字字符串（如 "abc"），会导致 _handler_reinit_tmdb 中 float() 抛 ValueError，
+        # 且坏值残留在内存，后台匹配刷新任务直到重启前一直崩溃。
+        _NUMERIC_KEYS = {
+            "fuzzy_threshold", "anime_min_ep_ratio",
+            "anime_max_season_diff", "watchlist_cache_ttl", "anime_min_season_ratio",
+        }
         for key in ("access_token", "api_key", "language", "host",
                     "csv_watchlist_file",
                     "fuzzy_threshold", "anime_min_ep_ratio",
@@ -888,6 +896,37 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
                 if key in ("access_token", "api_key") and not val:
                     if getattr(tmdb_cfg, key, ""):
                         continue
+                # P0-4: 数值字段做 float() 校验，非法输入拒绝该字段并返回 400
+                if key in _NUMERIC_KEYS:
+                    try:
+                        num_val = float(val)
+                    except (TypeError, ValueError):
+                        handler._send_json(
+                            {"success": False, "error": f"字段 {key} 必须是数字"},
+                            400,
+                        )
+                        return
+                    # 范围校验：阈值/比例应在 (0, 1]，TTL 应为正数
+                    if key in ("fuzzy_threshold", "anime_min_ep_ratio",
+                               "anime_min_season_ratio") and not (0 < num_val <= 1):
+                        handler._send_json(
+                            {"success": False, "error": f"字段 {key} 必须在 (0, 1] 范围内"},
+                            400,
+                        )
+                        return
+                    if key == "anime_max_season_diff" and num_val < 0:
+                        handler._send_json(
+                            {"success": False, "error": f"字段 {key} 不能为负数"},
+                            400,
+                        )
+                        return
+                    if key == "watchlist_cache_ttl" and num_val <= 0:
+                        handler._send_json(
+                            {"success": False, "error": f"字段 {key} 必须为正数"},
+                            400,
+                        )
+                        return
+                    val = num_val
                 setattr(tmdb_cfg, key, val)
                 applied[key] = val  # 记录实际生效的值
                 changed = True
@@ -923,7 +962,10 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
             # 重新初始化 TMDB 客户端
             _handler_reinit_tmdb(webui_server, tmdb_cfg)
             # 保存到 DB（webui_config 表）——传实际生效值，不是原始请求体
-            _save_tmdb_to_db(webui_server, applied)
+            # P2-8: 检查 DB 保存结果，失败时返回错误响应
+            if not _save_tmdb_to_db(webui_server, applied):
+                handler._send_json({"success": False, "error": "保存到数据库失败"}, 500)
+                return
             configured = bool(getattr(webui_server, '_tmdb_client', None))
             _wdb = getattr(webui_server, '_watchlist_db', None)
             if _wdb:
@@ -949,7 +991,7 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
                     "config_update", "error", f"TMDB 配置保存失败: {e}")
             except Exception:
                 pass
-        # M-13: 不回传原始异常信息
+        # 不回传原始异常信息
         handler._send_json({"success": False, "error": "保存失败"}, 500)
 
 def _handler_reinit_tmdb(webui_server, tmdb_cfg) -> None:
@@ -995,22 +1037,27 @@ def _handler_reinit_tmdb(webui_server, tmdb_cfg) -> None:
         logging.warning("[TMDB] 待看列表数据库重建失败: %s", e)
         webui_server._watchlist_db = None
 
-def _save_tmdb_to_db(webui_server, changes: dict) -> None:
+def _save_tmdb_to_db(webui_server, changes: dict) -> bool:
     """保存 TMDB 配置到 DB webui_config 表（scope="tmdb"）。
+    
+    P2-8: 返回 bool 指示成功/失败，调用方据此调整响应，避免 DB 写失败时
+    前端误认为配置已保存。
     
     入参是「实际生效值」，不是原始请求体；调用方负责过滤与归一化。
     """
     _wdb = getattr(webui_server, '_watchlist_db', None)
     if not _wdb:
         logging.warning("[TMDB] 无法保存配置到 DB: watchlist_db 未初始化")
-        return
+        return False
     try:
         for key, val in changes.items():
             if val is not None:
                 _wdb.set_config("tmdb", str(key), str(val))
         logging.info("[TMDB] 配置已保存到 DB (webui_config scope=tmdb)")
+        return True
     except Exception as e:
         logging.warning("[TMDB] 保存配置到 DB 失败: %s", e)
+        return False
 
 def _handle_webui_config_get(handler, webui_server, scope: str) -> None:
     """处理 GET /api/webui/config/{scope} — 返回指定 scope 的所有配置。"""
@@ -1383,7 +1430,7 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
             }
             display_message = error_messages.get(error_type, error_messages["unknown"])
 
-            # M-13: display_message 已按 error_type 映射为用户友好文本，
+            # display_message 已按 error_type 映射为用户友好文本，
             # 不回传 client.last_error_message（可能含内部路径/凭据）
             handler._send_json({
                 "success": False,
@@ -1391,7 +1438,7 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
                 "error_type": error_type,
             })
     except Exception as e:
-        # M-13: 不回传原始异常信息
+        # 不回传原始异常信息
         logging.error("[OpenList] 连接测试异常: %s", e, exc_info=True)
         handler._send_json({
             "success": False,
@@ -1545,6 +1592,13 @@ def _handle_openlist_ping(handler, webui_server) -> None:
     _PING_WINDOW = 60
     with _ping_attempts_lock:
         ping_attempts = _ping_attempts  # 模块级 dict，见文件底部初始化
+        # 定期清理过期 IP 键（与 _login_attempts 对齐），防止长期运行时内存泄漏
+        if len(ping_attempts) > 1000:
+            cutoff = now - _PING_WINDOW
+            stale_ips = [ip for ip, times in ping_attempts.items()
+                         if all(t < cutoff for t in times)]
+            for ip in stale_ips:
+                del ping_attempts[ip]
         ip_attempts = ping_attempts.get(client_ip, [])
         ip_attempts = [t for t in ip_attempts if now - t < _PING_WINDOW]
         if len(ip_attempts) >= _PING_LIMIT:
@@ -1754,7 +1808,7 @@ def _handle_tmdb_watchlist_match_override(
                 pass
     except Exception as e:
         logging.error("[TMDB] 手动覆盖收录状态失败: %s", e, exc_info=True)
-        # M-13: 不回传原始异常信息
+        # 不回传原始异常信息
         handler._send_json({"success": False, "message": "覆盖失败"}, 500)
 
 def _handle_tmdb_watchlist_match_clear(
@@ -1820,7 +1874,7 @@ def _handle_tmdb_watchlist_match_clear(
                 pass
     except Exception as e:
         logging.error("[TMDB] 清除人工覆盖失败: %s", e, exc_info=True)
-        # M-13: 不回传原始异常信息
+        # 不回传原始异常信息
         handler._send_json({"success": False, "message": "清除失败"}, 500)
 
 def _handle_tmdb_watchlist_bg_sync(handler, webui_server) -> None:
@@ -2302,6 +2356,12 @@ _ping_attempts_lock = threading.Lock()
 
 def _handle_login(handler, webui_server, body: bytes) -> None:
     """处理 POST /api/login — 密码登录验证。"""
+    # P2-9: 验证 Content-Type 头必须为 application/json
+    content_type = handler.headers.get("Content-Type", "")
+    if not content_type.startswith("application/json"):
+        handler._send_json({"error": "Content-Type 必须为 application/json"}, 400)
+        return
+
     # 客户端 IP 速率限制（原子化读写，防止并发绕过）
     client_ip = handler.client_address[0]
     now = time.time()
@@ -2351,7 +2411,7 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
                 "error": "密码格式损坏，请运行 reset_admin.py 重置管理员密码"
             }, 500)
             return
-        # M-2: 使用统一的密码工具模块验证密码
+        # 使用统一的密码工具模块验证密码
         from utils.password_utils import verify_password
         password_ok = verify_password(password, stored)
         if not password_ok:
@@ -2379,11 +2439,13 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
             _login_attempts.pop(client_ip, None)
         # 生成 session token
         token = secrets.token_hex(32)
-        # M-4: Session 绑定客户端 IP（防止被盗 token 跨 IP 使用）
+        # Session 绑定客户端 IP（防止被盗 token 跨 IP 使用）
         with webui_server._sessions_lock:
             webui_server._sessions[token] = (time.time() + 604800, client_ip)  # 7天, IP
         handler._send_json({"success": True, "token": token})
     except json.JSONDecodeError:
+        # 设计决策：恶意 JSON 请求计入限流频率（暴力尝试），
+        # 与合法非 dict 不计语义区分（见 line 2340 安全权衡注释）。
         with _login_attempts_lock:
             _login_attempts.setdefault(client_ip, []).append(now)
         handler._send_json({"error": "无效的 JSON"}, 400)
@@ -2420,8 +2482,9 @@ def _get_media_groups_paginated(handler, area: str, kind_filter: str,
         fts_table_map = {"a": "a_strm_files_fts", "b": "b_strm_files_fts", "c": "c_ghost_files_fts"}
         fts_table = fts_table_map.get(area, "a_strm_files_fts")
         escaped_query = _escape_fts5_query(q)
-        base_where = f" AND rowid IN (SELECT rowid FROM {fts_table} WHERE {fts_table} MATCH ?)"
-        params_list.append(escaped_query)
+        if escaped_query is not None:
+            base_where = f" AND rowid IN (SELECT rowid FROM {fts_table} WHERE {fts_table} MATCH ?)"
+            params_list.append(escaped_query)
 
     # kind_counts 使用独立参数（只含搜索 q，不含 kind 筛选），
     # 确保统计始终显示所有类型的真实数量不受当前筛选影响
@@ -2755,11 +2818,14 @@ def _compute_common_local_root(local_paths: list[str]) -> str:
         # 如果路径无法计算公共路径（如不同驱动器），返回空
         return ""
 
-def _escape_fts5_query(query: str) -> str:
+def _escape_fts5_query(query: str) -> str | None:
     """清理 FTS5 查询字符串，移除可能被解释为运算符的字符。
 
     策略：移除 FTS5 特殊运算符字符（* - + " ^ ~），保留括号等可能出现在
     文件名中的字符（替换为空格）。避免逐个反斜杠转义在不同上下文的行为不一致问题。
+
+    P2-10: 清理后为空字符串时返回 None，调用方跳过 FTS5 查询。
+    之前返回空引号字符串 '""'，FTS5 运行时错误后 fallback 到 LIKE，产生日志噪音。
     """
     # 移除 FTS5 运算符字符（包括冒号，因为冒号在 FTS5 中用于列过滤）
     query = re.sub(r'[*+"^~:]', '', query)
@@ -2771,6 +2837,9 @@ def _escape_fts5_query(query: str) -> str:
     query = ' '.join(query.split())
     # 移除反斜杠（Windows 路径分隔符在 FTS5 中无意义）
     query = query.replace('\\', ' ')
+    # P2-10: 清理后为空 → 返回 None，调用方跳过 FTS5
+    if not query:
+        return None
     return f'"{query}"'
 
 def handle_area_detail(handler, area, params) -> None:
@@ -2792,6 +2861,12 @@ def handle_area_detail(handler, area, params) -> None:
         return
 
     media_name = params.get("media", [""])[0]
+    # P1-2: media_name 为空时直接返回空结果，避免 WHERE 子句为空导致全表
+    # fetchall() 加载到 Python 内存（大型库数万条记录时造成内存/CPU 尖峰）。
+    if not media_name:
+        handler._send_json({"media_name": "", "mappings": [], "total": 0})
+        return
+
     sort_field = params.get("sort", ["local_path"])[0]
     sort_order = params.get("order", ["asc"])[0]
     page = _safe_int(params.get("page", ["1"])[0], 1)
@@ -3181,7 +3256,7 @@ def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str |
             a_records = [dict(r) for r in rows]
     except Exception as e:
         logging.error("[Refresh] 查询 A 区记录失败: %s", e)
-        # M-13: 不回传原始异常信息
+        # 不回传原始异常信息
         return {"ok": False, "error": "query_failed"}
 
     _refresh_log("debug", "[Refresh] 查询完成 耗时=%.2fs 记录数=%d",
@@ -3221,7 +3296,7 @@ def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str |
     _refresh_log("debug", "[Refresh] 引擎 API 完成 耗时=%.2fs", time.monotonic() - phase_start)
 
     if list_result is None or list_result.get("code") not in (0, 200):
-        # M-13: 不回传原始 API 响应（可能含内部路径/服务端详情）
+        # 不回传原始 API 响应（可能含内部路径/服务端详情）
         logging.error("[Refresh] OpenList API 返回异常: code=%s", list_result.get("code") if isinstance(list_result, dict) else None)
         return {"ok": False, "error": "OpenList API 返回错误"}
 
@@ -3478,7 +3553,7 @@ def handle_config_api(handler) -> None:
     如果 DB 无数据则回退到内存 TmdbConfig 对象。
     OpenList 配置优先从 DB (webui_config scope=openlist) 读取。
     
-    M-3: 未认证时只返回状态 booleans（configured/not_configured），
+    未认证时只返回状态 booleans（configured/not_configured），
          完整配置信息需认证后获取，防止局域网信息泄露。
     """
     # b_root/a_folders）有意在登录前可读，以便 SPA/onboarding 在鉴权前渲染（服务绑定局域网）。
@@ -3507,7 +3582,7 @@ def handle_config_api(handler) -> None:
         is_authenticated = handler._validate_session_token(token_header, client_ip)
 
     if not is_authenticated:
-        # M-3: 未认证时只返回最基本的状态 booleans，防止信息泄露
+        # 未认证时只返回最基本的状态 booleans，防止信息泄露
         handler._send_json({
             # 只返回是否已配置的状态，不返回具体值
             "tmdb_configured": bool(tmdb_client),
@@ -3673,7 +3748,7 @@ def handle_config_api(handler) -> None:
         "tmdb_token_configured": token_configured,
         "tmdb_language": tmdb_language,
         "tmdb_host": tmdb_host,
-        # tmdb_api_key 不返回明文（B-3）：仅返回是否已配置的布尔值，
+        # tmdb_api_key 不返回明文：仅返回是否已配置的布尔值，
         # 防止未认证客户端通过白名单接口窃取完整 API key。
         "tmdb_api_key": bool(tmdb_api_key),
         "tmdb_api_key_configured": bool(tmdb_api_key),
@@ -3702,7 +3777,7 @@ def handle_config_api(handler) -> None:
         ],
         "strm_engine_paths": strm_engine_paths,
         "refresh_paths": refresh_paths_val,
-        # WebDAV（M-3: 认证后才返回敏感信息）
+        # WebDAV（认证后才返回敏感信息）
         "webdav_host": webdav_host,
         "webdav_user": webdav_user,
         "webdav_password": webdav_password,
@@ -3714,7 +3789,7 @@ def handle_config_api(handler) -> None:
         # Behavior
         "behavior_action": behavior_action,
         "ghost_protect_seconds": ghost_protect_seconds,
-        # M-3: 认证状态标记
+        # 认证状态标记
         "_authenticated": True,
     })
 
@@ -3810,11 +3885,14 @@ def _handle_config_status(handler, webui_server) -> None:
     main_running = bool(getattr(webui_server, '_app_running', False))
 
     # onboarding_completed: 检查 DB 中的标记
-    onboarding_completed = False
+    # P0-1: 返回字符串 "1"/"0"（与 DB 存储一致），前端用 === '1' 严格比较。
+    # 之前返回 Python bool → JSON true/false，与前端 === '1' 恒不相等，导致
+    # onboarding 完成后卡片不隐藏、快捷按钮不显示。
+    onboarding_completed = "0"
     if _wdb:
         try:
             val = _wdb.get_config("ui", "onboarding_completed", "")
-            onboarding_completed = val == "1"
+            onboarding_completed = "1" if val == "1" else "0"
         except Exception:
             pass
 
@@ -3914,7 +3992,7 @@ def _handle_config_validate(handler, webui_server) -> None:
                     "suggestion": "请检查 OpenList 配置或网络连通性",
                 })
         except Exception as e:
-            # M-13: 通用消息，不向前端泄露异常详情（HTML 转义仅防 XSS，不防信息泄露）
+            # 通用消息，不向前端泄露异常详情（HTML 转义仅防 XSS，不防信息泄露）
             logging.debug("[仪表盘] OpenList 连接检查异常: %s", e, exc_info=True)
             checks.append({
                 "name": "openlist_online",
@@ -3985,7 +4063,7 @@ def _handle_onboarding_complete_step(handler, webui_server, body: bytes) -> None
             handler._send_json({"error": "internal_error"}, 500)
             return
 
-    handler._send_json({"ok": True})
+    handler._send_json({"ok": True, "success": True})
 
 # ============================================================
 # Task A: 手动全量审计端点
@@ -4018,7 +4096,7 @@ def handle_index_audit(handler, body: bytes) -> None:
     with webui_server._index_audit_lock:
         if webui_server._index_audit_running:
             handler._send_json({
-                "ok": True,
+                "ok": False,  # P1-3: 应为 False，与 wiki/WebUI-API-Reference.md 文档一致
                 "status": "already_running",
                 "message": "审计已在进行中"
             })

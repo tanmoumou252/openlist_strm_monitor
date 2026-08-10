@@ -45,7 +45,7 @@ if %errorlevel% neq 0 (
     echo [ERROR] pip 未安装或不可用。
     echo.
     echo   建议执行以下命令安装 pip:
-    echo     %PYTHON% -m ensurepip --upgrade
+    echo     "%PYTHON%" -m ensurepip --upgrade
     echo   或参考 https://pip.pypa.io/en/stable/installation/
     echo.
     pause
@@ -58,12 +58,12 @@ if %errorlevel% neq 0 (
     echo [ERROR] 检测到缺失的依赖库。
     echo.
     echo   请先安装依赖:
-    echo     %PYTHON% -m pip install -r requirements.txt
+    echo     "%PYTHON%" -m pip install -r requirements.txt
     echo.
     echo   如果网络不通，可先设置代理再安装:
     echo     set HTTPS_PROXY=http://127.0.0.1:7890
     echo     set HTTP_PROXY=http://127.0.0.1:7890
-    echo     %PYTHON% -m pip install -r requirements.txt
+    echo     "%PYTHON%" -m pip install -r requirements.txt
     echo.
     pause
     exit /b 1

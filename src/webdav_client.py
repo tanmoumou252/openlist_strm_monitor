@@ -360,9 +360,11 @@ class OpenListAdminClient:
 
                 # 检查是否过期：HTTP 401 或业务 JSON code 401
                 should_retry = res.status_code == 401
+                response_json = None
                 if not should_retry:
                     try:
-                        if res.json().get("code") == 401:
+                        response_json = res.json()
+                        if response_json.get("code") == 401:
                             should_retry = True
                     except (ValueError, KeyError, AttributeError):
                         pass
@@ -372,16 +374,20 @@ class OpenListAdminClient:
                     if self.login(force=True):
                         kwargs["headers"]["Authorization"] = self.token
                         res = self.session.request(method, url, **kwargs)
+                        response_json = None  # 响应已更换，缓存失效
                         if not _is_fs_list:
                             log.debug("[API重试] 重新登录后状态码=%s", res.status_code)
                     else:
-                        log.error("[API重试] 重新登录失败: %s", self.last_error_message or "未知错误")
+                        log.error("[API重试] 登录失败: %s", self.last_error_message or "未知错误")
                         return res  # 登录失败，直接返回 401 结果
 
                 # 记录响应摘要（避免记录大响应体）
+                # 复用上一次 res.json() 的解析结果，避免热路径上
+                # 同一响应体被重复解析 2-3 次（/api/fs/list 分页并发场景）。
                 try:
                     if res.status_code == 200:
-                        response_json = res.json()
+                        if response_json is None:
+                            response_json = res.json()
                         code = response_json.get('code', 'N/A')
                         message = response_json.get('message', '')
                         if not _is_fs_list:

@@ -159,7 +159,14 @@ def _get_fernet():
         # 双重检查：等待锁期间可能已被其它线程创建
         if _cached_fernet is not None:
             return _cached_fernet
-        key = _load_or_create_master_key()
+        try:
+            key = _load_or_create_master_key()
+        except RuntimeError as e:
+            # 主密钥文件存在但为空 → _load_or_create_master_key 抛 RuntimeError。
+            # 与损坏密钥同语义：视为不可用，返回 None 走降级路径，
+            # 避免空文件把 encrypt()/decrypt() 的降级逻辑击穿。
+            log.warning("[SecretManager] 主密钥文件为空，无法创建 Fernet: %s", e)
+            return None
         try:
             _cached_fernet = Fernet(key)
         except ValueError as e:

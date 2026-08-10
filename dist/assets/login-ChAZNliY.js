@@ -1,14 +1,14 @@
-import{L as e,c as t,o as n}from"./core-nA5dXoti.js";async function r(r){let i=!1,a=!1;try{i=(await t(`/api/admin/status`)).has_password,a=!0}catch{}let o=localStorage.getItem(`session_token`);if(o&&i&&a){n(`#dashboard`);return}if(o&&!i&&a&&localStorage.removeItem(`session_token`),!a){r.innerHTML=`
+import{L as e,c as t,o as n}from"./core-EfZOI4_I.js";async function r(r){let i=!1,a=!1;try{i=(await t(`/api/admin/status`)).has_password,a=!0}catch{}let o=localStorage.getItem(`session_token`);if(o&&i&&a){n(`#dashboard`);return}if(o&&!i&&a&&localStorage.removeItem(`session_token`),!a){let t=localStorage.getItem(`session_token_expired`)===`1`;localStorage.removeItem(`session_token_expired`),r.innerHTML=`
       <div style="display:flex;align-items:center;justify-content:center;min-height:60vh">
         <div class="page-card" style="max-width:420px;width:100%;text-align:center;padding:40px 32px">
           <div style="font-size:48px;margin-bottom:16px;color:var(--text-error)">${e(`warn`)}</div>
-          <h2 style="margin:0 0 12px;font-size:20px;color:var(--text-main)">无法连接服务器</h2>
+          <h2 style="margin:0 0 12px;font-size:20px;color:var(--text-main)">${t?`登录已过期`:`无法连接服务器`}</h2>
           <p style="color:var(--text-muted);font-size:var(--font-base);line-height:1.6">
-            无法连接到 STRM Bridge 后端服务，请检查服务是否已启动。<br>
+            ${t?`你的登录会话已过期，请重新连接服务器并登录。`:`无法连接到 STRM Bridge 后端服务，请检查服务是否已启动。`}<br>
             默认端口为 <code style="background:var(--bg-control);padding:2px 6px;border-radius:4px">8579</code>。
           </p>
           <button class="toolbar-btn primary" style="margin-top:12px" id="login-retry-btn">
-            ${e(`refresh`)} 重试连接
+            ${e(`refresh`)} ${t?`重新连接`:`重试连接`}
           </button>
         </div>
       </div>`,document.getElementById(`login-retry-btn`)?.addEventListener(`click`,()=>{let e=window.location.hash;window.location.hash=`#login`,e===`#login`?window.dispatchEvent(new HashChangeEvent(`hashchange`)):window.location.hash=e});return}if(!i){r.innerHTML=`
@@ -50,4 +50,4 @@ import{L as e,c as t,o as n}from"./core-nA5dXoti.js";async function r(r){let i=!
           忘记密码可运行 <code style="background:var(--bg-control);padding:1px 4px;border-radius:3px">python reset_admin.py</code> 重置
         </div>
       </div>
-    </div>`;let s=document.getElementById(`login-password-input`),c=document.getElementById(`login-btn`),l=document.getElementById(`login-error`);function u(e){l.textContent=e,l.style.display=`block`}async function d(){let t=s.value;if(!t||!t.trim()){u(`请输入管理员密码`);return}c.disabled=!0,c.textContent=`登录中...`,l.style.display=`none`;try{let r=new AbortController,i=setTimeout(()=>r.abort(),1e4),a;try{a=await fetch(`/api/login`,{method:`POST`,headers:{"Content-Type":`application/json`},body:JSON.stringify({password:t}),signal:r.signal})}finally{clearTimeout(i)}let o=await a.json();a.ok&&o.token?(localStorage.setItem(`session_token`,o.token),n(`#dashboard`)):(u(o.error||`密码错误`),c.disabled=!1,c.innerHTML=`${e(`login`)} 登录`)}catch{u(`网络错误，请检查服务器是否运行`),c.disabled=!1,c.innerHTML=`${e(`login`)} 登录`}}c.addEventListener(`click`,d),s.addEventListener(`keydown`,e=>{e.key===`Enter`&&d()}),setTimeout(()=>s.focus(),100)}export{r as renderLogin};
+    </div>`;let s=document.getElementById(`login-password-input`),c=document.getElementById(`login-btn`),l=document.getElementById(`login-error`);function u(e){l.textContent=e,l.style.display=`block`}async function d(){let t=s.value;if(!t||!t.trim()){u(`请输入管理员密码`);return}c.disabled=!0,c.textContent=`登录中...`,l.style.display=`none`;try{let r=new AbortController,i=setTimeout(()=>r.abort(),1e4),a;try{a=await fetch(`/api/login`,{method:`POST`,headers:{"Content-Type":`application/json`},body:JSON.stringify({password:t}),signal:r.signal})}finally{clearTimeout(i)}let o=await a.json();a.ok&&o.token?(setToken(o.token),n(`#dashboard`)):(u(o.error||`密码错误`),c.disabled=!1,c.innerHTML=`${e(`login`)} 登录`)}catch{u(`网络错误，请检查服务器是否运行`),c.disabled=!1,c.innerHTML=`${e(`login`)} 登录`}}c.addEventListener(`click`,d),s.addEventListener(`keydown`,e=>{e.key===`Enter`&&d()}),setTimeout(()=>s.focus(),100)}export{r as renderLogin};

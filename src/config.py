@@ -371,7 +371,7 @@ class AppConfig:
                     mappings_data = json.loads(db_cfg["a_b_mappings"])
                     parsed: list[ABMapping] = []
                     for m in mappings_data:
-                        # T17: 纵深防御——写入侧 _validate_a_b_mappings 已挡非 dict，
+                        # 纵深防御——写入侧 _validate_a_b_mappings 已挡非 dict，
                         # 此处仍跳过并记 warning，避免 AttributeError 中止全部 DB 覆盖
                         if not isinstance(m, dict):
                             logging.warning(
@@ -588,12 +588,17 @@ class AppConfig:
                         storage_paths = [
                             str(p).strip() for p in paths_val if str(p).strip()
                         ]
-                    else:
+                    elif isinstance(paths_val, str):
                         storage_paths = [
                             p.strip()
                             for p in paths_val.split("\n")
                             if p.strip()
                         ]
+                    else:
+                        # paths 为 dict/null 等非字符串时不再调用 .split("\n")，
+                        # 避免 AttributeError 冒泡到外层 except Exception (line 647)
+                        # 中断整个 STRM 存储加载。此分支安全降级为空列表。
+                        storage_paths = []
 
                     local_path = addition.get("SaveStrmLocalPath", "")
 
@@ -614,7 +619,7 @@ class AppConfig:
                             local_path=local_path,
                         )
                 except (json.JSONDecodeError, TypeError):
-                    # T12: addition 为 None/dict 等非字符串时 json.loads 抛 TypeError，
+                    # addition 为 None/dict 等非字符串时 json.loads 抛 TypeError，
                     # 一并捕获并 str() 化日志入参，单条失败只跳过该条目，不中断整个加载
                     logging.warning(
                         "[STRM存储解析] 解析 addition 失败：%s",

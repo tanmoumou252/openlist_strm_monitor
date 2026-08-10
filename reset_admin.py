@@ -20,16 +20,16 @@ from utils.password_utils import hash_password  # noqa: E402
 def find_db_path() -> str:
     """返回固定项目根路径下的 tmdb_watchlist.db。
     
-    [已修复] P1-3: 不再从 config.toml 读取、不再搜索 data/ 目录、不再 rglob，
+    不再从 config.toml 读取、不再搜索 data/ 目录、不再 rglob，
     不再接受 --db 参数。数据库路径固定在脚本所在目录（项目根）。
     """
-    # [设计取舍] 仅测试注入，生产固定项目根
+    # 设计决策：仅测试注入，生产固定项目根
     db_path = Path(__file__).resolve().parent / "tmdb_watchlist.db"
     return str(db_path)
 
 
 def main():
-    # M18: 拒绝任何未知的 - 前缀标志（如 --db/--xxx），逐字参数仅允许密码
+    # 拒绝任何未知的 - 前缀标志（如 --db/--xxx），逐字参数仅允许密码
     unknown = [a for a in sys.argv[1:] if a.startswith("-")]
     if unknown:
         print(f"错误: 未知参数: {' '.join(unknown)}")

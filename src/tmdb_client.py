@@ -268,10 +268,10 @@ class TmdbClient:
                     try:
                         retry_after = float(e.headers.get("Retry-After", default_wait))
                     except (ValueError, TypeError):
-                        # T14: RFC 允许 Retry-After 为 HTTP-date（如 "Wed, 21 Oct 2015 07:28:00 GMT"），
+                        # RFC 允许 Retry-After 为 HTTP-date（如 "Wed, 21 Oct 2015 07:28:00 GMT"），
                         # float() 会抛 ValueError 逃逸重试逻辑；回退默认指数退避
                         retry_after = default_wait
-                    # T14: 等待秒数设上限并拒绝负值，防止异常/恶意 Retry-After 无限挂起线程
+                    # 等待秒数设上限并拒绝负值，防止异常/恶意 Retry-After 无限挂起线程
                     if retry_after < 0:
                         retry_after = default_wait
                     elif retry_after > 60.0:
@@ -388,7 +388,7 @@ class TmdbClient:
         api_key-only 模式返回空列表。
         返回 (items, has_next_page)
 
-        T5: 取回失败（api_key 模式、无 account_id、响应缺 results、请求异常）
+        取回失败（api_key 模式、无 account_id、响应缺 results、请求异常）
         一律 raise，不再返回 ([], False) 与"清单真为空"同形——否则 sync() 会据此
         全清本地表。
         """
@@ -419,7 +419,7 @@ class TmdbClient:
         api_key-only 模式返回空列表。
         返回 (items, has_next_page)
 
-        T5: 同 get_watchlist_movies，取回失败一律 raise。
+        同 get_watchlist_movies，取回失败一律 raise。
         """
         if self._use_api_key_auth:
             raise RuntimeError("api_key 模式不支持 watchlist")
@@ -444,9 +444,11 @@ class TmdbClient:
 
     def fetch_all_watchlist_movies(self) -> list[dict]:
         """获取全部待看电影"""
+        # Max page 安全阀（与 list_storages 对齐），防止 has_next 恒真时无限循环
+        MAX_PAGES = 100
         all_items: list[dict] = []
         page = 1
-        while True:
+        while page <= MAX_PAGES:
             items, has_next = self.get_watchlist_movies(page)
             if not items:
                 break
@@ -455,13 +457,17 @@ class TmdbClient:
                 break
             page += 1
             time.sleep(0.3)
+        if page > MAX_PAGES:
+            logging.warning("[TMDB] 电影 watchlist 已达最大页数 %d，可能数据不完整", MAX_PAGES)
         return all_items
 
     def fetch_all_watchlist_tv(self) -> list[dict]:
         """获取全部待看剧集"""
+        # Max page 安全阀（与 list_storages 对齐），防止 has_next 恒真时无限循环
+        MAX_PAGES = 100
         all_items: list[dict] = []
         page = 1
-        while True:
+        while page <= MAX_PAGES:
             items, has_next = self.get_watchlist_tv(page)
             if not items:
                 break
@@ -470,6 +476,8 @@ class TmdbClient:
                 break
             page += 1
             time.sleep(0.3)
+        if page > MAX_PAGES:
+            logging.warning("[TMDB] 剧集 watchlist 已达最大页数 %d，可能数据不完整", MAX_PAGES)
         return all_items
 
 # ============================================================

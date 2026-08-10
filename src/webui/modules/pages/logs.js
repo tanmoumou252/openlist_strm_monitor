@@ -188,39 +188,39 @@ async function _fetchAndRenderLogs(el) {
     });
   }
 
-  // 下载按钮：通过 api() 获取数据后生成 Blob 下载（避免 401）
+  // 下载按钮：改用服务端流式下载端点（/api/logs/download、/api/tmdb/logs/download），
+  // 自动附加 X-Session-Token，避免 401，且能下载完整日志（不受分页上限截断）。
   const downloadBtn = document.getElementById('logs-download');
   if (downloadBtn) {
     downloadBtn.addEventListener('click', async () => {
       const originalHtml = downloadBtn.innerHTML;
       downloadBtn.disabled = true;
       downloadBtn.innerHTML = '准备下载...';
-      
+
       try {
-        let content, filename;
-        
-        if (currentLogType === 'tmdb') {
-          // TMDB 日志：请求最多 500 条
-          const data = await api('/api/tmdb/logs?limit=500');
-          const logs = data.logs || [];
-          const lines = logs.map(log => {
-            const ts = log.ts ? new Date(log.ts * 1000).toLocaleString('zh-CN') : '-';
-            const level = (log.level || 'info').toUpperCase();
-            const op = opLabel[log.op] || log.op || '-';
-            return `[${ts}] [${level}] [${op}] ${log.msg || ''}`;
-          });
-          content = lines.join('\n');
-          filename = 'tmdb_operations.log';
-        } else {
-          // 主程序日志：请求最多 1000 行
-          const data = await api('/api/logs?lines=1000');
-          const lines = data.lines || [];
-          content = lines.join('\n');
-          filename = 'strm_bridge.log';
+        const endpoint = currentLogType === 'tmdb'
+          ? '/api/tmdb/logs/download'
+          : '/api/logs/download';
+        const filename = currentLogType === 'tmdb'
+          ? 'tmdb_operations.log'
+          : 'strm_bridge.log';
+
+        const headers = {};
+        const token = localStorage.getItem('session_token');
+        if (token) headers['X-Session-Token'] = token;
+
+        const resp = await fetch(endpoint, { headers });
+        if (resp.status === 401) {
+          localStorage.removeItem('session_token');
+          showToast('登录已过期，请重新登录', 'error');
+          return;
         }
-        
-        // 创建 Blob 并触发下载
-        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+        if (!resp.ok) {
+          showToast('下载失败: HTTP ' + resp.status, 'error');
+          return;
+        }
+
+        const blob = await resp.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;

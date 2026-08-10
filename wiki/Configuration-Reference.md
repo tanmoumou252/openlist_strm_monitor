@@ -203,9 +203,9 @@ OpenList 后台配置                    程序内部映射
 
 ## JWT Token 缓存
 
-`OpenListAdminClient` 将 JWT Token 缓存到 `src/.admin_token.json`（`OpenListAdminClient` 所在目录），避免重复登录。Token 过期前 60 秒自动刷新。401 时清除缓存并重新登录。
+`OpenListAdminClient` 将 JWT Token 缓存到 `src/.admin_token.json`（`OpenListAdminClient` 所在目录），避免重复登录。缓存文件 TTL 为 24 小时（`_TOKEN_CACHE_TTL`），本身不解析 JWT 过期时间、也不做预置性自动刷新；请求返回 401 时清除缓存并重新登录。
 
-> **注意：** 这里的"60 秒"指 JWT Token 过期前的自动刷新提前量，与 `refresh.interval_minutes`（默认 10 分钟）控制的周期性 WebDAV/主动刷新间隔是两套独立机制，勿混淆。
+> **注意：** 这里的缓存文件 TTL（24 小时）与 JWT Token 自身的过期机制无关，且与 `refresh.interval_minutes`（默认 10 分钟）控制的周期性 WebDAV/主动刷新间隔是两套独立机制，勿混淆。
 
 ## 多存储分组
 

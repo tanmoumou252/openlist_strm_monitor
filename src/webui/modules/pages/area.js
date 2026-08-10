@@ -21,7 +21,7 @@ export async function renderArea(el, area, params) {
 }
 
 async function renderAreaList(el, area, params) {
-  // N0: 代际快照工厂——在首次 await 前捕获
+  // 代际快照工厂——在首次 await 前捕获
   const isStale = captureRenderGuard();
   const kind = params.kind || 'anime';
   const q = params.q || '';
@@ -169,7 +169,7 @@ ${pagerHtml}
 }
 
 async function renderAreaDetail(el, area, params) {
-  // N0: 代际快照工厂——在首次 await 前捕获
+  // 代际快照工厂——在首次 await 前捕获
   const isStale = captureRenderGuard();
   const media = params.media;
   const kind = params.kind || '';
@@ -196,7 +196,7 @@ async function renderAreaDetail(el, area, params) {
   // Task 2: 检测是否为多 mapping 场景
   const isMultiMapping = d.mappings && Array.isArray(d.mappings) && d.mappings.length > 0;
   
-  // Fix R4: expandBtns 提到分支外统一渲染一次
+  // expandBtns 提到分支外统一渲染一次
   const expandBtns = `<div class="detail-actions">
   <button class="toolbar-btn" id="expand-all-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('expand')} 展开全部</button>
   <button class="toolbar-btn" id="collapse-all-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('collapse')} 折叠全部</button>
@@ -256,7 +256,7 @@ async function renderAreaDetail(el, area, params) {
         if (mapping.page < mapping.total_pages) {
           html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">下一页 ${icon('chevron_r')}</a>`;
         }
-        // F2: 请求页码超出该 mapping 记录数被 clamp 时，明确提示而非静默截断
+        // 请求页码超出该 mapping 记录数被 clamp 时，明确提示而非静默截断
         if (mapping.clamped) {
           html += `<span class="pager-clamped" style="color:var(--text-muted);font-size:12px;margin-left:8px">（该分区记录较少，已回退到最后一页）</span>`;
         }
@@ -348,13 +348,16 @@ async function renderAreaDetail(el, area, params) {
           // 自动刷新页面数据
           await renderAreaDetail(el, area, params);
         } else {
-          showToast(`刷新失败：${result.error || '未知错误'}`, 'error');
+          showToast(`刷新失败：${result.message || result.error || '未知错误'}`, 'error');
         }
       } catch (err) {
         showToast(`刷新请求失败：${err.message}`, 'error');
       } finally {
-        refreshBtn.disabled = false;
-        refreshBtn.innerHTML = `${icon('refresh')} 刷新`;
+        // 刷新期间若已导航离开，按钮已从 DOM 脱离，跳过恢复避免操作分离节点
+        if (!isStale()) {
+          refreshBtn.disabled = false;
+          refreshBtn.innerHTML = `${icon('refresh')} 刷新`;
+        }
       }
     };
 

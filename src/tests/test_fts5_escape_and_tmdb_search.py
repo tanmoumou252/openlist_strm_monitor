@@ -140,8 +140,8 @@ class TestEscapeFts5Query:
         assert _escape_fts5_query("Movie Title 2024") == '"Movie Title 2024"'
 
     def test_empty_string(self):
-        """空字符串应返回空引号对"""
-        assert _escape_fts5_query("") == '""'
+        """空字符串应返回 None"""
+        assert _escape_fts5_query("") is None
 
     def test_chinese_with_special(self):
         """中文混合特殊字符应正确清理"""

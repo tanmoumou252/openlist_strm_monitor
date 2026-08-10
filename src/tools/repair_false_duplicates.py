@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""扫描并修复历史「假 duplicate」分叉（P3）。
+"""扫描并修复历史「假 duplicate」分叉。
 
 假 duplicate 定义：
   b_strm_files.status = 'duplicate'

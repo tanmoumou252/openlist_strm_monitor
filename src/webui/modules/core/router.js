@@ -57,10 +57,10 @@ function normalizeSpaEntryPath() {
 }
 
 /**
- * 渲染代际（F-3）：每次 router() 调用递增。
+ * 渲染代际：每次 router() 调用递增。
  * 页面渲染函数可在其内部 await 后判断是否已被更新导航取代。
  *
- * N0：原实现用模块级单变量 _pageRenderGen 表达"每个异步入口各自的代际"，
+ * 原实现用模块级单变量 _pageRenderGen 表达"每个异步入口各自的代际"，
  * 赋 myGen 时恒 false（护栏空转），赋 -1 后恒 true（整站白屏），两者皆错。
  * 改为代际快照工厂 captureRenderGuard()：每个异步入口在同步起始处捕获
  * 当前代际，得到只对自身生效的 stale 判定闭包。后续 agent 勿再退回模块级
@@ -84,7 +84,7 @@ export async function router() {
   const { page } = parseHash();
   const mainEl = document.getElementById('app-main');
   const navEl = document.getElementById('main-nav');
-  // 渲染护栏（F-3）：每次导航递增代际，被 await 挂起的旧渲染在恢复时
+  // 渲染护栏：每次导航递增代际，被 await 挂起的旧渲染在恢复时
   // 发现代际不匹配即中止，避免快速切换页面时旧页覆盖新页 + 定时器泄漏。
   const myGen = ++_renderGen;
   const isStale = () => myGen !== _renderGen;
@@ -115,6 +115,7 @@ export async function router() {
         if (isStale()) return;  // F-3：验证期间用户已导航到其它页
         if (!resp.ok) {
           localStorage.removeItem('session_token');
+          localStorage.setItem('session_token_expired', '1');
           navigate('#login');
           return;
         }
@@ -138,7 +139,7 @@ export async function router() {
     }
   }
 
-  const { page: currentPage, params } = parseHash();
+  const { params } = parseHash();
 
   // 离开 dashboard 时停止主程序状态轮询与 uptime 计时器
   if (page !== 'dashboard') {

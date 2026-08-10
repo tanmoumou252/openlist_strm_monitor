@@ -87,10 +87,19 @@ class SyncService:
         # 根据模式选择连接：bulk_connection 绕过 rw_lock，仅启动时单线程安全
         conn = None
         bulk_ctx = None
-        _exc_info = (None, None, None)  # M-6: 追踪异常信息
+        _exc_info = (None, None, None)  # 追踪异常信息
+        # __enter__ 嵌套在独立 try/finally 内，确保 raises 时 __exit__ 仍被调用，
+        # 避免 sqlite3.connect 失败等场景导致连接泄漏。
         if use_bulk:
             bulk_ctx = self.db.bulk_connection()
-            conn = bulk_ctx.__enter__()
+            try:
+                conn = bulk_ctx.__enter__()
+            except BaseException:
+                try:
+                    bulk_ctx.__exit__(*sys.exc_info())
+                except BaseException:
+                    pass
+                raise
 
         try:
             roots = self.app.a_roots if a_roots is None else a_roots
@@ -136,8 +145,10 @@ class SyncService:
 
                 # 刷新当前 a_root 的剩余记录
                 flush_batch()
-        except Exception:
-            # M-6: 捕获异常信息，以便在 __exit__ 时正确 rollback
+        except BaseException:
+            # P2-4: 捕获 BaseException（含 KeyboardInterrupt/SystemExit），
+            # 确保 __exit__ 收到正确的异常信息并 rollback bulk_connection，
+            # 与 __enter__ 的 except BaseException 语义一致。
             _exc_info = sys.exc_info()
             raise
         finally:
@@ -197,7 +208,7 @@ class SyncService:
                     to_update.append((webdav_path, parent_webdav_path, now, local_path))
 
         # 执行 INSERT
-        # [已修复] R7: bulk 批量新增分支同时写 last_verified_at=now，
+        # bulk 批量新增分支同时写 last_verified_at=now，
         # 与单条 upsert 路径一致，避免启动全量同步新增记录 last_verified_at 恒为 0。
         if to_insert:
             conn.executemany(
@@ -245,9 +256,9 @@ class SyncService:
         -----------
         批量同步使用 bulk_connection 绕过 rw_lock，写盘未提交前其它连接不可见，
         _sync_one_record 不依赖指纹锁，靠三层防御：
-        - L1: 内存缓存 _cache_b_fp，拦截同指纹重复。
-        - L2: 文件系统检查 b_local.exists()，磁盘文件对多线程可见。
-        - L3: ensure_single_visible_instance（兜底去重，通过 dedup_queue 延迟到提交后执行）。
+        - 内存缓存 _cache_b_fp，拦截同指纹重复。
+        - 文件系统检查 b_local.exists()，磁盘文件对多线程可见。
+        - ensure_single_visible_instance（兜底去重，通过 dedup_queue 延迟到提交后执行）。
         """
         BATCH_COMMIT_SIZE = 1000  # 分批提交大小
         MAX_CONFLICT_EXAMPLES = 5  # 冲突示例显示上限
@@ -267,7 +278,7 @@ class SyncService:
         # rw_lock.write_locked() 内串行化（预加载只读 DB，锁内开销可控）。
         #
         # 说明：去重 flush（ensure_single_visible_instance → read_locked）必须在
-        # rw_lock 写锁释放后执行（R1），因此 _flush_dedup_queue 在锁外统一调用。
+        # rw_lock 写锁释放后执行，因此 _flush_dedup_queue 在锁外统一调用。
 
         def _flush_dedup_queue(dedup_queue: list[tuple[str, str, str]]) -> None:
             """提交后执行延迟的去重操作（此时数据已可见，且位于写锁外）"""
@@ -284,7 +295,7 @@ class SyncService:
 
             该函数在 use_bulk=False 时被外层 rw_lock.write_locked() 包裹，
             保证对实例级缓存 _cache_ghost/_cache_b_fp 的预加载与清空不会与
-            其它并发全量同步交错（R24）。
+            其它并发全量同步交错。
             """
             # 预加载读缓存。注意：此处位于 rw_lock.write_locked() 内（use_bulk=False），
             # 必须用 skip_read_lock=True 跳过 read_locked()，否则因 _writers_active>0
@@ -467,11 +478,11 @@ class SyncService:
                         _run_pass2(conn)
                 else:
                     # use_bulk=False（刷新/审计时）：外层已持有 rw_lock.write_locked()，
-                    # 此处用标准连接即可（不再重复获取写锁，避免非可重入锁死锁 R24）。
+                    # 此处用标准连接即可（不再重复获取写锁，避免非可重入锁死锁）。
                     with self.db.connection() as conn:
                         _run_pass2(conn)
             finally:
-                # 无论事务成功或失败，finally 均清空 L1 缓存。
+                # 无论事务成功或失败，finally 均清空缓存。
                 # 若 bulk/分批 commit 回滚，DB 已恢复但缓存若不清理会残留本次新增的
                 # 指纹，导致后续合法记录被 skip_fp 跳过（A→B 复制遗漏）。
                 # 清空后下次调用重新预加载，缓存不会残留跨调用。
@@ -506,7 +517,7 @@ class SyncService:
 
         # 去重 flush 在写锁外统一执行。此时 rw_lock 写锁已释放，
         # ensure_single_visible_instance 的 read_locked 可正常获取；flush 直查 DB
-        # 不依赖 L1 缓存，安全。保留 use_bulk 语义不变。
+        # 不依赖缓存，安全。保留 use_bulk 语义不变。
         _flush_dedup_queue(dedup_queue)
 
     def _write_manual_review_list(self, target_index: dict, target_conflicts: set) -> None:
@@ -622,7 +633,7 @@ class SyncService:
             existing_webdav = read_strm_webdav_path(b_local)
             if existing_webdav == webdav_path:
                 try:
-                    # T2: 本条记录写入前建 SAVEPOINT，失败只回滚本记录，
+                    # 本条记录写入前建 SAVEPOINT，失败只回滚本记录，
                     # 不再回滚整批（旧实现 conn.rollback() 会抹掉同批已落盘 B 区的成功行）
                     conn.execute("SAVEPOINT sp_rec")
                     # 使用 bulk_connection 写入数据库
@@ -643,7 +654,7 @@ class SyncService:
                     return "success"
                 except Exception as e:
                     logging.warning("[A->B] B已存在但数据库写入失败 %s: %s", b_local, e)
-                    # T2: 只回滚到本记录 SAVEPOINT，保留同批其他成功行
+                    # 只回滚到本记录 SAVEPOINT，保留同批其他成功行
                     try:
                         conn.execute("ROLLBACK TO sp_rec")
                         conn.execute("RELEASE sp_rec")
@@ -686,7 +697,7 @@ class SyncService:
             return "success"
         except Exception as e:
             logging.error("[A->B] 数据库写入失败 %s: %s", b_local, e)
-            # T2: 只回滚到本记录 SAVEPOINT，保留同批其他成功行
+            # 只回滚到本记录 SAVEPOINT，保留同批其他成功行
             try:
                 conn.execute("ROLLBACK TO sp_rec")
                 conn.execute("RELEASE sp_rec")
@@ -697,7 +708,7 @@ class SyncService:
                 if b_local.exists():
                     b_local.unlink()
             except Exception as rollback_err:
-                # [设计取舍] #10: 尽力回滚——unlink 失败被有意忽略
+                # 设计决策：尽力回滚——unlink 失败被有意忽略
                 logging.warning("[A→B] 回滚删除失败 %s: %s", b_local, rollback_err)
             return "fail"
 
@@ -730,7 +741,7 @@ class SyncService:
 
         if old_row is None:
             # 新增记录
-            # [已修复] R7: bulk 新增分支同时写 last_verified_at=now，
+            # bulk 新增分支同时写 last_verified_at=now，
             # 与单条 upsert 路径(`upsert_b`)一致，避免启动全量同步新增
             # B 记录 last_verified_at 恒为 0。
             conn.execute(
@@ -748,6 +759,9 @@ class SyncService:
                 "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
             ).fetchone()
             if new_row:
+                # P2-2: 先清理可能残留的同 rowid 孤儿 FTS 行（与 database.py upsert_b 一致）
+                conn.execute(
+                    "DELETE FROM b_strm_files_fts WHERE rowid = ?", (new_row[0],))
                 conn.execute(
                     "INSERT INTO b_strm_files_fts(rowid, local_path, webdav_path) VALUES(?,?,?)",
                     (new_row[0], local_path, webdav_path),
@@ -815,7 +829,7 @@ class SyncService:
             logging.warning("[A->B] 无法解析 A 路径的映射上下文, 跳过复制: %s", a_local_path)
             return None
         mapping_id, _, _ = mapping
-        # 按 fingerprint 串行化，与 handle_a_created_or_modified 共用同一锁（P1-4）
+        # 按 fingerprint 串行化，与 handle_a_created_or_modified 共用同一锁
         fp_lock = self.app.get_fingerprint_lock(fingerprint)
         with fp_lock:
             if self.db.b_fingerprint_exists(fingerprint, mapping_id):
@@ -873,7 +887,7 @@ class SyncService:
                 "[A->B跳过] B区文件已存在但webdav源不同，拒绝覆写: %s (现有: %s, 请求: %s)",
                 b_local, existing_webdav_path, webdav_path
             )
-            # [已修复] N-P1-3: 返回 None（语义=跳过），而非字符串 "skip_exists_diff"
+            # 返回 None（语义=跳过），而非字符串 "skip_exists_diff"
             # 调用方 routes.py:3028 将 None 计入 skipped，字符串会误计入 failed
             return None
         # 如果 WebDAV 源文件已不存在，说明 A 区是冗余文件，清理掉。
@@ -890,7 +904,7 @@ class SyncService:
                 "[A->B跳过] WebDAV源文件已不存在，跳过复制并清理A区: %s",
                 webdav_path,
             )
-            # M-8: 清理 A 区冗余文件，检查返回值避免物理/DB不一致
+            # 清理 A 区冗余文件，检查返回值避免物理/DB不一致
             if Path(a_local_path).exists():
                 if safe_remove_file(a_local_path):
                     logging.info("[A区清理] 删除冗余STRM: %s", a_local_path)
@@ -944,6 +958,6 @@ class SyncService:
                 "[A->B复制失败] DB错误: %s | b_local=%s webdav=%s parent=%s fingerprint=%s",
                 e, b_local, webdav_path, parent, fingerprint,
             )
-            # 非“删文件后删 DB”路径。勿当作 M-8 未守卫删除标记。
+            # 非“删文件后删 DB”路径。勿当作未守卫删除标记。
             safe_remove_file(b_local)
             return False

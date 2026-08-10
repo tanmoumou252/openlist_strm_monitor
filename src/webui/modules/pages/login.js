@@ -33,17 +33,19 @@ export async function renderLogin(el) {
 
   // 网络错误误显"未设置管理员密码"
   if (!fetchSucceeded) {
+    const isExpired = localStorage.getItem('session_token_expired') === '1';
+    localStorage.removeItem('session_token_expired');
     el.innerHTML = `
       <div style="display:flex;align-items:center;justify-content:center;min-height:60vh">
         <div class="page-card" style="max-width:420px;width:100%;text-align:center;padding:40px 32px">
           <div style="font-size:48px;margin-bottom:16px;color:var(--text-error)">${icon('warn')}</div>
-          <h2 style="margin:0 0 12px;font-size:20px;color:var(--text-main)">无法连接服务器</h2>
+          <h2 style="margin:0 0 12px;font-size:20px;color:var(--text-main)">${isExpired ? '登录已过期' : '无法连接服务器'}</h2>
           <p style="color:var(--text-muted);font-size:var(--font-base);line-height:1.6">
-            无法连接到 STRM Bridge 后端服务，请检查服务是否已启动。<br>
+            ${isExpired ? '你的登录会话已过期，请重新连接服务器并登录。' : '无法连接到 STRM Bridge 后端服务，请检查服务是否已启动。'}<br>
             默认端口为 <code style="background:var(--bg-control);padding:2px 6px;border-radius:4px">8579</code>。
           </p>
           <button class="toolbar-btn primary" style="margin-top:12px" id="login-retry-btn">
-            ${icon('refresh')} 重试连接
+            ${icon('refresh')} ${isExpired ? '重新连接' : '重试连接'}
           </button>
         </div>
       </div>`;
@@ -143,7 +145,7 @@ export async function renderLogin(el) {
       }
       const data = await resp.json();
       if (resp.ok && data.token) {
-        localStorage.setItem('session_token', data.token);
+        setToken(data.token);
         navigate('#dashboard');
       } else {
         showError(data.error || '密码错误');

@@ -91,7 +91,7 @@ class BRecord:
     status: str
     updated_at: float
     mapping_id: str = ""  # Mapping ID for multi-A↔multi-B isolation
-    last_verified_at: float = 0.0  # N2: 保留最后校验时间戳
+    last_verified_at: float = 0.0  # 保留最后校验时间戳
 
 @dataclass(frozen=True)
 class IdentityRecord:
@@ -636,7 +636,7 @@ class Database:
         with self.rw_lock.write_locked(), self.connection() as conn:
             # 预读现有记录
             old_row = conn.execute(
-                "SELECT rowid, webdav_path, parent_webdav_path, updated_at "
+                "SELECT rowid, webdav_path, parent_webdav_path "
                 "FROM a_strm_files WHERE local_path = ?",
                 (local_path,),
             ).fetchone()
@@ -662,7 +662,7 @@ class Database:
                     )
             else:
                 # 现有记录：比较业务字段
-                old_rowid, old_webdav, old_parent, old_updated = old_row
+                old_rowid, old_webdav, old_parent = old_row
                 fields_changed = (
                     old_webdav != webdav_path or
                     old_parent != parent_webdav_path
@@ -1507,7 +1507,7 @@ class Database:
             return True
         
         with self.rw_lock.write_locked(), self.connection() as conn:
-            # 显式开启事务（B-8）：确保 conflict 检测与 INSERT/DELETE 在同一原子事务内，
+            # 设计决策：显式开启事务，确保 conflict 检测与 INSERT/DELETE 在同一原子事务内，
             # 避免 SELECT 与写入之间被其它写连接插入目标行（TOCTOU）。
             # 上下文 yield 后第一条语句，不会触发 "transaction within a transaction"。勿标记。
             conn.execute("BEGIN IMMEDIATE")
@@ -1542,7 +1542,7 @@ class Database:
                 ).fetchone()
                 old_rowid = old_rowid_row[0] if old_rowid_row else None
 
-                # 检查新路径是否已被其他 fingerprint 占用 (P2-6)
+                # 检查新路径是否已被其他 fingerprint 占用
                 conflict = conn.execute(
                     "SELECT fingerprint FROM b_strm_files WHERE local_path = ?",
                     (new_local_path,),
@@ -1553,6 +1553,16 @@ class Database:
                         "[DB] move_b_record 目标路径已被其他记录占用: %s (旧指纹=%s, 新指纹=%s)",
                         new_local_path, conflict[0], fingerprint)
                     return False
+
+                # P2-1: 捕获 new_local_path 的旧 rowid（在 INSERT OR REPLACE 之前），
+                # 用于稍后清理 FTS 孤儿行。INSERT OR REPLACE 会先 DELETE 旧行再 INSERT
+                # 新行，但 FTS 表无触发器，旧 rowid 的 FTS 条目不会自动清理。
+                prev_rowid_row = None
+                if conflict:
+                    prev_rowid_row = conn.execute(
+                        "SELECT rowid FROM b_strm_files WHERE local_path = ?",
+                        (new_local_path,),
+                    ).fetchone()
 
                 # 使用 INSERT OR REPLACE 实现原子替换
                 conn.execute(
@@ -1591,6 +1601,12 @@ class Database:
                 if old_rowid is not None:
                     conn.execute(
                         "DELETE FROM b_strm_files_fts WHERE rowid = ?", (old_rowid,))
+                # P2-1: 清理 INSERT OR REPLACE 前 new_local_path 旧行的 FTS 孤儿。
+                # REPLACE 内部先 DELETE 旧行再 INSERT 新行，但 FTS 表无触发器，
+                # 旧 rowid 的 FTS 条目不会自动清理。
+                if prev_rowid_row is not None:
+                    conn.execute(
+                        "DELETE FROM b_strm_files_fts WHERE rowid = ?", (prev_rowid_row[0],))
                 new_rowid_row = conn.execute(
                     "SELECT rowid FROM b_strm_files WHERE local_path = ?",
                     (new_local_path,),

@@ -43,7 +43,7 @@ function _olHelpIcon(key, tooltipBelow = false) {
 }
 
 export async function _renderOpenListConfig(cfg) {
-  // N0: 代际快照工厂——在首次 await 前捕获
+  // 代际快照工厂——在首次 await 前捕获
   const isStale = captureRenderGuard();
   // 在 await 前捕获容器引用，避免异步竞态将旧 HTML 插入当前子页
   const subpage = document.getElementById('config-subpage');
@@ -52,11 +52,13 @@ export async function _renderOpenListConfig(cfg) {
   let openlistCfg = {};
   try {
     const resp = await api('/api/webui/config/openlist');
+    if (isStale()) return; // await 返回后若已离开子页，放弃后续渲染
     if (resp.success && resp.config) openlistCfg = resp.config;
   } catch (e) { /* ignore */ }
 
   try {
     const engResp = await api('/api/openlist/strm-engines');
+    if (isStale()) return; // await 返回后若已离开子页，放弃后续同步处理
     if (engResp.success) OpenListState.availableEngines = engResp.engines || [];
   } catch (e) { OpenListState.availableEngines = []; }
 
@@ -799,6 +801,7 @@ function _olStatusText(configured, status) {
   const cfgOk = !!configured;
   if (status === 'online') return cfgOk ? 'OpenList 已连接' : 'OpenList 已连接（未保存配置）';
   if (status === 'offline') return cfgOk ? 'OpenList 已配置（离线）' : 'OpenList 未配置';
+  if (status === 'rate_limited') return cfgOk ? 'OpenList 请求受限 (429)' : 'OpenList 请求受限 (429)';
   if (status === 'auth_failed_password') return cfgOk ? 'OpenList 密码错误' : 'OpenList 密码错误（未保存）';
   if (status === 'auth_failed_2fa') return cfgOk ? 'OpenList 2FA 错误' : 'OpenList 2FA 错误（未保存）';
   if (status === 'auth_failed') return cfgOk ? 'OpenList 认证失败' : 'OpenList 认证失败（未保存）';

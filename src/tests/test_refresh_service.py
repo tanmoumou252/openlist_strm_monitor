@@ -345,6 +345,7 @@ class TestExecuteRefreshCycle:
         scan_a.assert_not_called()
         sync.assert_not_called()
 
+    def test_execute_refresh_cycle_calls_all_steps(self):
         """execute_refresh_cycle 应该按序调用所有步骤（不再调用 _cleanup_a_for_update_mode）"""
         app = _make_app(refresh_paths=["/strm"], strm_engine_paths=["/strm"])
         svc = RefreshService(app)

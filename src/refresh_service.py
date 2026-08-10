@@ -26,7 +26,7 @@ try:
 except ImportError:
     import tomli as tomllib  # type: ignore[no-redef]
 
-# T3: 规范化 A 根路径（a_strm_files.local_path 一律经 resolve() 写入，
+# 规范化 A 根路径（a_strm_files.local_path 一律经 resolve() 写入，
 # 传原始配置串会导致 touch_verified_by_mapping 匹配 0 行、last_verified_at 永不推进）
 from config import normalize_local_root
 
@@ -69,6 +69,19 @@ class RefreshService:
         except (AttributeError, TypeError, ValueError, OSError):
             return 0.0
 
+    # 公开只读属性：供 WebUI 状态面板读取，避免跨模块访问私有属性（P1-5）
+    @property
+    def consecutive_failures(self) -> int:
+        return self._consecutive_failures
+
+    @property
+    def last_error_summary(self) -> str:
+        return self._last_error_summary
+
+    @property
+    def healthy(self) -> bool:
+        return self._consecutive_failures == 0
+
     def _full_audit_interval_seconds(self) -> float:
         try:
             days = float(getattr(self.app.config.refresh, "full_audit_interval_days", 7))
@@ -108,7 +121,7 @@ class RefreshService:
                         mid = str(getattr(m, 'mapping_id', '')).strip()
                         a_root = getattr(m, 'a_root', '')
                         if mid and a_root:
-                            # T3: 传规范化后的 A 根（与 a_strm_files.local_path 写入口径一致）
+                            # 传规范化后的 A 根（与 a_strm_files.local_path 写入口径一致）
                             try:
                                 norm_a_root = str(normalize_local_root(a_root))
                             except Exception:
@@ -120,7 +133,7 @@ class RefreshService:
                     db_write_ok = False
             try:
                 self.app.db.set_control("last_full_audit_at", str(now))
-            # L2: SQLite 瞬时错误（Windows AV 锁/磁盘瞬时只读）单独覆盖
+            # SQLite 瞬时错误（Windows AV 锁/磁盘瞬时只读）单独覆盖
             except (AttributeError, OSError, sqlite3.OperationalError):
                 logging.warning("[主动刷新] 保存全量审计时间失败")
                 db_write_ok = False
@@ -166,7 +179,7 @@ class RefreshService:
                         mid = str(getattr(m, 'mapping_id', '')).strip()
                         a_root = getattr(m, 'a_root', '')
                         if mid and a_root:
-                            # T3: 传规范化后的 A 根（与 a_strm_files.local_path 写入口径一致）
+                            # 传规范化后的 A 根（与 a_strm_files.local_path 写入口径一致）
                             try:
                                 norm_a_root = str(normalize_local_root(a_root))
                             except Exception:
@@ -178,7 +191,7 @@ class RefreshService:
                     db_write_ok = False
             try:
                 self.app.db.set_control("last_full_audit_at", str(now))
-            # L2: SQLite 瞬时错误（Windows AV 锁/磁盘瞬时只读）单独覆盖
+            # SQLite 瞬时错误（Windows AV 锁/磁盘瞬时只读）单独覆盖
             except (AttributeError, OSError, sqlite3.OperationalError):
                 logging.warning("[手动审计] 保存全量审计时间失败")
                 db_write_ok = False
@@ -223,7 +236,7 @@ class RefreshService:
                 self.notify_config_changed()
             elif enabled:
                 if self._thread and self._thread.is_alive():
-                    # M-11: 旧线程仍在运行，避免双 worker 并发——不启动新线程，
+                    # 旧线程仍在运行，避免双 worker 并发——不启动新线程，
                     # 仅恢复运行标志并通知配置变更，让仍在运行的旧 worker 拾取新配置。
                     logging.warning("[主动刷新] reconfigure: 旧线程仍在运行，推迟启动新线程")
                     self._running = True
@@ -239,7 +252,7 @@ class RefreshService:
         with self._lifecycle_lock:
             if self._running:
                 return
-            # M-11: 检查旧线程是否还在运行，避免双 worker 并发
+            # 检查旧线程是否还在运行，避免双 worker 并发
             if self._thread and self._thread.is_alive():
                 logging.warning("[主动刷新] 旧线程仍在运行，推迟启动新线程")
                 return
@@ -260,7 +273,7 @@ class RefreshService:
             old_thread = self._thread
             self._thread = None
         if old_thread and old_thread.is_alive():
-            # M-11: 增加 join 超时到 5 秒，并检查是否仍然存活
+            # 增加 join 超时到 5 秒，并检查是否仍然存活
             old_thread.join(timeout=5)
             if old_thread.is_alive():
                 logging.warning("[主动刷新] 旧线程 join 超时，线程仍在运行（PID: %d）", old_thread.ident or 0)

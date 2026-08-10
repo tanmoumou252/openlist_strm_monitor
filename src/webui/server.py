@@ -99,14 +99,15 @@ if TYPE_CHECKING:
 
 STATIC_DIR = PROJECT_ROOT / "dist"
 
-# POST 请求体大小上限（10 MB），防止 Content-Length 攻击导致 OOM（B-5）
+# POST 请求体大小上限（10 MB），防止 Content-Length 攻击导致 OOM
 _MAX_CONTENT_LENGTH = 10 * 1024 * 1024
 
 # Content-Security-Policy：LAN 管理面板的安全策略
-# 仅允许 self 脚本/样式（含内联）、TMDB 图片、Google Fonts 字体/CSS
+# 仅允许 self 脚本、TMDB 图片、Google Fonts 字体/CSS
+# 注意：不包含 'unsafe-inline'，前端不得使用内联事件处理器/内联 <script>
 _CSP_HEADER = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline'; "
+    "script-src 'self'; "
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
     "img-src 'self' data: https://image.tmdb.org; "
     "font-src 'self' https://fonts.gstatic.com; "
@@ -347,7 +348,6 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         if not webui._has_password:
             return True
         # 标准化路径，匹配路由分发逻辑
-        from urllib.parse import urlparse
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         # 登录接口放行
@@ -390,25 +390,20 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
     def _validate_session_token(self, token: str, client_ip: str) -> bool:
         """验证 session token 是否有效（含 IP 绑定 + 滑动过期）。
 
-        M5: 抽为独立方法供 _check_auth 的常规路径与 /api/admin/status 双语义路径复用。
+        抽为独立方法供 _check_auth 的常规路径与 /api/admin/status 双语义路径复用。
         """
         webui = self.webui
         now = time.time()
         with webui._sessions_lock:
-            # 使用常量时间比较防止时序攻击
-            import hmac
-            matched_token = None
-            for stored_token in webui._sessions:
-                if hmac.compare_digest(token.encode('utf-8'), stored_token.encode('utf-8')):
-                    matched_token = stored_token
-                    break
-
-            if matched_token:
-                expiry, stored_ip = webui._sessions[matched_token]
-                # M-4: 验证 IP 匹配（防止被盗 token 跨 IP 使用）
+            # P2-12: 使用 dict.get() 直接查找（O(1)），替代 O(n) 遍历 + hmac.compare_digest。
+            # 会话 Token 是随机字符串，key 匹配即身份验证，IP 绑定提供额外安全层。
+            session_info = webui._sessions.get(token)
+            if session_info:
+                expiry, stored_ip = session_info
+                # 验证 IP 匹配（防止被盗 token 跨 IP 使用）
                 if now < expiry and (stored_ip == "" or stored_ip == client_ip):
                     # 滑动过期：刷新 7 天
-                    webui._sessions[matched_token] = (now + 604800, client_ip)
+                    webui._sessions[token] = (now + 604800, client_ip)
                     return True
         return False
 
@@ -624,12 +619,9 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
                 else:
                     self._proxy_google_font_file(path)
             elif path.endswith(".woff2") or path.endswith(".woff") or path.endswith(".ttf"):
-                # Font files served from static/ (support subdirectories for Vite-built assets)
-                fname = path.lstrip("/")
-                if ".." in fname or "\\" in fname:
-                    self._send_json({"error": "invalid path"}, 400)
-                else:
-                    self._send_static_file(fname)
+                # P2-7: 复用 _try_serve_static 的 resolve().relative_to() 路径穿越检查，
+                # 替代原有的弱检查（仅 .. 和 \\），防止符号链接攻击。
+                self._try_serve_static(path)
             elif path == "/api/logs":
                 handle_logs_api(self, params)
             elif path == "/api/logs/download":
@@ -845,7 +837,7 @@ class WebUIServer:
                 break
 
         # 认证 & Session
-        # M-4: Session 改为 dict[str, tuple[float, str]]（token -> (expiry, ip)）
+        # Session 改为 dict[str, tuple[float, str]]（token -> (expiry, ip)）
         self._sessions: dict[str, tuple[float, str]] = {}
         self._sessions_lock = threading.Lock()
         self._has_password = False
@@ -1071,7 +1063,7 @@ class WebUIServer:
             logging.error("[WebUI] %s", msg)
             return
 
-        # H2: 先初始化管理员密码再启动 HTTP 线程，消除鉴权空窗（TOCTOU）。
+        # 先初始化管理员密码再启动 HTTP 线程，消除鉴权空窗（TOCTOU）。
         # 首启时会同步生成随机密码并做 PBKDF2 哈希（数百 ms~数秒），此延迟可接受，
         # 否则 _has_password 为 False 时 _check_auth 会放行所有 LAN 请求。
         self._init_admin_password()
@@ -1113,7 +1105,7 @@ class WebUIServer:
     def _hash_password(password: str) -> str:
         """对密码加盐 PBKDF2-HMAC-SHA256 哈希，返回 salt$iterations$hash 格式。
         
-        M-1: 使用统一的 password_utils 模块。
+        使用统一的 password_utils 模块。
         """
         from utils.password_utils import hash_password
         return hash_password(password)
@@ -1122,7 +1114,7 @@ class WebUIServer:
     def _check_password(password: str, stored: str) -> bool:
         """验证密码是否与存储的 salt$iterations$hash 匹配。
         
-        M-2: 使用统一的 password_utils 模块。
+        使用统一的 password_utils 模块。
         """
         from utils.password_utils import verify_password
         return verify_password(password, stored)
@@ -1290,7 +1282,7 @@ class WebUIServer:
             except Exception as e:
                 logging.error("[Main] 启动失败: %s", e, exc_info=True)
                 # 不回传原始异常文本（可能含内部路径/服务器细节），
-                # 与 M-13 实践一致。详细异常只写日志。
+                # 与通行实践一致。详细异常只写日志。
                 return {"success": False, "message": "启动失败，请查看服务端日志",
                         "error_type": "exception"}
 
@@ -1336,9 +1328,9 @@ class WebUIServer:
         if self._app_running and self._app_service:
             rs = getattr(self._app_service, 'refresh_service', None)
             if rs:
-                result["refresh_healthy"] = rs._consecutive_failures == 0
-                result["refresh_consecutive_failures"] = rs._consecutive_failures
-                result["refresh_last_error"] = rs._last_error_summary
+                result["refresh_healthy"] = rs.healthy
+                result["refresh_consecutive_failures"] = rs.consecutive_failures
+                result["refresh_last_error"] = rs.last_error_summary
             # 返回 watcher 健康状态供前端轮询更新 banner
             result["watchers_healthy"] = getattr(self._app_service, '_watchers_healthy', True)
         else:

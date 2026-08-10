@@ -292,7 +292,7 @@ export async function updateMainStatus() {
       dot.style.boxShadow = '0 0 12px rgba(76,175,80,0.6)';
       text.textContent = '主程序运行中';
       text.style.color = 'var(--text-main)';
-      if (status.uptime) {
+      if (status.uptime != null) {
         const hours = Math.floor(status.uptime / 3600);
         const mins = Math.floor((status.uptime % 3600) / 60);
         const secs = status.uptime % 60;
@@ -459,7 +459,7 @@ ${d.watchers_healthy === false ? `<div class="dashboard-warning-banner" style="m
 <div class="stat-grid" style="margin-top:16px">
   <div class="stat-card"><div class="label">${icon('sync')} 索引代次</div><div class="value stat-value-primary" id="index-generation">#${d.index_metadata?.index_generation || 0}</div></div>
   <div class="stat-card"><div class="label">${icon('speed')} 最近索引</div><div class="value" title="${_formatExact(d.index_metadata?.last_full_index_at)}">${d.index_metadata?.last_full_index_at ? formatTimestamp(d.index_metadata.last_full_index_at) : '暂无记录'}</div></div>
-  <div class="stat-card"><div class="label">${icon('swap_horiz')} 映射版本</div><div class="value" title="${esc(d.index_metadata?.mapping_version || '')}">${d.index_metadata?.mapping_version ? d.index_metadata.mapping_version.substring(0, 8) + '...' : '-'}</div></div>
+  <div class="stat-card"><div class="label">${icon('swap_horiz')} 映射版本</div><div class="value" title="${esc(d.index_metadata?.mapping_version || '')}">${d.index_metadata?.mapping_version ? String(d.index_metadata.mapping_version).substring(0, 8) + '...' : '-'}</div></div>
   <div class="stat-card"><div class="label">映射版本生成</div><div class="value" title="${_formatExact(d.index_metadata?.mapping_version_generated_at)}">${d.index_metadata?.mapping_version_generated_at ? formatTimestamp(d.index_metadata.mapping_version_generated_at) : '暂无记录'}</div></div>
 </div>
 
