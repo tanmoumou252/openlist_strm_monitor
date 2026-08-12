@@ -48,7 +48,7 @@ _fernet_lock = threading.RLock()
 # cryptography 是否可用（首次调用时检测）
 _cryptography_available: bool | None = None
 
-# C-3: 解密失败标志（全局可观测，用于启动时检查）
+# 解密失败标志（全局可观测，用于启动时检查）
 _decryption_failed = False
 _decryption_failure_count = 0
 
@@ -62,7 +62,7 @@ def _check_cryptography_available() -> bool:
         _cryptography_available = True
     except ImportError:
         _cryptography_available = False
-        # C-3: Windows 上降级明文的警告更显眼
+        # Windows 上降级明文的警告更显眼
         if platform.system() == "Windows":
             log.warning(
                 "[SecretManager] cryptography 未安装，凭据将以明文存储在内存中。"
@@ -77,7 +77,7 @@ def _check_cryptography_available() -> bool:
     return _cryptography_available
 
 def check_decryption_health() -> dict:
-    """C-3: 检查解密健康状态（供启动时调用）。
+    """检查解密健康状态（供启动时调用）。
     
     Returns:
         {
@@ -206,7 +206,7 @@ def decrypt(ciphertext: str) -> str:
     - 空串返回 ``""``。
     - 若 cryptography 不可用且值是 ``ENC:`` 前缀 → 返回 ``""``（无法解密）。
     
-    C-3: 解密失败时更新全局失败标志，供启动健康检查使用。
+    解密失败时更新全局失败标志，供启动健康检查使用。
     """
     global _decryption_failed, _decryption_failure_count
     
@@ -230,7 +230,7 @@ def decrypt(ciphertext: str) -> str:
         plaintext = fernet.decrypt(payload.encode("ascii"))
         return plaintext.decode("utf-8")
     except Exception as e:
-        # C-3: 主密钥不匹配 / 密文损坏 → 记录失败并更新全局标志
+        # 主密钥不匹配 / 密文损坏 → 记录失败并更新全局标志
         _decryption_failed = True
         _decryption_failure_count += 1
         log.warning(

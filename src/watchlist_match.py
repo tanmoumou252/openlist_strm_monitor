@@ -34,7 +34,7 @@ class _MatchHost(Protocol):
     _db: Database
 
 
-# P2-16: 移至 utils.file_utils 共享模块
+# 移至 utils.file_utils 共享模块
 from utils.file_utils import cn_to_int as _cn_to_int
 
 

@@ -74,7 +74,7 @@ echo   OpenList STRM Bridge (System Python)
 echo =======================================================
 echo.
 
-:: 6. 运行程序
+:: 6. 运行程序（不重定向输出，让 server.py 日志与交互菜单直接显示在控制台）
 "%PYTHON%" "%APP%"
 
 echo.

@@ -36,7 +36,9 @@ export function parseHash() {
   const params = {};
   if (qstr) {
     for (const kv of qstr.split('&')) {
-      const [k, v] = kv.split('=');
+      const idx = kv.indexOf('=');
+      const k = idx === -1 ? kv : kv.slice(0, idx);
+      const v = idx === -1 ? '' : kv.slice(idx + 1);
       params[safeDecode(k)] = safeDecode((v || '').replace(/\+/g, '%20'));
     }
   }
@@ -104,7 +106,7 @@ export async function router() {
     // 如果有 token，尝试验证（可选：轻量验证）
     if (_hasPassword && token) {
       try {
-        // F-4：加超时，避免后端挂起导致导航永久卡死（原本用裸 fetch 无超时）
+        // 加超时，避免后端挂起导致导航永久卡死（原本用裸 fetch 无超时）
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 5000);
         const resp = await fetch('/api/admin/status', {
@@ -112,7 +114,7 @@ export async function router() {
           signal: ctrl.signal,
         });
         clearTimeout(timer);
-        if (isStale()) return;  // F-3：验证期间用户已导航到其它页
+        if (isStale()) return;  // 验证期间用户已导航到其它页
         if (!resp.ok) {
           localStorage.removeItem('session_token');
           localStorage.setItem('session_token_expired', '1');
@@ -130,6 +132,7 @@ export async function router() {
           return;
         }
       } catch (e) {
+        if (isStale()) return;  // stale validation catch → do not delete fresh token
         // M-17: 网络错误/超时时拒绝放行（fail-closed），跳转登录页
         console.warn('[Auth] 无法验证登录状态，跳转至登录页:', e.message);
         localStorage.removeItem('session_token');
@@ -160,7 +163,7 @@ export async function router() {
   // Update uptime only on dashboard page
   if (page === 'dashboard') {
     const { updateUptime } = await import('../pages/dashboard.js');
-    if (isStale()) return;  // F-3: 期间发生了新导航，放弃本次渲染
+    if (isStale()) return;  // 期间发生了新导航，放弃本次渲染
     updateUptime();
   }
 
@@ -201,7 +204,7 @@ export async function router() {
       mainEl.innerHTML = '<div class="error-msg">页面不存在</div>';
     }
   } catch (e) {
-    // F-2：api() 检测到 401 时已导航至 #login 并抛出 ApiAuthError，
+    // api() 检测到 401 时已导航至 #login 并抛出 ApiAuthError，
     // 此处静默抑制，避免把会话过期渲染成错误页闪现。
     if (e instanceof ApiAuthError) return;
     mainEl.innerHTML = `<div class="error-msg">${icon('error')} ${esc(e.message)}</div>`;

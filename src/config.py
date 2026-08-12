@@ -74,8 +74,9 @@ def read_line_list(
             if line.strip() and not line.strip().startswith("#")
         ]
     if is_webdav:
-        return [line.rstrip("/") for line in lines]
-    return lines
+        lines = [line.rstrip("/") for line in lines]
+    # 按原序去重，防止重复配置导致重复处理
+    return list(dict.fromkeys(lines))
 
 @dataclass(slots=True)
 class WebDAVConfig:
@@ -90,7 +91,7 @@ class RefreshConfig:
     enabled: bool = True
     depth: int = 5
     timeout_seconds: int = 300  # 刷新操作超时时间（秒）
-    log_level: str = "INFO"  # 刷新日志级别：DEBUG/INFO/WARNING
+    log_level: str = "INFO"  # 本字段已被废除，刷新日志改用全局 log_level
     full_audit_interval_days: int = 7  # A 区全量审计周期；0 表示关闭
 
 @dataclass(slots=True)
@@ -267,9 +268,6 @@ class AppConfig:
                 ("behavior_a_to_b_restore_delay_seconds", self.behavior, "a_to_b_restore_delay_seconds", int),
                 ("behavior_sync_on_startup", self.behavior, "sync_on_startup", self._to_bool),
                 ("behavior_sync_on_startup_wait", self.behavior, "sync_on_startup_wait", int),
-
-                # 刷新配置
-                ("refresh_log_level", self.refresh, "log_level", str),
 
                 # 日志配置
                 ("log_level", self.log, "level", str),
@@ -722,8 +720,6 @@ def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
                                 str(config.refresh.depth))
         watchlist_db.set_config("openlist", "refresh_full_audit_interval_days",
                                 str(config.refresh.full_audit_interval_days))
-        watchlist_db.set_config("openlist", "refresh_log_level",
-                                config.refresh.log_level)
 
         # 行为配置
         watchlist_db.set_config("openlist", "behavior_action", config.behavior.action)

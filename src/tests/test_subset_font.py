@@ -900,7 +900,14 @@ class TestDistFontCoverage:
         return fonts[0] if fonts else None
 
     def test_dist_font_covers_scanned_codepoints(self):
-        """dist 字体的 cmap 应包含 webui 源码扫描到的全部字符。"""
+        """dist 字体的 cmap 应包含 webui 源码扫描到的全部字符。
+
+        修复假守卫（原代码将子集自身 cmap 同时作为 output_cmap 和 source_cmap
+        传给 classify_missing，导致 (scanned - cmap) & cmap 恒为空，缺字永远
+        被归入 source_missing 后 skip，结构上永不 fail）。现改为传入真实 SC 源
+        字体 cmap（C:\\Windows\\Fonts\\NotoSansSC-VF.ttf），使"源字体存在但
+        子集缺失"的字符能正确触发 ERROR。源字体不可读时保守 skip。
+        """
         font_path = self._dist_font()
         if font_path is None:
             pytest.skip("dist/ 尚未构建或缺少子集字体")
@@ -918,11 +925,17 @@ class TestDistFontCoverage:
         if not missing:
             return  # 完美覆盖
 
+        # 读取真实 SC 源字体 cmap 作为来源判断依据
+        source_font_path = Path(r"C:\Windows\Fonts\NotoSansSC-VF.ttf")
+        source_cmap = sf.read_font_cmap(source_font_path)
+        if source_cmap is None:
+            pytest.skip("无法读取 SC 源字体 cmap，无法区分缺字来源")
+
         # 区分源字体缺字（WARNING）与子集丢字（ERROR）
-        from_source, from_subset = sf.classify_missing(scanned, cmap, cmap)
-        if from_source:
+        from_source, from_subset = sf.classify_missing(scanned, cmap, source_cmap)
+        if from_source and not from_subset:
             pytest.skip(
-                f"源字体缺字（WARNING，非子集化失败）：{sorted(from_source)[:10]}"
+                f"缺字均来自源字体缺失（WARNING，非子集化失败）：{sorted(from_source)[:10]}"
             )
         # 子集丢字（ERROR）必须失败
         assert not from_subset, \

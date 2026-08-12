@@ -3,7 +3,7 @@
 连接到运行中的 WebUI (http://127.0.0.1:8579) 执行安全验证。
 输出 JSON 日志到 <项目根>/test_logs/real_server_test_*.json
 """
-import json, urllib.request, urllib.error, time, os
+import json, sys, urllib.request, urllib.error, time, os
 from datetime import datetime
 from pathlib import Path
 
@@ -270,3 +270,4 @@ print(f"  通过: {sum(1 for r in results if r['passed'])}")
 print(f"  失败: {sum(1 for r in results if not r['passed'])}")
 print(f"日志: {LOG_FILE}")
 print("=" * 60)
+sys.exit(1 if any(not r['passed'] for r in results) else 0)

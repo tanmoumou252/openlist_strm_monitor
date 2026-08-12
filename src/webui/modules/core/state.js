@@ -72,6 +72,7 @@ let _uiConfigVersion = 0;  // 版本号 - 每次成功保存递增，防止 abor
 export async function _loadUiConfig() {
   try {
     const resp = await fetch('/api/webui/config/ui');
+    if (!resp.ok) return;
     const data = await resp.json();
     if (data.success && data.config) _uiConfig = data.config;
   } catch (e) { /* ignore */ }
@@ -85,7 +86,7 @@ export function _setUiConfig(key, val) {
   _uiConfig[key] = val;
   // 取消前一次未完成的保存请求
   if (_uiConfigController) {
-    // P2-17: 被新请求 abort 时，前一次请求的乐观更新需要回滚，
+    // 被新请求 abort 时，前一次请求的乐观更新需要回滚，
     // 否则如果前一次请求在后端实际失败了，前端状态会一直保持乐观更新的错误值。
     // 只有当新请求的值与前一次请求的值不同时，才需要回滚。
     _uiConfigController.abort();
@@ -118,7 +119,7 @@ export function _setUiConfig(key, val) {
     }
   }).catch(err => {
     if (err.name === 'AbortError') {
-      // P2-17: 被新请求 abort 时，若当前值仍是本请求设置的乐观值，则回滚到旧值。
+      // 被新请求 abort 时，若当前值仍是本请求设置的乐观值，则回滚到旧值。
       // 若新请求已覆盖为不同值，则保留新值（避免回滚覆盖新请求的乐观更新）。
       if (_uiConfigVersion === versionBefore && _uiConfig[key] === val) {
         if (oldVal === undefined) delete _uiConfig[key]; else _uiConfig[key] = oldVal;
@@ -139,7 +140,13 @@ export function _setUiConfig(key, val) {
 export const _genreCache = new Map();
 
 export function _getGenreCache(key) {
-  return _genreCache.get(key);
+  const val = _genreCache.get(key);
+  if (val !== undefined) {
+    // 读取时重新插入，更新访问顺序实现真 LRU 淘汰
+    _genreCache.delete(key);
+    _genreCache.set(key, val);
+  }
+  return val;
 }
 
 export function _setGenreCache(key, value) {

@@ -411,7 +411,7 @@ class OpenListAdminClient:
     # ================= 业务方法 (全量补全) =================
 
     # 1. 获取存储列表 (Admin API)
-    def list_storages(self, page: int = 1, per_page: int = 1000) -> dict[str, Any] | None:
+    def list_storages(self, page: int = 1, per_page: int = 100) -> dict[str, Any] | None:
         """获取全部存储列表（自动分页聚合）。
 
         返回结构与 OpenList API 一致：

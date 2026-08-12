@@ -276,6 +276,21 @@ class SubtitleHandler:
                 else:
                     _code, _label, _priority = lang_info
                     new_name = f"{base_name}.forced.{_code}.{_label}{sub_file.suffix.lower()}"
+            else:
+                # 从分组重命名结果中提取实际分配的语言代码
+                # 格式：{base_name}[.forced].{lang_code}.{label}{ext}
+                # 先去掉扩展名，再剥离 base_name + 可选的 .forced 前缀
+                stem = new_name[: -len(sub_file.suffix)] if new_name.endswith(sub_file.suffix) else new_name
+                rest = stem[len(base_name):]  # 去掉 S01E01 前缀
+                if rest.startswith(".forced"):
+                    rest = rest[len(".forced"):]
+                # 此时 rest 格式为 ".{lang_code}.{label}"，提取 lang_code
+                if rest.startswith("."):
+                    parts = rest[1:].split(".")
+                    if parts:
+                        group_lang_code = parts[0]
+                        # 更新 lang_info，使后续 DB 写入使用分组后的语言代码
+                        lang_info = (group_lang_code, parts[1] if len(parts) > 1 else group_lang_code, 0)
 
         target = b_target_dir / new_name
 

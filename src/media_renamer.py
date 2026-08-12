@@ -36,7 +36,7 @@ NOISE_TAG_PATTERNS = [
     re.compile(r"[\[\(\s._-]((?:19|20)\d{2})(?=[\]\)\s._-]|$)"),
 ]
 
-# P2-16: 移至 utils.file_utils 共享模块
+# 移至 utils.file_utils 共享模块
 from utils.file_utils import cn_to_int as _cn_to_int
 
 

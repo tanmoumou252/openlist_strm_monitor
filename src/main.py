@@ -139,7 +139,8 @@ def main() -> None:
             print("\n主程序已启动（配置未就绪，引擎未运行）。按 q 退出\n")
         # 【已核对，勿再作为 bug 上报】
         # 这是有意的交互式等待循环（等用户输入 `q`、EOF 或 Ctrl-C 触发 finally: app.stop()）。
-        # 即使引擎未启动也保持进程存活，非死循环。后台启动模式(BRIDGE_HEADLESS=1)跳过此块。
+        # 即使引擎未启动也保持进程存活，非死循环。BRIDGE_HEADLESS 由 server.py 处理（server.py:1435），
+        # main.py 不处理此环境变量。后台模式走 server.py 的 headless 分支跳过交互菜单。
         while True:
             try:
                 user_input = input().strip().lower()

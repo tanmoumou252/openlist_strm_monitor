@@ -86,7 +86,7 @@ totp_secret = ""
 
 | 键 | 默认值 | 说明 |
 |-----|------|------|
-| `enabled` | `true` | 启用 WebUI |
+| ~~`enabled`~~ | ~~`true`~~ | **已废弃**：WebUI 为主程序入口，`config.toml` 最小模板不再包含此字段。参见 `docs/否决方案.md` → `设计决策 | config.toml 最小模板 | config.toml.example`。 |
 | `port` | `8579` | HTTP 监听端口 |
 | `bind` | `"0.0.0.0"` | 监听地址。`"127.0.0.1"` 仅本地访问 |
 
@@ -142,7 +142,6 @@ totp_secret = ""
 | `openlist` | `refresh_enabled` | 刷新开关 |
 | `openlist` | `refresh_interval_minutes` | 刷新间隔（分钟，内部转秒） |
 | `openlist` | `refresh_depth` | WebDAV PROPFIND 扫描深度 |
-| `openlist` | `refresh_log_level` | 刷新日志级别 |
 | `openlist` | `refresh_full_audit_interval_days` | 全量审计周期（天）；0 关闭。**注意：TOML 中对应键名为 `full_audit_interval_days`（无 `refresh_` 前缀），两者不同** |
 | `openlist` | `behavior_action` | 删除行为（MOVE/DELETE） |
 | `openlist` | `behavior_trash_dir_name` | 云端回收站目录名 |

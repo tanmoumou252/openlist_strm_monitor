@@ -442,7 +442,7 @@ class TestRefreshServiceHotReloadContract:
         svc.stop()
         assert svc._run_cycle_with_breaker.call_count >= 2
 
-    def test_disabled_worker_waits_without_running_cycles(self):
+    def test_disabled_worker_returns_without_running_cycles(self):
         app = _make_app(refresh_paths=["/strm"], refresh_enabled=False)
         svc = RefreshService(app)
         svc._run_cycle_with_breaker = MagicMock()
@@ -451,9 +451,10 @@ class TestRefreshServiceHotReloadContract:
         svc._thread = worker
         worker.start()
         time.sleep(0.05)
-        assert svc._run_cycle_with_breaker.call_count == 1
-        assert worker.is_alive()
-        svc.stop()
+        # P1-2: 首轮 enabled 检查使禁用状态下 worker 直接返回，不执行任何周期。
+        # 见 refresh_service.py._worker 头部注释。
+        assert svc._run_cycle_with_breaker.call_count == 0
+        assert not worker.is_alive()
 
     def test_reconfigure_does_not_create_duplicate_worker(self):
         app = _make_app(refresh_paths=["/strm"])

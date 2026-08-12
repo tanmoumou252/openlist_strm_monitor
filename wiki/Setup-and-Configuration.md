@@ -98,6 +98,8 @@ fuzzy_threshold = 0.60            # 标题匹配阈值
 2. 调用 `migrate_config_to_db(config, wdb)` — 一次性迁移 config.toml 内容
 3. 调用 `config.update_from_db(wdb)` — 加载 DB 覆盖（DB > TOML）
 
+> **注意**：迁移仅在 `main.py` 入口执行。如果通过 `python src/webui/server.py` 直接启动 WebUI，config.toml 中的 WebDAV 凭据不会自动迁移到 DB。建议首次运行 `python src/main.py` 完成迁移，之后通过 WebUI 管理配置。
+
 迁移后，许多配置项可通过 WebUI 管理，无需直接编辑 config.toml：
 - OpenList 连接（host、user、password、TOTP）
 - STRM 引擎路径和监控路径
@@ -126,7 +128,8 @@ fuzzy_threshold = 0.60            # 标题匹配阈值
 5. 配置 STRM 引擎：
    - API 验证通过后从下拉列表选择引擎
    - 监控目录从 API 数据自动填充
-6. 设置 B 区和 C 区根目录
+6. 配置 A↔B 映射（`a_b_mappings`）：每个 A 区根目录必须绑定唯一的 B 区根目录，否则启动失败
+7. 设置 C 区根目录
 7. 配置刷新路径和行为设置：`refresh_paths` 为空时不执行周期主动扫描，仅依赖 watchdog 和 B 区删除联动；非空时只扫描命中这些 WebDAV 引擎路径的 A↔B mapping。`full_audit_interval_days` 默认每 7 天执行一次全量 A 区审计，可能访问未订阅的 A 根，设为 0 可关闭。
 8. 进入 **配置 → WebUI/TMDB** 设置：
    - TMDB access_token 或 api_key

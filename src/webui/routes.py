@@ -786,7 +786,7 @@ def _tmdb_routes(handler, tmdb_client: TmdbClient | None,
             tmdb_id = _safe_int(parts[5])
             genres: list[str] = []
             if webui_server:
-                # P1-1: 删除 _watchlist_cache 死代码分支（整个代码库中从未被赋值）。
+                # 删除 _watchlist_cache 死代码分支（整个代码库中从未被赋值）。
                 # 直接使用唯一的 get_watchlist_cached() 方法。
                 items: list[dict] = webui_server.get_watchlist_cached() if hasattr(
                     webui_server, 'get_watchlist_cached') else []
@@ -865,6 +865,9 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
     except json.JSONDecodeError:
         handler._send_json({"success": False, "error": "无效的 JSON"}, 400)
         return
+    if not isinstance(data, dict):
+        handler._send_json({"success": False, "error": "请求体须为 JSON 对象"}, 400)
+        return
     tmdb_cfg = getattr(webui_server._config, "tmdb", None)
     if not tmdb_cfg:
         handler._send_json({"success": False, "error": "TMDB 配置不可用"}, 500)
@@ -879,7 +882,7 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
                 400,
             )
             return
-        # P0-4: 数值字段白名单。这些字段后续会被 float() 消费（如 watchlist_cache_ttl），
+        # 数值字段白名单。这些字段后续会被 float() 消费（如 watchlist_cache_ttl），
         # 若写入非数字字符串（如 "abc"），会导致 _handler_reinit_tmdb 中 float() 抛 ValueError，
         # 且坏值残留在内存，后台匹配刷新任务直到重启前一直崩溃。
         _NUMERIC_KEYS = {
@@ -896,7 +899,7 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
                 if key in ("access_token", "api_key") and not val:
                     if getattr(tmdb_cfg, key, ""):
                         continue
-                # P0-4: 数值字段做 float() 校验，非法输入拒绝该字段并返回 400
+                # 数值字段做 float() 校验，非法输入拒绝该字段并返回 400
                 if key in _NUMERIC_KEYS:
                     try:
                         num_val = float(val)
@@ -962,7 +965,7 @@ def _handle_tmdb_configure(handler, webui_server, body: bytes) -> None:
             # 重新初始化 TMDB 客户端
             _handler_reinit_tmdb(webui_server, tmdb_cfg)
             # 保存到 DB（webui_config 表）——传实际生效值，不是原始请求体
-            # P2-8: 检查 DB 保存结果，失败时返回错误响应
+            # 检查 DB 保存结果，失败时返回错误响应
             if not _save_tmdb_to_db(webui_server, applied):
                 handler._send_json({"success": False, "error": "保存到数据库失败"}, 500)
                 return
@@ -1040,7 +1043,7 @@ def _handler_reinit_tmdb(webui_server, tmdb_cfg) -> None:
 def _save_tmdb_to_db(webui_server, changes: dict) -> bool:
     """保存 TMDB 配置到 DB webui_config 表（scope="tmdb"）。
     
-    P2-8: 返回 bool 指示成功/失败，调用方据此调整响应，避免 DB 写失败时
+    返回 bool 指示成功/失败，调用方据此调整响应，避免 DB 写失败时
     前端误认为配置已保存。
     
     入参是「实际生效值」，不是原始请求体；调用方负责过滤与归一化。
@@ -1198,11 +1201,20 @@ def _handle_webui_config_post(handler, webui_server, scope: str,
                 return
             data["a_b_mappings"] = _abm_value
 
-        # ui scope 白名单过滤：拒绝未声明的 key，避免 LAN 内任意 key 污染配置表
-        if scope == "ui":
-            rejected = [k for k in data if k not in _UI_CONFIG_ALLOWED_KEYS]
+        # scope 白名单过滤：拒绝未声明的 key，避免 LAN 内任意 key 污染配置表。
+        # ui / tmdb / openlist 三个 scope 均有独立白名单，未知 key 整次拒绝（403），
+        # 不部分写入。watchlist_db 属 tmdb scope 的历史遗留键，白名单放行后由
+        # 下方宽容剥离逻辑处理，保持对旧客户端的兼容。
+        _scope_whitelist = {
+            "ui": _UI_CONFIG_ALLOWED_KEYS,
+            "tmdb": _TMDB_CONFIG_ALLOWED_KEYS,
+            "openlist": _OPENLIST_CONFIG_ALLOWED_KEYS,
+        }
+        _allowed_keys = _scope_whitelist.get(scope)
+        if _allowed_keys is not None:
+            rejected = [k for k in data if k not in _allowed_keys]
             if rejected:
-                logging.warning("[WebUI] ui scope 配置拒绝未声明 key: %s", rejected)
+                logging.warning("[WebUI] %s scope 配置拒绝未声明 key: %s", scope, rejected)
                 handler._send_json(
                     {"success": False, "error": f"不允许的配置项: {rejected}"}, 403)
                 return
@@ -1370,11 +1382,18 @@ def _reinit_admin_client(webui_server) -> None:
         if new_client.login(force=True):
             logging.info("[HotReload] 新的 OpenListAdminClient 登录成功")
             # 仅当登录成功后才替换 client 引用，避免用无效客户端冲掉正常工作实例
-            webui_server._admin_client = new_client
-            app_service = getattr(webui_server, '_app_service', None)
-            if app_service:
-                app_service.admin_api = new_client
-                logging.info("[HotReload] AppService.admin_api 已更新")
+            # B3: 使用锁保护 client 引用替换，防止并发请求读到不一致状态
+            lock = getattr(webui_server, '_admin_client_lock', None)
+            if lock is None:
+                import threading
+                lock = threading.Lock()
+                webui_server._admin_client_lock = lock
+            with lock:
+                webui_server._admin_client = new_client
+                app_service = getattr(webui_server, '_app_service', None)
+                if app_service:
+                    app_service.admin_api = new_client
+                    logging.info("[HotReload] AppService.admin_api 已更新")
         else:
             logging.warning("[HotReload] 新的 OpenListAdminClient 登录失败: %s — 保留旧客户端继续运行", new_client.last_error_message or "未知错误")
     except Exception as e:
@@ -1386,6 +1405,9 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
         data = json.loads(body)
     except (json.JSONDecodeError, Exception):
         data = {}
+    if not isinstance(data, dict):
+        handler._send_json({"error": "请求体须为 JSON 对象"}, 400)
+        return
 
     cfg = webui_server._config
     user = data.get("user", cfg.webdav.user)
@@ -1770,6 +1792,9 @@ def _handle_tmdb_watchlist_match_override(
     except json.JSONDecodeError:
         handler._send_json({"success": False, "message": "无效的 JSON"}, 400)
         return
+    if not isinstance(data, dict):
+        handler._send_json({"success": False, "message": "请求体须为 JSON 对象"}, 400)
+        return
     media_type = str(data.get("media_type") or "").strip()
     if media_type not in {"movie", "tv"}:
         handler._send_json(
@@ -1836,6 +1861,9 @@ def _handle_tmdb_watchlist_match_clear(
         data = json.loads(body)
     except json.JSONDecodeError:
         handler._send_json({"success": False, "message": "无效的 JSON"}, 400)
+        return
+    if not isinstance(data, dict):
+        handler._send_json({"success": False, "message": "请求体须为 JSON 对象"}, 400)
         return
     media_type = str(data.get("media_type") or "").strip()
     if media_type not in {"movie", "tv"}:
@@ -2343,6 +2371,31 @@ _KIND_FILTER_MAP = {
 # UI scope 写入白名单：仅允许这些 key 通过 POST /api/webui/config/ui 写入
 _UI_CONFIG_ALLOWED_KEYS = {"tmdb_cache_never_remind", "tmdb_match_toast_disabled", "admin_password", "onboarding_completed", "onboarding_skipped"}
 
+# TMDB scope 写入白名单：与 _handle_tmdb_configure → _save_tmdb_to_db
+# 持久化的「实际生效键」对齐（access_token/api_key/language/host/数值阈值/代理/开关）。
+# watchlist_db 为历史遗留键，白名单放行后由写循环前的宽容剥离逻辑处理。
+_TMDB_CONFIG_ALLOWED_KEYS = {
+    "access_token", "api_key", "language", "host", "csv_watchlist_file",
+    "fuzzy_threshold", "anime_min_ep_ratio", "anime_max_season_diff",
+    "watchlist_cache_ttl", "anime_min_season_ratio",
+    "proxy_http", "proxy_enabled", "watchlist_enabled", "watchlist_db",
+}
+
+# OpenList scope 写入白名单：与 AppConfig.update_from_db 的读取键对齐，
+# 含前端 openlist.js 保存体（含按条件上传的 webdav_password/webdav_totp_secret）
+# 与后端自身写入的 engines_initialized。
+_OPENLIST_CONFIG_ALLOWED_KEYS = {
+    "webdav_host", "webdav_user", "webdav_password", "webdav_totp_secret",
+    "b_root", "c_root",
+    "behavior_action", "behavior_trash_dir_name",
+    "behavior_ghost_protect_seconds", "behavior_a_to_b_restore_delay_seconds",
+    "behavior_sync_on_startup", "behavior_sync_on_startup_wait",
+    "log_level", "log_max_size_mb", "log_backup_count", "log_file",
+    "refresh_enabled", "refresh_interval_minutes", "refresh_depth",
+    "refresh_full_audit_interval_days", "engines_initialized",
+    "strm_engines", "refresh_paths", "a_b_mappings",
+}
+
 # 登录速率限制
 _login_attempts: dict[str, list[float]] = {}
 _login_attempts_lock = threading.Lock()
@@ -2356,7 +2409,7 @@ _ping_attempts_lock = threading.Lock()
 
 def _handle_login(handler, webui_server, body: bytes) -> None:
     """处理 POST /api/login — 密码登录验证。"""
-    # P2-9: 验证 Content-Type 头必须为 application/json
+    # 验证 Content-Type 头必须为 application/json
     content_type = handler.headers.get("Content-Type", "")
     if not content_type.startswith("application/json"):
         handler._send_json({"error": "Content-Type 必须为 application/json"}, 400)
@@ -2824,7 +2877,7 @@ def _escape_fts5_query(query: str) -> str | None:
     策略：移除 FTS5 特殊运算符字符（* - + " ^ ~），保留括号等可能出现在
     文件名中的字符（替换为空格）。避免逐个反斜杠转义在不同上下文的行为不一致问题。
 
-    P2-10: 清理后为空字符串时返回 None，调用方跳过 FTS5 查询。
+    清理后为空字符串时返回 None，调用方跳过 FTS5 查询。
     之前返回空引号字符串 '""'，FTS5 运行时错误后 fallback 到 LIKE，产生日志噪音。
     """
     # 移除 FTS5 运算符字符（包括冒号，因为冒号在 FTS5 中用于列过滤）
@@ -2837,7 +2890,7 @@ def _escape_fts5_query(query: str) -> str | None:
     query = ' '.join(query.split())
     # 移除反斜杠（Windows 路径分隔符在 FTS5 中无意义）
     query = query.replace('\\', ' ')
-    # P2-10: 清理后为空 → 返回 None，调用方跳过 FTS5
+    # 清理后为空 → 返回 None，调用方跳过 FTS5
     if not query:
         return None
     return f'"{query}"'
@@ -2861,7 +2914,7 @@ def handle_area_detail(handler, area, params) -> None:
         return
 
     media_name = params.get("media", [""])[0]
-    # P1-2: media_name 为空时直接返回空结果，避免 WHERE 子句为空导致全表
+    # media_name 为空时直接返回空结果，避免 WHERE 子句为空导致全表
     # fetchall() 加载到 Python 内存（大型库数万条记录时造成内存/CPU 尖峰）。
     if not media_name:
         handler._send_json({"media_name": "", "mappings": [], "total": 0})
@@ -3133,7 +3186,15 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
     except (ValueError, json.JSONDecodeError):
         data = {}
 
-    media_name = (data.get("media") or "").strip()
+    # B2: 类型防御——非法输入直接返回 400
+    if not isinstance(data, dict):
+        handler._send_json({"error": "请求体必须为 JSON 对象"}, 400)
+        return
+    media_name = data.get("media")
+    if not isinstance(media_name, str):
+        handler._send_json({"error": "缺少 media 参数"}, 400)
+        return
+    media_name = media_name.strip()
     if not media_name:
         handler._send_json({"error": "缺少 media 参数"}, 400)
         return
@@ -3199,8 +3260,9 @@ def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str |
     # 读取刷新日志级别
     app_config = getattr(app_service, 'config', None)
     log_level_name = "INFO"
-    if app_config and hasattr(app_config, 'refresh'):
-        log_level_name = getattr(app_config.refresh, 'log_level', "INFO").upper()
+    if app_config:
+        # refresh_log_level 已合并至全局 log_level
+        log_level_name = getattr(app_config, 'log_level', "INFO").upper()
     _refresh_log = _make_refresh_logger(log_level_name)
 
     _refresh_log("info", "[Refresh] 开始刷新 媒体=%s 区=%s mapping_id=%s", media_name, area, mapping_id)
@@ -3493,6 +3555,16 @@ def handle_logs_api(handler, params: dict) -> None:
     if not log_file or not log_file.exists():
         handler._send_json({"lines": [], "count": 0})
         return
+
+    # 限制日志文件路径到项目目录，防止管理员配置任意路径后读取任意文件
+    base_dir = getattr(handler.webui._config, 'base_dir', None)
+    if base_dir:
+        try:
+            log_file.resolve().relative_to(Path(base_dir).resolve())
+        except ValueError:
+            handler._send_json({"error": "日志文件路径无效"}, 400)
+            return
+
     try:
         tail = _read_log_file_tail(log_file, lines_req)
         tail = tail[::-1]  # 反转为倒序（最新在上），与 TMDB 操作日志保持一致
@@ -3516,6 +3588,15 @@ def handle_download_log_api(handler, params: dict) -> None:
     if not log_file_path or not log_file_path.exists():
         handler._send_json({"error": "Log file not found"}, 404)
         return
+
+    # 限制日志文件路径到项目目录，防止管理员配置任意路径后读取任意文件
+    base_dir = getattr(handler.webui._config, 'base_dir', None)
+    if base_dir:
+        try:
+            log_file_path.resolve().relative_to(Path(base_dir).resolve())
+        except ValueError:
+            handler._send_json({"error": "日志文件路径无效"}, 400)
+            return
 
     try:
         # 分块流式写 + Content-Length，避免整文件读入内存
@@ -3885,7 +3966,7 @@ def _handle_config_status(handler, webui_server) -> None:
     main_running = bool(getattr(webui_server, '_app_running', False))
 
     # onboarding_completed: 检查 DB 中的标记
-    # P0-1: 返回字符串 "1"/"0"（与 DB 存储一致），前端用 === '1' 严格比较。
+    # 返回字符串 "1"/"0"（与 DB 存储一致），前端用 === '1' 严格比较。
     # 之前返回 Python bool → JSON true/false，与前端 === '1' 恒不相等，导致
     # onboarding 完成后卡片不隐藏、快捷按钮不显示。
     onboarding_completed = "0"
@@ -4047,6 +4128,9 @@ def _handle_onboarding_complete_step(handler, webui_server, body: bytes) -> None
         data = json.loads(body) if body else {}
     except (ValueError, json.JSONDecodeError):
         data = {}
+    if not isinstance(data, dict):
+        handler._send_json({"error": "请求体须为 JSON 对象"}, 400)
+        return
 
     step = data.get("step", "")
 
@@ -4096,7 +4180,7 @@ def handle_index_audit(handler, body: bytes) -> None:
     with webui_server._index_audit_lock:
         if webui_server._index_audit_running:
             handler._send_json({
-                "ok": False,  # P1-3: 应为 False，与 wiki/WebUI-API-Reference.md 文档一致
+                "ok": False,  # 应为 False，与 wiki/WebUI-API-Reference.md 文档一致
                 "status": "already_running",
                 "message": "审计已在进行中"
             })
@@ -4114,7 +4198,7 @@ def handle_index_audit(handler, body: bytes) -> None:
                     webui_server._index_audit_result = {"error": "刷新服务未初始化"}
                 return
 
-            # A'.1: 调用 RefreshService.run_full_audit_now()，不再内联审计逻辑
+            # 调用 RefreshService.run_full_audit_now()，不再内联审计逻辑
             result = refresh_service.run_full_audit_now()
 
             with webui_server._index_audit_lock:

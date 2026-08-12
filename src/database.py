@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Generator
 
 from utils import escape_like
+from utils.file_utils import chunk_list
 
 class ReadWriteLock:
     """读写锁：写者优先，读者与写者间无硬互斥。
@@ -1063,7 +1064,10 @@ class Database:
         # 每 60 秒执行一次过期清理（使用专用锁保护，避免多线程竞态）
         with self._ghost_cleanup_lock:
             if now - self._last_ghost_cleanup > 60:
-                self.cleanup_expired_ghosts()
+                try:
+                    self.cleanup_expired_ghosts()
+                except Exception as e:
+                    logging.warning("[DB] 自动清理过期幽灵保护失败（已自动降级跳过）: %s", e)
                 self._last_ghost_cleanup = now
 
         with self.rw_lock.read_locked(), self.read_connection() as conn:
@@ -1322,9 +1326,9 @@ class Database:
                 """
                 SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id, last_verified_at
                 FROM b_strm_files
-                WHERE webdav_path LIKE ? ESCAPE '\\'
+                WHERE webdav_path = ? OR webdav_path LIKE ? ESCAPE '\\'
                 """,
-                (pattern,),
+                (webdav_root, pattern),
             )
             return [BRecord(*row) for row in cur.fetchall()]
 
@@ -1554,7 +1558,7 @@ class Database:
                         new_local_path, conflict[0], fingerprint)
                     return False
 
-                # P2-1: 捕获 new_local_path 的旧 rowid（在 INSERT OR REPLACE 之前），
+                # 捕获 new_local_path 的旧 rowid（在 INSERT OR REPLACE 之前），
                 # 用于稍后清理 FTS 孤儿行。INSERT OR REPLACE 会先 DELETE 旧行再 INSERT
                 # 新行，但 FTS 表无触发器，旧 rowid 的 FTS 条目不会自动清理。
                 prev_rowid_row = None
@@ -1601,7 +1605,7 @@ class Database:
                 if old_rowid is not None:
                     conn.execute(
                         "DELETE FROM b_strm_files_fts WHERE rowid = ?", (old_rowid,))
-                # P2-1: 清理 INSERT OR REPLACE 前 new_local_path 旧行的 FTS 孤儿。
+                # 清理 INSERT OR REPLACE 前 new_local_path 旧行的 FTS 孤儿。
                 # REPLACE 内部先 DELETE 旧行再 INSERT 新行，但 FTS 表无触发器，
                 # 旧 rowid 的 FTS 条目不会自动清理。
                 if prev_rowid_row is not None:
@@ -1881,8 +1885,8 @@ class Database:
         pattern = escape_like(cloud_media_root.rstrip('/')) + '/%'
         with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute(
-                "SELECT COUNT(*) FROM a_strm_files WHERE webdav_path LIKE ? ESCAPE '\\'",
-                (pattern,)
+                "SELECT COUNT(*) FROM a_strm_files WHERE webdav_path = ? OR webdav_path LIKE ? ESCAPE '\\'",
+                (cloud_media_root, pattern)
             )
             row = cur.fetchone()
             return row[0] if row else 0
@@ -2130,15 +2134,26 @@ class Database:
             conn.commit()
 
     def cleanup_invalid_subtitles(self) -> None:
-        """清理目标文件已不存在的字幕记录"""
-        with self.rw_lock.write_locked(), self.connection() as conn:
+        """清理目标文件已不存在的字幕记录（锁外进行文件系统 I/O 检查）"""
+        with self.rw_lock.read_locked(), self.read_connection() as conn:
             cur = conn.execute("SELECT local_path, target_path FROM subtitles")
-            for local_path, target_path in cur.fetchall():
-                if not Path(target_path).exists():
-                    conn.execute(
-                        "DELETE FROM subtitles WHERE local_path = ?",
-                        (local_path,)
-                    )
+            rows = cur.fetchall()
+
+        to_delete = [
+            local_path for local_path, target_path in rows
+            if not Path(target_path).exists()
+        ]
+
+        if not to_delete:
+            return
+
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            for chunk in chunk_list(to_delete, 900):
+                placeholders = ','.join('?' * len(chunk))
+                conn.execute(
+                    f"DELETE FROM subtitles WHERE local_path IN ({placeholders})",
+                    chunk,
+                )
             conn.commit()
 
     # ========== 批量操作（30000+ 条数据性能优化）==========
@@ -2153,15 +2168,18 @@ class Database:
             return 0
         now = time.time()
         with self.rw_lock.write_locked(), self.connection() as conn:
-            # 预读现有记录
+            # 预读现有记录（分片处理避免 SQL 变量超限）
             local_paths = [r[0] for r in records]
-            placeholders = ','.join('?' * len(local_paths))
-            existing_rows = conn.execute(
-                f"SELECT local_path, webdav_path, parent_webdav_path, updated_at "
-                f"FROM a_strm_files WHERE local_path IN ({placeholders})",
-                local_paths,
-            ).fetchall()
-            existing_map = {row[0]: (row[1], row[2], row[3]) for row in existing_rows}
+            existing_map = {}
+            for chunk in chunk_list(local_paths, 900):
+                placeholders = ','.join('?' * len(chunk))
+                existing_rows = conn.execute(
+                    f"SELECT local_path, webdav_path, parent_webdav_path, updated_at "
+                    f"FROM a_strm_files WHERE local_path IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in existing_rows:
+                    existing_map[row[0]] = (row[1], row[2], row[3])
 
             # 分类：新增 vs 更新
             to_insert = []
@@ -2258,17 +2276,19 @@ class Database:
             return 0
         now = time.time()
         with self.rw_lock.write_locked(), self.connection() as conn:
-            # 预读现有记录
+            # 预读现有记录（分片处理避免 SQL 变量超限）
             local_paths = [r[0] for r in records]
-            placeholders = ','.join('?' * len(local_paths))
-            existing_rows = conn.execute(
-                f"SELECT local_path, webdav_path, parent_webdav_path, source_a_path, "
-                f"fingerprint, status, mapping_id, updated_at "
-                f"FROM b_strm_files WHERE local_path IN ({placeholders})",
-                local_paths,
-            ).fetchall()
-            existing_map = {row[0]: (row[1], row[2], row[3], row[4], row[5], row[6], row[7])
-                           for row in existing_rows}
+            existing_map = {}
+            for chunk in chunk_list(local_paths, 900):
+                placeholders = ','.join('?' * len(chunk))
+                existing_rows = conn.execute(
+                    f"SELECT local_path, webdav_path, parent_webdav_path, source_a_path, "
+                    f"fingerprint, status, mapping_id, updated_at "
+                    f"FROM b_strm_files WHERE local_path IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in existing_rows:
+                    existing_map[row[0]] = (row[1], row[2], row[3], row[4], row[5], row[6], row[7])
 
             # 分类：新增 vs 更新
             to_insert = []

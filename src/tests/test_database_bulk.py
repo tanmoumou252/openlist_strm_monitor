@@ -1018,3 +1018,172 @@ class TestLastVerifiedAtColumn:
             ).fetchone()
             # 新记录的 last_verified_at 应该接近 now
             assert abs(row[0] - now) < 2.0
+
+
+# ============================================================
+# 批量 >900 条回归测试（Task B：SQL 变量上限切片防御）
+# ============================================================
+
+
+class TestBatchOver900Records:
+    """验证超过 900 条的批量操作不会因 SQL 变量上限而崩溃。
+
+    现代 SQLite（≥3.32）默认上限 32766，但嵌入式/旧版 SQLite 上限
+    仍为 999。900 切片是跨版本防御。本测试用 1000 条记录验证切片
+    逻辑正确执行。
+    """
+
+    def test_upsert_a_batch_over_900_records(self, db: Database):
+        """upsert_a_batch 传入 >900 条记录不抛异常，返回计数正确。"""
+        records = [
+            (f"/a/nine_{i:04d}.strm", f"/m/file_{i:04d}.mp4", "/m")
+            for i in range(1000)
+        ]
+        n = db.upsert_a_batch(records)
+        assert n == 1000, f"返回值应为 1000，实际 {n}"
+
+        # 验证所有记录确实写入
+        with db.read_connection() as conn:
+            cur = conn.execute("SELECT COUNT(*) FROM a_strm_files")
+            assert cur.fetchone()[0] == 1000
+
+        # 第二次重复扫描（全部无变化）不抛异常
+        n2 = db.upsert_a_batch(records)
+        assert n2 == 1000, f"重复扫描返回应为 1000，实际 {n2}"
+        with db.read_connection() as conn:
+            cur = conn.execute("SELECT COUNT(*) FROM a_strm_files")
+            assert cur.fetchone()[0] == 1000  # 未新增
+
+    def test_upsert_b_batch_over_900_records(self, db: Database):
+        """upsert_b_batch 传入 >900 条记录不抛异常，返回计数正确。"""
+        records = [
+            (f"/b/nine_{i:04d}.strm", f"/m/file_{i:04d}.mp4", "/m",
+             f"/a/nine_{i:04d}.strm", f"fp_{i:04d}", "m1", "valid")
+            for i in range(1000)
+        ]
+        n = db.upsert_b_batch(records)
+        assert n == 1000, f"返回值应为 1000，实际 {n}"
+
+        with db.read_connection() as conn:
+            cur = conn.execute("SELECT COUNT(*) FROM b_strm_files")
+            assert cur.fetchone()[0] == 1000
+
+        # 第二次重复扫描（全部无变化）不抛异常
+        n2 = db.upsert_b_batch(records)
+        assert n2 == 1000
+
+    def test_upsert_a_batch_1500_records_merges_existing_map(self, db: Database):
+        """1500 条（跨越 2 个 900 切片）预读合并 existing_map 正确。"""
+        # 先插入 500 条
+        first_batch = [
+            (f"/a/merge_{i:04d}.strm", f"/m/old_{i:04d}.mp4", "/m")
+            for i in range(500)
+        ]
+        n1 = db.upsert_a_batch(first_batch)
+        assert n1 == 500
+
+        # 再插入 1500 条，其中 500 条是更新（webdav 变化），1000 条新增
+        second_batch = [
+            (f"/a/merge_{i:04d}.strm", f"/m/new_{i:04d}.mp4", "/m")  # 前 500 条更新
+            if i < 500 else
+            (f"/a/new_{i:04d}.strm", f"/m/new_{i:04d}.mp4", "/m")  # 后 1000 条新增
+            for i in range(1500)
+        ]
+        n2 = db.upsert_a_batch(second_batch)
+        assert n2 == 1500
+
+        # 验证总数：500 原有 + 1000 新增 = 1500
+        with db.read_connection() as conn:
+            cur = conn.execute("SELECT COUNT(*) FROM a_strm_files")
+            assert cur.fetchone()[0] == 1500
+
+        # 验证前 500 条的 webdav_path 已更新
+        with db.read_connection() as conn:
+            row = conn.execute(
+                "SELECT webdav_path FROM a_strm_files WHERE local_path = ?",
+                ("/a/merge_0000.strm",),
+            ).fetchone()
+            assert row[0] == "/m/new_0000.mp4"
+
+    def test_cleanup_invalid_subtitles_over_900_deletions(self, db: Database):
+        """cleanup_invalid_subtitles 删除 >900 条字幕记录，分批 DELETE 全部成功。"""
+        # 直接插入 1000 条字幕记录，target_path 指向不存在的路径
+        with db.rw_lock.write_locked(), db.connection() as conn:
+            conn.executemany(
+                "INSERT INTO subtitles(local_path, target_path, fingerprint, status) "
+                "VALUES (?, ?, ?, ?)",
+                [
+                    (f"/sub/{i:04d}.srt", f"/nonexistent/target_{i:04d}.srt",
+                     f"fp_{i:04d}", "valid")
+                    for i in range(1000)
+                ],
+            )
+            conn.commit()
+
+        # 确认插入成功
+        with db.read_connection() as conn:
+            before = conn.execute("SELECT COUNT(*) FROM subtitles").fetchone()[0]
+        assert before == 1000
+
+        # 执行清理
+        db.cleanup_invalid_subtitles()
+
+        # 验证全部删除
+        with db.read_connection() as conn:
+            after = conn.execute("SELECT COUNT(*) FROM subtitles").fetchone()[0]
+        assert after == 0, f"清理后应全删，实际残留 {after}"
+
+    def test_cleanup_invalid_subtitles_keeps_valid_targets(self, db: Database):
+        """cleanup_invalid_subtitles 保留 target_path 实际存在的记录。"""
+        # 创建临时目标文件
+        import tempfile
+        tmpdir = tempfile.TemporaryDirectory()
+        existing_target = Path(tmpdir.name) / "exists.srt"
+        existing_target.write_text("subtitle content", encoding="utf-8")
+
+        # 插入 950 条有效 + 50 条无效
+        with db.rw_lock.write_locked(), db.connection() as conn:
+            valid_records = [
+                (f"/sub/valid_{i:04d}.srt", str(existing_target), f"fp_v{i:04d}", "valid")
+                for i in range(950)
+            ]
+            invalid_records = [
+                (f"/sub/invalid_{i:04d}.srt", f"/nonexistent_{i:04d}.srt",
+                 f"fp_i{i:04d}", "valid")
+                for i in range(50)
+            ]
+            conn.executemany(
+                "INSERT INTO subtitles(local_path, target_path, fingerprint, status) "
+                "VALUES (?, ?, ?, ?)",
+                valid_records + invalid_records,
+            )
+            conn.commit()
+
+        db.cleanup_invalid_subtitles()
+
+        # 有效记录应保留
+        with db.read_connection() as conn:
+            remaining = conn.execute("SELECT COUNT(*) FROM subtitles").fetchone()[0]
+        assert remaining == 950, f"有效记录应保留 950，实际 {remaining}"
+
+        # 清理
+        tmpdir.cleanup()
+
+    def test_cleanup_invalid_subtitles_lock_behavior(self):
+        """结构性断言 cleanup_invalid_subtitles 使用 read_locked 读取 + 锁外 exists() + write_locked 删除。"""
+        import inspect
+        source = inspect.getsource(Database.cleanup_invalid_subtitles)
+
+        # 读取阶段使用 read_locked
+        assert "rw_lock.read_locked()" in source, "读取阶段应持有 read_locked"
+        assert "read_connection()" in source, "读取阶段应使用 read_connection"
+
+        # 读取后在锁外做 exists
+        assert "Path(target_path).exists()" in source, "锁外应做 exists() 检查"
+
+        # 删除阶段使用 write_locked
+        assert "rw_lock.write_locked()" in source, "删除阶段应持有 write_locked"
+        assert "connection()" in source, "删除阶段应使用 connection()"
+
+        # 删除使用 chunk_list 切片
+        assert "chunk_list(to_delete, 900)" in source, "删除应使用 chunk_list 按 900 切片"

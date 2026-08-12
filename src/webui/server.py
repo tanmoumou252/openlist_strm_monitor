@@ -252,8 +252,9 @@ class FontProxyMixin:
 
     def _proxy_google_font_file(self, path: str) -> None:
         """代理字体文件：/fonts/gstatic/<rest> → fonts.gstatic.com/<rest>
-        失败时返回 502。
+        失败时返回 502。限制响应体最大 5MB 防止内存耗尽。
         """
+        MAX_FONT_SIZE = 5 * 1024 * 1024
         rest = path[len("/fonts/gstatic/"):]
         url = f"https://fonts.gstatic.com/{rest}"
         try:
@@ -263,7 +264,11 @@ class FontProxyMixin:
                 "Origin": "https://fonts.googleapis.com",
             })
             with urllib.request.urlopen(req, timeout=15) as resp:
-                body = resp.read()
+                body = resp.read(MAX_FONT_SIZE + 1)
+                if len(body) > MAX_FONT_SIZE:
+                    logging.warning("[WebUI] 字体文件过大 (%d bytes)，已拦截: %s", len(body), url)
+                    self.send_error(502, "font proxy failed")
+                    return
                 content_type = resp.headers.get("Content-Type", "font/woff2")
             self.send_response(200)  # type: ignore[attr-defined]
             # type: ignore[attr-defined]
@@ -338,7 +343,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
                     的白名单仅对 GET 生效，POST 必须认证。
         """
         webui = self.webui
-        # C-2: DB/密码初始化失败时 fail-closed（拒绝请求而非放行）
+        # DB/密码初始化失败时 fail-closed（拒绝请求而非放行）
         if webui._db_init_failed:
             self._send_json(
                 {"error": "server_error", "message": "数据库初始化失败，请检查数据库文件权限"},
@@ -368,10 +373,10 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
                 or path == "/logo.png" or path == "/openlist_strm_bridge.png" \
                 or path == "/api/page" or path == "/login" \
                 or path.startswith("/fonts/") \
-                or path.endswith(".woff2") or path.endswith(".woff") or path.endswith(".ttf"):
+                or (path.startswith("/assets/") and path.endswith((".woff2", ".woff", ".ttf"))):
             return True
         # API 白名单：登录前初始化和图片代理（非敏感数据）
-        # [SECURITY-FIX] C-1: 敏感路径（/api/config, /api/webui/config/ui）仅对 GET 生效
+        # [SECURITY-FIX] 敏感路径（/api/config, /api/webui/config/ui）仅对 GET 生效
         # POST 请求必须认证，防止未授权密码重置和配置泄露
         if path in ("/api/tmdb/avatar", "/api/tmdb/poster",
                     "/api/openlist/status", "/api/openlist/ping"):
@@ -395,7 +400,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
         webui = self.webui
         now = time.time()
         with webui._sessions_lock:
-            # P2-12: 使用 dict.get() 直接查找（O(1)），替代 O(n) 遍历 + hmac.compare_digest。
+            # 使用 dict.get() 直接查找（O(1)），替代 O(n) 遍历 + hmac.compare_digest。
             # 会话 Token 是随机字符串，key 匹配即身份验证，IP 绑定提供额外安全层。
             session_info = webui._sessions.get(token)
             if session_info:
@@ -619,7 +624,7 @@ class _WebUIHandler(FontProxyMixin, BaseHTTPRequestHandler):
                 else:
                     self._proxy_google_font_file(path)
             elif path.endswith(".woff2") or path.endswith(".woff") or path.endswith(".ttf"):
-                # P2-7: 复用 _try_serve_static 的 resolve().relative_to() 路径穿越检查，
+                # 复用 _try_serve_static 的 resolve().relative_to() 路径穿越检查，
                 # 替代原有的弱检查（仅 .. 和 \\），防止符号链接攻击。
                 self._try_serve_static(path)
             elif path == "/api/logs":
@@ -795,7 +800,7 @@ class WebUIServer:
         self._bind = config.bind
         self._enabled = config.enabled
         self._start_time = time.time()
-        self._server: HTTPServer | None = None
+        self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._project_root = PROJECT_ROOT
 
@@ -841,7 +846,7 @@ class WebUIServer:
         self._sessions: dict[str, tuple[float, str]] = {}
         self._sessions_lock = threading.Lock()
         self._has_password = False
-        self._db_init_failed = False  # C-2: DB/密码初始化失败时 fail-closed
+        self._db_init_failed = False  # DB/密码初始化失败时 fail-closed
 
         # 1) 无条件创建 DB（存储配置 + 待看列表数据）
         self._reinit_watchlist_db()
@@ -972,7 +977,7 @@ class WebUIServer:
         except Exception as e:
             logging.warning("[WebUI] 待看列表数据库初始化失败: %s", e)
             self._watchlist_db = None
-            # C-2: DB 初始化失败时设置 fail-closed 标志
+            # DB 初始化失败时设置 fail-closed 标志
             # _has_password 会在 _init_admin_password 中被置为 False，
             # 但此时需要让 _check_auth 拒绝请求而非放行
             self._db_init_failed = True
@@ -1022,7 +1027,7 @@ class WebUIServer:
         if bind not in ("127.0.0.1", "0.0.0.0") and not _is_lan_ip(bind):
             logging.warning("[WebUI] 绑定地址 %s 可能不是局域网地址", bind)
 
-        # C-3: 启动时检查解密健康状态
+        # 启动时检查解密健康状态
         try:
             from secret_manager import check_decryption_health
             health = check_decryption_health()
@@ -1122,7 +1127,7 @@ class WebUIServer:
     def _init_admin_password(self) -> None:
         """检查或生成管理员密码。"""
         if not self._watchlist_db:
-            # C-2: DB 未初始化时设置 fail-closed 标志
+            # DB 未初始化时设置 fail-closed 标志
             self._db_init_failed = True
             self._has_password = False
             return
@@ -1155,9 +1160,9 @@ class WebUIServer:
             hashed = self._hash_password(new_password)
             self._watchlist_db.set_config("ui", "admin_password", hashed)
             self._has_password = True
-            login_url = f"http://{getattr(self,
-                                          '_bind',
-                                          '0.0.0.0')}:{self._port}"
+            bind_ip = getattr(self, '_bind', '0.0.0.0')
+            display_ip = '127.0.0.1' if bind_ip == '0.0.0.0' else bind_ip
+            login_url = f"http://{display_ip}:{self._port}"
             logging.info(
                 "[WebUI] ╔══════════════════════════════════════════════╗")
             logging.info(

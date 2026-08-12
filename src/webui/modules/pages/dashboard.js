@@ -407,10 +407,10 @@ export async function stopMainProgram() {
 }
 
 export async function renderDashboard(el) {
-  // N0: 代际快照工厂——在首次 await 前捕获，供其后所有 isStale() 判定
+  // 代际快照工厂——在首次 await 前捕获，供其后所有 isStale() 判定
   const isStale = captureRenderGuard();
   const d = await api('/api/dashboard');
-  // F-3: await 期间若发生新导航，放弃渲染，避免旧页覆盖 + setInterval 泄漏
+  // await 期间若发生新导航，放弃渲染，避免旧页覆盖 + setInterval 泄漏
   if (isStale()) return;
   if (d.uptime != null) {
     setServerStartTime(Date.now() - d.uptime * 1000);
@@ -451,19 +451,15 @@ ${d.watchers_healthy === false ? `<div class="dashboard-warning-banner" style="m
 <div class="stat-card"><div class="label">B - valid</div><div class="value stat-value-primary">${d.b_valid}</div></div>
     <div class="stat-card"><div class="label">B - duplicate</div><div class="value stat-value-warning">${d.b_duplicate}</div></div>
     <div class="stat-card"><div class="label">B - quarantined</div><div class="value stat-value-error">${d.b_quarantined}</div></div>
-  <div class="stat-card"><div class="label">${icon('tmdb')} TMDB</div><div class="value stat-value-large">${d.tmdb_configured ? '已配置' : '未配置'}</div></div>
-  <div class="stat-card"><div class="label">WebUI 运行时间</div><div class="value stat-value-large" id="uptime-val">-</div></div>
+  <div class="stat-card meta-compact"><div class="label">${icon('tmdb')} TMDB</div><div class="value stat-value-large">${d.tmdb_configured ? '已配置' : '未配置'}</div></div>
+  <div class="stat-card meta-compact"><div class="label">WebUI 运行时间</div><div class="value stat-value-large" id="uptime-val">-</div></div>
+  <div class="stat-card meta-compact"><div class="label">${icon('sync')} 索引代次</div><div class="value stat-value-primary" id="index-generation">#${d.index_metadata?.index_generation || 0}</div></div>
+  <div class="stat-card meta-compact"><div class="label">${icon('speed')} 最近索引</div><div class="value" title="${_formatExact(d.index_metadata?.last_full_index_at)}">${d.index_metadata?.last_full_index_at ? formatTimestamp(d.index_metadata.last_full_index_at) : '暂无记录'}</div></div>
+  <div class="stat-card meta-compact"><div class="label">${icon('swap_horiz')} 映射版本</div><div class="value" title="${esc(d.index_metadata?.mapping_version || '')}">${d.index_metadata?.mapping_version ? String(d.index_metadata.mapping_version).substring(0, 8) + '...' : '-'}</div></div>
+  <div class="stat-card meta-compact"><div class="label">映射版本生成</div><div class="value" title="${_formatExact(d.index_metadata?.mapping_version_generated_at)}">${d.index_metadata?.mapping_version_generated_at ? formatTimestamp(d.index_metadata.mapping_version_generated_at) : '暂无记录'}</div></div>
 </div>
 
-<!-- 索引元数据（Task 2） -->
-<div class="stat-grid" style="margin-top:16px">
-  <div class="stat-card"><div class="label">${icon('sync')} 索引代次</div><div class="value stat-value-primary" id="index-generation">#${d.index_metadata?.index_generation || 0}</div></div>
-  <div class="stat-card"><div class="label">${icon('speed')} 最近索引</div><div class="value" title="${_formatExact(d.index_metadata?.last_full_index_at)}">${d.index_metadata?.last_full_index_at ? formatTimestamp(d.index_metadata.last_full_index_at) : '暂无记录'}</div></div>
-  <div class="stat-card"><div class="label">${icon('swap_horiz')} 映射版本</div><div class="value" title="${esc(d.index_metadata?.mapping_version || '')}">${d.index_metadata?.mapping_version ? String(d.index_metadata.mapping_version).substring(0, 8) + '...' : '-'}</div></div>
-  <div class="stat-card"><div class="label">映射版本生成</div><div class="value" title="${_formatExact(d.index_metadata?.mapping_version_generated_at)}">${d.index_metadata?.mapping_version_generated_at ? formatTimestamp(d.index_metadata.mapping_version_generated_at) : '暂无记录'}</div></div>
-</div>
-
-<!-- A'.3: 立即全量审计按钮 -->
+<!-- 立即全量审计按钮 -->
 <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
   <button class="toolbar-btn secondary" id="btn-run-full-audit" style="font-size:calc(var(--font-base) - 1px)">${icon('refresh')} 立即全量审计</button>
   <span id="audit-status-text" style="font-size:calc(var(--font-base) - 1px);color:var(--text-muted)"></span>
@@ -472,15 +468,15 @@ ${d.watchers_healthy === false ? `<div class="dashboard-warning-banner" style="m
 <!-- Mapping 列表（Task 2） -->
 ${d.mappings && d.mappings.length > 0 ? `
 <div style="margin-top:16px">
-  <div style="font-size:14px;font-weight:500;margin-bottom:8px;color:var(--text-primary)">映射配置</div>
+  <div style="font-size:14px;font-weight:500;margin-bottom:8px;color:var(--text-main)">映射配置</div>
   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px">
     ${d.mappings.map(m => `
-      <div style="background:var(--bg-surface-variant);padding:12px;border-radius:8px;border:1px solid var(--border-subtle)">
+      <div style="background:var(--bg-subtle);padding:12px;border-radius:8px;border:1px solid var(--surface-border)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-          <span style="font-weight:500;color:var(--text-primary)">${esc(m.label || m.mapping_id)}</span>
+          <span style="font-weight:500;color:var(--text-main)">${esc(m.label || m.mapping_id)}</span>
           <span style="font-size:11px;color:var(--text-muted)">#${m.index_generation || 0}</span>
         </div>
-        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">
           <div>A: ${esc(_shortenPath(m.a_root))}</div>
           <div>B: ${esc(_shortenPath(m.b_root))}</div>
         </div>
@@ -537,15 +533,18 @@ function _shortenPath(path) {
     });
   }
 
-  // A'.3: 立即全量审计按钮 + 轮询
+  // 立即全量审计按钮 + 轮询
   const auditBtn = document.getElementById('btn-run-full-audit');
   const auditStatusText = document.getElementById('audit-status-text');
   if (auditBtn) {
-    auditBtn.addEventListener('click', async () => {
-      // N0: 审计轮询独立捕获代际，仅对该 handler 生效
-      const isStale = captureRenderGuard();
-      if (!confirm('确定要执行全量审计吗？\n\n这是一个重操作，耗时取决于 A 区库大小，会扫描全部 A 区根目录（含机械硬盘）。不会删除任何文件。')) return;
-      auditBtn.disabled = true;
+    auditBtn.addEventListener('click', () => {
+      showConfirmDialog(
+        '执行全量审计',
+        '这是一个重操作，耗时取决于 A 区库大小，会扫描全部 A 区根目录（含机械硬盘）。不会删除任何文件。',
+        async () => {
+          // 审计轮询独立捕获代际，仅对该 handler 生效
+          const isStale = captureRenderGuard();
+          auditBtn.disabled = true;
       auditBtn.innerHTML = '审计中...';
       if (auditStatusText) auditStatusText.textContent = '正在启动审计...';
       try {
@@ -564,7 +563,7 @@ function _shortenPath(path) {
           if (isStale()) return;
           try {
             const st = await api('/api/index/audit/status');
-            // T11c: already_running 是"被其他任务占用"，不是完成的假成功
+            // already_running 是"被其他任务占用"，不是完成的假成功
             if (st.result && st.result.status === 'already_running') {
               if (auditStatusText) auditStatusText.textContent = '审计被其他任务占用（已在进行中）';
               auditBtn.disabled = false;
@@ -604,6 +603,8 @@ function _shortenPath(path) {
         auditBtn.disabled = false;
         auditBtn.innerHTML = `${icon('refresh')} 立即全量审计`;
       }
+        }
+      );
     });
   }
 

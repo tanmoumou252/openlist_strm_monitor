@@ -83,6 +83,8 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     cfg.strm_engine_paths = []
     # DB 覆盖（no-op）
     cfg.update_from_db = MagicMock()
+    # base_dir
+    cfg.base_dir = str(tmp_path)
     return cfg
 
 
@@ -742,6 +744,31 @@ class TestWebUIConfigRoutes:
         status, _, body = _http_post(
             base, "/api/webui/config/invalid_scope", {"k": "v"}, session_token)
         assert status == 403
+
+    def test_config_post_scope_whitelist_rejects_unknown_key(self, webui_server):
+        """P1-1: tmdb/openlist scope 配置写入被未知 key 拒绝（403）。
+
+        三个 scope（ui/tmdb/openlist）均有独立白名单，未知 key 整次拒绝。
+        openlist scope 测试任意未知 key（如 nonexistent_key）应返回 403。
+        """
+        server, base, session_token = webui_server
+        for scope in ("openlist", "tmdb", "ui"):
+            status, _, body = _http_post(
+                base, f"/api/webui/config/{scope}",
+                {"nonexistent_key": "should_be_rejected"}, session_token)
+            assert status == 403, (
+                f"{scope} scope 应拒绝未知 key，实际 {status}: {body}")
+            assert isinstance(body, dict)
+            assert "不允许的配置项" in body.get("error", ""), (
+                f"{scope} scope 错误消息应含'不允许的配置项'，实际: {body}")
+
+    def test_config_post_scope_whitelist_allows_known_key(self, webui_server):
+        """P1-1: 已知 key 可正常写入，白名单不应误拒合法 key。"""
+        server, base, session_token = webui_server
+        status, _, body = _http_post(
+            base, "/api/webui/config/openlist",
+            {"webdav_host": "http://10.0.0.1:5244"}, session_token)
+        assert status == 200, f"已知 key 应接受，实际 {status}: {body}"
 
     def test_config_post_invalid_json_400(self, webui_server):
         server, base, session_token = webui_server

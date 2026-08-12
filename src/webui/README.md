@@ -46,7 +46,7 @@ openlist_strm_bridge/
 
 ### 环境要求
 
-- Node.js >= 18
+- Node.js >= 20.19.0
 
 ### 安装依赖
 

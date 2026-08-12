@@ -114,3 +114,4 @@ if all_ok:
     print("结论: 所有登录场景分类正确，无未处理异常")
 else:
     print("结论: 存在失败场景，需检查")
+sys.exit(0 if all_ok else 1)

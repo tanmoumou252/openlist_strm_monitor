@@ -179,21 +179,24 @@ def _open_routes() -> str:
 
 
 def test_dialog_html_content_assert_regex():
-    """dialog.js 的 console.assert 正则应允许 <br>/<br/> 且拒绝其他 <xxx 标签。"""
+    """dialog.js 的运行时守卫应拒绝 XSS 标签（script/iframe/object/embed/img+事件/javascript:）。"""
     dialog_source = (WEBUI_ROOT / "modules" / "components" / "dialog.js").read_text(encoding="utf-8")
-    # 提取断言正则
-    assert "/<(?!br\\s*\\/?>)[a-z]/i" in dialog_source, \
-        "dialog.js 应包含允许 <br> 的负向前瞻正则"
-    # 验证正则行为：允许 <br> 和 <br/>
+    # 提取运行时守卫正则
+    assert "/<script|<iframe|<object|<embed|<img[^>]+\\bon\\w|javascript:/i" in dialog_source, \
+        "dialog.js 应包含运行时 XSS 守卫正则"
+    # 验证正则行为：拒绝 XSS 标签
     import re
-    pattern = re.compile(r'<(?!br\s*\/?>)[a-z]', re.IGNORECASE)
+    pattern = re.compile(r'<script|<iframe|<object|<embed|<img[^>]+\bon\w|javascript:', re.IGNORECASE)
+    assert pattern.search("<script>") is not None
+    assert pattern.search("<iframe>") is not None
+    assert pattern.search("<object>") is not None
+    assert pattern.search("<embed>") is not None
+    assert pattern.search('javascript:alert(1)') is not None
+    # 允许安全标签
     assert pattern.search("<br>") is None
     assert pattern.search("<br/>") is None
-    assert pattern.search("<BR>") is None
-    # 拒绝其他标签
-    assert pattern.search("<script>") is not None
-    assert pattern.search("<div>") is not None
-    assert pattern.search("<span>") is not None
+    assert pattern.search("<div>") is None
+    assert pattern.search("<span>") is None
 
 
 def test_shipped_docs_have_no_line_number_references():

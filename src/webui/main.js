@@ -1,12 +1,9 @@
 import './styles/main.css';
-import { syncTheme, initDropdowns, setRouterFn } from './modules/core/theme.js';
+import { syncTheme, initDropdowns } from './modules/core/theme.js';
 import { router, navigate } from './modules/core/router.js';
 import { initWallpaperReveal } from './modules/core/wallpaper.js';
 import { _loadUiConfig, setTmdbWebBase, _mainStatusTimer, setMainStatusTimer, stopUptimeTimer, startUptimeTimer, CONFIG, setHasPassword } from './modules/core/state.js';
 import { _checkApiStatus } from './modules/pages/openlist.js';
-
-// Inject router into theme module to avoid circular dependency
-setRouterFn(router);
 
 // Bind hashchange event (will be activated after auth init)
 let _hashchangeBound = false;
@@ -77,7 +74,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }, 0);
 
   // 检查管理员密码状态（必须在 router() 之前完成，确保 auth guard 正确）
-  // 引导 fetch 无超时 + fail-open
+  // 引导状态探测 + fail-open（fetch 带 AbortController 10s 超时）
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
 

@@ -20,6 +20,7 @@ class AAreaEventHandler(FileSystemEventHandler):
         # 健康信号 - 失败计数
         self._failure_count = 0
         self._last_failure_time = 0
+        self._health_lock = threading.Lock()
         self._HEALTH_THRESHOLD = 10  # 连续失败阈值
         self._async_semaphore = threading.BoundedSemaphore(self._MAX_ASYNC_THREADS)
 
@@ -48,7 +49,8 @@ class AAreaEventHandler(FileSystemEventHandler):
         try:
             func(*args)
             # 成功时重置失败计数
-            self._failure_count = 0
+            with self._health_lock:
+                self._failure_count = 0
             # 成功时恢复健康标志，防止健康状态永久锁定为 False
             if hasattr(self.app, '_watchers_healthy'):
                 self.app._watchers_healthy = True
@@ -56,15 +58,17 @@ class AAreaEventHandler(FileSystemEventHandler):
             # 吞异常是有意设计（抛出将杀死 watchdog 线程）
             # 加失败计数 + _watchers_healthy 健康信号。勿改为 re-raise 或移除 try/except。
             # 记录失败并监控健康状态
-            self._failure_count += 1
-            self._last_failure_time = time.time()
-            logging.exception("[A区事件处理异常] %s args=%s (连续失败: %d)", func.__name__, args, self._failure_count)
+            with self._health_lock:
+                self._failure_count += 1
+                self._last_failure_time = time.time()
+                failure_count = self._failure_count
+            logging.exception("[A区事件处理异常] %s args=%s (连续失败: %d)", func.__name__, args, failure_count)
             
             # 超过阈值时发出警告并标记健康状态
-            if self._failure_count >= self._HEALTH_THRESHOLD:
+            if failure_count >= self._HEALTH_THRESHOLD:
                 logging.warning(
                     "[A区] 连续失败 %d 次，可能存在系统性问题，请检查日志",
-                    self._failure_count
+                    failure_count
                 )
                 # 此标志由 dashboard 状态 API 消费，勿当死代码删除
                 if hasattr(self.app, '_watchers_healthy'):
@@ -84,6 +88,13 @@ class AAreaEventHandler(FileSystemEventHandler):
         if not event.is_directory:
             self._run_async(self.app.handle_a_deleted, event.src_path)
 
+    def on_moved(self, event) -> None:
+        if event.is_directory:
+            return
+        # A 区移动：源路径视为删除，目标路径视为新增
+        self._run_async(self.app.handle_a_deleted, event.src_path)
+        self._run_async(self.app.handle_a_created_or_modified, event.dest_path)
+
 class BAreaEventHandler(FileSystemEventHandler):
     # 事件处理线程并发上限（同 A 区，见 AAreaEventHandler._MAX_ASYNC_THREADS）
     _MAX_ASYNC_THREADS = 8
@@ -93,6 +104,7 @@ class BAreaEventHandler(FileSystemEventHandler):
         # 健康信号 - 失败计数
         self._failure_count = 0
         self._last_failure_time = 0
+        self._health_lock = threading.Lock()
         self._HEALTH_THRESHOLD = 10  # 连续失败阈值
         self._async_semaphore = threading.BoundedSemaphore(self._MAX_ASYNC_THREADS)
 
@@ -121,21 +133,24 @@ class BAreaEventHandler(FileSystemEventHandler):
         try:
             func(*args)
             # 成功时重置失败计数
-            self._failure_count = 0
+            with self._health_lock:
+                self._failure_count = 0
             # 成功时恢复健康标志，防止健康状态永久锁定为 False
             if hasattr(self.app, '_watchers_healthy'):
                 self.app._watchers_healthy = True
         except Exception:
             # 记录失败并监控健康状态
-            self._failure_count += 1
-            self._last_failure_time = time.time()
-            logging.exception("[B区事件处理异常] %s args=%s (连续失败: %d)", func.__name__, args, self._failure_count)
+            with self._health_lock:
+                self._failure_count += 1
+                self._last_failure_time = time.time()
+                failure_count = self._failure_count
+            logging.exception("[B区事件处理异常] %s args=%s (连续失败: %d)", func.__name__, args, failure_count)
             
             # 超过阈值时发出警告并标记健康状态
-            if self._failure_count >= self._HEALTH_THRESHOLD:
+            if failure_count >= self._HEALTH_THRESHOLD:
                 logging.warning(
                     "[B区] 连续失败 %d 次，可能存在系统性问题，请检查日志",
-                    self._failure_count
+                    failure_count
                 )
                 # 此标志由 dashboard 状态 API 消费，勿当死代码删除
                 if hasattr(self.app, '_watchers_healthy'):
@@ -153,8 +168,17 @@ class BAreaEventHandler(FileSystemEventHandler):
 
     def on_deleted(self, event) -> None:
         # 移除: if getattr(self.app, '_b_watcher_paused', False): return
-        if not event.is_directory and Path(event.src_path).suffix.lower() == ".strm":
+        if event.is_directory:
+            return
+        path = Path(event.src_path)
+        suffix = path.suffix.lower()
+        if suffix == ".strm":
             self._run_async(self.app.handle_b_deleted, event.src_path)
+        # B4: 隔离文件（.duplicate / .invalid）被删除时触发对应的 DB 行清理
+        elif suffix in (".duplicate", ".invalid"):
+            # 去掉隔离后缀后得到原始路径，再匹配 DB 记录
+            orig_path = str(path.with_suffix(""))
+            self._run_async(self.app.handle_b_deleted, orig_path)
 
     def on_moved(self, event) -> None:
         # 移除: if getattr(self.app, '_b_watcher_paused', False): return

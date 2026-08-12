@@ -88,12 +88,27 @@ export async function renderConfig(el, params) {
   if (sub === 'openlist') _renderOpenListConfig(cfg).catch(e => console.warn('[Config] 渲染 OpenList 配置子页失败:', e));
 }
 
+const _configHelpTexts = {
+  fuzzy_threshold: '模糊匹配相似度阈值（0.0~1.0）。越高要求越严格，建议 0.60。',
+  anime_min_ep_ratio: '番剧最少集数占总集数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。',
+  anime_max_season_diff: '番剧最大允许季数差。超过此差值视为未收录，建议 1。当前版本未接入匹配逻辑（保留待用）。',
+  anime_min_season_ratio: '番剧最少季数占总季数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。当前版本未接入匹配逻辑（保留待用）。',
+  watchlist_cache_ttl: 'TMDB 缓存有效期（秒）。过期后重新从 TMDB 拉取数据，建议 604800（7 天）。',
+};
+
+function _configHelpIcon(key) {
+  const text = _configHelpTexts[key];
+  if (!text) return '';
+  const safeText = esc(text);
+  return `<span class="ol-help-icon" data-tooltip="${safeText}" aria-label="帮助">${icon('info')}</span>`;
+}
+
 function _renderConfigContent(cfg) {
   function section(titleIcon, title, rowsHtml) {
     return `<div class="config-section"><h3>${icon(titleIcon)} ${esc(title)}</h3>${rowsHtml}</div>`;
   }
-  function field(id, label, value, placeholder, type = 'text', persistLabel = false, readOnly = false, htmlLabel = '', helperText = '') {
-    return createField(id, label, value, { placeholder, type, persistLabel, readOnly, htmlLabel, helperText });
+  function field(id, label, value, placeholder, type = 'text', persistLabel = false, readOnly = false, htmlLabel = '', helpIcon = '', helperText = '') {
+    return createField(id, label, value, { placeholder, type, persistLabel, readOnly, htmlLabel, helpIcon, helperText });
   }
 
   const presetLangs = ['zh-CN', 'en-US', 'ja-JP'];
@@ -138,7 +153,7 @@ const tokenValue = '';  // 不预填截断预览，避免误保存覆盖真实 t
     </div>`;
 
   const tmdbWatchlistEnabled = cfg.tmdb_watchlist_enabled !== false && cfg.tmdb_watchlist_enabled !== 'false';
-  html += `<div class="config-section tmdb-section"><h3>${icon('tmdb')} TMDB <span style="font-size:calc(var(--font-base) - 1px);color:var(--text-muted);font-weight:400">(保存后即时生效，不需重启)</span></h3>`;
+  html += `<div class="config-section tmdb-section"><h3>${icon('tmdb')} TMDB <span class="ol-help-icon" data-tooltip="保存后即时生效，不需重启" aria-label="帮助">${icon('info')}</span></h3>`;
   html += `<div class="field-grid">`;
   html += `<div class="floating-field" data-field="cfg-tmdb-status">
     <div class="field-control">
@@ -160,11 +175,11 @@ html += field('cfg-tmdb-token', 'Access Token', tokenValue, '输入 TMDB Access 
   html += langField;
   html += field('cfg-tmdb-host', '反代 Host', hostValue, '留空则使用官方 API');
   html += field('cfg-tmdb-proxy', 'HTTP 代理', proxyValue, '例: http://127.0.0.1:7890', 'text', true);
-  html += field('cfg-tmdb-fuzzy', '模糊匹配阈值', cfg.tmdb_fuzzy_threshold || '0.60', '0.0~1.0', 'text', false, false, '', '模糊匹配相似度阈值（0.0~1.0）。越高要求越严格，建议 0.60。');
-    html += field('cfg-tmdb-ep-ratio', '番剧最少集数比例', cfg.tmdb_anime_min_ep_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少集数占总集数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。');
-    html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '0.3', '', 'text', false, false, '', '番剧最大允许季数差。超过此差值视为未收录，建议 1。当前版本未接入匹配逻辑（保留待用）。');
-    html += field('cfg-tmdb-min-season-ratio', '番剧最少季数比例', cfg.tmdb_anime_min_season_ratio || '0.30', '0.0~1.0', 'text', false, false, '', '番剧最少季数占总季数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。当前版本未接入匹配逻辑（保留待用）。');
-    html += field('cfg-tmdb-cache-ttl', '缓存 TTL（秒）', cfg.tmdb_cache_ttl || '604800', '', 'text', false, false, '', 'TMDB 缓存有效期（秒）。过期后重新从 TMDB 拉取数据，建议 604800（7 天）。');
+  html += field('cfg-tmdb-fuzzy', '模糊匹配阈值', cfg.tmdb_fuzzy_threshold || '0.60', '0.0~1.0', 'text', false, false, '', _configHelpIcon('fuzzy_threshold'));
+    html += field('cfg-tmdb-ep-ratio', '番剧最少集数比例', cfg.tmdb_anime_min_ep_ratio || '0.30', '0.0~1.0', 'text', false, false, '', _configHelpIcon('anime_min_ep_ratio'));
+    html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '0.3', '', 'text', false, false, '', _configHelpIcon('anime_max_season_diff'));
+    html += field('cfg-tmdb-min-season-ratio', '番剧最少季数比例', cfg.tmdb_anime_min_season_ratio || '0.30', '0.0~1.0', 'text', false, false, '', _configHelpIcon('anime_min_season_ratio'));
+    html += field('cfg-tmdb-cache-ttl', '缓存 TTL（秒）', cfg.tmdb_cache_ttl || '604800', '', 'text', false, false, '', _configHelpIcon('watchlist_cache_ttl'));
     html += `</div>`;
   html += `<div class="config-form-actions"><button class="toolbar-btn primary" id="cfg-tmdb-save">${icon('save')} 保存 TMDB 配置</button><button class="toolbar-btn" id="cfg-tmdb-refresh"> 刷新待看列表</button><button class="toolbar-btn" id="cfg-tmdb-match-refresh" style="background:color-mix(in srgb,var(--primary) 15%,var(--bg-card));border-color:color-mix(in srgb,var(--primary) 30%,var(--border-color))"> 刷新收录状态</button><button class="toolbar-btn secondary" id="cfg-tmdb-restart" style="color:#e37400;border-color:#e37400">${icon('refresh')} 重启 WebUI</button></div>`;
   html += `<div class="toggle-row"><span>关闭全屏 TMDB 缓存过期提醒</span><div class="segmented-switch" data-key="tmdb_cache_never_remind"><button type="button" data-value="off" class="active">否</button><button type="button" data-value="on">是</button></div></div>`;

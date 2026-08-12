@@ -58,7 +58,7 @@ async function renderAreaList(el, area, params) {
   const tabsHtml = kinds.map(k => {
     const active = (kind || '') === k.v ? ' active' : '';
     // tab href 保留搜索词，点击 tab 切分类时 q 不丢失
-    const href = `#area_${area}?kind=${k.v}&sort=${sort}&order=${order}&page_size=${pageSize}${q ? '&q=' + encodeURIComponent(q) : ''}`;
+    const href = `#area_${area}?kind=${k.v}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}&page_size=${pageSize}${q ? '&q=' + encodeURIComponent(q) : ''}`;
     // "全部"tab 计数用 d.total（跨分类去重总数）；后端 kind_counts 无 all 键，直接读会恒为 0
     const count = k.v === 'all' ? (d.total || 0) : ((d.kind_counts || {})[k.v] || 0);
     return `<button class="category-tab${active}" data-kind-href="${href}">${icon(k.i)} ${k.l} <span class="count">${count}</span></button>`;
@@ -89,11 +89,11 @@ async function renderAreaList(el, area, params) {
   if (d.total_pages > 1) {
     pagerHtml = '<div class="pager">';
     if (d.page > 1) {
-      pagerHtml += `<a href="#area_${area}?page=${d.page - 1}&sort=${sort}&order=${order}&page_size=${d.page_size}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">${icon('chevron_l')} 上一页</a>`;
+      pagerHtml += `<a href="#area_${area}?page=${d.page - 1}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}&page_size=${d.page_size}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">${icon('chevron_l')} 上一页</a>`;
     }
     pagerHtml += `<span class="current">第 ${d.page} / ${d.total_pages} 页 (共 ${d.total} 项)</span>`;
     if (d.page < d.total_pages) {
-      pagerHtml += `<a href="#area_${area}?page=${d.page + 1}&sort=${sort}&order=${order}&page_size=${d.page_size}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">下一页 ${icon('chevron_r')}</a>`;
+      pagerHtml += `<a href="#area_${area}?page=${d.page + 1}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}&page_size=${d.page_size}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">下一页 ${icon('chevron_r')}</a>`;
     }
     pagerHtml += '</div>';
   }
@@ -221,9 +221,9 @@ async function renderAreaDetail(el, area, params) {
       const indexMetadata = mapping.index_metadata;
       
       // Mapping 分区标题
-      html += `<div style="margin:16px 0 8px;padding:12px;background:var(--bg-surface-variant);border-radius:8px;border:1px solid var(--border-subtle)">`;
+      html += `<div style="margin:16px 0 8px;padding:12px;background:var(--bg-subtle);border-radius:8px;border:1px solid var(--surface-border)">`;
       html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">`;
-      html += `<span style="font-weight:600;color:var(--text-primary)">${mappingId === 'unknown' ? '未知映射' : '映射 ' + esc(mappingId)}</span>`;
+      html += `<span style="font-weight:600;color:var(--text-main)">${mappingId === 'unknown' ? '未知映射' : '映射 ' + esc(mappingId)}</span>`;
       if (indexMetadata && indexMetadata.mapping_index_generation) {
         html += `<span style="font-size:11px;color:var(--text-muted)">索引 #${indexMetadata.mapping_index_generation} · ${indexMetadata.mapping_index_generation_at ? formatTimestamp(indexMetadata.mapping_index_generation_at) : '未索引'}</span>`;
       }
@@ -250,11 +250,11 @@ async function renderAreaDetail(el, area, params) {
       if (mapping.total_pages > 1) {
         html += '<div class="pager">';
         if (mapping.page > 1) {
-          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">${icon('chevron_l')} 上一页</a>`;
+          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page - 1}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">${icon('chevron_l')} 上一页</a>`;
         }
         html += `<span class="current">第 ${mapping.page} / ${mapping.total_pages} 页</span>`;
         if (mapping.page < mapping.total_pages) {
-          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">下一页 ${icon('chevron_r')}</a>`;
+          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page + 1}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">下一页 ${icon('chevron_r')}</a>`;
         }
         // 请求页码超出该 mapping 记录数被 clamp 时，明确提示而非静默截断
         if (mapping.clamped) {
@@ -274,7 +274,7 @@ async function renderAreaDetail(el, area, params) {
     
     // 索引元数据（单 mapping）
     if (indexMetadata && indexMetadata.mapping_index_generation) {
-      html += `<div style="margin:8px 0;padding:8px 12px;background:var(--bg-surface-variant);border-radius:6px;font-size:12px;color:var(--text-secondary)">`;
+      html += `<div style="margin:8px 0;padding:8px 12px;background:var(--bg-subtle);border-radius:6px;font-size:12px;color:var(--text-muted)">`;
       html += `索引代次 #${indexMetadata.mapping_index_generation} · `;
       html += `最近索引: ${indexMetadata.mapping_index_generation_at ? formatTimestamp(indexMetadata.mapping_index_generation_at) : '未索引'}`;
       html += `</div>`;
@@ -298,11 +298,11 @@ async function renderAreaDetail(el, area, params) {
     if (d.total_pages > 1) {
       html += '<div class="pager">';
       if (d.page > 1) {
-        html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">${icon('chevron_l')} 上一页</a>`;
+        html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page - 1}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">${icon('chevron_l')} 上一页</a>`;
       }
       html += `<span class="current">第 ${d.page} / ${d.total_pages} 页</span>`;
       if (d.page < d.total_pages) {
-        html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">下一页 ${icon('chevron_r')}</a>`;
+        html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page + 1}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">下一页 ${icon('chevron_r')}</a>`;
       }
       html += '</div>';
     }

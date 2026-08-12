@@ -196,7 +196,7 @@ class TestOnboardingFlow:
         server, base, session_token = webui_server
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert status == 200
-        assert resp["onboarding_completed"] is False
+        assert resp["onboarding_completed"] == "0"
         assert resp["view_ab_completed"] is False
         assert resp["tmdb_refresh_completed"] is False
         assert resp["tmdb_match_completed"] is False
@@ -355,7 +355,7 @@ class TestCompleteJourney:
         # 2. 查看引导状态
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert status == 200
-        assert resp["onboarding_completed"] is False
+        assert resp["onboarding_completed"] == "0"
 
         # 3. 完成所有新增步骤
         for step in ["view_ab", "tmdb_refresh", "tmdb_match"]:
@@ -376,7 +376,7 @@ class TestCompleteJourney:
 
         # 6. 验证引导已完成
         status, _, resp = _http_get(base, "/api/config/status", session_token)
-        assert resp["onboarding_completed"] is True
+        assert resp["onboarding_completed"] == "1"
 
 
 class TestOnboardingCompleteViaConfig:
@@ -393,7 +393,7 @@ class TestOnboardingCompleteViaConfig:
         # 初始未完成
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert status == 200
-        assert resp["onboarding_completed"] is False
+        assert resp["onboarding_completed"] == "0"
 
         # 走前端 skip/complete 共用路径
         status, _, resp = _http_post(
@@ -404,7 +404,7 @@ class TestOnboardingCompleteViaConfig:
         # 标记完成后 status 应为 true（前端据此隐藏引导卡片）
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert status == 200
-        assert resp["onboarding_completed"] is True
+        assert resp["onboarding_completed"] == "1"
 
     def test_onboarding_reset(self, webui_server):
         """POST /api/webui/config/ui {onboarding_completed:'0'} → 状态复位为 false。"""
@@ -416,7 +416,7 @@ class TestOnboardingCompleteViaConfig:
             {"onboarding_completed": "1"}, session_token)
         assert status == 200
         status, _, resp = _http_get(base, "/api/config/status", session_token)
-        assert resp["onboarding_completed"] is True
+        assert resp["onboarding_completed"] == "1"
 
         # 复位（前端「重新开始引导」）
         status, _, resp = _http_post(
@@ -426,7 +426,7 @@ class TestOnboardingCompleteViaConfig:
 
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert status == 200
-        assert resp["onboarding_completed"] is False
+        assert resp["onboarding_completed"] == "0"
 
 
 # ============================================================

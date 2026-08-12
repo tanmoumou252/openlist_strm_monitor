@@ -182,7 +182,6 @@ cython_debug/
 .cursorindexingignore
 *.db
 bridge.db
-*.code-workspace
 python_embed/
 *.db-wal
 *.db-shm

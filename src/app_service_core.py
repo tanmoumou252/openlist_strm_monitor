@@ -177,14 +177,15 @@ class StrmStorageManager:
 class AppService:
     """应用核心服务。
 
-    锁获取顺序（必须严格遵守，避免死锁）：
+锁获取顺序（必须严格遵守，避免死锁）：
       1. _path_locks_lock（获取 path_lock 时）
       2. _path_locks[path]（单个路径操作；on_moved 取双锁时按 key 全序）
-      3. _dav_write_lock（WebDAV 写操作）
-      4. _cleanup_lock（延迟清理定时器管理）
-      5. _restoring_lock（恢复标记 / 引擎内部删除标记）
-      6. _lineage_log_lock（日志记录）
-    规则：只能按编号从小到大获取，释放时反向；禁止同时持有非相邻的锁。
+      3. _fingerprint_locks[fp]（按 fingerprint 串行化 A→B 处理 / B 删除防竞态）
+      4. _dav_write_lock（WebDAV 写操作）
+      5. _cleanup_lock（延迟清理定时器管理）
+      6. _restoring_lock（恢复标记 / 引擎内部删除标记）
+      7. _lineage_log_lock（日志记录）
+     规则：只能按编号从小到大获取，释放时反向；禁止同时持有非相邻的锁。
     （注：原 _b_file_lock 已移除——B 区移动/修复改由 get_path_lock 按路径串行化。）
     """
 
@@ -759,6 +760,19 @@ class AppService:
             b_root = normalize_local_root(mapping.b_root)
             if any(a_root == old or b_root == old for old in seen_a + seen_b):
                 return {"status": "fail_safe_active", "reason": "mapping 根路径重复"}
+            # B1: 嵌套根路径校验——防止 A 或 B 根互相嵌套导致路径边界模糊
+            a_root_str = str(a_root)
+            b_root_str = str(b_root)
+            for old_a in seen_a:
+                old_a_str = str(old_a)
+                if (a_root_str.startswith(old_a_str + os.sep) or old_a_str.startswith(a_root_str + os.sep)
+                        or b_root_str.startswith(str(old_a) + os.sep) or str(old_a).startswith(b_root_str + os.sep)):
+                    return {"status": "fail_safe_active", "reason": f"mapping 根路径嵌套: {a_root} 与 {old_a}"}
+            for old_b in seen_b:
+                old_b_str = str(old_b)
+                if (a_root_str.startswith(old_b_str + os.sep) or old_b_str.startswith(a_root_str + os.sep)
+                        or b_root_str.startswith(old_b_str + os.sep) or old_b_str.startswith(b_root_str + os.sep)):
+                    return {"status": "fail_safe_active", "reason": f"mapping 根路径嵌套: {b_root} 与 {old_b}"}
             seen_a.append(a_root)
             seen_b.append(b_root)
         return {"status": "ready", "reason": "mapping 配置有效"}
@@ -2410,6 +2424,12 @@ class AppService:
             return (score, 0 if path == prefer_path else 1)
         valid_files.sort(key=_sort_key)
         keep = valid_files[0]
+        # 已知取舍：预标阶段一次性把所有兄弟实例置为 duplicate（而非逐个处理时
+        # 再标记），换取"物理隔离失败时逐个恢复 valid"的可重试语义。副作用：若
+        # 下方循环中某次隔离异常 raise（如回滚也失败），该兄弟之后的未处理实例
+        # 会保持 DB=duplicate / 磁盘=.strm 的分叉，且 valid_files 过滤器（status=
+        # valid）使本函数永不重试它们。触发窗口极窄（磁盘满/杀毒锁文件叠加），
+        # 权衡后接受，登记于 docs/否决方案.md B3 子注。
         duplicate_paths = self.db.mark_other_b_instances_duplicate(
             fingerprint, keep, mapping_id)
         for dup_path in duplicate_paths:
@@ -2621,11 +2641,12 @@ class AppService:
             logging.warning("[B区越界恢复] C区迁移失败，回退到直接删除: %s", e)
         
         # C区迁移失败时，回退到直接删除（原逻辑）
+        # 注意：先确认物理删除成功后再清理 DB 记录，防止 DB/磁盘不一致
         deleted = self._force_delete_and_verify(local)
-        self.db.delete_b_by_local(local_path)
         if not deleted:
             logging.error("[B区越界恢复] 无法删除越界文件，跳过恢复: %s", local_path)
             return
+        self.db.delete_b_by_local(local_path)
         logging.info("[B区越界恢复] 已删除越界文件: %s", local_path)
         identity = self.db.get_identity_by_fingerprint(fingerprint)
         correct_b_path: str | None = None
@@ -2924,6 +2945,19 @@ class AppService:
             row = self.db.get_b_by_local_full(str(local))
             if not row:
                 return
+            fingerprint = row.fingerprint
+            with self._restoring_lock:
+                # 恢复操作标记：程序自身正在恢复此指纹的文件，跳过记录清理
+                if fingerprint in self._restoring_markers:
+                    logging.info("[B区重命名] 检测到程序恢复操作，跳过记录清理: %s", local_path)
+                    return
+                # 引擎内部删除标记：隔离/去重/迁移等程序自身操作，仅清理 DB 记录
+                if fingerprint in self._engine_internal_markers:
+                    logging.info(
+                        "[B区重命名] 检测到程序内部删除（隔离/去重/迁移），仅清理 DB 记录: %s",
+                        local_path)
+                    self.db.delete_b_by_local(str(local))
+                    return
             self.db.delete_b_by_local(str(local))
             logging.info("[B区重命名] .strm 重命名为非 .strm，已从数据库移除记录: %s", local_path)
 
@@ -2967,15 +3001,35 @@ class AppService:
                     local_path)
                 self.db.delete_b_by_local(str(local))
                 return
-            # 云端 MOVE/DELETE 成功才联动清理；失败保留 A 区/A 记录
-            if webdav_path:
-                ok = self._execute_webdav_deletion(webdav_path, parent_webdav_path)
-                if not ok:
-                    logging.warning(
-                        "[B区删除联动] 云端删除失败，保留 A 区记录以便重试: %s",
-                        webdav_path)
+            # 获取指纹锁，防止 handle_b_created_or_modified 在检查和删除之间
+            # 创建同 fingerprint 的新 B 实例导致 TOCTOU 竞态。
+            fp_lock = self.get_fingerprint_lock(fingerprint)
+            with fp_lock:
+                # 二次确认：在指纹锁内重新检查 B 区是否有同指纹实例
+                if fingerprint and self.db.has_other_b_instance(
+                        mapping_id, fingerprint, str(local)):
+                    logging.info(
+                        "[B区删除联动] 指纹锁内二次确认：B区中仍存在同指纹文件，跳过WebDAV删除: %s",
+                        local_path)
+                    self.db.delete_b_by_local(str(local))
                     return
-                self._delete_a_file_by_webdav(webdav_path)
+                if fingerprint and self._check_fingerprint_exists_in_b(
+                        fingerprint,
+                        exclude_path=str(local), mapping_id=mapping_id):
+                    logging.info(
+                        "[B区删除联动] 指纹锁内二次确认：B区文件系统中仍存在同指纹文件，跳过WebDAV删除: %s",
+                        local_path)
+                    self.db.delete_b_by_local(str(local))
+                    return
+                # 云端 MOVE/DELETE 成功才联动清理；失败保留 A 区/A 记录
+                if webdav_path:
+                    ok = self._execute_webdav_deletion(webdav_path, parent_webdav_path)
+                    if not ok:
+                        logging.warning(
+                            "[B区删除联动] 云端删除失败，保留 A 区记录以便重试: %s",
+                            webdav_path)
+                        return
+                    self._delete_a_file_by_webdav(webdav_path)
             self.db.delete_b_by_local(str(local))
             if fingerprint:
                 self.refresh_identity_current_b_path(fingerprint, mapping_id)
@@ -3299,6 +3353,8 @@ class AppService:
         ]
         if not valid_instances:
             self.db.delete_identity_projection(fingerprint, mapping_id)
+            # 无可见实例时显式清空陈旧的 current_b_path，防止 identity 指向已不存在的文件
+            self.db.update_identity_b_path(fingerprint, None)
             return
         valid_instances.sort(key=lambda row: self._b_file_score(row.local_path))
         best = valid_instances[0]
@@ -3331,6 +3387,9 @@ class AppService:
                     break
             if physical_media_folder_name is None and local_rel.parts:
                 physical_media_folder_name = local_rel.parts[-1]
+                # 无 Season 层时取父目录名（与云端 cloud_parts[-2] 口径一致）
+                if len(local_rel.parts) >= 2:
+                    physical_media_folder_name = local_rel.parts[-2]
         except Exception as e:
             logging.debug("[边界映射] %s: %s", local, e)
             return
@@ -3394,8 +3453,10 @@ class AppService:
         self.db.delete_b_by_local(str(local))
         if local.exists():
             safe_remove_file(local)
-            if fingerprint and mapping_id:
-                self.refresh_identity_current_b_path(fingerprint, mapping_id)
+        # 无论物理文件是否仍在磁盘，只要指纹与映射存在即刷新身份投影，
+        # 避免文件已被外部删除时 b_identity_projection 残留过期 B 路径。
+        if fingerprint and mapping_id:
+            self.refresh_identity_current_b_path(fingerprint, mapping_id)
         if webdav_path:
             self.db.set_ghost_protection(
                 webdav_path,

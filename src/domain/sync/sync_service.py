@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from config import AppConfig
 
 from utils import read_strm_webdav_path, safe_remove_file, webdav_parent, make_strm_fingerprint
+from utils.file_utils import chunk_list
 
 class SyncService:
     """A->B 同步服务"""
@@ -146,7 +147,7 @@ class SyncService:
                 # 刷新当前 a_root 的剩余记录
                 flush_batch()
         except BaseException:
-            # P2-4: 捕获 BaseException（含 KeyboardInterrupt/SystemExit），
+            # 捕获 BaseException（含 KeyboardInterrupt/SystemExit），
             # 确保 __exit__ 收到正确的异常信息并 rollback bulk_connection，
             # 与 __enter__ 的 except BaseException 语义一致。
             _exc_info = sys.exc_info()
@@ -183,15 +184,18 @@ class SyncService:
             return 0
         now = time.time()
 
-        # 预读现有记录
+        # 预读现有记录（分片处理避免 SQL 变量超限）
         local_paths = [r[0] for r in records]
-        placeholders = ','.join('?' * len(local_paths))
-        existing_rows = conn.execute(
-            f"SELECT local_path, webdav_path, parent_webdav_path "
-            f"FROM a_strm_files WHERE local_path IN ({placeholders})",
-            local_paths,
-        ).fetchall()
-        existing_map = {row[0]: (row[1], row[2]) for row in existing_rows}
+        existing_map = {}
+        for chunk in chunk_list(local_paths, 900):
+            placeholders = ','.join('?' * len(chunk))
+            existing_rows = conn.execute(
+                f"SELECT local_path, webdav_path, parent_webdav_path "
+                f"FROM a_strm_files WHERE local_path IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for row in existing_rows:
+                existing_map[row[0]] = (row[1], row[2])
 
         # 分类：新增 vs 更新
         to_insert = []
@@ -759,7 +763,7 @@ class SyncService:
                 "SELECT rowid FROM b_strm_files WHERE local_path = ?", (local_path,)
             ).fetchone()
             if new_row:
-                # P2-2: 先清理可能残留的同 rowid 孤儿 FTS 行（与 database.py upsert_b 一致）
+                # 先清理可能残留的同 rowid 孤儿 FTS 行（与 database.py upsert_b 一致）
                 conn.execute(
                     "DELETE FROM b_strm_files_fts WHERE rowid = ?", (new_row[0],))
                 conn.execute(

@@ -117,7 +117,7 @@ Canvas 水墨鼠标擦除效果（`destination-out` 合成模式）。5 种笔�
 
 - IP 白名单（仅局域网）— `_is_lan_ip()` 为后端 `routes.py` 中定义的工具函数，`server.py` 导入并复用，前端不涉及。
 
-免 Token 路径：`/api/config`、`/api/webui/config/ui`、`/api/tmdb/avatar`、`/api/tmdb/poster`、`/api/openlist/status`、`/api/openlist/ping`、`/api/admin/status`、`/api/login`、静态资源
+免 Token 路径：`/api/config`、`/api/webui/config/ui`、`/api/tmdb/avatar`、`/api/tmdb/poster`、`/api/openlist/status`、`/api/openlist/ping`、`/api/admin/status`、`/api/login`、`/api/page`、`/login`、静态资源
 
 ## 仪表盘
 

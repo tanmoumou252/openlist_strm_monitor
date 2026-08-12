@@ -17,6 +17,12 @@ CN_NUMBERS = {
 }
 
 
+def chunk_list(lst: list, chunk_size: int = 900):
+    """通用列表分片生成器，用于安全处理 SQL IN (...) 参数上限。"""
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i + chunk_size]
+
+
 def cn_to_int(s: str) -> int | None:
     """将中文数字转换为整数"""
     s = s.strip()
@@ -93,25 +99,6 @@ def remove_empty_dirs(root_folder: str | Path) -> None:
             directory.rmdir()
         except OSError:
             continue
-
-
-def normalize_path(path: str | Path) -> str:
-    """规范化路径：解析为绝对路径，去除尾随斜杠，Windows 下小写。
-
-    Args:
-        path: 输入路径
-
-    Returns:
-        规范化后的路径字符串
-    """
-    p = Path(path).resolve()
-    result = str(p)
-    if os.name == "nt":
-        result = result.lower()
-    # 去除尾随斜杠（除了根目录）
-    if len(result) > 3 and result.endswith('/'):
-        result = result[:-1]
-    return result
 
 
 def local_relative(root: str | Path, target: str | Path) -> Path:

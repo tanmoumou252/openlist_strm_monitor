@@ -141,8 +141,6 @@ class TestMigrateConfigToDb:
         # 验证刷新配置
         assert wdb.get_config("openlist", "refresh_enabled") == "true"
         assert wdb.get_config("openlist", "refresh_interval_minutes") == "10"
-        assert wdb.get_config("openlist", "refresh_log_level") == "INFO"
-
         # 验证日志配置
         assert wdb.get_config("openlist", "log_level") == "INFO"
         assert wdb.get_config("openlist", "log_max_size_mb") == "10"

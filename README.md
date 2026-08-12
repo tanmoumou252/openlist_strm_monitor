@@ -228,6 +228,8 @@ pip install -r src/tests/requirements-dev.txt
 - `pytest-cov` (测试覆盖率)
 - `flask` (Mock 服务器，仅 `test_tmdb_api.py` 使用)
 
+> **前端构建依赖**：WebUI 使用 Vite 8.x 构建，需 **Node.js >= 20.19.0**（见 `src/webui/package.json:7`）。若只需运行已构建的 `dist/` 则无需 Node.js；仅修改前端源码后需执行 `cd src/webui && npx vite build` 时需 Node.js。
+
 ### 2. 运行程序
 
 ```bash

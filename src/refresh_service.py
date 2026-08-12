@@ -58,7 +58,7 @@ class RefreshService:
         self._consecutive_failures: int = 0
         self._last_error_summary: str = ""
         self._last_full_audit_at = self._load_last_full_audit_at()
-        # A'.2: 全量审计互斥锁（手动 vs 周期不能并发）
+        # 全量审计互斥锁（手动 vs 周期不能并发）
         self._full_audit_lock = threading.Lock()
         self._full_audit_in_progress = False
 
@@ -69,7 +69,7 @@ class RefreshService:
         except (AttributeError, TypeError, ValueError, OSError):
             return 0.0
 
-    # 公开只读属性：供 WebUI 状态面板读取，避免跨模块访问私有属性（P1-5）
+    # 公开只读属性：供 WebUI 状态面板读取，避免跨模块访问私有属性
     @property
     def consecutive_failures(self) -> int:
         return self._consecutive_failures
@@ -147,7 +147,7 @@ class RefreshService:
                 self._full_audit_in_progress = False
 
     def run_full_audit_now(self) -> dict:
-        """A'.1: 手动触发全量审计的薄封装。
+        """手动触发全量审计的薄封装。
 
         完整镜像 _maybe_run_full_audit 的后置状态：
         initial_scan_a → scan_a_to_b_full_sync → complete_index_generation
@@ -196,8 +196,10 @@ class RefreshService:
                 logging.warning("[手动审计] 保存全量审计时间失败")
                 db_write_ok = False
             # DB 全部写入成功后，才推进内存时间戳
+            # 与 _maybe_run_full_audit 保持锁同步，防止并发读/写撕裂
             if db_write_ok:
-                self._last_full_audit_at = now
+                with self._full_audit_lock:
+                    self._last_full_audit_at = now
             meta = self.app.db.get_index_metadata()
             return {
                 "ok": db_write_ok,
@@ -283,6 +285,12 @@ class RefreshService:
         # SQLite 瞬时 readonly（Windows 杀毒锁文件）等属于可恢复错误。
         # 熔断器：前 _CIRCUIT_BREAKER_THRESHOLD 次连续失败打全栈，
         # 之后降级为单行 WARNING 避免日志洪泛。
+        # 首轮同样受 refresh.enabled 约束：start()/reconfigure() 虽在启动前检查，
+        # 但存在「检查后、线程启动前」被改禁用的竞态窗口，此处二次拦截避免
+        # 禁用状态下仍执行一轮完整刷新。
+        if not self.app.config.refresh.enabled:
+            logging.info("[主动刷新] 已关闭，首轮刷新跳过")
+            return
         self._run_cycle_with_breaker()
 
         while self._running:
@@ -327,6 +335,18 @@ class RefreshService:
         logging.info("[主动刷新] 开始执行")
 
         full_audit_ran = self._maybe_run_full_audit()
+        # A8: 全量审计失败时更新健康状态，使 _run_cycle_with_breaker 可感知审计错误
+        if not full_audit_ran and self._full_audit_interval_seconds() > 0:
+            # 检查是否不是"未到周期"导致的 False（非正常跳过）
+            now = time.time()
+            with self._full_audit_lock:
+                interval = self._full_audit_interval_seconds()
+                if interval > 0 and now - self._last_full_audit_at >= interval:
+                    # 审计应在本次周期执行但返回了 False → 视为审计失败
+                    self._consecutive_failures += 1
+                    self._last_error_summary = "全量审计执行失败"
+                    logging.warning("[主动刷新] 全量审计返回失败，已更新健康状态")
+
         if not self.app.config.refresh_paths:
             logging.info("[主动刷新] refresh_paths 为空，本轮仅保留 watchdog 和删除联动")
             return

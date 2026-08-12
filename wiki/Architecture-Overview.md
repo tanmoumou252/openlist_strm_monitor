@@ -102,7 +102,7 @@ JWT 认证的 OpenList Admin API 客户端：
 3. **config.toml** — 静态文件配置
 4. **默认值** — dataclass 定义中的硬编码默认值
 
-首次启动时，`config.toml` 内容会被一次迁移到数据库（`config.py:migrate_config_to_db`），之后 DB 成为运行时配置的权威来源。
+首次启动时，`config.toml` 内容会被一次迁移到数据库（`config.py:migrate_config_to_db`），之后 DB 成为运行时配置的权威来源。注意：迁移仅在 `main.py` 入口执行；直接启动 `server.py` 不会触发迁移。
 
 ## 关键设计模式
 

@@ -21,6 +21,7 @@ import argparse
 import logging
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 
@@ -85,8 +86,7 @@ def main(argv: list[str] | None = None) -> int:
             print("dry-run：未写库。加 --apply 以恢复 status=valid。")
             return 0
 
-        now_import = __import__("time")
-        now = now_import.time()
+        now = time.time()
         for row in rows:
             conn.execute(
                 """

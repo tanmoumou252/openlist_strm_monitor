@@ -36,7 +36,7 @@ This file provides guidance to AI coding assistants when working with code in th
 
 - **Sync engine only**: `python src/main.py` — starts the A/B/C zone sync engine, no WebUI.
 - **WebUI**: `python src/webui/server.py` — starts the management panel with an interactive menu to optionally launch the sync engine.
-- **WebUI headless (background)**: `BRIDGE_HEADLESS=1` environment variable triggers headless mode in `main()` — auto-starts the sync engine (skips interactive menu) and enters silent wait (no stdin). The repository ships `后台带Bridge启动webui.vbs` which sets this variable and launches `server.py` with a hidden console window.
+- **WebUI headless (background)**: `BRIDGE_HEADLESS=1` environment variable is handled by `server.py` (detected at the WebUI startup flow, `headless = os.environ.get("BRIDGE_HEADLESS") == "1"`) — triggers headless mode that auto-starts the sync engine (skips the interactive menu) and enters silent wait (no stdin). `main.py` does not process this variable. The repository ships `后台带Bridge启动webui.vbs` which sets this variable and launches `server.py` with a hidden console window.
 
 > Do NOT use `python src/main.py --webui-only` or `--webui` — those flags do not exist (both are rejected by `main.py`).
 
@@ -238,6 +238,7 @@ The Vite config groups modules into chunks:
   - `use_bulk=False` (refresh): uses `upsert_a_batch()`, maintains FTS per batch
 - **Multithreaded reads**: uses `ThreadPoolExecutor(max_workers=4)` to read `.strm` files concurrently
 - **Batch size**: `BATCH_SIZE = 1000` (one batched write per 1000 records)
+- **Pre-read `IN(...)` chunking**: the batch pre-read `SELECT ... WHERE local_path IN (...)` is sliced at **900 params per batch** via `chunk_list` on `upsert_a_batch` / `upsert_b_batch` / `_upsert_a_batch_bulk` / `cleanup_invalid_subtitles` / `_upsert_movies_batch` / `_upsert_tvs_batch`. This is independent of the "every 1000 records" commit semantics and avoids SQLite's variable limit on embedded/legacy builds (<3.32, `SQLITE_MAX_VARIABLE_NUMBER` = 999). See `docs/否决方案.md` → `设计决策 | 900 保守切片 IN(...) 预读`.
 - **Log throttling**: emits a progress log every 100 records or every 2 seconds with a records/s benchmark (resolves log-freeze issue)
 - Only does DB indexing, no WebDAV checks
 

@@ -1415,3 +1415,81 @@ class TestBulkUpsertTimestampSemantics:
             assert new_hit is not None and old_hit is None
         finally:
             tmpdir.cleanup()
+
+
+# ===========================================================================
+# TestBulkUpsertOver900Records
+# _upsert_a_batch_bulk 的 >900 条 SQL 变量上限切片回归（Task B）
+# ===========================================================================
+
+
+class TestBulkUpsertOver900Records:
+    """验证 _upsert_a_batch_bulk 传入 >900 条记录不触发 SQL 变量上限崩溃。"""
+
+    @staticmethod
+    def _new_db() -> Database:
+        tmpdir = tempfile.TemporaryDirectory()
+        db = Database(str(Path(tmpdir.name) / "test.db"))
+        return db, tmpdir
+
+    def test_upsert_a_batch_bulk_over_900_records(self):
+        """1000 条记录经 _upsert_a_batch_bulk 写入不抛异常，返回计数正确。"""
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            records = [
+                (f"/a/bulk_{i:04d}.strm", f"/m/file_{i:04d}.mp4", "/m")
+                for i in range(1000)
+            ]
+            with db.bulk_connection() as conn:
+                n = svc._upsert_a_batch_bulk(conn, records)
+            assert n == 1000, f"返回值应为 1000，实际 {n}"
+
+            with db.read_connection() as conn:
+                count = conn.execute("SELECT COUNT(*) FROM a_strm_files").fetchone()[0]
+            assert count == 1000
+
+            # 第二次重复扫描（全部无变化）不抛异常
+            with db.bulk_connection() as conn:
+                n2 = svc._upsert_a_batch_bulk(conn, records)
+            assert n2 == 1000
+            with db.read_connection() as conn:
+                count2 = conn.execute("SELECT COUNT(*) FROM a_strm_files").fetchone()[0]
+            assert count2 == 1000  # 未新增
+        finally:
+            tmpdir.cleanup()
+
+    def test_upsert_a_batch_bulk_1500_records_merges_existing_map(self):
+        """1500 条（跨越 2 个 900 切片）预读合并 existing_map 正确。"""
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            # 先插入 500 条
+            first = [
+                (f"/a/bm_{i:04d}.strm", f"/m/old_{i:04d}.mp4", "/m")
+                for i in range(500)
+            ]
+            with db.bulk_connection() as conn:
+                svc._upsert_a_batch_bulk(conn, first)
+
+            # 再插入 1500 条：前 500 更新，后 1000 新增
+            second = [
+                (f"/a/bm_{i:04d}.strm", f"/m/new_{i:04d}.mp4", "/m")
+                if i < 500 else
+                (f"/a/bn_{i:04d}.strm", f"/m/new_{i:04d}.mp4", "/m")
+                for i in range(1500)
+            ]
+            with db.bulk_connection() as conn:
+                n2 = svc._upsert_a_batch_bulk(conn, second)
+            assert n2 == 1500
+
+            with db.read_connection() as conn:
+                count = conn.execute("SELECT COUNT(*) FROM a_strm_files").fetchone()[0]
+                row = conn.execute(
+                    "SELECT webdav_path FROM a_strm_files WHERE local_path = ?",
+                    ("/a/bm_0000.strm",),
+                ).fetchone()
+            assert count == 1500
+            assert row[0] == "/m/new_0000.mp4", "前 500 条应被更新为新 webdav_path"
+        finally:
+            tmpdir.cleanup()

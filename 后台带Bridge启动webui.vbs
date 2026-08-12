@@ -4,6 +4,19 @@ Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
 WshShell.Environment("PROCESS")("BRIDGE_HEADLESS") = "1"
 
+' C6: 端口检测——启动前检查 8579 端口是否已被占用。
+' 移除 findstr LISTENING 过滤器（非英文系统 netstat 输出可能不包含 LISTENING），
+' 仅判 :8579 有输出即可确定端口已被占用。
+Dim portCheck
+portCheck = WshShell.Run("cmd /c netstat -ano | findstr "":8579"" >nul 2>&1", 0, True)
+If portCheck = 0 Then
+    MsgBox "端口 8579 已被占用。" & vbCrLf & vbCrLf & _
+           "STRM Bridge 可能已在运行中，请先关闭已有实例。" & vbCrLf & _
+           "如需强制启动，请先关闭已有进程或修改端口配置。", _
+           vbExclamation, "启动检查"
+    WScript.Quit 1
+End If
+
 ' Check if python is available
 Dim pythonPath
 pythonPath = WshShell.ExpandEnvironmentStrings("%PYTHON_EXE%")
@@ -21,7 +34,7 @@ Dim quotedPythonPath
 quotedPythonPath = """" & pythonPath & """"
 
 ' Test if python command is valid
-' 轮询 testExec.Status 实现 ~10 秒超时（每次 100ms），防止 python --version
+' 轮询 testExec.Status 实现 ~30 秒超时（每次 100ms），防止 python --version
 ' 挂起（Store 弹窗 / 杀软沙箱 / 网络盘不可达等场景）时无限卡死；
 ' 加 On Error 兜底。不能用 AtEndOfStream 判断——进程静默挂起时它会一直阻塞。
 On Error Resume Next
@@ -36,10 +49,10 @@ If IsObject(testExec) Then
     Do While testExec.Status = 0
         WScript.Sleep 100
         pollCount = pollCount + 1
-        If pollCount >= 100 Then Exit Do
+        If pollCount >= 300 Then Exit Do
     Loop
-    If pollCount >= 100 Then
-        ' 已等待约 10 秒仍无输出/未退出，强制终止挂起的进程
+    If pollCount >= 300 Then
+        ' 已等待约 30 秒仍无输出/未退出，强制终止挂起的进程
         testExec.Terminate
     Else
         ' 进程已结束，读取全部输出
@@ -68,9 +81,9 @@ If exitCode <> 0 Then
     WScript.Quit 1
 End If
 
-' Launch in background with stderr redirected to log file
+' Launch in background with stdout+stderr redirected to log file
 Dim execCommand
-execCommand = "cmd /c " & quotedPythonPath & " src\webui\server.py 2>strm_bridge_boot.log"
+execCommand = "cmd /c " & quotedPythonPath & " """ & WshShell.CurrentDirectory & "\src\webui\server.py"" >strm_bridge_boot.log 2>&1"
 WshShell.Run execCommand, 0, False
 
 Set WshShell = Nothing

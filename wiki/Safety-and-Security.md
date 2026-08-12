@@ -120,6 +120,7 @@ B 区文件变动（创建/修改/移动）
 2. **主动刷新**：分批提交（每 1000 条），watchdog 最多等待 100ms
    - `initial_scan_a(use_bulk=False)`：使用 `upsert_a_batch()`，逐批维护 FTS
    - `scan_a_to_b_full_sync(use_bulk=False)`：分批提交
+   - 批量预读 `IN(...)` 按 900 条/批 `chunk_list` 分片，独立于每 1000 条提交的语义，规避 SQLite 变量上限（<3.32 默认 999）
 
 **跨进程安全**：SQLite WAL 模式自身处理并发，多进程场景安全。
 

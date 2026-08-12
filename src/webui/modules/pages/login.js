@@ -6,18 +6,37 @@
 import { api } from '../core/api.js';
 import { icon } from '../core/icons.js';
 import { esc } from '../core/utils.js';
-import { navigate } from '../core/router.js';
+import { navigate, captureRenderGuard } from '../core/router.js';
+import { setToken } from '../core/state.js';
 
 export async function renderLogin(el) {
+  const isStale = captureRenderGuard();
   // 始终从服务器获取密码状态，避免与 main.js 的异步初始化产生时序竞争
+  // 裸 fetch 不带 token——/api/admin/status 双语义：无 token 即返回 has_password，
+  // 避免过期 token 触发 401 → ApiAuthError → 误显连接错误
   let hasPassword = false;
   let fetchSucceeded = false;
   try {
-    const status = await api('/api/admin/status');
-    hasPassword = status.has_password;
-    fetchSucceeded = true;
+    // 增加 10 秒 AbortController 超时；分离 fetch 网络异常与 JSON 解析异常
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    let resp;
+    try {
+      resp = await fetch('/api/admin/status', { signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    if (!resp.ok) {
+      // 非 2xx 状态码视为获取失败，不误显错误
+      fetchSucceeded = false;
+    } else {
+      const status = await resp.json();
+      hasPassword = !!status.has_password;
+      fetchSucceeded = true;
+    }
   } catch (e) {
-    // 服务器不可达，显示连接错误
+    // 服务器不可达或超时，显示连接错误
+    // 超时与网络异常均显示连接错误，不误显"未设置密码"
   }
 
   // 如果已登录，直接跳转
@@ -26,13 +45,14 @@ export async function renderLogin(el) {
     navigate('#dashboard');
     return;
   }
-  // 仅当明确获知无密码时才删除 token（网络错误时不删除 P3-7）
+  // 仅当明确获知无密码时才删除 token（网络错误时不删除）
   if (token && !hasPassword && fetchSucceeded) {
     localStorage.removeItem('session_token');
   }
 
   // 网络错误误显"未设置管理员密码"
   if (!fetchSucceeded) {
+    if (isStale()) return;
     const isExpired = localStorage.getItem('session_token_expired') === '1';
     localStorage.removeItem('session_token_expired');
     el.innerHTML = `
@@ -60,6 +80,7 @@ export async function renderLogin(el) {
 
   // 检查是否已配置密码
   if (!hasPassword) {
+    if (isStale()) return;
     el.innerHTML = `
       <div style="display:flex;align-items:center;justify-content:center;min-height:60vh">
         <div class="page-card" style="max-width:420px;width:100%;text-align:center;padding:40px 32px">
@@ -79,6 +100,7 @@ export async function renderLogin(el) {
     return;
   }
 
+  if (isStale()) return;
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:center;min-height:70vh">
       <div class="page-card" id="login-card" style="max-width:400px;width:100%;padding:36px 28px 28px">
@@ -129,7 +151,7 @@ export async function renderLogin(el) {
     errorEl.style.display = 'none';
 
     try {
-      // 裸 fetch 无超时
+      // 裸 fetch 不带 token（登录前尚无会话令牌，不附加 X-Session-Token）
       const loginController = new AbortController();
       const loginTimeoutId = setTimeout(() => loginController.abort(), 10000);
       let resp;

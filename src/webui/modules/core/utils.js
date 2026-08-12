@@ -158,7 +158,7 @@ export function renderTmdbResults(results, title, query = '', container) {
       <h3 class="tmdb-results-title" style="font-size:14px;font-weight:600;color:var(--text-main);margin:0 0 12px 0">${esc(title)}</h3>
       <div class="tmdb-results-list" style="display:flex;flex-direction:column;gap:8px">
         ${allResults.map(item => `
-          <a class="tmdb-result-item" href="https://www.themoviedb.org/${item.type}/${encodeURIComponent(String(item.id || ''))}" target="_blank" rel="noopener" style="display:flex;align-items:center;gap:12px;padding:8px;background:var(--bg-elevated);border-radius:var(--radius-control);border:1px solid var(--border-color);text-decoration:none;color:inherit;cursor:pointer;transition:background .18s ease">
+          <a class="tmdb-result-item" href="https://www.themoviedb.org/${item.type}/${encodeURIComponent(String(item.id || ''))}" target="_blank" rel="noopener" style="display:flex;align-items:center;gap:12px;padding:8px;background:var(--bg-card);border-radius:var(--radius-control);border:1px solid var(--border-color);text-decoration:none;color:inherit;cursor:pointer;transition:background .18s ease">
             <span class="tmdb-result-type" style="font-size:11px;font-weight:600;color:var(--primary);background:color-mix(in srgb,var(--primary) 10%,transparent);padding:2px 8px;border-radius:var(--radius-pill);flex-shrink:0">${item.type === 'movie' ? '电影' : '电视剧'}</span>
             <span class="tmdb-result-name" style="flex:1;font-size:13px;font-weight:500;color:var(--text-main)">${esc(item.title || item.name)}</span>
             <span class="tmdb-result-date" style="font-size:12px;color:var(--text-muted);flex-shrink:0">${esc(item.release_date || item.first_air_date || '')}</span>
@@ -170,13 +170,13 @@ export function renderTmdbResults(results, title, query = '', container) {
   
   container.innerHTML = html;
 
-  // P0-3: 内联 onmouseover/onmouseout 改为 addEventListener（CSP 已移除 'unsafe-inline'）。
+  // 内联 onmouseover/onmouseout 改为 addEventListener（CSP 已移除 'unsafe-inline'）。
   // 使用事件委托绑定在容器上，避免重复绑定，且容器可能被重新渲染。
   const delegateHover = (e) => {
     const item = e.target.closest && e.target.closest('.tmdb-result-item');
     if (!item) return;
     const over = e.type === 'mouseover';
-    item.style.background = over ? 'var(--bg-control)' : 'var(--bg-elevated)';
+    item.style.background = over ? 'var(--bg-control)' : 'var(--bg-card)';
   };
   container.addEventListener('mouseover', delegateHover);
   container.addEventListener('mouseout', delegateHover);

@@ -30,11 +30,12 @@ AppService.__init__()
 │   ├── _fingerprint_locks_lock (按指纹锁的字典锁)
 │   ├── _fingerprint_locks (按指纹串行化)
 │   ├── _webdav_scan_logged (WebDAV 扫描日志去重集合)
-│   └── _refresh_lock (WebUI 媒体刷新锁，已迁移：由 WebUIServer 持有，见 server.py)
 ├── 解析 A/B/C 根路径
 ├── 创建 SyncService(self)
 └── 创建 SubtitleHandler(self)
 ```
+
+> `_refresh_lock`（WebUI 媒体刷新锁）**不在此锁树中**——已迁移为 `WebUIServer` 持有的锁（见 `server.py`），AppService 启动序列不再创建它。该锁用于序列化 WebUI 手动刷新与后台周期刷新，防止同一 A 区被并发全量扫描。
 
 > 注：`init_subtitle_table()` 在 `Database.__init__()` 中调用，不在 `AppService.__init__()`。`AppService.start()` 中调用的是 `cleanup_invalid_subtitles()`。
 
@@ -62,7 +63,7 @@ AppService.__init__()
 
 5. **持久化当前根目录快照** — 将当前引擎路径写入 `protected_roots_snapshot` 表
 
-6. **A 区全量扫描与索引建立** — 批量遍历所有 A 区目录，使用多线程并发读取 .strm 文件（4 个工作线程）。启动时使用 bulk_connection 长连接模式批量写入数据库（绕过 rw_lock，复用连接），扫描完成并提交后一次性重建 FTS 索引。定期刷新时使用 upsert_a_batch（保持线程安全，逐批维护 FTS）。每 100 条或每 2 秒输出进度日志（含 records/s 性能基准），解决日志冻结问题。字幕处理由启动后的 `_scan_a_subtitles_on_startup()` 补偿
+6. **A 区全量扫描与索引建立** — 批量遍历所有 A 区目录，使用多线程并发读取 .strm 文件（4 个工作线程）。启动时使用 bulk_connection 长连接模式批量写入数据库（绕过 rw_lock，复用连接），扫描完成并提交后一次性重建 FTS 索引。定期刷新时使用 upsert_a_batch（保持线程安全，逐批维护 FTS）。每 100 条或每 2 秒输出进度日志（含 records/s 性能基准），解决日志冻结问题。字幕处理由启动后的 `_scan_a_subtitles_on_startup()` 补偿。批量预读 `IN(...)` 按 900 条/批 `chunk_list` 分片，规避 SQLite 变量上限（<3.32 默认 999），区别于每 1000 条一次提交的提交语义。
 
 7. **A → B 全量同步**（可选，受 `sync_on_startup` 配置控制，方法 `scan_a_to_b_full_sync`） — 采用**两遍结构**：第一遍（索引阶段）遍历所有 A 记录，调用 `build_b_path_from_a()` 计算目标路径，建立 `target_path -> [source_info]` 索引并检测目标冲突（同目标 + 不同 WebDAV 身份）；第二遍（执行阶段）对非冲突目标调用 `_sync_one_record`，对冲突目标统一返回 `skip_target_conflict` 安全跳过（不复制、不覆盖、不自动改名）。启动时使用 `bulk_connection()` 长连接模式（1 个连接 + 1 次提交），跳过血统校验和 per-file `check_exists` HTTP。预加载 ghost 保护和 B 区指纹到内存缓存。`use_bulk` 参数控制模式选择：`use_bulk=True` 单事务提交（首次启动，无并发），`use_bulk=False` 分批提交（每 1000 条，主动刷新，有并发）。`valid_engine_paths` 参数用于限定本次同步覆盖的引擎路径子集（定期刷新时只传待刷新引擎，全量审计传 `None` 表示全部）。冲突汇总输出冲突数量、唯一目标数和最多 5 个示例。当 `sync_on_startup = false` 时跳过此步骤（日志输出"跳过 A→B 全量同步"），但启动等待仍然执行。
 
@@ -271,7 +272,7 @@ def notify_config_changed(self) -> None:
 - 到达时执行完整序列：
   1. `initial_scan_a()` — 多线程并发读取 A 区 `.strm`，批量写入数据库
   2. `scan_a_to_b_full_sync()` — A→B 全量同步（`use_bulk=False` 分批提交模式）
-  3. `complete_index_generation()` — 推进代次计数器（`index_generation`）
+  3. `complete_index_generation()` — 递增全局代次（`index_generation` +1），并在同一事务中写入 `index_generation_at`、`last_full_index_at` 时间戳，以及每个 mapping 的独立代次 `index_generation:{mapping_id}` 与 `index_generation_at:{mapping_id}`
   4. `touch_verified_by_mapping()` — 为本次审计覆盖的所有 mapping 写入 `last_verified_at`
   5. 记录 `last_full_audit_at` 控制键（`set_control`），供下一轮周期判断使用
 
@@ -298,7 +299,7 @@ WebUI 会话 token 绑定登录时客户端 IP：`_handle_login` 在登录时记
 | **周期审计** | `_maybe_run_full_audit` 周期窗口到达时 |
 | **手动审计** | `run_full_audit_now()` 手动触发时 |
 
-三者均调用 `complete_index_generation()` 推进 DB sync_control 的 index_generation 代次计数器，作为 B→C 恢复、幽灵保护等机制判断"当前代次"的依据。
+三者均调用 `complete_index_generation()` 推进 DB sync_control 的 index_generation 代次计数器，作为 B→C 恢复、幽灵保护等机制判断"当前代次"的依据。同时写入 `last_full_index_at` 时间戳（与 `last_full_audit_at` 不同——后者由 RefreshService 的审计流程写入，供 Dashboard 展示索引健康状态）。
 
 ### 三层验证清理
 

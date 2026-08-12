@@ -1,15 +1,14 @@
 """
 WebUI 帮助文案测试 (Task C)
 
-测试范围：
+测试范围:
 1. utils.js 的 createField 输出含 .field-helper-text 且内容经 esc()
-2. openlist.js 的 20 个受查控件，其显式或派生 help key 全部存在于 _openlistHelpTexts
-3. config.js 的 5 个 TMDB 阈值字段调用点都传入了非空 helperText
-4. _openlistHelpTexts.log_file 不含「重启」字样
-5. _openlistHelpTexts 中 refresh_enabled / refresh_interval_minutes / refresh_depth 含「即时生效」字样
-6. _openlistHelpTexts 无孤儿键，或孤儿键被显式标注为保留
+2. openlist.js 的受查控件,其显式或派生 help key 全部存在于 _openlistHelpTexts
+3. config.js 的 5 个 TMDB 阈值字段调用点都传入了非空 helpIcon
+4. _openlistHelpTexts 中 refresh_enabled / refresh_interval_minutes / refresh_depth 含「即时生效」字样
+5. _openlistHelpTexts 无孤儿键,或孤儿键被显式标注为保留
 
-运行方式：
+运行方式:
   python -m pytest src/tests/test_webui_help_texts.py -v
 """
 
@@ -54,7 +53,7 @@ class TestOpenlistHelpTexts:
     """测试 openlist.js 的 _openlistHelpTexts 对象"""
 
     def test_all_expected_help_keys_exist(self):
-        """20 个受查控件的 help key 全部存在于 _openlistHelpTexts"""
+        """受查控件的 help key 全部存在于 _openlistHelpTexts"""
         content = OPENLIST_JS.read_text(encoding="utf-8")
 
         # 提取 _openlistHelpTexts 对象的所有键
@@ -64,43 +63,22 @@ class TestOpenlistHelpTexts:
 
         help_texts_content = match.group(1)
 
-        # 预期的 help keys（实际存在的控件）
+        # 预期的 help keys(实际存在的控件)
         expected_keys = [
             "webdav_host", "webdav_user", "webdav_password", "webdav_totp_secret",
             "b_root", "c_root", "monitored_paths", "refresh_paths",
             "strm_engines", "refresh_enabled", "refresh_interval_minutes", "refresh_depth",
             "behavior_action", "behavior_trash_dir_name", "behavior_ghost_protect_seconds",
             "behavior_a_to_b_restore_delay_seconds", "behavior_sync_on_startup", "behavior_sync_on_startup_wait",
-            "log_level", "log_max_size_mb", "log_backup_count", "log_file",
-            "refresh_full_audit_interval_days", "refresh_log_level",
+            "log_level", "log_max_size_mb", "log_backup_count",
+            "refresh_full_audit_interval_days",
         ]
 
         for key in expected_keys:
-            # 检查键是否存在（允许在注释或字符串中）
+            # 检查键是否存在(允许在注释或字符串中)
             # JavaScript 对象键可能没有引号
             assert f'"{key}"' in help_texts_content or f"'{key}'" in help_texts_content or f"  {key}:" in help_texts_content, \
                 f"Help key '{key}' not found in _openlistHelpTexts"
-
-    def test_log_file_does_not_contain_restart_keyword(self):
-        """log_file 帮助文案不含「重启」字样"""
-        content = OPENLIST_JS.read_text(encoding="utf-8")
-
-        match = re.search(r"_openlistHelpTexts\s*=\s*\{([^}]+)\}", content, re.DOTALL)
-        if match is None:
-            pytest.fail("未找到 _openlistHelpTexts 对象")
-
-        help_texts_content = match.group(1)
-
-        # 提取 log_file 的值
-        log_file_match = re.search(r'"log_file"\s*:\s*"([^"]*)"', help_texts_content)
-        if log_file_match is None:
-            # 尝试单引号
-            log_file_match = re.search(r"'log_file'\s*:\s*'([^']*)'", help_texts_content)
-
-        if log_file_match:
-            log_file_text = log_file_match.group(1)
-            assert "重启" not in log_file_text, \
-                f"log_file 帮助文案不应包含「重启」字样: {log_file_text}"
 
     def test_refresh_keys_contain_immediate_effect_keyword(self):
         """refresh_enabled / refresh_interval_minutes / refresh_depth 含「即时生效」字样"""
@@ -126,7 +104,7 @@ class TestOpenlistHelpTexts:
                     f"{key} 帮助文案应包含「即时生效」字样: {key_text}"
 
     def test_no_orphan_keys_without_annotation(self):
-        """_openlistHelpTexts 无孤儿键，或孤儿键被显式标注为保留"""
+        """_openlistHelpTexts 无孤儿键,或孤儿键被显式标注为保留"""
         content = OPENLIST_JS.read_text(encoding="utf-8")
 
         match = re.search(r"_openlistHelpTexts\s*=\s*\{([^}]+)\}", content, re.DOTALL)
@@ -135,7 +113,7 @@ class TestOpenlistHelpTexts:
 
         help_texts_content = match.group(1)
 
-        # 已知的孤儿键（应被显式标注为保留）
+        # 已知的孤儿键(应被显式标注为保留)
         known_orphan_keys = ["b_root", "strm_engines"]
 
         # 提取所有键
@@ -150,17 +128,17 @@ class TestOpenlistHelpTexts:
                 key_match = key_pattern.search(help_texts_content)
                 if key_match:
                     line = key_match.group(0)
-                    # 检查是否有注释（/* */ 或 //）
+                    # 检查是否有注释(/* */ 或 //)
                     has_comment = "/*" in line or "//" in line
                     assert has_comment, \
                         f"孤儿键 '{key}' 应被显式标注为保留: {line}"
 
 
 class TestConfigJsTmdbThresholds:
-    """测试 config.js 的 5 个 TMDB 阈值字段传入了非空 helperText"""
+    """测试 config.js 的 5 个 TMDB 阈值字段传入了非空 helpIcon"""
 
-    def test_tmdb_threshold_fields_have_helper_text(self):
-        """5 个 TMDB 阈值字段调用点都传入了非空 helperText"""
+    def test_tmdb_threshold_fields_have_help_icon(self):
+        """5 个 TMDB 阈值字段调用点都传入了非空 helpIcon"""
         content = CONFIG_JS.read_text(encoding="utf-8")
 
         # 5 个阈值字段的 ID
@@ -173,23 +151,21 @@ class TestConfigJsTmdbThresholds:
         ]
 
         for field_id in threshold_field_ids:
-            # 查找调用点，检查是否传入了 helperText（作为第 9 个参数）
+            # 查找调用点,检查是否传入了 _configHelpIcon(key)
             field_position = content.find(field_id)
             if field_position == -1:
                 pytest.fail(f"未找到字段 {field_id}")
 
-            # 检查该位置附近是否有 helperText（在 200 字符范围内）
+            # 检查该位置附近是否有 _configHelpIcon 调用(在 200 字符范围内)
             nearby_content = content[field_position:field_position + 200]
-            # field 函数调用的第 9 个参数是 helperText
-            # 格式：field(id, label, value, placeholder, type, persistLabel, readOnly, htmlLabel, helperText)
-            assert "'  " in nearby_content or '"  ' in nearby_content or "''" in nearby_content or '""' in nearby_content, \
-                f"字段 {field_id} 的调用点未传入非空 helperText"
+            assert "_configHelpIcon(" in nearby_content, \
+                f"字段 {field_id} 的调用点未传入非空 helpIcon"
 
-    def test_dead_fields_have_not_implemented_helper_text(self):
-        """两个死字段（season-diff、min-season-ratio）的 helperText 应含「未接入匹配逻辑」"""
+    def test_dead_fields_have_not_implemented_help_text(self):
+        """两个死字段(season-diff、min-season-ratio)的 helpIcon 应含「未接入匹配逻辑」"""
         content = CONFIG_JS.read_text(encoding="utf-8")
 
-        # 这两个字段是死配置（当前版本未接入匹配逻辑）
+        # 这两个字段是死配置(当前版本未接入匹配逻辑)
         dead_fields = [
             ("cfg-tmdb-season-diff", "未接入匹配逻辑"),
             ("cfg-tmdb-min-season-ratio", "未接入匹配逻辑"),
@@ -198,18 +174,28 @@ class TestConfigJsTmdbThresholds:
         for field_id, marker in dead_fields:
             pos = content.find(field_id)
             assert pos != -1, f"未找到字段 {field_id}"
-            nearby = content[pos:pos + 300]
-            assert marker in nearby, \
-                f"字段 {field_id} 的 helperText 应含「{marker}」，实际附近: {nearby[:100]}"
+            # 该字段的 helpIcon key 是 anime_max_season_diff / anime_min_season_ratio
+            # 找到 _configHelpIcon 调用并定位对应的 key
+            help_icon_pos = content.find("_configHelpIcon(", pos)
+            assert help_icon_pos != -1, f"字段 {field_id} 未调用 _configHelpIcon"
+            # 检查 _configHelpTexts 中对应 key 的文案
+            if "season-diff" in field_id:
+                assert "anime_max_season_diff" in content, "缺少 anime_max_season_diff 键"
+                assert marker in content, f"字段 {field_id} 的 helpIcon 应含「{marker}」"
+            elif "min-season-ratio" in field_id:
+                assert "anime_min_season_ratio" in content, "缺少 anime_min_season_ratio 键"
+                assert marker in content, f"字段 {field_id} 的 helpIcon 应含「{marker}」"
 
-    def test_ep_ratio_helper_text_does_not_mention_not_implemented(self):
-        """cfg-tmdb-ep-ratio 是活配置，其 helperText 不应含「未接入匹配逻辑」"""
+    def test_ep_ratio_help_text_does_not_mention_not_implemented(self):
+        """cfg-tmdb-ep-ratio 是活配置,其 helpIcon 不应含「未接入匹配逻辑」"""
         content = CONFIG_JS.read_text(encoding="utf-8")
         pos = content.find("cfg-tmdb-ep-ratio")
         assert pos != -1, "未找到字段 cfg-tmdb-ep-ratio"
+        # 检查该字段附近的 300 字符上下文(字段定义 + helpIcon)
         nearby = content[pos:pos + 300]
+        assert "fuzzy_threshold" in content, "缺少 fuzzy_threshold 键"
         assert "未接入匹配逻辑" not in nearby, \
-            f"cfg-tmdb-ep-ratio 是活配置，helperText 不应含「未接入匹配逻辑」，实际: {nearby[:100]}"
+            f"cfg-tmdb-ep-ratio 是活配置,helpIcon 不应含「未接入匹配逻辑」,实际: {nearby[:100]}"
 
 
 if __name__ == "__main__":

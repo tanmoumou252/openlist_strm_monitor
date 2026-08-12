@@ -127,7 +127,7 @@ function _initFlipCards() {
 }
 
 export async function renderTmdb(el, params) {
-  // N0: 代际快照工厂——在首次 await 前捕获
+  // 代际快照工厂——在首次 await 前捕获
   const isStale = captureRenderGuard();
   const [status, config] = await Promise.all([
     api('/api/tmdb/status'),
@@ -189,7 +189,7 @@ export async function renderTmdb(el, params) {
         });
       }
       data = await _fetchPromises[apiType];
-      // await 后渲染护栏
+      // 渲染前检查 stale（避免异步响应回填已切换的页面）
       if (isStale()) return;
       _setCachedWatchlist(apiType, data);
     }
@@ -201,7 +201,7 @@ export async function renderTmdb(el, params) {
     data = await promise.finally(() => {
       if (_fetchPromises[apiType] === promise) _fetchPromises[apiType] = null;
     });
-    // await 后缺渲染护栏
+    // 渲染前检查 stale（避免异步响应回填已切换的页面）
     if (isStale()) return;
     _setCachedWatchlist(apiType, data);
   }
@@ -212,10 +212,11 @@ export async function renderTmdb(el, params) {
   if (q) {
     try {
       const filtered = await api(`/api/tmdb/watchlist/${apiType}?all=1&q=${encodeURIComponent(q)}`);
-      // await 后缺渲染护栏
+      // 渲染前检查 stale（避免异步响应回填已切换的页面）
       if (isStale()) return;
       items = filtered.results || [];
     } catch (e) {
+      if (isStale()) return;  // stale fallback guard
       // 后端搜索失败时回退到完整列表（不再做前端内存过滤）
       items = data.results || [];
     }
@@ -238,16 +239,15 @@ export async function renderTmdb(el, params) {
   const avatarHash = status.avatar_path || '';
   const avatarUrl = avatarHash ? `/api/tmdb/avatar?hash=${encodeURIComponent(avatarHash)}` : '';
   const username = status.username || data.account_id || '';
-  const _TMDB_LOGO_HEADER_CDN = 'https://www.themoviedb.org/assets/2/v4/logos/v2/blue_square_2-d537fb228cf3ded904ef09b136fe3fec72548ebc1fea3fbbd1ad9e36364db38b.svg';
-  const _TMDB_LOGO_CARD_CDN = 'https://www.themoviedb.org/assets/2/v4/logos/v2/blue_square_1-5bdc75aaebeb75dc7ae79426ddd9be3b2be1e342510f8202baf6bffa71d7f5c4.svg';
-  const _TMDB_LOGO_FALLBACK = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="4" fill="#01B4E4"/><text x="50%" y="54%" dominant-baseline="central" text-anchor="middle" fill="white" font-family="Arial,sans-serif" font-weight="700" font-size="12">TMDB</text></svg>');
+  const _TMDB_LOGO_HEADER_FALLBACK = '/assets/tmdb-logo-header.svg';
+  const _TMDB_LOGO_CARD_FALLBACK = '/assets/tmdb-logo-card.svg';
 
   function _resolveTmdbLogoUrl(s, kind) {
-    const asset = kind === 'header' ? _TMDB_LOGO_HEADER_CDN : _TMDB_LOGO_CARD_CDN;
+    const local = kind === 'header' ? _TMDB_LOGO_HEADER_FALLBACK : _TMDB_LOGO_CARD_FALLBACK;
     if (s.host && !s.host.startsWith('https://api.themoviedb.org')) {
-      return s.host.replace(/\/+$/, '') + asset.replace('https://www.themoviedb.org', '');
+      return s.host.replace(/\/+$/, '') + local;
     }
-    return asset;
+    return local;
   }
 
   const tmdbLogoUrl = _resolveTmdbLogoUrl(status, 'header');
@@ -380,12 +380,19 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
 
   el.innerHTML = html;
 
-  // P0-3: 内联 onerror 改为 addEventListener（CSP 已移除 'unsafe-inline'）。
-  // 头部 logo 与卡片跳转 logo 加载失败时回退到内联 SVG 占位。
-  el.querySelectorAll('img.tmdb-header-logo, img.tmdb-jump-logo').forEach(img => {
+  // 内联 onerror 改为 addEventListener（CSP 已移除 'unsafe-inline'）。
+  // 头部 logo 与卡片跳转 logo 加载失败时回退到本地官方 SVG 文件。
+  el.querySelectorAll('img.tmdb-header-logo').forEach(img => {
     img.addEventListener('error', () => {
-      if (img.src !== _TMDB_LOGO_FALLBACK) {
-        img.src = _TMDB_LOGO_FALLBACK;
+      if (img.src !== _TMDB_LOGO_HEADER_FALLBACK) {
+        img.src = _TMDB_LOGO_HEADER_FALLBACK;
+      }
+    });
+  });
+  el.querySelectorAll('img.tmdb-jump-logo').forEach(img => {
+    img.addEventListener('error', () => {
+      if (img.src !== _TMDB_LOGO_CARD_FALLBACK) {
+        img.src = _TMDB_LOGO_CARD_FALLBACK;
       }
     });
   });
