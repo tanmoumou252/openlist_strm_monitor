@@ -56,7 +56,7 @@ class TestFTSOrphanCleanup:
             conn.execute("DELETE FROM _keep_movie_ids")
             conn.executemany("INSERT INTO _keep_movie_ids VALUES (?)", [(101,)])
 
-            # 调用修复后的批量删除逻辑
+            # 调用批量删除逻辑
             conn.execute("DELETE FROM movies WHERE id NOT IN (SELECT id FROM _keep_movie_ids)")
             # 修复：同步清理 FTS 表中的孤儿记录
             conn.execute(
@@ -106,7 +106,7 @@ class TestFTSOrphanCleanup:
             conn.execute("DELETE FROM _keep_tv_ids")
             conn.executemany("INSERT INTO _keep_tv_ids VALUES (?)", [(201,)])
 
-            # 调用修复后的批量删除逻辑
+            # 调用批量删除逻辑
             conn.execute("DELETE FROM tv WHERE id NOT IN (SELECT id FROM _keep_tv_ids)")
             # 修复：同步清理 FTS 表中的孤儿记录
             conn.execute(
@@ -152,7 +152,7 @@ class TestFTSOrphanCleanup:
 
         # 模拟同步：movie_ids 为空，全量删除
         with db._conn() as conn:
-            # 调用修复后的全量删除逻辑
+            # 调用全量删除逻辑
             conn.execute("DELETE FROM movies")
             # 修复：同步清理 FTS 表
             conn.execute("DELETE FROM movies_fts")

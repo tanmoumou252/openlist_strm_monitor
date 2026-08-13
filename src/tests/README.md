@@ -191,7 +191,7 @@ pip install -r src/tests/requirements-dev.txt
 
 - 空数据库（0 条记录）或最小化数据集
 - 最小化配置（仅必要字段）
-- 固定测试密码（`test_password_123`）
+- 固定测试密码（`1111`）——仅指 pytest 收集的测试。`test_webui_standalone.py` 为**手动在线集成脚本**（不在 pytest 收集范围），使用独立默认密码 `admin123`（可用命令行参数覆盖），二者互不影响
 
 ## 常见问题
 

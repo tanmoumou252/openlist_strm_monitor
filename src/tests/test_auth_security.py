@@ -116,7 +116,7 @@ class TestLoginRateLimit:
         handler.headers = {"Content-Type": "application/json; charset=utf-8"}
         webui_server = MagicMock()
         # 设置一个真实哈希，但密码不匹配
-        stored_hash = hash_password("correct_password")
+        stored_hash = hash_password("1111")
         webui_server._watchlist_db = MagicMock()
         webui_server._watchlist_db.get_config.return_value = stored_hash
 
@@ -136,7 +136,7 @@ class TestPasswordHash:
         from webui.server import WebUIServer
 
         # _hash_password 是 WebUIServer 的静态方法
-        password = "test_password_123"
+        password = "1111"
         hash_result = WebUIServer._hash_password(password)
 
         # 检查三段式格式
@@ -159,7 +159,7 @@ class TestPasswordHash:
         """相同密码产生不同哈希（不同 salt）"""
         from webui.server import WebUIServer
 
-        password = "test_password_123"
+        password = "1111"
         hash1 = WebUIServer._hash_password(password)
         hash2 = WebUIServer._hash_password(password)
 

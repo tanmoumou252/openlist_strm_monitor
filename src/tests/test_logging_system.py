@@ -57,7 +57,7 @@ class TestTmdbOperationLog:
     def test_log_auto_cleanup_after_7_days(self, tmp_path):
         """测试 7 天前的日志自动清理
 
-        注意：_prune_tmdb_logs() 仅在写侧 log_tmdb_operation() 调用（M-14 设计），
+        注意：_prune_tmdb_logs() 仅在写侧 log_tmdb_operation() 调用，
         get_tmdb_logs() 只做 SELECT。因此插入旧日志后需显式调用 _prune_tmdb_logs()
         触发清理，再通过 get_tmdb_logs() 验证结果。
         """
@@ -76,7 +76,7 @@ class TestTmdbOperationLog:
             )
             conn.commit()
 
-        # 显式触发写侧清理（M-14 设计：_prune_tmdb_logs 只在 log_tmdb_operation 调用）
+        # 显式触发写侧清理（_prune_tmdb_logs 只在 log_tmdb_operation 调用）
         db._prune_tmdb_logs()
 
         # 查询应只返回 recent 日志

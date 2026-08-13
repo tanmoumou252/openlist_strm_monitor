@@ -142,7 +142,7 @@ async function _fetchAndRenderLogs(el) {
 </div>
 <table>
 <thead id="log-table-header"></thead>
-<tbody>${rows || '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">暂无日志</td></tr>'}</tbody>
+<tbody>${rows || '<tr><td colspan="1" style="text-align:center;color:var(--text-muted)">暂无日志</td></tr>'}</tbody>
 </table>`;
 
   _renderLogTableHeader();

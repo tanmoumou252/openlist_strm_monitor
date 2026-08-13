@@ -82,7 +82,7 @@ SCAN_GLOBS: tuple[str, ...] = (
     "public/*.html",
     "modules/**/*.js",
     "styles/**/*.css",
-    "*.py",  # G'.3: 后端 Python 源文件（routes.py / server.py 中的 showToast/dialog 中文）
+    "*.py",  # 后端 Python 源文件（routes.py / server.py 中的 showToast/dialog 中文）
 )
 
 

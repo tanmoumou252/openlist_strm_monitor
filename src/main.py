@@ -112,7 +112,7 @@ def main() -> None:
         totp_secret=config.webdav.totp_secret,
     )
     # 强制重新登录，不使用缓存 token，确保真实验证连接
-    if not admin_client.login(force=True):
+    if not admin_client.login(force=True, source="startup"):
         error_msg = admin_client.last_error_message or "未知错误"
         error_type = admin_client.last_error_type or "unknown"
         logging.error("[AdminAPI] 登录失败: %s (类型: %s)", error_msg, error_type)
@@ -137,7 +137,6 @@ def main() -> None:
             print("\n主程序已启动。按 q 退出\n")
         else:
             print("\n主程序已启动（配置未就绪，引擎未运行）。按 q 退出\n")
-        # 【已核对，勿再作为 bug 上报】
         # 这是有意的交互式等待循环（等用户输入 `q`、EOF 或 Ctrl-C 触发 finally: app.stop()）。
         # 即使引擎未启动也保持进程存活，非死循环。BRIDGE_HEADLESS 由 server.py 处理（server.py:1435），
         # main.py 不处理此环境变量。后台模式走 server.py 的 headless 分支跳过交互菜单。

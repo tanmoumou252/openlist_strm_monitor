@@ -82,7 +82,7 @@ class TestBoundaryConditions:
 
     def test_password_hash_length(self):
         """测试密码哈希格式"""
-        password = "test_password"
+        password = "1111"
         hashed = hash_password(password)
 
         # 格式：salt$iterations$hash

@@ -289,7 +289,7 @@ export async function _renderOpenListConfig(cfg) {
           <span class="a-folder-chip">${esc(f)}</span>
           <div class="floating-field" data-field="b-root-${i}">
             <div class="field-control">
-              <label class="floating-label${savedBRoot ? ' is-shown is-floating is-filled' : ''}" data-role="label" for="b-root-${i}">B 区根目录</label>
+              <label class="floating-label${savedBRoot ? ' is-shown is-floating is-filled' : ''}" data-role="label" for="b-root-${i}">B 区根目录${_olHelpIcon('b_root')}</label>
               <input type="text" id="b-root-${i}" class="b-root-input${savedBRoot ? ' has-value' : ''}"
                      data-a-root="${esc(f)}"
                      value="${esc(savedBRoot)}"
@@ -328,6 +328,9 @@ function _syncRefreshPathsFromPreviewEngines() {
       if (!row || !row.engine || !row.monitored_paths) return;
       const engineEntry = row.engine;
       row.monitored_paths.forEach(p => {
+        // 设计局限：仅取最后一段目录推导 refresh path，仅支持顶层挂载。
+        // 嵌套挂载（如 /天翼云/电影/动作 → /strm/动作）会推导错；
+        // 支持嵌套需改为完整相对路径。登记于 docs/否决方案.md。
         const lastDir = String(p).replace(/\/$/, '').split('/').pop();
         if (lastDir) {
           const refreshPath = `${engineEntry.replace(/\/$/, '')}/${lastDir}`;
@@ -666,7 +669,7 @@ function _refreshABMappings() {
           <span class="a-folder-chip">${esc(f)}</span>
           <div class="floating-field" data-field="b-root-${i}">
             <div class="field-control">
-              <label class="floating-label${bVal ? ' is-shown is-floating is-filled' : ''}" data-role="label" for="b-root-${i}">B 区根目录</label>
+              <label class="floating-label${bVal ? ' is-shown is-floating is-filled' : ''}" data-role="label" for="b-root-${i}">B 区根目录${_olHelpIcon('b_root')}</label>
               <input type="text" id="b-root-${i}" class="b-root-input${bVal ? ' has-value' : ''}"
                      data-a-root="${esc(f)}"
                      value="${esc(bVal)}"
@@ -819,7 +822,9 @@ function _olStatusText(configured, status) {
 }
 
 function _olStatusClass(configured, status) {
-  return configured ? `api-status-dot ${status}` : 'api-status-dot unconfigured';
+  // 将子状态映射到已知 CSS 类
+  const cssStatus = ({ auth_failed_password: 'auth_failed', auth_failed_2fa: 'auth_failed', rate_limited: 'auth_failed' })[status] || status;
+  return configured ? `api-status-dot ${cssStatus}` : 'api-status-dot unconfigured';
 }
 
 export function _updateApiStatusDot() {

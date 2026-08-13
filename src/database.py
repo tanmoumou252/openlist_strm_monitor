@@ -1506,7 +1506,7 @@ class Database:
         使用 INSERT OR REPLACE 实现原子操作，避免先 DELETE 再 INSERT
         时中间失败导致的数据丢失。
         """
-        # H-6: 同路径时直接返回，避免 INSERT OR REPLACE + DELETE 导致记录被删除
+        # 同路径时直接返回，避免 INSERT OR REPLACE + DELETE 导致记录被删除
         if old_local_path == new_local_path:
             return True
         
@@ -2196,7 +2196,7 @@ class Database:
                         to_update.append((webdav_path, parent_webdav_path, now, local_path,
                                          old_webdav, webdav_path))
             # test_insert_new_record_initializes_last_verified_at 断言。仅 UPDATE 分支
-            # 有意不触碰该列（保护 ##29 启动性能）。此处写 now 是预期，勿标记。
+            # 有意不触碰该列（避免大表全量 UPDATE 拖慢启动）。此处写 now 是预期，勿标记。
             # 执行 INSERT
             if to_insert:
                 conn.executemany(

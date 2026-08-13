@@ -174,7 +174,7 @@ class BAreaEventHandler(FileSystemEventHandler):
         suffix = path.suffix.lower()
         if suffix == ".strm":
             self._run_async(self.app.handle_b_deleted, event.src_path)
-        # B4: 隔离文件（.duplicate / .invalid）被删除时触发对应的 DB 行清理
+        # 隔离文件（.duplicate / .invalid）被删除时触发对应的 DB 行清理
         elif suffix in (".duplicate", ".invalid"):
             # 去掉隔离后缀后得到原始路径，再匹配 DB 记录
             orig_path = str(path.with_suffix(""))
@@ -192,7 +192,7 @@ class BAreaEventHandler(FileSystemEventHandler):
         dst_is_strm = Path(dest_path).suffix.lower() == ".strm"
 
         if src_is_strm and dst_is_strm:
-            # B-2: .strm 重命名为 .strm 统一异步化 + 双路径锁。
+            # .strm 重命名为 .strm 统一异步化 + 双路径锁。
             # 原同步调用在 watchdog 事件线程内执行，与同路径的 created/modified/deleted
             # 异步处理线程竞争，导致 move_b_record 的 SELECT→INSERT/DELETE 序列
             # 与并发插入/删除产生丢失更新（复活已删行 / 删掉刚插入的新行）。

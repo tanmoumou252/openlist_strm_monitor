@@ -173,7 +173,7 @@ class TestAreaRefreshMappingIdNormalization:
 
     背景：ABMapping.a_root 存用户原始输入（如 Windows 前斜杠 `D:/x`），而
     `a_strm_files.local_path` 存规范化路径（反斜杠 `D:\\x`）。若用原始 a_root
-    构造 LIKE，分隔符不一致时过滤静默失效，返回"未找到相关记录"。修复后应命中。
+    构造 LIKE，分隔符不一致时过滤静默失效，返回"未找到相关记录"。规范化后应命中。
     """
 
     def test_refresh_mapping_id_matches_normalized_a_root(self, tmp_path, db: Database):

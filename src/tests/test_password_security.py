@@ -4,7 +4,7 @@
 覆盖密码安全检查清单中标记"无直接测试"的项：
   哈希与验证  PBKDF2-HMAC-SHA256 600k 迭代哈希格式
   密码验证正确性（正确/错误）
-  时序安全已修复：使用 hmac.compare_digest（M-5/H-5），=== 比较已移除
+  时序安全：使用 hmac.compare_digest（恒定时间比较），=== 比较已移除
   /api/webui/config/ui GET 不泄露 admin_password
   明文密码写入 DB 时自动哈希
   首次启动生成随机密码
@@ -208,15 +208,15 @@ class TestPasswordHashing:
         assert WebUIServer._check_password("anything", "a$b$c$d") is False
 
     def test_p3_password_compare_not_timing_safe(self):
-        """P3: 时序安全现状记录。
+        """时序安全现状记录。
 
         当前实现使用 hmac.compare_digest（通过 password_utils.verify_password），
-        防止时序攻击。这是已知安全设计，M-5 修复后统一使用恒定时间比较。
+        防止时序攻击。这是已知安全设计，统一使用恒定时间比较。
         本测试验证当前实现已使用安全比较。
         """
         import inspect
         source = inspect.getsource(WebUIServer._check_password)
-        # 修复后：使用 verify_password（内部使用 hmac.compare_digest）
+        # 使用 verify_password（内部使用 hmac.compare_digest）
         assert "verify_password" in source, "当前实现应使用统一的 verify_password"
         assert "==" not in source, "当前实现不应使用 == 比较"
 
@@ -241,7 +241,7 @@ def webui_server_real_db(tmp_path):
     port = _free_port()
     cfg.webui.port = port
 
-    test_password = "test_password_123"
+    test_password = "1111"
     os.environ["WEBUI_TEST_MODE"] = "1"
     os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
 
@@ -405,7 +405,7 @@ class TestPasswordInitialization:
         """
         cfg = _make_mock_config(tmp_path)
         db = _make_mock_db(tmp_path)
-        test_pw = "env_test_password"
+        test_pw = "1111"
 
         with patch("webui.server.PROJECT_ROOT", tmp_path), \
              patch.dict(os.environ, {

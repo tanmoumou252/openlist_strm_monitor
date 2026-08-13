@@ -1114,7 +1114,7 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
 
         with patch.object(self.db, "move_b_record", side_effect=mock_move):
             with patch.object(Path, "rename", mock_rename):
-                # 修复后：回滚失败时应抛出异常使清理中止，不静默继续
+                # 回滚失败时应抛出异常使清理中止，不静默继续
                 with pytest.raises(OSError, match="模拟磁盘满"):
                     self.app.ensure_single_visible_instance(
                         fp, paths[0], prefer_path=paths[0], mapping_id="test_m1")

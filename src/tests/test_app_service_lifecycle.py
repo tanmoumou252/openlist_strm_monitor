@@ -686,18 +686,18 @@ class TestStartupLogFormatting(_LifecycleBase):
     根本不做格式化，所以整套测试都看不见 %d 与 str 的不匹配。本用例用
     caplog.at_level(logging.INFO) 强制放行 INFO，让格式化真正发生。
 
-    红灯形态：修复前该用例 FAILED，报
+    红灯形态：本用例作为回归守卫，若格式化不匹配会报
     TypeError: %d format: a real number is required, not str，
     失败点在 self.app.start() 调用处。
     生产环境不会中止：logging 默认的 handleError 只打 traceback 不重抛，
-    complete_index_generation / set_mapping_version 都已在此之前完成（见计划 F1）。
+    complete_index_generation / set_mapping_version 都已在此之前完成。
     """
 
     def test_index_generation_log_is_formattable(self, caplog):
         self.db.get_control.return_value = "7"
         ctx, _ = self._patch_phases()
         with ctx, caplog.at_level(logging.INFO):
-            # 修复前：格式化在此处真正发生并抛 TypeError
+            # 格式化在此处真正发生并抛 TypeError
             self.app.start()
 
         # 用 str(record.msg) 过滤，避免在筛选阶段就触发格式化

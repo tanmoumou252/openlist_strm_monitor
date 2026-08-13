@@ -6,7 +6,7 @@ import { showCacheStaleModal } from '../components/dialog.js';
 import { navigate, captureRenderGuard } from '../core/router.js';
 import {
   CONFIG, _getCachedWatchlist, _setCachedWatchlist, _fetchPromises,
-  _tmdbWebBase, _getUiConfig, _flippedCard, setFlippedCard,
+  _getUiConfig, _flippedCard, setFlippedCard,
   _getGenreCache, _setGenreCache, _tmdbCache
 } from '../core/state.js';
 

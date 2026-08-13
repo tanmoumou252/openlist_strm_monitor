@@ -289,7 +289,7 @@ class TestReadonlyGettersReadLock:
         "get_media_boundary_by_fingerprint", "get_media_boundaries_by_source_name",
         "get_media_boundary_by_current_name", "get_media_boundary_by_source_name_only",
         "get_subtitle_by_local", "subtitle_exists", "get_subtitles_by_fingerprint",
-        # Task 7 重点：以下 3 个曾漏读锁
+        # 重点：以下 3 个曾漏读锁
         "get_all_b_records", "get_table_counts", "get_b_status_counts",
     )
 

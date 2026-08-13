@@ -2,7 +2,7 @@ import './styles/main.css';
 import { syncTheme, initDropdowns } from './modules/core/theme.js';
 import { router, navigate } from './modules/core/router.js';
 import { initWallpaperReveal } from './modules/core/wallpaper.js';
-import { _loadUiConfig, setTmdbWebBase, _mainStatusTimer, setMainStatusTimer, stopUptimeTimer, startUptimeTimer, CONFIG, setHasPassword } from './modules/core/state.js';
+import { _loadUiConfig, _mainStatusTimer, setMainStatusTimer, stopUptimeTimer, startUptimeTimer, CONFIG, setHasPassword } from './modules/core/state.js';
 import { _checkApiStatus } from './modules/pages/openlist.js';
 
 // Bind hashchange event (will be activated after auth init)
@@ -37,12 +37,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Load UI config from DB
   _loadUiConfig();
-
-  // Load TMDB web base from config
-  fetch('/api/config').then(r => r.json()).then(cfg => {
-    setTmdbWebBase(cfg.tmdb_host && !cfg.tmdb_host.startsWith('https://api.themoviedb.org')
-      ? cfg.tmdb_host : 'https://www.themoviedb.org');
-  }).catch(() => { });
 
   // 页面可见性优化：隐藏时暂停定时器，恢复时重启
   document.addEventListener('visibilitychange', () => {

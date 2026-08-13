@@ -157,8 +157,10 @@ class OpenListAdminClient:
             except Exception as e:
                 log.warning(f"无法保存 Token 缓存: {e}")
 
-    def login(self, force: bool = False) -> bool:
+    def login(self, force: bool = False, source: str = "unknown") -> bool:
         """登录获取 JWT。force=True 会无视缓存强制联网登录。
+
+        source 参数用于标识调用来源，方便日志定位问题。
 
         返回: bool（True 成功，False 失败）
         错误详情通过属性访问:
@@ -219,7 +221,7 @@ class OpenListAdminClient:
 
             # HTTP 200，检查业务响应
             data = res.json()
-            # H-3: 诊断日志：记录实际响应内容，但脱敏 token 字段
+            # 诊断日志：记录实际响应内容，但脱敏 token 字段
             log_data = data.copy() if isinstance(data, dict) else data
             if isinstance(log_data, dict):
                 # 脱敏 data.token
@@ -251,7 +253,7 @@ class OpenListAdminClient:
                 # 检查是否有业务错误码
                 error_msg = data.get("message", "")
                 error_type = self._parse_login_error(error_msg) if error_msg else "unknown"
-                log.error("登录响应中未获取到有效 Token: %s", data)
+                log.error("登录响应中未获取到有效 Token: %s（来源：%s）", data, source)
                 self.last_error_message = error_msg or "无法提取 token"
                 self.last_error_type = error_type
                 return False
@@ -259,7 +261,7 @@ class OpenListAdminClient:
             self._save_token_to_cache(token)
             self.last_error_message = None
             self.last_error_type = None
-            log.info("OpenList 登录成功，Token 已更新")
+            log.info("OpenList 登录成功，Token 已更新（来源：%s）", source)
             return True
         except requests.exceptions.RequestException as e:
             # 使用错误翻译工具转换为易懂描述
@@ -311,7 +313,7 @@ class OpenListAdminClient:
         # 不含业务解析，串行化开销极小。
         with self._http_lock:
             if not self.token:
-                if not self.login():
+                if not self.login(source="auto_auth"):
                     return None
 
             # 注入 Header
@@ -371,7 +373,7 @@ class OpenListAdminClient:
 
                 if should_retry:
                     log.warning("Token 已过期，尝试自动重新登录...")
-                    if self.login(force=True):
+                    if self.login(force=True, source="auto_auth"):
                         kwargs["headers"]["Authorization"] = self.token
                         res = self.session.request(method, url, **kwargs)
                         response_json = None  # 响应已更换，缓存失效
@@ -674,7 +676,7 @@ class OpenListAdminClient:
             False: 权威确认不存在（完整可信列表中未出现）
             None: 响应不可信 / 请求失败 / 安全阀耗尽 —— 调用方不得当「不存在」去删除
 
-        分页 per_page=100（对齐 OpenAPI maximum 与 Issue7 列表契约）。
+        分页 per_page=100（对齐 OpenAPI maximum 与 fs/list 列表契约，见 docs/openlist_api_fs_list_contract.md）。
         """
         now = time.time()
         # 统一 key 规范化（strip 尾斜杠），避免 /path 与 /path/ 双 key
@@ -700,7 +702,7 @@ class OpenListAdminClient:
 
             try:
                 page = 1
-                per_page = 100  # 对齐 docs maximum:100 / Issue7 契约
+                per_page = 100  # 对齐 docs maximum:100 / fs/list 列表契约
                 max_pages = 100  # 安全阀
 
                 while page <= max_pages:

@@ -342,13 +342,12 @@ async function renderAreaDetail(el, area, params) {
           body: JSON.stringify(body)
         });
 
+        // api() 对非 2xx 直接 throw，故此处 result.ok 恒为 true，失败统一由下方 catch 呈现
         if (result.ok) {
           const msg = result.message || '刷新完成';
           showToast(msg, 'success');
           // 自动刷新页面数据
           await renderAreaDetail(el, area, params);
-        } else {
-          showToast(`刷新失败：${result.message || result.error || '未知错误'}`, 'error');
         }
       } catch (err) {
         showToast(`刷新请求失败：${err.message}`, 'error');

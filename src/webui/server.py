@@ -1226,7 +1226,7 @@ class WebUIServer:
                 )
 
                 # 登录验证（强制重新登录，不使用缓存 token，确保真实验证连接）
-                if not admin_client.login(force=True):
+                if not admin_client.login(force=True, source="health_check"):
                     error_msg = admin_client.last_error_message or "未知错误"
                     return {"success": False,
                             "message": f"OpenList 登录失败: {error_msg}"}
@@ -1355,9 +1355,24 @@ def main():
         sys.exit(1)
 
     # 加载配置（使用 AppConfig 统一配置系统）
-    logger.info("加载配置: %s", config_path)
     from config import AppConfig
     cfg = AppConfig.from_file(str(config_path))
+
+    # WebUI 进程启动即写入 UTF-8 日志文件（与 main.py 一致），
+    # 避免只启动 WebUI 时 strm_bridge.log 保持 0 字节。
+    # setup_logging 会先清空旧 handler 再重建，重复调用安全。
+    try:
+        from logger_setup import setup_logging
+        setup_logging(
+            level=cfg.log.level,
+            log_file=cfg.log.file or "strm_bridge.log",
+            max_size_mb=cfg.log.max_size_mb,
+            backup_count=cfg.log.backup_count,
+        )
+    except Exception as log_exc:
+        logger.warning("[WebUI] 日志初始化失败（沿用 stderr）: %s", log_exc)
+
+    logger.info("加载配置: %s", config_path)
 
     # 从 DB 加载 TMDB 配置覆盖（DB 为唯一来源，替代 .tmdb_webui_config.json）
     db_path = str(PROJECT_ROOT / "tmdb_watchlist.db")

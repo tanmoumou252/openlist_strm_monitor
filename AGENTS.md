@@ -331,4 +331,4 @@ The following files are included as-is and should NOT be flagged as issues or re
 
 ## Design Decisions / Rejected Options Registry
 
-- **`docs/否决方案.md`** is the authoritative registry for intentional design decisions ("设计决策"), deliberately-kept dead/legacy fields ("有意保留"), and rejected fix proposals. Code comments use stable keywords `# 设计决策：` / `# 有意保留：` as grep anchors; consult this file for the rationale before flagging or refactoring such code. Registry entries are indexed by `file:function`, not by plan IDs.
+- **`docs/否决方案.md`** is the authoritative registry for intentional design decisions ("设计决策"), deliberately-kept dead/legacy fields ("有意保留"), accepted trade-offs ("已知取舍"), and deprecated/migrated mechanisms ("[已废弃]"), plus rejected fix proposals. Code comments use four stable anchor keywords as grep anchors — `# 设计决策：` / `# 有意保留：` / `# 已知取舍：` / `# [已废弃]` (bracketed, no colon for the last). Consult this file for the rationale before flagging or refactoring such code. Registry entries are indexed by `file:function`, not by plan IDs.

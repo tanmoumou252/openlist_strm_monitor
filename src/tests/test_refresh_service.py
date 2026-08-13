@@ -451,7 +451,7 @@ class TestRefreshServiceHotReloadContract:
         svc._thread = worker
         worker.start()
         time.sleep(0.05)
-        # P1-2: 首轮 enabled 检查使禁用状态下 worker 直接返回，不执行任何周期。
+        # 首轮 enabled 检查使禁用状态下 worker 直接返回，不执行任何周期。
         # 见 refresh_service.py._worker 头部注释。
         assert svc._run_cycle_with_breaker.call_count == 0
         assert not worker.is_alive()
@@ -663,7 +663,7 @@ class TestCircuitBreaker:
 
 
 # ============================================================
-# Task 4: Admin API 不可信时保护根快照
+# Admin API 不可信时保护根快照
 # ============================================================
 
 

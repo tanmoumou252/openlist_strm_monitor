@@ -222,13 +222,13 @@ class AppService:
         
         self.engine_configs: list[dict] = []
         self._restoring_markers: set[str] = set()
-        # 代际计数器：与 _engine_internal_generation 相同模式（M1修复）
+        # 代际计数器：与 _engine_internal_generation 相同模式
         self._restoring_generation: dict[str, int] = {}
-        # B-7 删除归因：引擎内部操作（隔离/清理）删除 B 文件时标记 fingerprint，
+        # 删除归因：引擎内部操作（隔离/清理）删除 B 文件时标记 fingerprint，
         # handle_b_deleted 检测到此标记即跳过不可逆的云删除 + A 区删除，
         # 仅清理本地 DB 行。避免引擎隔离/僵尸清理被误判为用户删除而连累云源。
         self._engine_internal_markers: set[str] = set()
-        # 代际计数器：为延迟清除提供重入安全（M1修复）
+        # 代际计数器：为延迟清除提供重入安全
         # 每次标记递增，延迟清除时检查：若代际已变化则不清除（有新的标记发生）
         self._engine_internal_generation: dict[str, int] = {}
         self._restoring_lock = threading.Lock()
@@ -238,7 +238,7 @@ class AppService:
         # 按 fingerprint 串行化 A→B 处理，避免 TOCTOU 竞争
         self._fingerprint_locks_lock = threading.Lock()
         self._fingerprint_locks: dict[str, threading.Lock] = {}
-        # [已废弃] WebUI 媒体刷新锁已移至 WebUIServer._refresh_lock（server.py:791），
+        # [已废弃] WebUI 媒体刷新锁已移至 WebUIServer.__init__ 的 _refresh_lock，
         # routes.py 使用 handler.webui._refresh_lock。此处保留注释以说明迁移。
         # self._refresh_lock = threading.Lock()
         # Watchdog 健康状态标志 - 由 area_watchers 设置，dashboard 读取并显示
@@ -306,7 +306,7 @@ class AppService:
 
         handle_b_deleted 检测到此标记即跳过不可逆的云删除 + A 区删除。
         与 _restoring_markers 共用 _restoring_lock 串行化。
-        递增代际计数器，使之前已调度的延迟清除不会误清理（M1修复）。
+        递增代际计数器，使之前已调度的延迟清除不会误清理。
         """
         if fingerprint:
             with self._restoring_lock:
@@ -321,7 +321,7 @@ class AppService:
                 self._engine_internal_markers.discard(fingerprint)
 
     def _clear_engine_internal_delayed(self, fingerprint: str, delay: float = 10.0) -> None:
-        """延迟清除引擎内部删除标记（M1修复）。
+        """延迟清除引擎内部删除标记。
 
         quarantine_file 触发 on_moved 事件后，watchdog 在新线程中异步调用 handle_b_deleted。
         如果立即清除标记，handle_b_deleted 执行时标记已不存在，会误判为用户删除并级联删除云源。
@@ -760,7 +760,7 @@ class AppService:
             b_root = normalize_local_root(mapping.b_root)
             if any(a_root == old or b_root == old for old in seen_a + seen_b):
                 return {"status": "fail_safe_active", "reason": "mapping 根路径重复"}
-            # B1: 嵌套根路径校验——防止 A 或 B 根互相嵌套导致路径边界模糊
+            # 嵌套根路径校验——防止 A 或 B 根互相嵌套导致路径边界模糊
             a_root_str = str(a_root)
             b_root_str = str(b_root)
             for old_a in seen_a:
@@ -1570,7 +1570,6 @@ class AppService:
             return  # 跳过后续的 ensure_single_visible_instance，因为回滚了
         
         if fingerprint:
-            # 【已核对，勿再作为 bug 上报】
             # `mapping_id` 复用本函数上方 line 1429 已解析的变量，
             # 非二次调用 `self._mapping_id_for_b(...)`，勿"优化"改写。
             self.ensure_single_visible_instance(fingerprint, new_path, mapping_id=mapping_id)
@@ -1704,6 +1703,9 @@ class AppService:
                         self.db.delete_a_by_local(rec.local_path)
                     else:
                         logging.warning("[初始化] A 区冗余清理：物理删除失败，保留 DB 记录: %s", rec.local_path)
+                    # 已知取舍：无论删除是否成功都设 ghost。若物理删除失败，A 记录仍在 DB，
+                    # 但其 webdav_path 已被 ghost 屏蔽，后续 A→B 同步会跳过该仍有效文件。
+                    # 该路径休眠（0 生产调用），有 WebUI 手动刷新替代，接受。
                     self.db.set_ghost_protection(
                         rec.webdav_path,
                         self.config.behavior.ghost_protect_seconds,
@@ -1988,7 +1990,6 @@ class AppService:
                         "[冗余清理跳过] WebDAV 存在性不可信，fail-closed 跳过: %s",
                         webdav_path)
                     continue
-            # 【已核对，勿再作为 bug 上报】
             # None（不可信）已在上方 continue 拦截，此处 `source_exists` 只能是 False；
             # 该重复判断是有意冗余，确保 fail-closed 语义明确。
             if not source_exists:
@@ -2265,7 +2266,7 @@ class AppService:
                         else:
                             logging.warning("[A区清理] 物理删除失败，跳过DB删除: %s", a_local_path)
                     return
-            # H-1: 把 copy_a_record_to_b 移入 fp_lock 块内，避免 TOCTOU 竞争
+            # 把 copy_a_record_to_b 移入 fp_lock 块内，避免 TOCTOU 竞争
             # 增加 try/except 记录 A 路径和 mapping 上下文
             try:
                 self.copy_a_record_to_b(str(local), webdav_path, parent, mapping_id=mapping_id)
@@ -2436,7 +2437,7 @@ class AppService:
             dup = Path(dup_path)
             if not dup.exists():
                 continue
-            # B-7 删除归因：在物理隔离前标记，防止 quarantine_file 的改名事件
+            # 在物理隔离前标记，防止 quarantine_file 的改名事件
             # 触发 handle_b_deleted 连带删除云源/A区源。
             self._mark_engine_internal(fingerprint)
             try:
@@ -2452,7 +2453,7 @@ class AppService:
                             quarantined,
                             keep)
                     else:
-                        # B-8: DB 迁移失败（目标被占/冲突）— 回滚物理改名，
+                        # DB 迁移失败（目标被占/冲突）— 回滚物理改名，
                         # 保持 DB local_path 与文件系统一致，避免两者分叉。
                         try:
                             Path(quarantined).rename(dup)
@@ -2610,7 +2611,7 @@ class AppService:
                         self.db.mark_b_instance_status(str(c_target), "quarantined")
                         logging.info("[B区越界恢复] 已将越界文件移入C区隔离: %s -> %s", local_path, c_target)
                         return  # C区迁移成功，不删除DB记录
-                    # move_b_record 返回 False（目标被占/冲突）——对齐 B3-B 思路：
+                    # move_b_record 返回 False（目标被占/冲突）——对齐 B 区去重恢复思路：
                     # 回退物理移动或对齐 DB，避免「文件已在 C 区 / DB 行仍指向旧 B 路径」分叉
                     try:
                         Path(c_target).rename(local)
@@ -2690,7 +2691,7 @@ class AppService:
                         def _remove_marker():
                             time.sleep(10)
                             with self._restoring_lock:
-                                # 代际未变化才清除（M1修复）
+                                # 代际未变化才清除
                                 if self._restoring_generation.get(fingerprint, 0) == _restore_gen:
                                     self._restoring_markers.discard(fingerprint)
                                     self._restoring_generation.pop(fingerprint, None)
@@ -2793,7 +2794,7 @@ class AppService:
                     str(local), old_webdav_path, parent, source_a_path):
                 logging.warning("[B区修复] 已从A区恢复异常STRM: %s", local)
                 return
-        # B-7 删除归因：物理隔离前标记 fingerprint 为引擎内部操作，
+        # 物理隔离前标记 fingerprint 为引擎内部操作，
         # 使 quarantine_file 重命名触发的 on_moved→handle_b_deleted 不级联删除云源。
         fp_marker = row.fingerprint if row else None
         if fp_marker:
@@ -2861,7 +2862,7 @@ class AppService:
             self.ensure_single_visible_instance(fingerprint, str(local), mapping_id=self._mapping_id_for_b(local))
 
     def _quarantine_modified_b_file(self, local: Path, fingerprint: str | None = None) -> None:
-        # B-7 删除归因：物理隔离前标记 fingerprint 为引擎内部操作，
+        # 物理隔离前标记 fingerprint 为引擎内部操作，
         # 防止 quarantine_file 重命名触发的 handle_b_deleted 级联删除云源。
         if fingerprint:
             self._mark_engine_internal(fingerprint)
@@ -2928,7 +2929,7 @@ class AppService:
                 parent_webdav_path)
             return
         if not self.admin_api.token:
-            if not self.admin_api.login():
+            if not self.admin_api.login(source="index_update"):
                 error_msg = self.admin_api.last_error_message or "未知错误"
                 logging.warning("[OpenListAdmin] 登录失败: %s，跳过索引更新", error_msg)
                 return
@@ -3055,7 +3056,7 @@ class AppService:
     def handle_b_moved(self, src_path: str, dest_path: str) -> None:
         """处理 B 区 .strm 重命名为 .strm 的事件（异步调用）。
 
-        B-2：原 on_moved 在 watchdog 事件线程内同步调用 db.move_b_record，
+        原 on_moved 在 watchdog 事件线程内同步调用 db.move_b_record，
         既不取路径锁也不经 _run_async，与同路径的 created/modified/deleted
         异步处理线程竞争，导致 move_b_record 的 SELECT→INSERT/DELETE 序列
         与并发插入/删除产生丢失更新（复活已删行 / 删掉刚插入的新行）。
@@ -3097,7 +3098,7 @@ class AppService:
     def _execute_webdav_deletion(
             self, webdav_path: str, parent_webdav_path: str) -> bool:
         logging.debug("[WebDAV删除] 进入，路径=%s, 父目录=%s", webdav_path, parent_webdav_path)
-        # B-2: webdav 路径使用独立命名空间的锁（get_webdav_lock），
+        # webdav 路径使用独立命名空间的锁（get_webdav_lock），
         # 避免与本地路径锁在 Windows 上因 Path().resolve() 碰撞。
         lock = self.get_webdav_lock(webdav_path)
         with lock, self._dav_write_lock:
@@ -3451,6 +3452,8 @@ class AppService:
         # handle_b_deleted 的 get_b_by_local_full 返回 None → 提前返回，不级联。
         mapping_id = self._mapping_id_for_b(local)
         self.db.delete_b_by_local(str(local))
+        # 已知取舍：物理删除为尽力而为。若 safe_remove_file 失败（杀毒锁/权限），
+        # 磁盘残留 .strm 且无 DB 行 → 重扫前为"未跟踪文件"分叉。窄边沿，接受。
         if local.exists():
             safe_remove_file(local)
         # 无论物理文件是否仍在磁盘，只要指纹与映射存在即刷新身份投影，

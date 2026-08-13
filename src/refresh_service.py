@@ -115,7 +115,7 @@ class RefreshService:
                 except Exception:
                     logging.warning("[主动刷新] 推进索引代次失败", exc_info=True)
                     db_write_ok = False
-                # D'.3: 标记 last_verified_at（全量审计后推进核对时间）
+                # 推进 last_verified_at（全量审计后标记核对时间）
                 try:
                     for m in getattr(self.app, 'a_b_mappings', []):
                         mid = str(getattr(m, 'mapping_id', '')).strip()
@@ -173,7 +173,7 @@ class RefreshService:
                 except Exception:
                     logging.warning("[手动审计] 推进索引代次失败", exc_info=True)
                     db_write_ok = False
-                # D'.3: 标记 last_verified_at
+                # 推进 last_verified_at（审计后标记核对时间）
                 try:
                     for m in getattr(self.app, 'a_b_mappings', []):
                         mid = str(getattr(m, 'mapping_id', '')).strip()
@@ -335,7 +335,10 @@ class RefreshService:
         logging.info("[主动刷新] 开始执行")
 
         full_audit_ran = self._maybe_run_full_audit()
-        # A8: 全量审计失败时更新健康状态，使 _run_cycle_with_breaker 可感知审计错误
+        # A8: 全量审计失败时更新健康状态。注意：execute_refresh_cycle 正常返回后，
+        # _run_cycle_with_breaker 会在同一调用栈内将 _consecutive_failures 清零，
+        # 故单次审计失败本身不熔断；仅在审计失败后仍有异常抛出的周期里，该计数
+        # 与 _last_error_summary 才保留到熔断判定。此为有意设计（审计失败可感知，但不因单次失败误触发熔断）。
         if not full_audit_ran and self._full_audit_interval_seconds() > 0:
             # 检查是否不是"未到周期"导致的 False（非正常跳过）
             now = time.time()
@@ -497,7 +500,7 @@ class RefreshService:
                     "[STRM存储API验证] admin_api 未初始化，回退到 WebDAV 检查")
                 return None
 
-            if not admin_client.login():
+            if not admin_client.login(source="refresh"):
                 error_msg = admin_client.last_error_message or "未知错误"
                 logging.warning("[STRM存储API验证] Admin API 登录失败: %s，回退到 WebDAV 检查", error_msg)
                 return None

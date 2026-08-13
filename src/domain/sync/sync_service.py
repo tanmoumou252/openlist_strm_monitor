@@ -886,7 +886,7 @@ class SyncService:
                 except Exception as e:
                     logging.error("[A->B跳过失败] %s", e)
                     return False
-            # H-2: 如果文件存在但 webdav 路径不同，拒绝覆写（保护用户编排成果）
+            # 如果文件存在但 webdav 路径不同，拒绝覆写（保护用户编排成果）
             logging.warning(
                 "[A->B跳过] B区文件已存在但webdav源不同，拒绝覆写: %s (现有: %s, 请求: %s)",
                 b_local, existing_webdav_path, webdav_path

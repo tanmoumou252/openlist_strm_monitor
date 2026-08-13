@@ -1,6 +1,6 @@
 """统一密码哈希/验证工具。
 
-M-1+M-2: 消除 server.py / routes.py / reset_admin.py 中三处重复的
+消除 server.py / routes.py / reset_admin.py 中三处重复的
 PBKDF2-HMAC-SHA256 密码哈希逻辑。
 
 约定：
@@ -68,7 +68,7 @@ def verify_password(password: str, stored: str) -> bool:
             salt.encode("utf-8"),
             iterations,
         )
-        # M-5: 使用 hmac.compare_digest 防止时序攻击
+        # 使用 hmac.compare_digest 防止时序攻击
         return hmac.compare_digest(h.hex(), stored_hash)
     except (ValueError, AttributeError):
         return False

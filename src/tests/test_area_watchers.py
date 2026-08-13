@@ -193,7 +193,7 @@ class TestBAreaEventHandler:
         assert app.handle_b_deleted.called
 
     def test_on_moved_strm_to_strm(self):
-        """测试 B 区 .strm 重命名为 .strm（B-2 异步化回归测试）"""
+        """测试 B 区 .strm 重命名为 .strm（异步化回归测试）"""
         app = MagicMock()
         handler = BAreaEventHandler(app)
 
@@ -204,7 +204,7 @@ class TestBAreaEventHandler:
 
         handler.on_moved(event)
 
-        # B-2: 现在通过 _run_async 异步调用 handle_b_moved，而非同步调用 db.move_b_record
+        # 现在通过 _run_async 异步调用 handle_b_moved，而非同步调用 db.move_b_record
         # 等待异步线程执行
         time.sleep(0.1)
 
@@ -352,7 +352,7 @@ class TestAreaWatcherIntegration:
         assert call_args[0][0] == "/media/show/episode.ass"
 
     def test_b_rename_updates_database(self):
-        """测试 B 区重命名更新数据库（B-2 异步化回归场景）"""
+        """测试 B 区重命名更新数据库（异步化回归场景）"""
         app = MagicMock()
         handler = BAreaEventHandler(app)
 
@@ -364,7 +364,7 @@ class TestAreaWatcherIntegration:
 
         handler.on_moved(event)
 
-        # B-2: 现在通过 _run_async 异步调用 handle_b_moved
+        # 现在通过 _run_async 异步调用 handle_b_moved
         # 等待异步线程执行
         time.sleep(0.1)
 

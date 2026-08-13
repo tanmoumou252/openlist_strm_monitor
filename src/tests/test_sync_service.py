@@ -599,12 +599,12 @@ class TestSyncServiceScanAToBFullSync:
         app.admin_api.check_exists.assert_not_called()
 
     def test_full_sync_concurrent_no_typeerror(self, tmp_path):
-        """R24: 并发 scan_a_to_b_full_sync(use_bulk=False) 不因缓存生命周期竞态抛错误。
+        """并发 scan_a_to_b_full_sync(use_bulk=False) 不因缓存生命周期竞态抛错误。
 
         手动审计(run_full_audit_now) 与周期 _scan_and_sync 可并发调用本方法。
-        修复前预加载与 finally 清空都在 rw_lock.write_locked() 之外，线程 A 的
+        若预加载与 finally 清空都在 rw_lock.write_locked() 之外，线程 A 的
         finally 把 _cache_ghost 置 None 时线程 B 正在 pass1/pass2 访问 → TypeError。
-        修复后预加载+索引+执行+清空全程纳入 write_locked 串行化，不再交错。
+        预加载+索引+执行+清空全程纳入 write_locked 串行化，不再交错。
         """
         import threading
         app = _make_app(tmp_path)

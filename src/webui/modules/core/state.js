@@ -34,10 +34,8 @@ export function setUptimeTimer(v) { _uptimeTimer = v; }
 export const _tmdbCache = { movies: null, tv: null };
 export const _tmdbCacheTTL = 30 * 60 * 1000;
 export const _fetchPromises = {};
-export let _tmdbWebBase = 'https://www.themoviedb.org';
 export let _uiConfig = {};
 
-export function setTmdbWebBase(v) { _tmdbWebBase = v; }
 export function setUiConfig(v) { _uiConfig = v; }
 
 // Flipped card state (TMDB)

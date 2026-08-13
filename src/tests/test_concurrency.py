@@ -3,7 +3,7 @@ import threading
 import time
 import socket
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -70,12 +70,12 @@ class TestConcurrency:
         from database import Database
         bridge_db = Database(cfg.local.db_file)
 
-        server = WebUIServer(cfg.webui, bridge_db, app_config=cfg)
-        server._has_password = True
-        # Set password on the server's actual watchlist_db
-        if server._watchlist_db:
-            from utils.password_utils import hash_password
-            server._watchlist_db.set_config("ui", "admin_password", hash_password("test_password"))
+        with patch("webui.server.PROJECT_ROOT", tmp_path):
+            server = WebUIServer(cfg.webui, bridge_db, app_config=cfg)
+            server._has_password = True
+            if server._watchlist_db:
+                from utils.password_utils import hash_password
+                server._watchlist_db.set_config("ui", "admin_password", hash_password("1111"))
 
         port = _free_port()
         server._port = port
@@ -92,7 +92,7 @@ class TestConcurrency:
             try:
                 req = urllib.request.Request(
                     f"http://127.0.0.1:{port}/api/login",
-                    data=json.dumps({"password": "test_password"}).encode(),
+                    data=json.dumps({"password": "1111"}).encode(),
                     headers={"Content-Type": "application/json"},
                     method="POST"
                 )

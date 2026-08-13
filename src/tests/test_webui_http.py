@@ -139,7 +139,7 @@ def webui_server(tmp_path):
 
         server = WebUIServer(cfg.webui, db, app_config=cfg)
         # 设置测试密码环境变量
-        test_password = "test_password_123"
+        test_password = "1111"
         os.environ["WEBUI_TEST_MODE"] = "1"
         os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
         server.start()
@@ -251,7 +251,7 @@ class TestStaticRoutes:
     def test_login_returns_spa_index_html(self, webui_server):
         """GET /login 应返回 SPA index.html（与 / 和 /api/page 一致）。
 
-        回归守卫：修复前 do_GET 调用不存在的 _send_login_page()，
+        回归守卫：do_GET 调用不存在的 _send_login_page()，
         导致 AttributeError 或非 200 响应。
         """
         server, base, session_token = webui_server
@@ -399,7 +399,7 @@ class TestLogsDownloadRoute:
             (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
 
             server = WebUIServer(cfg.webui, db, app_config=cfg)
-            test_password = "test_password_123"
+            test_password = "1111"
             os.environ["WEBUI_TEST_MODE"] = "1"
             os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
             server.start()
@@ -533,9 +533,9 @@ class TestOpenListRoutes:
     def test_openlist_ping_unreachable_host_returns_offline(self, webui_server):
         """ping 接口在 host 不可达时返回 offline，而非 online。
 
-        回归守卫：修复前 _handle_openlist_ping 调用 client.login()（无 force=True），
+        回归守卫：_handle_openlist_ping 若调用 client.login()（无 force=True），
         新实例会加载缓存 token 直接返回 True，导致状态误报为"已连接"。
-        修复后调用 client.login(force=True)，强制真实验证连接。
+        必须调用 client.login(force=True) 强制真实验证连接。
         """
         server, base, session_token = webui_server
         # 设置一个非空 host，使 ping 接口进入登录逻辑
@@ -553,8 +553,8 @@ class TestOpenListRoutes:
 
         assert status == 200
         assert body.get("status") == "offline"
-        # 验证 login 被调用时传入了 force=True（关键回归断言）
-        mock_instance.login.assert_called_once_with(force=True)
+        # 验证 login 被调用时传入了 force=True(关键回归断言)
+        mock_instance.login.assert_called_once_with(force=True, source="ping")
 
     def test_openlist_ping_login_succeeds_returns_online(self, webui_server):
         """ping 接口在登录成功时返回 online。"""
@@ -571,7 +571,7 @@ class TestOpenListRoutes:
 
         assert status == 200
         assert body.get("status") == "online"
-        mock_instance.login.assert_called_once_with(force=True)
+        mock_instance.login.assert_called_once_with(force=True, source="ping")
 
     def test_openlist_ping_not_configured_returns_offline(self, webui_server):
         """ping 接口在 host 无效（not_configured）时返回 offline。
@@ -979,7 +979,7 @@ class TestMatchClearEndpoint:
             (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
 
             server = WebUIServer(cfg.webui, db, app_config=cfg)
-            test_password = "test_password_123"
+            test_password = "1111"
             os.environ["WEBUI_TEST_MODE"] = "1"
             os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
             server.start()
@@ -1519,7 +1519,7 @@ class TestAreaRefreshAPI:
             (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
 
             server = WebUIServer(cfg.webui, db, app_config=cfg)
-            test_password = "test_password_123"
+            test_password = "1111"
             os.environ["WEBUI_TEST_MODE"] = "1"
             os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
             server.start()
@@ -1873,7 +1873,7 @@ class TestOnboardingAPI:
 
 
 # ============================================================
-# Task 4: Area Detail API Tests
+# Area Detail API Tests
 # ============================================================
 
 class TestAreaDetailKindParameter:
@@ -2199,7 +2199,7 @@ class TestConfigApiFreshInstall:
     def test_config_api_survives_fresh_install(self, tmp_path):
         from webui.routes import handle_config_api
         handler = self._fresh_handler(tmp_path)
-        handle_config_api(handler)  # 修复前抛 AttributeError
+        handle_config_api(handler)  # 早期版本抛 AttributeError
         handler._send_json.assert_called_once()
         payload = handler._send_json.call_args[0][0]
         # 未认证响应不泄露 port/bind/counts
@@ -2283,7 +2283,7 @@ class TestStartMainFailSafe:
 
 
 # ============================================================
-# Task A: 手动全量审计端点测试
+# 手动全量审计端点测试
 # ============================================================
 
 
@@ -2341,7 +2341,7 @@ class TestManualFullIndexAuditAPI:
         body = {}
         status, _, resp = _http_post(base, "/api/index/audit", body, session_token)
         assert status == 200
-        assert resp.get("ok") is False  # P1-3: 已在进行时应返回 ok: False
+        assert resp.get("ok") is False  # 已在进行时应返回 ok: False
         assert resp.get("status") == "already_running"
 
         # 验证没有调用审计方法
@@ -2361,7 +2361,7 @@ class TestManualFullIndexAuditAPI:
 
 
 # ============================================================
-# Task B: TMDB override 端点一致性收口测试
+# TMDB override 端点一致性收口测试
 # ============================================================
 
 
@@ -2438,10 +2438,10 @@ class TestSessionIPBinding:
 
 
 class TestRound13Regressions:
-    """第 23 轮 superpower 审计回归（M3 / M4 / M5）。"""
+    """superpower 审计回归：媒体名 SQL 别名目录、改密失效、admin/status 鉴权。"""
 
     def test_media_name_sql_matches_all_alias_dirs(self):
-        """M3: _MEDIA_NAME_SQL 应对 /movies/ /movie/ /anime/ /动漫/ /动画/ 别名目录提取正确媒体名。
+        """_MEDIA_NAME_SQL 应对 /movies/ /movie/ /anime/ /动漫/ /动画/ 别名目录提取正确媒体名。
 
         旧实现只匹配 /番剧/ 与 /电影/，别名目录全部坍缩进 '未分类'。
         """
@@ -2467,7 +2467,7 @@ class TestRound13Regressions:
             )
 
     def test_password_change_invalidates_old_session(self, webui_server):
-        """M4: 改密后旧 token 应立即失效（401），不能继续冒用。"""
+        """改密后旧 token 应立即失效（401），不能继续冒用。"""
         server, base, session_token = webui_server
 
         # 改密前旧 token 有效
@@ -2490,7 +2490,7 @@ class TestRound13Regressions:
             assert len(server._sessions) == 0
 
     def test_admin_status_invalid_token_returns_401(self, webui_server):
-        """M5: /api/admin/status 带无效 token 应返回 401（不再无条件 200）。"""
+        """/api/admin/status 带无效 token 应返回 401（不再无条件 200）。"""
         server, base, _session_token = webui_server
         status, _, resp = _http_get(
             base, "/api/admin/status", "fake-or-expired-token")
@@ -2498,7 +2498,7 @@ class TestRound13Regressions:
         assert resp.get("error") == "unauthorized"
 
     def test_admin_status_no_token_returns_200(self, webui_server):
-        """M5: /api/admin/status 无 token 应保持白名单直通（200 + has_password）。
+        """/api/admin/status 无 token 应保持白名单直通（200 + has_password）。
 
         router.js:105 的 has_password 变更检测依赖该 200 响应。
         """

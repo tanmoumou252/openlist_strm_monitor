@@ -4,7 +4,7 @@ Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
 WshShell.Environment("PROCESS")("BRIDGE_HEADLESS") = "1"
 
-' C6: 端口检测——启动前检查 8579 端口是否已被占用。
+' 端口检测——启动前检查 8579 端口是否已被占用。
 ' 移除 findstr LISTENING 过滤器（非英文系统 netstat 输出可能不包含 LISTENING），
 ' 仅判 :8579 有输出即可确定端口已被占用。
 Dim portCheck
@@ -81,9 +81,10 @@ If exitCode <> 0 Then
     WScript.Quit 1
 End If
 
-' Launch in background with stdout+stderr redirected to log file
+' Launch in background (隐藏窗口下 stdout/stderr 自然丢弃，不再产生 strm_bridge_boot.log；
+' WebUI 启动期日志已由 server.py 在启动时 setup_logging 写入共享 strm_bridge.log)
 Dim execCommand
-execCommand = "cmd /c " & quotedPythonPath & " """ & WshShell.CurrentDirectory & "\src\webui\server.py"" >strm_bridge_boot.log 2>&1"
+execCommand = "cmd /c " & quotedPythonPath & " """ & WshShell.CurrentDirectory & "\src\webui\server.py"""
 WshShell.Run execCommand, 0, False
 
 Set WshShell = Nothing

@@ -115,7 +115,7 @@ def webui_server(tmp_path):
         (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
 
         server = WebUIServer(cfg.webui, db, app_config=cfg)
-        test_password = "test_password_123"
+        test_password = "1111"
         os.environ["WEBUI_TEST_MODE"] = "1"
         os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
         server.start()
@@ -156,7 +156,7 @@ def real_webui_server(tmp_path):
         (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
 
         server = WebUIServer(cfg.webui, db, app_config=cfg)
-        test_password = "test_password_123"
+        test_password = "1111"
         os.environ["WEBUI_TEST_MODE"] = "1"
         os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
         server.start()
@@ -229,7 +229,7 @@ def real_config_webui_server(tmp_path):
                     return_value=mock_admin_client):
 
             server = WebUIServer(cfg.webui, db, app_config=cfg)
-            test_password = "test_password_123"
+            test_password = "1111"
             os.environ["WEBUI_TEST_MODE"] = "1"
             os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
             server.start()

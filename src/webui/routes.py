@@ -1379,10 +1379,10 @@ def _reinit_admin_client(webui_server) -> None:
             cfg.webdav.password,
             totp_secret=cfg.webdav.totp_secret,
         )
-        if new_client.login(force=True):
+        if new_client.login(force=True, source="hot_reload"):
             logging.info("[HotReload] 新的 OpenListAdminClient 登录成功")
             # 仅当登录成功后才替换 client 引用，避免用无效客户端冲掉正常工作实例
-            # B3: 使用锁保护 client 引用替换，防止并发请求读到不一致状态
+            # 使用锁保护 client 引用替换，防止并发请求读到不一致状态
             lock = getattr(webui_server, '_admin_client_lock', None)
             if lock is None:
                 import threading
@@ -1431,7 +1431,7 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
         from webdav_client import OpenListAdminClient
         client = OpenListAdminClient(host, user, password, totp_secret=totp_secret)
         # 强制重新登录，不使用缓存的 Token，确保测试的是当前配置的连接
-        if client.login(force=True):
+        if client.login(force=True, source="test_connection"):
             handler._send_json({
                 "success": True,
                 "message": "连接成功",
@@ -1454,6 +1454,13 @@ def _handle_openlist_test_connection(handler, webui_server, body: bytes) -> None
 
             # display_message 已按 error_type 映射为用户友好文本，
             # 不回传 client.last_error_message（可能含内部路径/凭据）
+            # 注意：本次 test-connection 使用独立 client/端点强制重新登录，与后台自动登录
+            # （auto_auth / startup）的会话互不影响。因此此处即使报「登录失败」，
+            # 后台守护进程的旧会话仍可能有效——这是正常双日志现象，非逻辑错误。
+            logging.warning(
+                "[OpenList] 连接测试失败（type=%s）: %s。后台自动登录使用独立会话，旧会话仍可能有效",
+                error_type, display_message,
+            )
             handler._send_json({
                 "success": False,
                 "error": display_message,
@@ -1640,7 +1647,7 @@ def _handle_openlist_ping(handler, webui_server) -> None:
     try:
         from webdav_client import OpenListAdminClient
         client = OpenListAdminClient(host, user, password, totp_secret=totp_secret)
-        if client.login(force=True):
+        if client.login(force=True, source="ping"):
             # 不返回 host（与 /api/openlist/status 一致，避免白名单端点泄露配置）
             handler._send_json({"success": True, "status": "online"})
         else:
@@ -2175,7 +2182,7 @@ def handle_dashboard(handler) -> None:
         b_status = _db_get_b_status_counts(db)
         db_size = _db_get_db_file_size(db)
         
-        # 获取索引元数据（Task 2）
+        # 获取索引元数据（代际计数、时间戳、映射版本）
         index_metadata = db.get_index_metadata()
         mapping_metadata = _get_mapping_metadata_list(handler)
         
@@ -2199,7 +2206,7 @@ def handle_dashboard(handler) -> None:
             "db_file_size": db_size,
             "db_file_size_human": _human_size(db_size),
             "uptime": time.time() - handler.webui._start_time,
-            # Task 2: 索引元数据
+            # 索引元数据：代际计数与时间戳，供前端检测代际更新
             "index_metadata": {
                 "index_generation": index_metadata.get("index_generation", 0),
                 "index_generation_at": index_metadata.get("index_generation_at", 0),
@@ -2436,7 +2443,6 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
                 {"error": f"登录尝试过于频繁，请在 {retry_after} 秒后重试"},
                 429)
             return
-        # 【已核对，勿再作为 bug 上报】
         # 写回操作仍在 `with _login_attempts_lock:` 块内（从 line 2125 到此行），
         # 读-清理-判限-写回全程原子，勿据缩进误判为竞态。
         _login_attempts[client_ip] = attempts
@@ -2898,13 +2904,13 @@ def _escape_fts5_query(query: str) -> str | None:
 def handle_area_detail(handler, area, params) -> None:
     """处理 GET /api/area/{area}/detail — 区域详情，返回指定媒体的所有记录
     
-    Task 2: 支持多 mapping 分区
+    分区行为：
     - 列表页：按 kind + media_name 合并（不拆分）
     - 详情页：按 mapping_id 分区，每个 mapping 独立根路径/季分组/分页
     - 单一 mapping：保持向后兼容扁平响应
     - 多 mapping：返回 mappings 数组
     
-    Task 4: 支持 kind 参数控制季提取行为
+    kind 参数控制季提取行为：
     - kind ∈ {anime, movie, other, all}，非法值降级为 all
     - 仅 kind == 'anime' 允许文件名 SxxExx fallback
     - movie/other/all 只认目录显式季标识，否则归入「默认」
@@ -2924,7 +2930,7 @@ def handle_area_detail(handler, area, params) -> None:
     sort_order = params.get("order", ["asc"])[0]
     page = _safe_int(params.get("page", ["1"])[0], 1)
     
-    # Task 4: 读取并校验 kind 参数
+    # 读取并校验 kind 参数（非法值降级为 all，安全行为）
     kind = params.get("kind", [""])[0].strip().lower()
     valid_kinds = {"anime", "movie", "other", "all"}
     if kind not in valid_kinds:
@@ -2944,7 +2950,7 @@ def handle_area_detail(handler, area, params) -> None:
     total = 0
     search_params: tuple[str, ...] = ()
     try:
-        # 构建列列表和 COUNT（Task 2: B 区添加 mapping_id 列）
+        # 构建列列表和 COUNT（B 区含 mapping_id 列用于分区）
         if area == "a":
             columns = "local_path, webdav_path, parent_webdav_path, updated_at, last_verified_at"
             table = "a_strm_files"
@@ -2975,7 +2981,7 @@ def handle_area_detail(handler, area, params) -> None:
     except Exception as e:
         logging.error("查询 %s 区详情失败: %s", area, e)
 
-    # Task 2: 按 mapping 分区
+    # 按 mapping 分区：同一媒体在不同映射下可能对应不同根路径，需隔离分组
     app_service = getattr(handler.webui, '_app_service', None)
     current_mapping_ids = set()
     if app_service:
@@ -3174,7 +3180,7 @@ def _process_mapping_partition(
 def handle_area_refresh(handler, area, body: bytes) -> None:
     """处理 POST /api/area/{area}/refresh — 通过 STRM 入口路径触发引擎刷新并同步到 B 区
     
-    Task 2: 支持 mapping_id 参数，按 mapping 过滤 A 区记录
+    支持 mapping_id 参数，按 mapping 过滤 A 区记录。
     """
     if area not in ("a", "b"):
         handler._send_json({"error": "无效区域，仅支持 'a' 或 'b'"}, 400)
@@ -3186,7 +3192,7 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
     except (ValueError, json.JSONDecodeError):
         data = {}
 
-    # B2: 类型防御——非法输入直接返回 400
+    # 类型防御——非法输入直接返回 400
     if not isinstance(data, dict):
         handler._send_json({"error": "请求体必须为 JSON 对象"}, 400)
         return
@@ -3199,7 +3205,7 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
         handler._send_json({"error": "缺少 media 参数"}, 400)
         return
 
-    # Task 2: 可选的 mapping_id 参数
+    # 可选的 mapping_id 参数：为空则按默认映射处理
     mapping_id = (data.get("mapping_id") or "").strip() or None
 
     # 路径穿越校验：防止恶意构造路径
@@ -3251,11 +3257,11 @@ def handle_area_refresh(handler, area, body: bytes) -> None:
 def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str | None = None) -> dict:
     """执行媒体刷新逻辑：通过 STRM 入口路径触发引擎重新生成，然后同步到 B 区。
     
-    Task 2: 支持 mapping_id 参数，按 mapping 过滤 A 区记录
+    支持 mapping_id 参数，按 mapping 过滤 A 区记录。
     """
     db = app_service.db
     admin_api = app_service.admin_api
-    now_verified = time.time()  # D'.3: 默认时间戳，成功路径会在 step 5.1 更新
+    now_verified = time.time()  # 默认时间戳，成功路径会在后续步骤更新
 
     # 读取刷新日志级别
     app_config = getattr(app_service, 'config', None)
@@ -3267,7 +3273,7 @@ def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str |
 
     _refresh_log("info", "[Refresh] 开始刷新 媒体=%s 区=%s mapping_id=%s", media_name, area, mapping_id)
 
-    # 1. 从 A 区 DB 查询该媒体的所有记录（Task 2: 支持 mapping_id 过滤）
+    # 1. 从 A 区 DB 查询该媒体的所有记录（按 mapping_id 过滤）
     # 注意：LIKE '%media_name%' 是子串匹配，理论上当两部媒体名互为子串时会误匹配
     # （如 '巨人' 会命中 '进击的巨人'）。此处依赖后续 _compute_common_parent_path
     # 计算公共父目录 + '/' 根目录保护来收敛范围；若误匹配导致跨目录，公共父目录会退化为
@@ -3282,7 +3288,7 @@ def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str |
             # 下划线在媒体名中极常见（如 S01_E01、The_Movie），不转义会被当作单字符通配符过度匹配。
             like = f"%{escape_like(media_name)}%"
             
-            # Task 2: 如果指定了 mapping_id，通过 app_service 获取对应的 A 区路径进行过滤
+            # 若指定了 mapping_id，通过 app_service 获取对应的 A 区路径进行过滤
             if mapping_id and app_service:
                 # 通过 mapping_id 找到对应的 a_root
                 a_root = None
@@ -4047,7 +4053,7 @@ def _handle_config_validate(handler, webui_server) -> None:
         try:
             from webdav_client import OpenListAdminClient
             client = OpenListAdminClient(host, user, password, totp_secret=totp_secret)
-            if client.login(force=True):
+            if client.login(force=True, source="health_check"):
                 checks.append({
                     "name": "openlist_online",
                     "label": "OpenList 连接",

@@ -1,8 +1,8 @@
 """
 回归测试：番剧同集多字幕场景下 _process_anime_subtitle 不再触发 NameError。
 
-复现计划 BUG-01：当番剧目录中同一集有多个字幕文件（如 .ass + .srt）且
-process_subtitle_group 成功返回映射时，修复前 lang_info 从未定义，
+复现已知问题：当番剧目录中同一集有多个字幕文件（如 .ass + .srt）且
+process_subtitle_group 成功返回映射时，lang_info 曾未定义，
 后续 upsert_subtitle 引用 lang_info[0] 触发 NameError，字幕永远不会写入 DB。
 
 运行方式：
@@ -54,11 +54,11 @@ class TestAnimeMultiSubtitleNoNameError:
         sub_srt.write_text("content", encoding="utf-8")
 
         handler = SubtitleHandler(app)
-        # 修复前：这里会抛 NameError（被 _safe_call 吞掉，DB 不写入）
+        # 这里不应抛 NameError（被 _safe_call 吞掉会导致 DB 不写入）
         handler._process_anime_subtitle(sub_ass, a_root, "fp_test")
         handler._process_anime_subtitle(sub_srt, a_root, "fp_test")
 
-        # 两个字幕都应写入 DB（修复前一个都不会写入）
+        # 两个字幕都应写入 DB
         rec_ass = real_db.get_subtitle_by_local(str(sub_ass))
         rec_srt = real_db.get_subtitle_by_local(str(sub_srt))
         assert rec_ass is not None, "ass 字幕未写入 DB（可能触发 NameError）"

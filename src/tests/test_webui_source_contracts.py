@@ -30,7 +30,7 @@ def test_ping_status_does_not_override_configured_state():
     assert "OpenListState.configured =" not in ping_block
 
 
-# ---- V9 Audit Acceptance Regression Contracts ----
+# ---- Audit Acceptance Regression Contracts ----
 
 def test_build_engine_row_no_delete_disabled_reference():
     """buildEngineRow() must not reference undefined `deleteDisabled`.

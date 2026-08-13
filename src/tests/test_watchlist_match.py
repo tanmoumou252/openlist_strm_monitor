@@ -451,7 +451,7 @@ class TestEdgeStructural:
 
 
 # ============================================================
-# Task 4: _extract_season_from_local_path with allow_filename_fallback
+# _extract_season_from_local_path with allow_filename_fallback
 # ============================================================
 
 class TestExtractSeasonFromLocalPath:
@@ -510,7 +510,7 @@ class TestExtractSeasonFromLocalPath:
 
 
 # ============================================================
-# Task 4: 电影误分季测试
+# 电影误分季测试
 # ============================================================
 
 class TestMovieSeasonMisclassification:
@@ -564,7 +564,7 @@ class TestMovieSeasonMisclassification:
 
 
 # ============================================================
-# Task 3: is_anime=False 目录级季节提取跳过
+# is_anime=False 目录级季节提取跳过
 # ============================================================
 
 class TestIsAnimeFalseDirectorySeasonSkip:

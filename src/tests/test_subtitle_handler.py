@@ -397,7 +397,7 @@ class TestProcessSubtitleFileDispatch:
     def test_anime_path_no_strm_uses_subtitle_name_season(self, tmp_path: Path):
         """路径含 "番剧" 目录 + 同目录无 STRM → 仍走 anime 模式，从字幕名提取季集
 
-        这是 L0 修复的核心价值：修复前，anime 路径 + 无 STRM 会被误降级为 movie。
+        这是核心行为：anime 路径 + 无 STRM 不被误降级为 movie。
         """
         app = _make_app(tmp_path)
         a_root = tmp_path / "a"

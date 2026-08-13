@@ -614,7 +614,7 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 .config-form-actions{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;justify-content:center}
 .config-form-actions .toolbar-btn{min-width:unset;flex:1 1 auto}
 .field-helper-text{font-size:calc(var(--font-base) - 1px);color:var(--text-muted);line-height:1.4;margin:2px 0 0;padding:0 2px}
-.configured-badge{color:var(--success);margin-left:8px;font-size:calc(var(--font-base) - 1px);white-space:nowrap;font-weight:600}
+.configured-badge{color:var(--success);margin-left:6px;font-size:calc(var(--font-base) - 1px);white-space:nowrap;font-weight:600}
 .tmdb-restore-auto-btn{margin-top:8px;padding:4px 10px;font-size:12px;background:color-mix(in srgb,var(--bg-card) 80%,var(--primary) 20%);border:1px solid color-mix(in srgb,var(--border-color) 60%,var(--primary) 40%);border-radius:6px;color:var(--text-main);cursor:pointer;white-space:nowrap}
 
 .config-blocks-wrapper{max-width:620px;margin:0 auto}
@@ -666,10 +666,10 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 .api-status-dot.auth_failed{background:var(--color-warning);box-shadow:0 0 6px color-mix(in srgb,var(--color-warning) 50%,transparent)}
 @keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.4}}
 .api-status-text{font-size:calc(var(--font-base) - 2px);color:var(--text-muted);white-space:nowrap}
-/* Q2-3: OpenList 连接头部状态紧凑布局 */
-.ol-conn-header{display:inline-flex;align-items:center;gap:6px}
+/* OpenList 连接头部状态紧凑布局 */
+.ol-conn-header{display:inline-flex;align-items:center;gap:8px;max-width:100%}
 .ol-conn-header .ol-conn-icon{width:18px;height:18px;flex-shrink:0}
-.ol-conn-header .ol-conn-status-text{font-size:var(--font-base);color:var(--text-muted);white-space:nowrap}
+.ol-conn-header .ol-conn-status-text{font-size:var(--font-base);color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px;flex-shrink:1}
 .gear-quick-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;border:none;background:transparent;color:var(--text-muted);cursor:pointer;transition:background .15s,color .15s}
 .gear-quick-btn:hover{background:color-mix(in srgb,var(--primary) 12%,transparent);color:var(--primary)}
 

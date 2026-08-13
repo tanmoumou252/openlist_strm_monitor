@@ -318,7 +318,7 @@ class TestAdminLogin:
         覆盖 webdav_client.py:190-201：当 OpenList API 返回 data 字段为 null 时，
         原代码 data.get("data", {}).get("token") 会抛出
         'NoneType' object has no attribute 'get' 错误。
-        修复后应安全处理并返回明确的错误信息。
+        login() 应安全处理并返回明确的错误信息。
         """
         client = _make_admin_client(tmp_path)
         # 模拟 OpenList 返回 data: null 的情况

@@ -396,6 +396,9 @@ class AppConfig:
                     self.a_b_mappings = []
 
             logging.info("[Config] 已从 DB 加载 OpenList 配置 (%d 项)", len(db_cfg))
+        # 已知取舍：特殊块（refresh_interval/log_file/strm_engines/a_b_mappings/strm_storage_map）
+        # 被外层单个 except 整体吞掉并提前 return，一个非 (ValueError,TypeError) 异常会丢弃其后
+        # 所有 DB 覆盖。DB 值均由应用自身写入，单值畸形概率低，接受。
         except Exception as e:
             logging.warning("[Config] 从 DB 加载 OpenList 配置失败: %s", e)
 
@@ -551,7 +554,7 @@ class AppConfig:
                     totp_secret=self.webdav.totp_secret,
                 )
                 # 强制重新登录，不使用缓存 token，确保真实验证连接
-                if not admin_client.login(force=True):
+                if not admin_client.login(force=True, source="strm_storage"):
                     logging.warning("[STRM存储API] 登录失败，跳过 STRM 存储映射加载")
                     return
 

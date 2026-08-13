@@ -132,8 +132,8 @@ class TestReinitAdminClient:
     def test_reinit_forces_login_not_cached(self):
         """回归守卫：_reinit_admin_client 必须调用 login(force=True)，而非 login()。
 
-        修复前调用 login()（无 force=True），新实例会加载缓存 token 直接返回 True，
-        导致修改配置后不会真实验证连接。修复后调用 login(force=True)，强制真实验证。
+        若调用 login()（无 force=True），新实例会加载缓存 token 直接返回 True，
+        导致修改配置后不会真实验证连接。必须调用 login(force=True) 强制真实验证。
         """
         server = _make_mock_server()
 
@@ -146,14 +146,14 @@ class TestReinitAdminClient:
             _reinit_admin_client(server)
 
         # 关键回归断言：login 必须被调用时传入了 force=True
-        mock_instance.login.assert_called_once_with(force=True)
+        mock_instance.login.assert_called_once_with(force=True, source="hot_reload")
 
     def test_reinit_login_data_null_does_not_raise(self):
         """回归守卫：真实 OpenListAdminClient + data:null 响应不抛 AttributeError。
 
         模拟用户原始报错场景：OpenList API 返回 {"data": null, "message": "..."}，
-        旧代码 data.get("data", {}).get("token") 会抛
-        'NoneType' object has no attribute 'get'。修复后 login() 安全返回 False，
+        若 data.get("data", {}).get("token") 会抛
+        'NoneType' object has no attribute 'get'。login() 应安全返回 False，
         _reinit_admin_client 保留旧 client，无异常逃逸。
         """
         server = _make_mock_server()
