@@ -798,7 +798,6 @@ class WebUIServer:
         self._db = db
         self._port = config.port
         self._bind = config.bind
-        self._enabled = config.enabled
         self._start_time = time.time()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -1014,13 +1013,10 @@ class WebUIServer:
     def start(self):
         """启动 WebUI 服务器
 
+        WebUI 是主程序入口，始终启动；不存在可关闭自身的配置分支。
         失败时：生产模式记录日志后返回（不中断主程序），
         独立运行模式抛出 RuntimeError（让调用方感知）。
         """
-        if not self._enabled:
-            logging.info("[WebUI] 已禁用，跳过启动")
-            return
-
         port = self._port
         bind = self._bind
 

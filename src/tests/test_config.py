@@ -333,6 +333,19 @@ class TestAppConfigFromFile:
         assert cfg.webui.port == 9000
         assert cfg.webui.bind == "127.0.0.1"
 
+    def test_webui_legacy_enabled_ignored(self, tmp_path):
+        """旧配置残留 `enabled` 键应由 TOML 加载自然忽略。
+
+        WebUI 是主程序入口，不提供关闭自身的配置项；`[webui].enabled=false`
+        不得生效，且解析后的模型不应再存在该字段。
+        """
+        toml = _MINIMAL_TOML + "enabled = false\n"
+        cfg = AppConfig.from_file(_write_toml(tmp_path, toml))
+        assert not hasattr(cfg.webui, "enabled"), \
+            "WebUIConfig 不应再包含 enabled 字段"
+        assert cfg.webui.port == 8579
+        assert cfg.webui.bind == "0.0.0.0"
+
     def test_tmdb_section_is_ignored_by_design(self, tmp_path):
         """TMDB 配置已迁移到 DB；TOML 中的 [tmdb] 不应生效。"""
         toml = _MINIMAL_TOML + '\n[tmdb]\naccess_token = "from_toml"\n'

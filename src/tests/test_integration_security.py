@@ -98,7 +98,6 @@ def _free_port() -> int:
 
 def _make_mock_config(tmp_path: Path) -> MagicMock:
     cfg = MagicMock()
-    cfg.webui.enabled = True
     cfg.webui.port = 0
     cfg.webui.bind = "127.0.0.1"
     cfg.tmdb.access_token = "test_token_12345678901234567890"

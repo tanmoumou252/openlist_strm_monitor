@@ -335,7 +335,7 @@ class RefreshService:
         logging.info("[主动刷新] 开始执行")
 
         full_audit_ran = self._maybe_run_full_audit()
-        # A8: 全量审计失败时更新健康状态。注意：execute_refresh_cycle 正常返回后，
+        # 设计决策: 全量审计失败时更新健康状态。注意：execute_refresh_cycle 正常返回后，
         # _run_cycle_with_breaker 会在同一调用栈内将 _consecutive_failures 清零，
         # 故单次审计失败本身不熔断；仅在审计失败后仍有异常抛出的周期里，该计数
         # 与 _last_error_summary 才保留到熔断判定。此为有意设计（审计失败可感知，但不因单次失败误触发熔断）。

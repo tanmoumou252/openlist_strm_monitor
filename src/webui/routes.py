@@ -2503,7 +2503,7 @@ def _handle_login(handler, webui_server, body: bytes) -> None:
             webui_server._sessions[token] = (time.time() + 604800, client_ip)  # 7天, IP
         handler._send_json({"success": True, "token": token})
     except json.JSONDecodeError:
-        # 设计决策：恶意 JSON 请求计入限流频率（暴力尝试），
+        # 设计决策: 恶意 JSON 请求计入限流频率（暴力尝试），
         # 与合法非 dict 不计语义区分（见 line 2340 安全权衡注释）。
         with _login_attempts_lock:
             _login_attempts.setdefault(client_ip, []).append(now)
@@ -4156,7 +4156,7 @@ def _handle_onboarding_complete_step(handler, webui_server, body: bytes) -> None
     handler._send_json({"ok": True, "success": True})
 
 # ============================================================
-# Task A: 手动全量审计端点
+# 手动全量审计端点
 # ============================================================
 
 def handle_index_audit(handler, body: bytes) -> None:

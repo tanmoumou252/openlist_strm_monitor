@@ -24,7 +24,7 @@ This file provides guidance to AI coding assistants when working with code in th
 
 ## Configuration
 
-- **WebUI port**: 8579, bind: 0.0.0.0 (LAN only)
+- **WebUI port**: 默认 8579,实际值来自 `config.toml` 的 `[webui].port`;bind: 0.0.0.0 (LAN only)
 - **Backend**: Python stdlib `http.server`, no Flask/uvicorn
 - **Frontend build**: `cd src/webui && npx vite build` (Vite 8.x)
 - **Frontend dev server**: `cd src/webui && npx vite`
@@ -36,7 +36,7 @@ This file provides guidance to AI coding assistants when working with code in th
 
 - **Sync engine only**: `python src/main.py` — starts the A/B/C zone sync engine, no WebUI.
 - **WebUI**: `python src/webui/server.py` — starts the management panel with an interactive menu to optionally launch the sync engine.
-- **WebUI headless (background)**: `BRIDGE_HEADLESS=1` environment variable is handled by `server.py` (detected at the WebUI startup flow, `headless = os.environ.get("BRIDGE_HEADLESS") == "1"`) — triggers headless mode that auto-starts the sync engine (skips the interactive menu) and enters silent wait (no stdin). `main.py` does not process this variable. The repository ships `后台带Bridge启动webui.vbs` which sets this variable and launches `server.py` with a hidden console window.
+- **WebUI headless (background)**: `BRIDGE_HEADLESS=1` environment variable is handled by `server.py` (detected at the WebUI startup flow, `headless = os.environ.get("BRIDGE_HEADLESS") == "1"`) — triggers headless mode that auto-starts the sync engine (skips the interactive menu) and enters silent wait (no stdin). `main.py` does not process this variable. The repository ships `后台带Bridge启动webui.vbs` which sets this variable, reads `[webui].port` from `config.toml` (falling back to default 8579 when missing or unparseable), and launches `server.py` with a hidden console window. The VBS port check is a coarse single-instance check based on listening port only — it does not verify process identity or PID, so a different program occupying the port will also be flagged as "already running".
 
 > Do NOT use `python src/main.py --webui-only` or `--webui` — those flags do not exist (both are rejected by `main.py`).
 
@@ -331,4 +331,4 @@ The following files are included as-is and should NOT be flagged as issues or re
 
 ## Design Decisions / Rejected Options Registry
 
-- **`docs/否决方案.md`** is the authoritative registry for intentional design decisions ("设计决策"), deliberately-kept dead/legacy fields ("有意保留"), accepted trade-offs ("已知取舍"), and deprecated/migrated mechanisms ("[已废弃]"), plus rejected fix proposals. Code comments use four stable anchor keywords as grep anchors — `# 设计决策：` / `# 有意保留：` / `# 已知取舍：` / `# [已废弃]` (bracketed, no colon for the last). Consult this file for the rationale before flagging or refactoring such code. Registry entries are indexed by `file:function`, not by plan IDs.
+- **`docs/否决方案.md`** is the authoritative registry for intentional design decisions ("设计决策"), deliberately-kept dead/legacy fields ("有意保留"), accepted trade-offs ("已知取舍"), and deprecated/migrated mechanisms ("[已废弃]"), plus rejected fix proposals. Code comments use four stable anchor keywords as grep anchors — `# 设计决策:` / `# 有意保留:` / `# 已知取舍:` / `# [已废弃]` (bracketed, no colon for the last). Consult this file for the rationale before flagging or refactoring such code. Registry entries are indexed by `file:function`, not by plan IDs.

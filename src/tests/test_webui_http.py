@@ -50,7 +50,6 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     """构造最小化 AppConfig mock，满足 WebUIServer 初始化需求。"""
     cfg = MagicMock()
     # webui
-    cfg.webui.enabled = True
     cfg.webui.port = 0  # 由 _free_port() 覆盖
     cfg.webui.bind = "127.0.0.1"
     # tmdb

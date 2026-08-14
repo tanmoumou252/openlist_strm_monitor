@@ -44,7 +44,6 @@ def _free_port() -> int:
 def _make_mock_config(tmp_path: Path) -> MagicMock:
     """构造最小化 AppConfig mock。"""
     cfg = MagicMock()
-    cfg.webui.enabled = True
     cfg.webui.port = 0
     cfg.webui.bind = "127.0.0.1"
     cfg.tmdb.access_token = ""

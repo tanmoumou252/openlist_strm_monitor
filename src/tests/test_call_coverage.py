@@ -94,7 +94,7 @@ def _make_app_config(tmp_path: Path) -> AppConfig:
             b_root=str(tmp_path / "b"),
             c_root=str(tmp_path / "c"),
         ),
-        webui=WebUIConfig(enabled=True, port=8579, bind="0.0.0.0"),
+        webui=WebUIConfig(port=8579, bind="0.0.0.0"),
     )
 
 

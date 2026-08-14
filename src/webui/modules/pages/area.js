@@ -193,7 +193,7 @@ async function renderAreaDetail(el, area, params) {
   const areaLabels = { a: 'A 区', b: 'B 区', c: 'C 区' };
   const areaLabel = areaLabels[area] || area.toUpperCase() + ' 区';
   
-  // Task 2: 检测是否为多 mapping 场景
+  // 检测是否为多 mapping 场景
   const isMultiMapping = d.mappings && Array.isArray(d.mappings) && d.mappings.length > 0;
   
   // expandBtns 提到分支外统一渲染一次
@@ -210,7 +210,7 @@ async function renderAreaDetail(el, area, params) {
   ${((area === 'a' || area === 'b') && !isMultiMapping) ? `<button class="toolbar-btn refresh-media-btn" data-mapping-id="${esc(d.mapping_id || '')}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button>` : ''}
 </div>`;
 
-  // Task 2: 多 mapping 场景渲染
+  // 多 mapping 场景渲染
   if (isMultiMapping) {
     // 为每个 mapping 渲染独立分区
     for (const mapping of d.mappings) {
@@ -372,7 +372,7 @@ async function renderAreaDetail(el, area, params) {
   });
 }
 
-// Task 2: 渲染季分组和记录表
+// 渲染季分组和记录表
 function _renderSeasons(area, seasons, sort, order, kind, q, media, localRoot, webdavRoot) {
   function stripPath(p, root) {
     if (root && p.startsWith(root)) return p.slice(root.length);

@@ -326,3 +326,41 @@ def test_onboarding_completed_strict_comparison():
     # 额外断言：至少存在一处 === '1' 用法（证明修复已应用）
     assert "=== '1'" in source or "==='1'" in source, \
         "dashboard.js 中 onboarding_completed 应至少有一处 === '1' 严格比较"
+
+
+def test_webui_enabled_self_disable_path_removed():
+    """WebUI 是主程序入口，不存在可关闭自身的配置字段或运行分支。
+
+    问题 33 统一审计收敛：`WebUIConfig.enabled` 已从模型、解析与消费路径
+    正式移除；旧配置残留的 `[webui].enabled=false` 由 TOML 加载自然忽略，
+    不增加永久兼容字段或迁移分支。Bridge 启动方式不受影响。
+    """
+    project_root = WEBUI_ROOT.parent
+    config_source = (project_root / "config.py").read_text(encoding="utf-8")
+    server_source = _read("server.py")
+
+    # WebUIConfig 定义段不得包含 enabled 字段
+    wui_idx = config_source.find("class WebUIConfig:")
+    assert wui_idx != -1, "WebUIConfig 类未找到"
+    # 仅截取 WebUIConfig 类体：到下一个 @dataclass 或 class 定义为止
+    next_class = config_source.find("@dataclass", wui_idx + 1)
+    if next_class == -1:
+        next_class = config_source.find("class ", wui_idx + 1)
+    wui_block = config_source[wui_idx:next_class if next_class != -1 else wui_idx + 400]
+    assert "enabled" not in wui_block, (
+        "WebUIConfig 仍定义 enabled 字段；该字段应已移除，"
+        "旧配置中的 enabled 由 TOML 加载自然忽略"
+    )
+
+    # from_file 的 [webui] 解析段不得再读取 enabled
+    assert 'webui_data.get("enabled"' not in config_source, (
+        "AppConfig.from_file 仍在解析 [webui].enabled"
+    )
+
+    # WebUIServer 启动路径不得存在 _enabled 保存或自关闭分支
+    assert "self._enabled" not in server_source, (
+        "WebUIServer 仍保存 _enabled；应移除该消费路径"
+    )
+    assert "已禁用，跳过启动" not in server_source, (
+        "WebUIServer.start() 仍存在自关闭分支；WebUI 应始终启动"
+    )

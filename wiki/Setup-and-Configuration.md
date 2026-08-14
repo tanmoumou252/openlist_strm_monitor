@@ -78,7 +78,7 @@ max_size_mb = 2                   # 日志文件最大 MB
 backup_count = 5                  # 轮转备份数
 
 [webui]
-port = 8579                       # HTTP 端口
+port = 8579  # 默认端口,实际值可自定义                       # HTTP 端口
 bind = "0.0.0.0"                  # 监听地址
 
 [tmdb]

@@ -88,17 +88,17 @@ npx vite          # 开发服务器（HMR）
 - TMDB 状态 — 待看列表缓存（30 分钟 TTL）、类型缓存（1000 LRU）
 - UI 配置 — 带 `AbortController` 取消进行中的保存
 
-### 表单字段帮助文本系统（`helperText` / `helpKey` / `_openlistHelpTexts`）
+### 表单字段帮助文本系统（`helpIcon` / `helpKey` / `_openlistHelpTexts`）
 
-OpenList 配置页（`openlist.js`）实现了结构化的帮助文本系统，用于在表单控件下方显示上下文相关的帮助说明：
+OpenList 配置页（`openlist.js`）实现了结构化的帮助系统，以 **info 图标 tooltip** 形式在字段标签旁展示上下文帮助（Issue 34 注释收敛后，原 10 个字段的常驻 `.field-helper-text` 明文已移除，统一改为图标提示）：
 
 - **`_openlistHelpTexts`** — 常量对象，定义所有帮助文本的键值对。键名对应控件的 `helpKey`，值为帮助文本字符串。
-- **`helpKey`** — `olField()` / `olSelect()` / `olToggle()` 的形参（非 `createField` 配置项）。当渲染 OpenList 表单时，`helpKey` 用于从 `_openlistHelpTexts` 查找帮助文本，查找结果作为 `helperText` 传递给底层 `createField`。
-- **`helperText`** — `olField()` / `olSelect()` / `olToggle()` 的形参。与 `helpKey` 互补：`helpKey` 通过字典查找，`helperText` 直接指定文本。两者非竞争关系，`helpKey` 的查找结果优先。
-- **帮助图标（tooltip）**：`_olHelpIcon(key)` 根据 `helpKey` 查 `_openlistHelpTexts` 生成 `<span class="ol-help-icon">` tooltip 图标，与下方 `.field-helper-text` div 并存，前者为 hover 提示，后者为常驻文本。
-- **渲染位置**：帮助文本渲染为 `<div class="field-helper-text">` 元素，显示在浮动标签输入框的外层容器内，紧接输入框之后。
+- **`helpKey`** — `olField()` / `olSelect()` / `olToggle()` 的形参（非 `createField` 配置项）。当渲染 OpenList 表单时，`helpKey` 用于从 `_openlistHelpTexts` 查找帮助文本。
+- **`helpIcon`** — `createField()` 的形参（`utils.js`），值为已渲染的 HTML 片段，渲染在浮动标签 `<label>` 内、字段名之后。`olField()` 通过 `_olHelpIcon(key)` 生成该片段后作为 `helpIcon` 传入 `createField`；`olSelect()` / `olToggle()` 直接在各自标签内渲染 `_olHelpIcon(key)`。
+- **帮助图标（tooltip）**：`_olHelpIcon(key)` 根据 `helpKey` 查 `_openlistHelpTexts`，生成 `<span class="ol-help-icon" data-tooltip="...">${icon('info')}</span>`——hover 时显示 tooltip 提示。当前 OpenList 字段的帮助均以该图标呈现，不再渲染常驻 `.field-helper-text` 明文（`helperText` 形参保留，但当前调用点均传空字符串）。
+- **`helperText`** — `createField()` / `olField()` / `olSelect()` / `olToggle()` 仍保留的形参，非空时渲染为 `<div class="field-helper-text">` 元素（紧接输入框之后）。当前 OpenList 字段未使用，仅个别场景（如 config.js 死字段标注）可能使用。
 
-`utils.js` 的 `createField()` 函数接收 `helperText` 参数并生成对应的 `.field-helper-text` div DOM 结构。`olField()` / `olSelect()` / `olToggle()` 是 OpenList 页面的封装函数，负责 `helpKey`→`_openlistHelpTexts` 查找后再调用 `createField`。
+`utils.js` 的 `createField()` 函数接收 `helpIcon` 与 `helperText` 两个形参：`helpIcon` 渲染在标签内，`helperText` 渲染为输入框下方的 `.field-helper-text` div。`olField()` / `olSelect()` / `olToggle()` 是 OpenList 页面的封装函数，负责 `helpKey`→`_openlistHelpTexts` 查找并生成 `helpIcon` 后调用 `createField`。
 
 ### `theme.js` — 双主题系统
 - `syncTheme()` — 应用 `data-system`、`data-color`、`data-font` 到 `<html>`，持久化到 localStorage

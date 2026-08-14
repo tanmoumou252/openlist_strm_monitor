@@ -84,10 +84,11 @@ totp_secret = ""
 
 ### `[webui]` — `WebUIConfig`
 
+> **WebUI 是主程序入口**，不提供关闭自身的配置项。旧配置中残留的 `[webui].enabled` 键会被 TOML 加载器自然忽略；Bridge 同步引擎是否启动由启动流程（交互菜单 / `BRIDGE_HEADLESS=1`）控制，不由本段配置控制。
+
 | 键 | 默认值 | 说明 |
 |-----|------|------|
-| ~~`enabled`~~ | ~~`true`~~ | **已废弃**：WebUI 为主程序入口，`config.toml` 最小模板不再包含此字段。参见 `docs/否决方案.md` → `设计决策 | config.toml 最小模板 | config.toml.example`。 |
-| `port` | `8579` | HTTP 监听端口 |
+| `port` | `8579`(默认,可自定义) | HTTP 监听端口 |
 | `bind` | `"0.0.0.0"` | 监听地址。`"127.0.0.1"` 仅本地访问 |
 
 ### `[tmdb]` — `TmdbConfig`

@@ -771,7 +771,7 @@ class TmdbWatchlistDb:
         v = d.get(key)
         return v if v is not None else default
 
-    # 有意保留：单元测试 helper 方法
+    # 有意保留: 单元测试 helper 方法
     def _upsert_movie(self, item: dict, synced_at: float) -> None:
         with self._conn() as conn:
             existing = conn.execute(
@@ -918,7 +918,7 @@ class TmdbWatchlistDb:
                 fts_rows,
             )
 
-    # 有意保留：单元测试 helper 方法
+    # 有意保留: 单元测试 helper 方法
     def _upsert_tv(self, item: dict, synced_at: float) -> None:
         with self._conn() as conn:
             # 先查已有 _season_count, _episode_count, _last_ep_* 和匹配状态，保留旧值

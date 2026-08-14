@@ -239,7 +239,7 @@ pip install -r src/tests/requirements-dev.txt
 python src/webui/server.py
 ```
 
-启动后访问 `http://127.0.0.1:8579` 即可使用 WebUI 管理面板。
+启动后访问 `http://127.0.0.1:8579`(默认端口,实际端口由 `config.toml` 的 `[webui].port` 决定) 即可使用 WebUI 管理面板。
 
 ### 3. 运行测试
 
@@ -332,7 +332,7 @@ python -m pytest src/tests/test_onboarding_e2e.py -v
 
 | 配置项 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| `[webui] port` | `8579` | 监听端口 |
+| `[webui] port` | `8579`(默认,可自定义) | 监听端口 |
 | `[webui] bind` | `0.0.0.0` | 监听地址（仅本地和局域网） |
 | `access_token` | — | TMDB API 访问令牌（通过 WebUI 配置页填写，存储在 `tmdb_watchlist.db`） |
 

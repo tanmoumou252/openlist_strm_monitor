@@ -81,6 +81,7 @@ python -m pytest src/tests/ -v
 | `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试（含 `TestAreaDetailKindParameter`、`TestAreaDetailCZonePagination`、`TestAreaDetailSingleMappingMid`、`TestTMDBWatchlistMatchOverrideConsistency`、`TestManualFullIndexAuditAPI`）。**D2 回归**：全新安装 `/api/config` 不抛异常（`TestConfigApiFreshInstall`）；**D3 回归**：fail-safe 时 `start_main` 返回失败（`TestStartMainFailSafe`）。**第 23 轮回归**（`TestRound13Regressions`）：**M3** `_MEDIA_NAME_SQL` 别名目录（`/movies/` 等）不再坍缩「未分类」、**M4** 改密后旧 token 立即失效、**M5** `/api/admin/status` 带无效 token 返回 401 / 无 token 保持 200。 |
 | `test_webui_help_texts.py` | WebUI 帮助文案系统测试：`createField` 输出 `.field-helper-text`、`_openlistHelpTexts` 键完整性、`log_file` 已删除、`refresh_*` 含「即时生效」、TMDB 阈值字段 helpIcon、孤儿键标注、死字段「未接入匹配逻辑」标注 |
 | `test_webui_source_contracts.py` | 前端源码契约回归测试：未定义变量（`mappingIdParam`/`deleteDisabled`）、死参数（`mapping_id`）、CSV 公式注入安全、`_do_bg_sync` 预检查、dialog 断言正则、配置「未接入」标注、畸形请求不计数、交付文档无行号、**M9** `captureRenderGuard()` 渲染护栏、**L5** `parseHash` 畸形编码容错 |
+| `test_webui_entry_behavior.py` | WebUI 入口行为测试（`server.py` `main()` 的普通交互模式与 `BRIDGE_HEADLESS=1` 无头模式）：覆盖普通交互菜单（选 1 启动 Bridge、默认仅 WebUI）、无头自动启动 Bridge 并跳过 stdin 静默等待、交互循环 `q`/`quit` 退出、EOFError 不崩溃、KeyboardInterrupt 可控退出、退出时清理子程序与服务器、配置缺失 `sys.exit(1)`、启动失败 `sys.exit(1)`。验证 `q` 退出用例真实断言未启动 Bridge（`start_main.call_count == 0`）。 |
 | `test_call_coverage.py` | 启动链调用覆盖率测试 |
 | `test_logging_system.py` | TMDB 操作日志表、日志读取接口与轮转产物测试 |
 | `test_logger_setup.py` | logger_setup 模块单元测试：handler 装配、重复初始化（热更新）、回退路径、级别过滤、启动分隔标记、临时目录清理（**窄编码控制台下无法编码字符不丢日志、且不改写流的全局 errors 策略**（`TestConsoleEncodingFallback`））。 |
@@ -116,8 +117,8 @@ python -m pytest src/tests/ -v
 |------|------|------|
 | `test_openlist_admin_api.py` | OpenList Admin API 手动烟雾测试 | 运行中的 OpenList 服务器 |
 | `test_tmdb_api.py` | TMDB API CLI/Flask 端点测试 | 有效的 TMDB access_token |
-| `test_real_server.py` | 真实服务器安全验证探测 | 运行中的 WebUI (8579) |
-| `test_webui_standalone.py` | WebUI 在线集成测试 | 运行中的 WebUI (8579) |
+| `test_real_server.py` | 真实服务器安全验证探测 | 运行中的 WebUI（固定默认端口 8579，见 `config.toml` `[webui].port`，脚本硬编码默认值） |
+| `test_webui_standalone.py` | WebUI 在线集成测试 | 运行中的 WebUI（固定默认端口 8579，见 `config.toml` `[webui].port`，脚本硬编码默认值） |
 
 ## 运行测试
 

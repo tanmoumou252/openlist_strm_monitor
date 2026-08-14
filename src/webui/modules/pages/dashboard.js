@@ -441,7 +441,7 @@ export async function renderDashboard(el) {
   </div>
 </div>
 
-<!-- N1: watchdog 降级指示（后端 _watchers_healthy 标志） -->
+<!-- watchdog 降级指示（后端 _watchers_healthy 标志） -->
 ${d.watchers_healthy === false ? `<div class="dashboard-warning-banner" style="margin:12px 0;padding:10px 14px;background:color-mix(in srgb,var(--error) 12%,transparent);border:1px solid color-mix(in srgb,var(--error) 40%,transparent);border-radius:var(--radius-control);color:var(--error);font-size:13px;display:flex;align-items:center;gap:8px">${icon('warn')} watchdog 监视器降级：部分区域事件可能未同步，请检查 WebUI 日志</div>` : ''}
 
 <div class="stat-grid">
@@ -465,7 +465,7 @@ ${d.watchers_healthy === false ? `<div class="dashboard-warning-banner" style="m
   <span id="audit-status-text" style="font-size:calc(var(--font-base) - 1px);color:var(--text-muted)"></span>
 </div>
 
-<!-- Mapping 列表（Task 2） -->
+<!-- Mapping 列表 -->
 ${d.mappings && d.mappings.length > 0 ? `
 <div style="margin-top:16px">
   <div style="font-size:14px;font-weight:500;margin-bottom:8px;color:var(--text-main)">映射配置</div>

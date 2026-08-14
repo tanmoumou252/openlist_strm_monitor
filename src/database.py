@@ -1511,7 +1511,7 @@ class Database:
             return True
         
         with self.rw_lock.write_locked(), self.connection() as conn:
-            # 设计决策：显式开启事务，确保 conflict 检测与 INSERT/DELETE 在同一原子事务内，
+            # 设计决策: 显式开启事务，确保 conflict 检测与 INSERT/DELETE 在同一原子事务内，
             # 避免 SELECT 与写入之间被其它写连接插入目标行（TOCTOU）。
             # 上下文 yield 后第一条语句，不会触发 "transaction within a transaction"。勿标记。
             conn.execute("BEGIN IMMEDIATE")
@@ -2366,7 +2366,7 @@ class Database:
             conn.commit()
             return len(records)
 
-    # ========== last_verified_at 触碰方法 (Task D) ==========
+    # ========== last_verified_at 触碰方法 ==========
 
     def touch_verified_a(self, local_paths: list[str], now: float) -> None:
         """批量更新 A 区记录的 last_verified_at 字段。

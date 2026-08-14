@@ -1,16 +1,19 @@
-﻿' 编码说明：本文件为 UTF-8 带 BOM。cscript/wscript 识别 BOM 后按 UTF-8
-' 解析，中文 MsgBox 在 GBK 系统的命令宿主下可正常显示。
+﻿' 编码说明:本文件为 UTF-16LE 带 BOM(FF FE)。cscript/wscript 在 Windows 下以系统 ANSI/UTF-16 解释脚本，
+' 中文 MsgBox 在 GBK 系统的命令宿主下可正常显示。
 Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
 WshShell.Environment("PROCESS")("BRIDGE_HEADLESS") = "1"
 
-' 端口检测——启动前检查 8579 端口是否已被占用。
-' 移除 findstr LISTENING 过滤器（非英文系统 netstat 输出可能不包含 LISTENING），
-' 仅判 :8579 有输出即可确定端口已被占用。
+' 端口检测——启动前检查监听端口是否已被占用。
+' 监听端口从 config.toml 的 [webui].port 读取，文件缺失或解析失败时回退默认 8579。
+' 移除 findstr LISTENING 过滤器(非英文系统 netstat 输出可能不包含 LISTENING)，
+' 仅判 ":" & webuiPort 有输出即可确定端口已被占用。
+Dim webuiPort
+webuiPort = GetWebUIPort()
 Dim portCheck
-portCheck = WshShell.Run("cmd /c netstat -ano | findstr "":8579"" >nul 2>&1", 0, True)
+portCheck = WshShell.Run("cmd /c netstat -ano | findstr "":" & webuiPort & """ >nul 2>&1", 0, True)
 If portCheck = 0 Then
-    MsgBox "端口 8579 已被占用。" & vbCrLf & vbCrLf & _
+    MsgBox "端口 " & webuiPort & " 已被占用。" & vbCrLf & vbCrLf & _
            "STRM Bridge 可能已在运行中，请先关闭已有实例。" & vbCrLf & _
            "如需强制启动，请先关闭已有进程或修改端口配置。", _
            vbExclamation, "启动检查"
@@ -34,8 +37,8 @@ Dim quotedPythonPath
 quotedPythonPath = """" & pythonPath & """"
 
 ' Test if python command is valid
-' 轮询 testExec.Status 实现 ~30 秒超时（每次 100ms），防止 python --version
-' 挂起（Store 弹窗 / 杀软沙箱 / 网络盘不可达等场景）时无限卡死；
+' 轮询 testExec.Status 实现 ~30 秒超时(每次 100ms)，防止 python --version
+' 挂起(Store 弹窗 / 杀软沙箱 / 网络盘不可达等场景)时无限卡死；
 ' 加 On Error 兜底。不能用 AtEndOfStream 判断——进程静默挂起时它会一直阻塞。
 On Error Resume Next
 Dim testExec
@@ -45,7 +48,7 @@ output = ""
 Dim pollCount
 pollCount = 0
 If IsObject(testExec) Then
-    ' 等待进程结束（正常退出或超时强制终止）
+    ' 等待进程结束(正常退出或超时强制终止)
     Do While testExec.Status = 0
         WScript.Sleep 100
         pollCount = pollCount + 1
@@ -86,5 +89,46 @@ End If
 Dim execCommand
 execCommand = "cmd /c " & quotedPythonPath & " """ & WshShell.CurrentDirectory & "\src\webui\server.py"""
 WshShell.Run execCommand, 0, False
+
+' 从当前目录 config.toml 读取 [webui].port；文件缺失或解析失败时回退默认 8579。
+' 端口检查和错误提示使用同一最终值。
+Function GetWebUIPort()
+    GetWebUIPort = 8579
+    Dim fso, cfgPath, content, f
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    cfgPath = WshShell.CurrentDirectory & "\config.toml"
+    If Not fso.FileExists(cfgPath) Then Exit Function
+    Set f = fso.OpenTextFile(cfgPath, 1, False)
+    content = f.ReadAll
+    f.Close
+    Dim secStart
+    secStart = InStr(content, "[webui]")
+    If secStart = 0 Then Exit Function
+    ' 统一换行符为 vbCrLf，兼容 LF-only 文件(Unix 工具编辑后)
+    content = Replace(content, vbCr, "")
+    content = Replace(content, vbLf, vbCrLf)
+    Dim lines, line, low, eqPos, value, i
+    lines = Split(Mid(content, secStart), vbCrLf)
+    For i = 0 To UBound(lines)
+        line = Trim(lines(i))
+        If Left(line, 1) = "[" Then
+            ' 首行是 [webui] 段头；之后出现 [ 开头行表示已进入下一段
+            If i > 0 Then Exit For
+        End If
+        low = LCase(line)
+        If Left(low, 5) = "port " Or Left(low, 5) = "port=" Then
+            eqPos = InStr(line, "=")
+            If eqPos > 0 Then
+                value = Trim(Mid(line, eqPos + 1))
+                If InStr(value, "#") > 0 Then value = Trim(Left(value, InStr(value, "#") - 1))
+                If InStr(value, ";") > 0 Then value = Trim(Left(value, InStr(value, ";") - 1))
+                If IsNumeric(value) Then
+                    GetWebUIPort = CInt(value)
+                    Exit Function
+                End If
+            End If
+        End If
+    Next
+End Function
 
 Set WshShell = Nothing

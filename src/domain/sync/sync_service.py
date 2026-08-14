@@ -712,7 +712,7 @@ class SyncService:
                 if b_local.exists():
                     b_local.unlink()
             except Exception as rollback_err:
-                # 设计决策：尽力回滚——unlink 失败被有意忽略
+                # 设计决策: 尽力回滚——unlink 失败被有意忽略
                 logging.warning("[A→B] 回滚删除失败 %s: %s", b_local, rollback_err)
             return "fail"
 

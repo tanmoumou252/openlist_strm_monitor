@@ -64,7 +64,7 @@ OpenList STRM 引擎能够高效地生成 `.strm` 文件供本地媒体库刮削
 pip install -r requirements.txt
 # 启动 WebUI 后，在「配置」页面填写 OpenList 服务器信息
 python src/webui/server.py
-# 打开 http://localhost:8579
+# 打开 http://localhost:8579(默认端口,实际端口由 `config.toml` 的 `[webui].port` 决定)
 ```
 
 ## 项目目录结构

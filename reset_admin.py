@@ -23,7 +23,7 @@ def find_db_path() -> str:
     不再从 config.toml 读取、不再搜索 data/ 目录、不再 rglob，
     不再接受 --db 参数。数据库路径固定在脚本所在目录（项目根）。
     """
-    # 设计决策：仅测试注入，生产固定项目根
+    # 设计决策: 仅测试注入，生产固定项目根
     db_path = Path(__file__).resolve().parent / "tmdb_watchlist.db"
     return str(db_path)
 

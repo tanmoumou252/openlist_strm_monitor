@@ -1703,7 +1703,7 @@ class AppService:
                         self.db.delete_a_by_local(rec.local_path)
                     else:
                         logging.warning("[初始化] A 区冗余清理：物理删除失败，保留 DB 记录: %s", rec.local_path)
-                    # 已知取舍：无论删除是否成功都设 ghost。若物理删除失败，A 记录仍在 DB，
+                    # 已知取舍: 无论删除是否成功都设 ghost。若物理删除失败，A 记录仍在 DB，
                     # 但其 webdav_path 已被 ghost 屏蔽，后续 A→B 同步会跳过该仍有效文件。
                     # 该路径休眠（0 生产调用），有 WebUI 手动刷新替代，接受。
                     self.db.set_ghost_protection(
@@ -2425,7 +2425,7 @@ class AppService:
             return (score, 0 if path == prefer_path else 1)
         valid_files.sort(key=_sort_key)
         keep = valid_files[0]
-        # 已知取舍：预标阶段一次性把所有兄弟实例置为 duplicate（而非逐个处理时
+        # 已知取舍: 预标阶段一次性把所有兄弟实例置为 duplicate（而非逐个处理时
         # 再标记），换取"物理隔离失败时逐个恢复 valid"的可重试语义。副作用：若
         # 下方循环中某次隔离异常 raise（如回滚也失败），该兄弟之后的未处理实例
         # 会保持 DB=duplicate / 磁盘=.strm 的分叉，且 valid_files 过滤器（status=
@@ -3452,7 +3452,7 @@ class AppService:
         # handle_b_deleted 的 get_b_by_local_full 返回 None → 提前返回，不级联。
         mapping_id = self._mapping_id_for_b(local)
         self.db.delete_b_by_local(str(local))
-        # 已知取舍：物理删除为尽力而为。若 safe_remove_file 失败（杀毒锁/权限），
+        # 已知取舍: 物理删除为尽力而为。若 safe_remove_file 失败（杀毒锁/权限），
         # 磁盘残留 .strm 且无 DB 行 → 重扫前为"未跟踪文件"分叉。窄边沿，接受。
         if local.exists():
             safe_remove_file(local)
