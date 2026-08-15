@@ -288,3 +288,45 @@ class TestHotReloadOpenlistConfig:
 
         # 不应抛出
         _hot_reload_openlist_config(server)
+
+    def test_hot_reload_log_changed_reinitializes_logging(self):
+        """update_from_db 改变 cfg.log.level → setup_logging 用新日志配置被调用。
+
+        断言使用新的 level、log_file、max_size_mb、backup_count 四个参数。
+        _hot_reload_openlist_config 内是局部 `from logger_setup import setup_logging`，
+        运行时从源模块读取名称，因此 patch 目标是 `logger_setup.setup_logging`
+        （与 test_reinit_* 中 patch `webdav_client.OpenListAdminClient` 同理）。
+        通过修改真实 mock 配置字段触发 log_changed，不在测试中复制判断表达式。
+        """
+        server = _make_mock_server()
+        server._config.load_strm_storage_from_api = MagicMock()
+        server._app_service.refresh_service = MagicMock()
+
+        # update_from_db 修改真实 mock 配置字段，使日志配置发生变化
+        def _change_log_config(_wdb):
+            server._config.log.level = "DEBUG"
+            server._config.log.file = "hotreload.log"
+
+        server._config.update_from_db.side_effect = _change_log_config
+
+        with patch("logger_setup.setup_logging") as mock_setup:
+            _hot_reload_openlist_config(server)
+
+        mock_setup.assert_called_once_with(
+            level="DEBUG",
+            log_file="hotreload.log",
+            max_size_mb=2,
+            backup_count=5,
+        )
+
+    def test_hot_reload_log_unchanged_skips_setup_logging(self):
+        """日志配置全部保持不变 → setup_logging 不被调用。"""
+        server = _make_mock_server()
+        server._config.update_from_db = MagicMock()  # 不改任何日志配置
+        server._config.load_strm_storage_from_api = MagicMock()
+        server._app_service.refresh_service = MagicMock()
+
+        with patch("logger_setup.setup_logging") as mock_setup:
+            _hot_reload_openlist_config(server)
+
+        mock_setup.assert_not_called()

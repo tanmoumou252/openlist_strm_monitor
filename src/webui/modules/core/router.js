@@ -21,7 +21,7 @@ export function buildNav(activeTab) {
   }).join('\n');
 }
 
-// L5: 畸形编码（如 %zz）会抛 URIError 使 router() 整体中止，回退为原始字符串
+// 畸形编码（如 %zz）会抛 URIError 使 router() 整体中止，回退为原始字符串
 const safeDecode = (s) => {
   try {
     return decodeURIComponent(s);
@@ -133,7 +133,7 @@ export async function router() {
         }
       } catch (e) {
         if (isStale()) return;  // stale validation catch → do not delete fresh token
-        // M-17: 网络错误/超时时拒绝放行（fail-closed），跳转登录页
+        // 网络错误/超时时拒绝放行（fail-closed），跳转登录页
         console.warn('[Auth] 无法验证登录状态，跳转至登录页:', e.message);
         localStorage.removeItem('session_token');
         navigate('#login');

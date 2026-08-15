@@ -67,6 +67,16 @@ python src/webui/server.py
 # 打开 http://localhost:8579(默认端口,实际端口由 `config.toml` 的 `[webui].port` 决定)
 ```
 
+## 文档导航
+
+| 文档 | 说明 |
+| :--- | :--- |
+| [部署指南](../docs/部署指南.md) | 部署流程、系统要求、常见问题 |
+| [用户手册](../docs/用户手册.md) | 功能说明、操作指南 |
+| [Python 规范审计](../docs/Python规范审计与Lint检查报告.md) | 全量 Python 文件 Lint 审计、决策锚点与文档一致性结论 |
+| [否决方案与设计登记](../docs/否决方案.md) | 设计决策、有意保留、已知取舍的权威登记册 |
+| [测试说明](Development-Guide) | 测试文件清单与运行方式(见 src/tests/README.md) |
+
 ## 项目目录结构
 
 ```

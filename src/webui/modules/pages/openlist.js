@@ -607,7 +607,6 @@ const data = await api('/api/restart-webui', { method: 'POST' });
     refresh_interval_minutes: document.getElementById('ol-refresh-interval')?.value || '10',
     refresh_depth: document.getElementById('ol-refresh-depth')?.value || '5',
     refresh_full_audit_interval_days: document.getElementById('ol-refresh-audit-days')?.value || '7',
-        // refresh_log_level 已合并至全局 log_level，不再单独上传
         behavior_action: document.getElementById('ol-action')?.value || 'MOVE',
         behavior_trash_dir_name: document.getElementById('ol-trash-dir')?.value || 'trash',
         behavior_ghost_protect_seconds: document.getElementById('ol-ghost-protect')?.value || '300',

@@ -133,7 +133,7 @@ function _renderConfigContent(cfg) {
 
   const tokenIsConfigured = cfg.tmdb_token_configured === true;
 const tokenValue = '';  // 不预填截断预览，避免误保存覆盖真实 token
-  const apiKeyValue = '';  // 不预填明文 API key（B-3：后端仅返回 bool），避免误保存覆盖
+  const apiKeyValue = '';  // 不预填明文 API key（后端仅返回 bool），避免误保存覆盖
   const hostValue = cfg.tmdb_host || '';
   const proxyValue = cfg.tmdb_proxy_http || '';
 
@@ -167,10 +167,10 @@ const tokenValue = '';  // 不预填截断预览，避免误保存覆盖真实 t
     </div>
   </div>`;
   html += field('cfg-tmdb-account', 'account_id', cfg.tmdb_account_id || '未获取', '', 'text', true, true);
-  const tokenBadge = tokenIsConfigured ? '<span class="badge configured-badge" style="color:var(--success);margin-left:6px;font-size:calc(var(--font-base) - 1px)">✓ 已配置</span>' : '';
+  const tokenBadge = tokenIsConfigured ? '<span class="badge configured-badge">✓ 已配置</span>' : '';
 html += field('cfg-tmdb-token', 'Access Token', tokenValue, '输入 TMDB Access Token', 'password', false, false, tokenBadge);
   const apiKeyIsConfigured = cfg.tmdb_api_key_configured === true;
-  const apiKeyBadge = apiKeyIsConfigured ? '<span class="badge configured-badge" style="color:var(--success);margin-left:6px;font-size:calc(var(--font-base) - 1px)">✓ 已配置</span>' : '';
+  const apiKeyBadge = apiKeyIsConfigured ? '<span class="badge configured-badge">✓ 已配置</span>' : '';
   html += field('cfg-tmdb-apikey', 'API Key', apiKeyValue, '输入 TMDB API Key', 'password', false, false, apiKeyBadge);
   html += langField;
   html += field('cfg-tmdb-host', '反代 Host', hostValue, '留空则使用官方 API');

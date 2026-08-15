@@ -59,7 +59,6 @@ totp_secret = ""
 | `interval_minutes` | `10` | 刷新间隔（分钟），内部转秒：`interval_seconds = interval_minutes * 60` |
 | `depth` | `5` | WebDAV PROPFIND 扫描深度 |
 | `timeout_seconds` | `300` | 刷新操作超时时间（秒） |
-| `log_level` | `"INFO"` | 刷新日志级别：DEBUG/INFO/WARNING |
 | `full_audit_interval_days` | `7` | A 区全量审计周期；0 关闭。`refresh_paths` 为空时周期局部扫描停止，但到期全量审计仍可能访问所有 A 根。DB 键名为 `refresh_full_audit_interval_days`（带 `refresh_` 前缀） |
 
 ### `[behavior]` — `BehaviorConfig`
@@ -78,6 +77,7 @@ totp_secret = ""
 | 键 | 默认值 | 说明 |
 |-----|------|------|
 | `level` | `"INFO"` | 日志级别：DEBUG/INFO/WARNING/ERROR |
+| | | 媒体刷新与周期刷新共用此全局日志级别，不再提供独立的 `[refresh].log_level` 配置。 |
 | `file` | `"strm_bridge.log"` | 日志文件路径（默认位于项目根目录） |
 | `max_size_mb` | `2` | 单文件最大 MB，超限轮转 |
 | `backup_count` | `5` | 保留的轮转备份数 |

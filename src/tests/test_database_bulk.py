@@ -262,7 +262,7 @@ class TestGetAllBFingerprints:
 
 
 # ────────────────────────────────────────────────
-# 只读 getter 读锁一致性（Task 7，audit Important-2 + 二次审核 C-2）
+# 只读 getter 读锁一致性
 # ────────────────────────────────────────────────
 
 class TestReadonlyGettersReadLock:

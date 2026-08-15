@@ -759,7 +759,7 @@ class TestFullAuditTouchVerified:
 
 
 class TestRunFullAuditNow:
-    """A'.1: 测试 RefreshService.run_full_audit_now() 薄封装"""
+    """测试 RefreshService.run_full_audit_now() 薄封装"""
 
     def test_run_full_audit_now_calls_correct_sequence(self):
         """run_full_audit_now 应按序调用 initial_scan_a → scan_a_to_b_full_sync → complete_index_generation"""

@@ -260,11 +260,11 @@ def test_shipped_docs_have_no_line_number_references():
 
 
 def test_router_render_guard_not_always_stale_free():
-    """N0: router.js 导出 captureRenderGuard() 工厂，页面渲染护栏用代际快照防陈旧覆盖。
+    """router.js 导出 captureRenderGuard() 工厂，页面渲染护栏用代际快照防陈旧覆盖。
 
     旧实现 `_pageRenderGen = myGen` 使 `_pageRenderGen === _renderGen` 恒成立，
     isRenderStale() 恒返回 false，12 处页面渲染护栏全部失效。
-    docs/否决方案.md N0 约束：不要退回模块级单变量 isRenderStale。
+    docs/否决方案.md 架构约束：不要退回模块级单变量 isRenderStale。
     """
     source = _read("modules/core/router.js")
     # captureRenderGuard() 工厂是当前渲染护栏的基础
@@ -277,7 +277,7 @@ def test_router_render_guard_not_always_stale_free():
 
 
 def test_parse_hash_tolerates_malformed_encoding():
-    """L5: parseHash() 必须用 try/catch 包裹 decodeURIComponent，畸形编码回退原始串。
+    """parseHash() 必须用 try/catch 包裹 decodeURIComponent，畸形编码回退原始串。
 
     旧实现 %zz 触发 URIError 使 router() 整体中止，SPA 路由失效。
     """

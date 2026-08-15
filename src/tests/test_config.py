@@ -453,6 +453,24 @@ class TestUpdateFromDb:
             {"openlist": {"log_file": "strm_bridge.log"}}))
         assert Path(cfg.log.file) == (tmp_path / "strm_bridge.log").resolve()
 
+    def test_log_level_db_key_maps_to_log_config_level(self, tmp_path):
+        """DB 键 log_level 映射到 LogConfig.level，而非已废除的 RefreshConfig.log_level。
+
+        缺失 log_level 键时保持 config.toml 默认级别（INFO）；提供该键时更新
+        LogConfig.level，已废除的 RefreshConfig.log_level 不受 DB 键影响。
+        """
+        cfg = self._cfg(tmp_path)
+        assert cfg.log.level == "INFO"
+
+        cfg.update_from_db(FakeWatchlistDb(
+            {"openlist": {"webdav_host": "http://127.0.0.1:5244"}}))
+        assert cfg.log.level == "INFO"  # 缺失 log_level → 保持默认
+
+        cfg.update_from_db(FakeWatchlistDb(
+            {"openlist": {"log_level": "DEBUG"}}))
+        assert cfg.log.level == "DEBUG"  # DB 键 → LogConfig.level
+        assert cfg.refresh.log_level == "INFO"  # 已废除字段不被误写
+
     def test_strm_engines_derive_engine_paths(self, tmp_path):
         cfg = self._cfg(tmp_path)
         cfg.update_from_db(FakeWatchlistDb({"openlist": {

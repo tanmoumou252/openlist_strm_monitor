@@ -1032,7 +1032,7 @@ class TestAreaSearchE2E:
         与 test_area_list_search_chinese_hit 同样绕过 HTTP 跨线程 WAL 延迟，
         直接经 db 读连接验证转义后的查询词能命中。
 
-        说明（R17 校正）：_escape_fts5_query 自提交 1ab6826 起有意用引号包裹
+        说明：_escape_fts5_query 自提交 1ab6826 起有意用引号包裹
         （docs/否决方案.md，使 FTS5 按短语精确匹配），因此转义断言需匹配
         带引号的输出。但 FTS5 索引按 simple 分词器以整条 local_path/webdav_path
         分词，"进击的巨人 限制级" 不是索引上的连续短语（方括号内容被分词器切分为

@@ -614,7 +614,7 @@ td.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:calc(var(--f
 .config-form-actions{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;justify-content:center}
 .config-form-actions .toolbar-btn{min-width:unset;flex:1 1 auto}
 .field-helper-text{font-size:calc(var(--font-base) - 1px);color:var(--text-muted);line-height:1.4;margin:2px 0 0;padding:0 2px}
-.configured-badge{color:var(--success);margin-left:6px;font-size:calc(var(--font-base) - 1px);white-space:nowrap;font-weight:600}
+.configured-badge{color:var(--color-success);margin-left:8px;font-size:calc(var(--font-base) - 1px);white-space:nowrap;font-weight:600}
 .tmdb-restore-auto-btn{margin-top:8px;padding:4px 10px;font-size:12px;background:color-mix(in srgb,var(--bg-card) 80%,var(--primary) 20%);border:1px solid color-mix(in srgb,var(--border-color) 60%,var(--primary) 40%);border-radius:6px;color:var(--text-main);cursor:pointer;white-space:nowrap}
 
 .config-blocks-wrapper{max-width:620px;margin:0 auto}

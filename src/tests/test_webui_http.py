@@ -745,7 +745,7 @@ class TestWebUIConfigRoutes:
         assert status == 403
 
     def test_config_post_scope_whitelist_rejects_unknown_key(self, webui_server):
-        """P1-1: tmdb/openlist scope 配置写入被未知 key 拒绝（403）。
+        """tmdb/openlist scope 配置写入被未知 key 拒绝（403）。
 
         三个 scope（ui/tmdb/openlist）均有独立白名单，未知 key 整次拒绝。
         openlist scope 测试任意未知 key（如 nonexistent_key）应返回 403。
@@ -762,7 +762,7 @@ class TestWebUIConfigRoutes:
                 f"{scope} scope 错误消息应含'不允许的配置项'，实际: {body}")
 
     def test_config_post_scope_whitelist_allows_known_key(self, webui_server):
-        """P1-1: 已知 key 可正常写入，白名单不应误拒合法 key。"""
+        """已知 key 可正常写入，白名单不应误拒合法 key。"""
         server, base, session_token = webui_server
         status, _, body = _http_post(
             base, "/api/webui/config/openlist",
@@ -2404,12 +2404,12 @@ class TestTMDBWatchlistMatchOverrideConsistency:
 
 
 # ============================================================
-# 回归测试：M-4 Session IP 绑定 + C-2 DB失败 fail-closed
+# 回归测试：Session IP 绑定 + DB 初始化失败 fail-closed
 # ============================================================
 
 
 class TestSessionIPBinding:
-    """测试 M-4 Session IP 绑定功能。"""
+    """测试 Session IP 绑定功能。"""
 
     def test_session_ip_binding_rejects_different_ip(self, webui_server):
         """登录后使用不同IP的token应被拒绝（401）"""
@@ -2508,7 +2508,7 @@ class TestRound13Regressions:
 
 
 class TestDBInitFailure:
-    """测试 C-2 DB初始化失败时 fail-closed。"""
+    """测试 DB 初始化失败时 fail-closed。"""
 
     def test_db_init_failure_returns_503(self, webui_server):
         """模拟 _db_init_failed=True 时 POST 应返回 503"""

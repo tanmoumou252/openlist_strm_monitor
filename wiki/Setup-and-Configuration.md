@@ -60,7 +60,6 @@ enabled = true                    # 是否启用主动刷新
 interval_minutes = 20             # 刷新间隔（分钟）
 depth = 5                         # WebDAV 刷新递归深度
 timeout_seconds = 300             # 刷新操作超时时间（秒）
-log_level = "INFO"                # 刷新日志级别
 full_audit_interval_days = 7      # A 区全量审计周期；0 关闭（可能访问所有 A 根）
 
 [behavior]

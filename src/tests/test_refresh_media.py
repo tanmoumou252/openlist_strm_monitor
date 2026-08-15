@@ -14,6 +14,7 @@ from __future__ import annotations
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -165,6 +166,29 @@ class TestApiFileParsing:
 
 class TestDiffDetection:
     """测试刷新逻辑（简化后：查询 → 映射 → API 调用 → 同步）"""
+
+    def test_refresh_logger_uses_global_log_level(self):
+        """媒体刷新应读取 AppConfig.log.level，而不是已废弃的刷新专用级别。"""
+        app_service = MagicMock()
+        app_service.config = SimpleNamespace(
+            log=SimpleNamespace(level="DEBUG")
+        )
+        app_service.db = MagicMock()
+        app_service.admin_api = MagicMock()
+
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = []
+        mock_conn_ctx = MagicMock()
+        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+        app_service.db.read_connection.return_value = mock_conn_ctx
+
+        with patch("webui.routes._make_refresh_logger") as make_logger:
+            make_logger.return_value = MagicMock()
+            result = _do_media_refresh(app_service, "a", "test")
+
+        assert result == {"ok": True, "message": "未找到相关记录"}
+        make_logger.assert_called_once_with("DEBUG")
 
     def test_refresh_no_records(self):
         """DB 无记录时应返回 未找到相关记录"""

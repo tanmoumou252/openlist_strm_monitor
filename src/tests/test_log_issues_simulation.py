@@ -1124,14 +1124,14 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
         assert "[B区重复] DB迁移失败且回滚物理改名失败" in log
         # 不应再出现误导性日志（误打"已回滚物理改名"）
         assert "[B区重复] DB迁移失败，已回滚物理改名" not in log
-        # B3-B：回滚失败后应尝试把 DB 对齐到隔离路径（日志线索）
+        # 回滚失败后应尝试把 DB 对齐到隔离路径（日志线索）
         assert (
             "已将 DB 对齐到隔离路径" in log
             or "DB 对齐隔离路径也失败" in log
             or "回滚失败后 DB 对齐异常" in log
         )
     def test_same_second_collision_baseline(self):
-        """B3-A：quarantine 返回 None 时必须撤销假 duplicate，恢复 status=valid。
+        """quarantine 返回 None 时必须撤销假 duplicate，恢复 status=valid。
 
         同秒碰撞在自然 basename 不同路径下难以形成；用 mock 稳定复现
         「第二个实例隔离失败」。契约：
@@ -1167,7 +1167,7 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
         assert keep_rec.status == "valid"
         assert Path(keep_path).exists()
 
-        # 隔离失败实例：原路径仍在，且不得残留假 duplicate（B3-A）
+        # 隔离失败实例：原路径仍在，且不得残留假 duplicate
         restored = []
         for p in paths[1:]:
             if Path(p).exists() and p in by_path:
@@ -1197,7 +1197,7 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
         """更接近真实同秒碰撞：.duplicate 与 .duplicate.<epoch> 均已占用。
 
         quarantine_file 在目标存在时只追加一次 epoch；若时间戳目标也存在，
-        rename 抛 OSError → 返回 None。B3-A：status 恢复 valid，原 .strm 保留。
+        rename 抛 OSError → 返回 None。此时 status 恢复 valid，原 .strm 保留。
         """
         from utils.file_utils import quarantine_file as real_quarantine
 
@@ -1231,7 +1231,7 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
 
         rec = self.db.get_b_by_local_full(str(victim))
         assert rec is not None
-        # B3-A：撤销假 duplicate，恢复 valid 以便下次 ensure 再试
+        # 撤销假 duplicate，恢复 valid 以便下次 ensure 再试
         assert rec.status == "valid", "隔离失败不得残留 status=duplicate"
         assert rec.local_path == str(victim) or Path(rec.local_path).resolve() == victim.resolve()
 
@@ -1243,7 +1243,7 @@ class TestNewIssue5_DuplicateStorm(SimulationBase):
         assert "[B区重复] 重复实例隔离失败" in log
 
     def test_db_move_failure_after_quarantine_restores_valid_status(self):
-        """B3-A 扩展：物理隔离成功但 move_b_record 失败且已回滚时，status 恢复 valid。"""
+        """扩展：物理隔离成功但 move_b_record 失败且已回滚时，status 恢复 valid。"""
         webdav = "/cloud/mount/dup_show/S01E01.mp4"
         files, paths = self._seed_three_instances(webdav)
         fp = make_strm_fingerprint(webdav)

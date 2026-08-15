@@ -3263,12 +3263,10 @@ def _do_media_refresh(app_service, area: str, media_name: str, mapping_id: str |
     admin_api = app_service.admin_api
     now_verified = time.time()  # 默认时间戳，成功路径会在后续步骤更新
 
-    # 读取刷新日志级别
-    app_config = getattr(app_service, 'config', None)
-    log_level_name = "INFO"
-    if app_config:
-        # refresh_log_level 已合并至全局 log_level
-        log_level_name = getattr(app_config, 'log_level', "INFO").upper()
+    # 媒体刷新与主程序共用全局日志级别。
+    app_config = getattr(app_service, "config", None)
+    log_config = getattr(app_config, "log", None)
+    log_level_name = str(getattr(log_config, "level", "INFO")).upper()
     _refresh_log = _make_refresh_logger(log_level_name)
 
     _refresh_log("info", "[Refresh] 开始刷新 媒体=%s 区=%s mapping_id=%s", media_name, area, mapping_id)

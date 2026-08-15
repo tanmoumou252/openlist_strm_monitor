@@ -65,9 +65,9 @@ export function showConfirmDialog(title, message, onConfirm, onCancel, options =
       message = esc(message);
     }
   }
-  // L3: 非 htmlContent 路径（默认）直接拼接 message/title 到 innerHTML，
+  // 非 htmlContent 路径（默认）直接拼接 message/title 到 innerHTML，
   // 调用方若传入用户可控内容即构成 XSS。统一用 esc() 转义；htmlContent 分支
-  // 仍按 S7 约定由调用者保证内容可信（上方 console.assert 已守卫）。
+  // 仍按约定由调用者保证内容可信（上方 console.assert 已守卫）。
   const bodyContent = options.htmlContent ? message : `<p>${esc(message)}</p>`;
   overlay.innerHTML = `
     <div class="modal-box">

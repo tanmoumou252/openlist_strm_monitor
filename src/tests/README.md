@@ -17,7 +17,7 @@ python -m pytest src/tests/ -v
 | `test_app_service_core.py` | 核心同步引擎 `AppService` 主流程与状态机测试（含 **M6** `_extract_save_local_mode` 对 `SaveLocalMode: null` 返回 `""` 的守卫测试、**R23 回归** `TestRestoreBFromAAfterViolation` 验证 B 区指纹违规后 A 重构恢复） |
 | `test_sync_service.py` | A→B 同步服务（`initial_scan_a` 批量索引、`scan_a_to_b_full_sync` 双模式同步、`_bulk_upsert_b` FTS 孤儿行处理）测试。**R24 回归**：`test_full_sync_concurrent_no_typeerror` 验证批量同步并发安全性。 |
 | `test_area_watchers.py` | A/B/C 三区文件系统监视器事件处理测试 |
-| `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试（含 `TestLastVerifiedAtWiring`） |
+| `test_refresh_media.py` | 媒体刷新逻辑（差异检测、逐条同步、LIKE 转义、计数回传）测试（含 `TestLastVerifiedAtWiring`）。**全局日志级别回归**：`test_refresh_logger_uses_global_log_level` 断言 `_do_media_refresh` 读取 `AppConfig.log.level` 并传给 `_make_refresh_logger`，而非已废弃的刷新专用级别 |
 | `test_refresh_service.py` | 周期性 WebDAV 刷新服务测试（含 `TestFullAuditTouchVerified`、`TestRunFullAuditNow`） |
 | `test_refresh_service_helpers.py` | RefreshService 辅助委托、路径分析日志、WebDAV 刷新与 update 模式清理测试。 |
 | `test_bootstrap.py` | 启动路径工具（`ensure_base_dir_first`、`load_local_module`）测试 |
@@ -33,7 +33,7 @@ python -m pytest src/tests/ -v
 | 文件 | 说明 |
 |------|------|
 | `test_integration.py` | 数据库重构与核心流程集成测试（含 A/B/C 区 FTS 完整性回归） |
-| `test_database_bulk.py` | bulk_connection 批量写入、只读 getter 读锁与并发数据库行为测试（含 `TestLastVerifiedAtColumn`） |
+| `test_database_bulk.py` | bulk_connection 批量写入、只读 getter 读锁与并发数据库行为测试（含 `TestLastVerifiedAtColumn`）。**bulk 生命周期边界**：`TestBulkConnection`（`test_yields_connection_and_commits` 事务提交、`test_rollback_on_exception` 异常回滚、`test_connection_closed_after_exit` 连接关闭、`test_bypasses_rw_lock` 绕过读写锁）、`TestBatchOver900Records`（>900/1500 记录跨 SQLite 变量数边界批次）、`TestReadonlyGettersReadLock`（只读 getter 读锁） |
 | `test_fts5_search.py` | FTS5 全文检索查询与匹配测试（含 simple 分词器加载、版本可读、`黑暗`/`暗黑` 按词分词语义断言） |
 | `test_fts5_escape_and_tmdb_search.py` | FTS5 查询转义函数（`_escape_fts5_query`）与 TMDB 搜索路由测试（含 `进击的巨人[限制级]`、`电影：测试*`、`Spy×Family` 真实媒体名转义） |
 | `test_fts_orphan_cleanup.py` | FTS 孤儿行清理与一致性测试（含 **H1 回归**：`sync()` 同时含电影+剧集时两类 FTS 行均保留、电影搜索不失效） |
@@ -43,7 +43,7 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_config.py` | 配置模块单元测试：ABMapping、mapping_version、AppConfig.from_file、update_from_db、load_strm_storage_from_api、migrate_config_to_db、配置 fail-closed。**D1 回归**：`update_from_db` 补齐缺失 `mapping_id`（`test_a_b_mappings_backfills_missing_mapping_id` 等）；**D2 回归**：`from_file` 初始化 `a_b_mappings` / `engines_initialized`（`test_from_file_initializes_mapping_fields`）。 |
+| `test_config.py` | 配置模块单元测试：ABMapping、mapping_version、AppConfig.from_file、update_from_db、load_strm_storage_from_api、migrate_config_to_db、配置 fail-closed。**D1 回归**：`update_from_db` 补齐缺失 `mapping_id`（`test_a_b_mappings_backfills_missing_mapping_id` 等）；**D2 回归**：`from_file` 初始化 `a_b_mappings` / `engines_initialized`（`test_from_file_initializes_mapping_fields`）。**日志级别映射**：`test_log_level_db_key_maps_to_log_config_level` 断言 DB 键 `log_level` 映射到 `LogConfig.level`（全局日志），已废除的 `RefreshConfig.log_level` 不被误写 |
 | `test_password_security.py` | 管理员密码 PBKDF2 哈希与校验安全测试 |
 | `test_auth_security.py` | 认证安全测试：登录限流字典逻辑（5 次失败后限流）、密码哈希格式（salt$iterations$hash 三段式，iterations=600000）、首启密码生成与哈希验证往返、损坏密码格式提示（含 `reset_admin.py` 重置指令） |
 | `test_secret_manager.py` | 密钥/凭据安全管理测试 |
@@ -62,13 +62,13 @@ python -m pytest src/tests/ -v
 | `test_subtitle_multi_bug_repro.py` | 番剧多字幕场景 NameError 回归测试 |
 | `test_boundary_conditions.py` | 边界条件与异常输入健壮性测试 |
 | `test_error_translator.py` | 错误码到用户可读信息的翻译测试 |
-| `test_subset_font.py` | 字体子集化脚本单元测试：参数解析、Unicode 集合运算、网页字符扫描、缺字来源区分、CSS 一致性校验、icon-preview 与 icons.js 一致性（**icon-preview 副标题图标总数与 `ICONS` 键数一致**（`TestIconPreviewParity`））。 |
+| `test_subset_font.py` | 字体子集化脚本单元测试：参数解析、Unicode 集合运算、网页字符扫描、缺字来源区分、CSS 一致性校验、icon-preview 与 icons.js 一致性（**icon-preview 副标题图标总数与 `ICONS` 键数一致**（`TestIconPreviewParity`））。**字体覆盖分工（三个不同边界，勿合并描述）**：`TestDistFontCoverage::test_dist_font_covers_scanned_codepoints` 验证发布字体（`dist/assets/NotoSansSC-Subset-*.woff2`）cmap 覆盖当前网页全部扫描字符，且区分「源字体缺字（WARNING → skip）」与「子集字体丢字（ERROR → fail）」；`TestVerifyCssDeclaration::test_real_css_matches_shipped_font` 验证源码 `main.css` 的 `unicode-range` 声明不超过源码子集字体实际 cmap；`TestUnicodeRangeCoverage::test_scanned_codepoints_within_css_range` 验证后端 Python 扫描到的 CJK 码点落在 CSS 声明的 `unicode-range` 内。三者不是「CSS 与 dist 字体 cmap 完全相等」的单一测试。**依赖**：需要 `fonttools[woff2]`（见 `requirements-dev.txt`），无法读取字体 cmap 时相关用例跳过。**已知 skip**：`TestDistFontCoverage` 当前唯一跳过项为 U+25BE `▾`（十进制 9662），该字符在源字体 `NotoSansSC-VF.ttf` 中缺失，`classify_missing()` 归入 `from_source`，属于源字体 fallback 风险，不是子集化失败。`python -m pytest src/tests/test_subset_font.py -q -rs` 预期结果为 `144 passed, 1 skipped`（仅 U+25BE 源字体缺失）。 |
 
 ### API 客户端
 
 | 文件 | 说明 |
 |------|------|
-| `test_openlist_hotreload.py` | OpenList 热重载/配置刷新测试 |
+| `test_openlist_hotreload.py` | OpenList 热重载/配置刷新测试：`_reinit_admin_client` 保留旧客户端（登录失败/构造异常时不替换）、`_hot_reload_openlist_config` 异常吞咽与 WebDAV 变更触发重连。**日志热更新行为**：`test_hot_reload_log_changed_reinitializes_logging` 断言 `update_from_db` 改变 `cfg.log.level` 后 `setup_logging` 以新 `level`/`log_file`/`max_size_mb`/`backup_count` 被调用；`test_hot_reload_log_unchanged_skips_setup_logging` 断言日志配置未变时不调用。函数内为局部 `from logger_setup import setup_logging`，patch 目标为源模块 `logger_setup.setup_logging`（与 patch `webdav_client.OpenListAdminClient` 同理） |
 | `test_webdav_client.py` | WebDAV 协议客户端测试（含 `_check_exists_cache` 容量淘汰验证、**M8** TOTP 无 padding base64 密钥解码回归） |
 | `test_tmdb_client.py` | TMDB API v3 客户端测试 |
 | `test_openlist_login_shared.py` | OpenList 登录错误消息解析（`parse_login_error`）测试 |
@@ -78,10 +78,10 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试（含 `TestAreaDetailKindParameter`、`TestAreaDetailCZonePagination`、`TestAreaDetailSingleMappingMid`、`TestTMDBWatchlistMatchOverrideConsistency`、`TestManualFullIndexAuditAPI`）。**D2 回归**：全新安装 `/api/config` 不抛异常（`TestConfigApiFreshInstall`）；**D3 回归**：fail-safe 时 `start_main` 返回失败（`TestStartMainFailSafe`）。**第 23 轮回归**（`TestRound13Regressions`）：**M3** `_MEDIA_NAME_SQL` 别名目录（`/movies/` 等）不再坍缩「未分类」、**M4** 改密后旧 token 立即失效、**M5** `/api/admin/status` 带无效 token 返回 401 / 无 token 保持 200。 |
+| `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试（含 `TestAreaDetailKindParameter`、`TestAreaDetailCZonePagination`、`TestAreaDetailSingleMappingMid`、`TestTMDBWatchlistMatchOverrideConsistency`、`TestManualFullIndexAuditAPI`）。**D2 回归**：全新安装 `/api/config` 不抛异常（`TestConfigApiFreshInstall`）；**D3 回归**：fail-safe 时 `start_main` 返回失败且不置 `_app_running`（`TestStartMainFailSafe`）。**安全边界**：`TestSecurity`（公网 IP 拒绝、5 次失败限流 429）、`TestSessionIPBinding`（会话 IP 绑定拒绝异 IP / 放行原 IP）、`TestConfigApiUnifiedSession`（token 滑动过期、空 stored_ip 兼容、无效 token 拒绝）、`TestMainStartHidesExceptionDetail`（后台异常返回通用消息）。**第 23 轮回归**（`TestRound13Regressions`）：**M3** `_MEDIA_NAME_SQL` 别名目录（`/movies/` 等）不再坍缩「未分类」、**M4** 改密后旧 token 立即失效、**M5** `/api/admin/status` 带无效 token 返回 401 / 无 token 保持 200。 |
 | `test_webui_help_texts.py` | WebUI 帮助文案系统测试：`createField` 输出 `.field-helper-text`、`_openlistHelpTexts` 键完整性、`log_file` 已删除、`refresh_*` 含「即时生效」、TMDB 阈值字段 helpIcon、孤儿键标注、死字段「未接入匹配逻辑」标注 |
-| `test_webui_source_contracts.py` | 前端源码契约回归测试：未定义变量（`mappingIdParam`/`deleteDisabled`）、死参数（`mapping_id`）、CSV 公式注入安全、`_do_bg_sync` 预检查、dialog 断言正则、配置「未接入」标注、畸形请求不计数、交付文档无行号、**M9** `captureRenderGuard()` 渲染护栏、**L5** `parseHash` 畸形编码容错 |
-| `test_webui_entry_behavior.py` | WebUI 入口行为测试（`server.py` `main()` 的普通交互模式与 `BRIDGE_HEADLESS=1` 无头模式）：覆盖普通交互菜单（选 1 启动 Bridge、默认仅 WebUI）、无头自动启动 Bridge 并跳过 stdin 静默等待、交互循环 `q`/`quit` 退出、EOFError 不崩溃、KeyboardInterrupt 可控退出、退出时清理子程序与服务器、配置缺失 `sys.exit(1)`、启动失败 `sys.exit(1)`。验证 `q` 退出用例真实断言未启动 Bridge（`start_main.call_count == 0`）。 |
+| `test_webui_source_contracts.py` | 前端源码契约回归测试：未定义变量（`mappingIdParam`/`deleteDisabled`）、死参数（`mapping_id`）、CSV 公式注入安全、`_do_bg_sync` 预检查、dialog 断言正则、配置「未接入」标注、畸形请求不计数、交付文档无行号、`captureRenderGuard()` 渲染护栏、`parseHash` 畸形编码容错 |
+| `test_webui_entry_behavior.py` | WebUI 入口行为测试（`server.py` `main()` 的普通交互模式与 `BRIDGE_HEADLESS=1` 无头模式）：覆盖普通交互菜单（选 1 启动 Bridge、默认仅 WebUI）、无头自动启动 Bridge 并跳过 stdin 静默等待、交互循环 `q`/`quit` 退出、EOFError 不崩溃、KeyboardInterrupt 可控退出、退出时清理子程序与服务器、配置缺失 `sys.exit(1)`、启动失败 `sys.exit(1)`。**无头失败入口**：`test_headless_start_main_failure_does_not_escape` 验证 `start_main` 返回失败结果时异常不逃逸并进入清理路径（该测试直接断言清理路径，不断言日志内容；`_app_running` 不被置位的 fail-safe 见 `test_webui_http.py::TestStartMainFailSafe`）。验证 `q` 退出用例真实断言未启动 Bridge（`start_main.call_count == 0`）。 |
 | `test_call_coverage.py` | 启动链调用覆盖率测试 |
 | `test_logging_system.py` | TMDB 操作日志表、日志读取接口与轮转产物测试 |
 | `test_logger_setup.py` | logger_setup 模块单元测试：handler 装配、重复初始化（热更新）、回退路径、级别过滤、启动分隔标记、临时目录清理（**窄编码控制台下无法编码字符不丢日志、且不改写流的全局 errors 策略**（`TestConsoleEncodingFallback`））。 |
@@ -164,6 +164,8 @@ python -m pytest src/tests/ --cov=src --cov-report=html
 ```bash
 pip install -r src/tests/requirements-dev.txt
 ```
+
+字体相关测试（`test_subset_font.py`）需要 `fonttools[woff2]>=4.50.0`，用于字体子集化、WOFF2 cmap 读取及发布字体覆盖测试。该依赖**仅用于开发/测试**，不是生产运行依赖。无法读取字体 cmap 时，相关用例会跳过而不是失败。
 
 ## 测试环境
 

@@ -5,7 +5,7 @@ cd /d "%~dp0"
 
 :: 1. 优先使用 PYTHON_EXE 环境变量，未配置时回退到 python
 if defined PYTHON_EXE (
-    :: M17: 去除 PYTHON_EXE 中可能存在的首尾引号，后续统一用 "%PYTHON%" 引用，
+    :: 去除 PYTHON_EXE 中可能存在的首尾引号，后续统一用 "%PYTHON%" 引用，
     :: 与 VBS 的「去外层引号再加一层」保持一致，避免双引号嵌套。
     set "PYTHON=%PYTHON_EXE:"=%"
 ) else (

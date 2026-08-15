@@ -13,3 +13,7 @@ requests>=2.31.0
 # Mock TMDB API 服务器（独立调试工具，非 pytest 用例；仅 src/tests/test_tmdb_api.py --flask 启动）
 flask>=2.0.0
 
+# 字体测试依赖（仅用于字体子集化、WOFF2 cmap 读取及发布字体覆盖测试；
+# 见 src/tests/test_subset_font.py。不是生产运行依赖，仅开发/测试所需。）
+fonttools[woff2]>=4.50.0
+

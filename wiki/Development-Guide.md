@@ -181,6 +181,10 @@ const data = await fetchData();
 if (isStale()) return; // 用户已导航离开，放弃渲染
 ```
 
+### Lint 审计基线
+
+全量 Python 文件的 Lint 审计结论（`pyflakes` 扫描、决策锚点与文档一致性核验）见 `docs/Python规范审计与Lint检查报告.md`。新增代码提交前建议运行 `python -m pyflakes src` 自检，避免引入 F821 未定义名字类告警；既有技术债与有意保留项已在该报告中登记。
+
 ## 常见陷阱
 
 1. **未重新构建 dist**：修改 `src/webui/modules/*.js` 后必须运行 `npx vite build`，否则浏览器看不到更改。

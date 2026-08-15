@@ -119,8 +119,8 @@ class TestHeadlessMode:
 
         mock_server.stop_main.assert_called_once()
 
-    def test_headless_start_main_failure_logged(self, _patch_main_deps):
-        """无头模式 start_main 失败时不应产生异常。"""
+    def test_headless_start_main_failure_does_not_escape(self, _patch_main_deps):
+        """无头模式 start_main 返回失败时不传播异常并进入清理路径。"""
         mock_server = _patch_main_deps
         mock_server.start_main.return_value = {"success": False, "message": "config error"}
         os.environ["BRIDGE_HEADLESS"] = "1"
