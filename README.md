@@ -1,0 +1,2 @@
+# openlist_strm_monitor
+君只见生成strm的工具多样 却不见删除strm后对应源文件的狼狈
