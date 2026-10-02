@@ -1,4 +1,7 @@
 from __future__ import annotations
+from typing import Optional
+from dataclasses import dataclass, field
+import re
 import os
 import sys
 import json
@@ -17,7 +20,8 @@ def ensure_base_dir_first():
     sys.path.insert(0, BASE_DIR)
 
 
-def load_local_module(module_name: str, filename: str, base_dir: str | None = None):
+def load_local_module(module_name: str, filename: str,
+                      base_dir: str | None = None):
     import importlib.util
     from types import ModuleType
 
@@ -41,10 +45,6 @@ try:
     import tomllib
 except ImportError:
     import tomli as tomllib
-
-import re
-from dataclasses import dataclass, field
-from typing import Optional
 
 
 def read_line_list(
@@ -156,7 +156,8 @@ class StrmStorageMapping:
         last_dir = ""
         if self.paths:
             last_dir = self.paths[0].rstrip("/").split("/")[-1]
-        base = os.path.join(self.local_path, last_dir) if last_dir else self.local_path
+        base = os.path.join(self.local_path,
+                            last_dir) if last_dir else self.local_path
         if sub_path:
             return os.path.join(base, sub_path.lstrip("/\\"))
         return base
@@ -173,7 +174,8 @@ class AppConfig:
     paths: PathsConfig
     a_folders: list[str] = field(default_factory=list)
     # STRM 存储映射 mount_path -> StrmStorageMapping
-    strm_storage_map: dict[str, StrmStorageMapping] = field(default_factory=dict)
+    strm_storage_map: dict[str, StrmStorageMapping] = field(
+        default_factory=dict)
 
     def __getattr__(self, name: str):
         if name == "strm_engine_paths":
@@ -202,7 +204,9 @@ class AppConfig:
             a_dir=os.path.join(base_dir, "a"),
             b_dir=b_root,
             c_dir=c_root,
-            db_file=os.path.join(base_dir, local_data.get("db_file", "bridge.db")),
+            db_file=os.path.join(
+                base_dir, local_data.get(
+                    "db_file", "bridge.db")),
         )
 
         webdav_data = data.get("webdav", {})
@@ -227,7 +231,8 @@ class AppConfig:
             sync_on_startup_wait=behavior_data.get("sync_on_startup_wait", 0),
             trash_dir_name=behavior_data.get("trash_dir_name", "trash"),
             action=behavior_data.get("action", "MOVE"),
-            ghost_protect_seconds=behavior_data.get("ghost_protect_seconds", 300),
+            ghost_protect_seconds=behavior_data.get(
+                "ghost_protect_seconds", 300),
             a_to_b_restore_delay_seconds=behavior_data.get(
                 "a_to_b_restore_delay_seconds", 30
             ),
@@ -243,7 +248,9 @@ class AppConfig:
 
         paths = PathsConfig(
             strm_engine_paths=read_line_list(
-                paths_data.get("strm_engine_paths_file", "strm_engine_paths.txt"),
+                paths_data.get(
+                    "strm_engine_paths_file",
+                    "strm_engine_paths.txt"),
                 base_dir,
                 is_webdav=True,
             ),
@@ -276,7 +283,9 @@ class AppConfig:
                 storages = admin_client.list_storages()
                 if storages and isinstance(storages, dict):
                     data = storages.get("data", {})
-                    content = data.get("content", []) if isinstance(data, dict) else []
+                    content = data.get(
+                        "content", []) if isinstance(
+                        data, dict) else []
                     for storage in content:
                         if storage.get("driver", "").lower() != "strm":
                             continue
@@ -310,7 +319,8 @@ class AppConfig:
 
                             # 为每个 group 创建 StrmStorageMapping
                             for last_dir, group_paths in path_groups.items():
-                                entry_path = f"{mount_path.rstrip('/')}/{last_dir}"
+                                entry_path = f"{
+                                    mount_path.rstrip('/')}/{last_dir}"
                                 strm_storage_map[entry_path] = StrmStorageMapping(
                                     mount_path=mount_path,
                                     paths=group_paths,
@@ -348,11 +358,13 @@ class AppConfig:
             host=self._read_single_line("webdav_host.txt", base_dir),
             user=self._read_single_line("webdav_user.txt", base_dir),
             password=self._read_single_line("webdav_password.txt", base_dir),
-            totp_secret=self._read_single_line("webdav_totp_secret.txt", base_dir),
+            totp_secret=self._read_single_line(
+                "webdav_totp_secret.txt", base_dir),
         )
         self.refresh = RefreshConfig(
             interval_seconds=int(
-                self._read_single_line("refresh_interval.txt", base_dir) or "300"
+                self._read_single_line(
+                    "refresh_interval.txt", base_dir) or "300"
             ),
             wait_seconds=int(
                 self._read_single_line("refresh_wait.txt", base_dir) or "30"
@@ -366,7 +378,8 @@ class AppConfig:
             ).lower()
             == "true",
             sync_on_startup_wait=int(
-                self._read_single_line("sync_on_startup_wait.txt", base_dir) or "0"
+                self._read_single_line(
+                    "sync_on_startup_wait.txt", base_dir) or "0"
             ),
         )
         self.log = LogConfig(
@@ -388,7 +401,8 @@ class AppConfig:
             strm_engine_paths=read_line_list(
                 "strm_engine_paths.txt", base_dir, is_webdav=True
             ),
-            refresh_paths=read_line_list("refresh_paths.txt", base_dir, is_webdav=True),
+            refresh_paths=read_line_list(
+                "refresh_paths.txt", base_dir, is_webdav=True),
             strm_monitored_paths=read_line_list(
                 "strm_monitored_paths.txt", base_dir, is_webdav=True
             ),

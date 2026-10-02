@@ -46,7 +46,17 @@ from utils import (
 )
 from refresh_service import RefreshService
 from webdav_client import OpenListAdminClient
-from media_renamer import suggest_rename, build_season_path, _extract_season_episode
+from media_renamer import (
+    suggest_rename, 
+    build_season_path, 
+    _extract_season_episode,
+    _build_standard_name,
+    detect_media_type_from_path,
+    is_subtitle_file,
+    detect_subtitle_language,
+    SUBTITLE_EXTS,
+    extract_season_from_path,
+)
 # autopep8: on
 # isort: on
 
@@ -94,7 +104,7 @@ class StrmStorageInfo:
 
     @property
     def is_sync_mode(self) -> bool:
-        return self.save_local_mode.lower() == "sync"
+        return self.save_local_mode.lower() == "update"
 
 
 class StrmStorageManager:
@@ -153,7 +163,7 @@ class StrmStorageManager:
         return result
 
     def get_working_sync_storages(self) -> list[StrmStorageInfo]:
-        """获取有效的同步模式存储"""
+        """获取有效的更新模式存储"""
         return [s for s in self.get_strm_storages(
         ) if s.is_working and s.is_sync_mode]
 
@@ -214,6 +224,7 @@ class AppService:
         self.engine_configs: list[dict] = []
         self._restoring_markers: set[str] = set()  # 正在恢复的文件指纹集合
         self._restoring_lock = threading.Lock()
+        self.db.init_subtitle_table()   # 初始化字幕表
 
     def get_path_lock(self, path: str | Path) -> threading.Lock:
         key = str(Path(path).resolve())
@@ -457,103 +468,74 @@ class AppService:
             raise ValueError(f"文件不属于任何A根目录: {a_local}")
 
         rel = a_local.relative_to(a_root)
-        root_name = a_root.name or "a_root"
 
-        # 尝试自动重命名
+        # 1. 电影检测：保持原有结构，不做番剧重命名
+        is_movie = self._should_treat_as_movie(a_local, webdav_path)
+        if is_movie:
+            return self.b_root / rel
+
+        # 2. 尝试自动重命名（suggest_rename 驱动）
         suggested_name = suggest_rename(a_local)
         if suggested_name and webdav_path:
-            # ===== 修复：始终从 webdav_path 提取季信息 =====
+            # 优先从 webdav_path 提取季信息
             season = self._extract_season_from_webdav_path(webdav_path)
-            # 如果 webdav_path 中也提取不到，回退到从文件名提取
+            # 回退从路径中的中文季目录提取
+            if season is None:
+                season = extract_season_from_path(a_local)
+            # 回退到从文件名提取
             if season is None:
                 season, _ = _extract_season_episode(a_local.name)
-            # =============================================
 
             # 从文件名提取集信息
             _, episode = _extract_season_episode(a_local.name)
 
             if season is not None and episode is not None:
-                # 构建标准文件名 S{season:02d}E{episode:02d}
-                standard_name = f"S{
-                    season:02d}E{
-                    episode:02d}{
-                    Path(suggested_name).suffix}"
-
-                # 从 webdav_path 提取真正的媒体根名称
-                cloud_show_name = None
-                for config in getattr(self, "engine_configs", []):
-                    for sp in config.get("source_paths", []):
-                        if webdav_path.startswith(sp.rstrip("/") + "/"):
-                            rel_cloud = webdav_path[len(
-                                sp.rstrip("/")):].lstrip("/")
-                            cloud_show_name = rel_cloud.split(
-                                "/")[0] if rel_cloud else None
-                            break
-                    if cloud_show_name:
-                        break
-
-                if cloud_show_name:
-                    show_name = cloud_show_name
+                # suggest_rename 返回完整格式 S01E01.ext
+                if suggested_name:
+                    standard_name = suggested_name
                 else:
-                    # 回退：从 webdav_path 提取
-                    engine_path = self._find_matching_engine_path(webdav_path)
-                    if engine_path:
-                        rel_to_engine = webdav_path[len(
-                            engine_path.rstrip("/")):].lstrip("/")
-                        show_name = rel_to_engine.split(
-                            "/")[0] if rel_to_engine else None
-                    else:
-                        show_name = None
+                    # 兼容旧格式或异常情况
+                    standard_name = f"S{
+                        season:02d}E{
+                        episode:02d}{
+                        Path(a_local).suffix}"
 
-                    # 如果还是找不到，尝试从路径中提取
-                    if not show_name:
-                        webdav_parts = webdav_path.strip("/").split("/")
-                        for part in reversed(webdav_parts[:-1]):
-                            part_lower = part.lower()
-                            if (part_lower.startswith("season") or
-                                part_lower.startswith("episode") or
-                                    re.match(r"^s\d{1,2}$", part_lower)):
-                                continue
-                            show_name = part
-                            break
-                        if not show_name and len(webdav_parts) >= 2:
-                            show_name = webdav_parts[-2]
+                # ===== 关键修复：保留 A 区完整相对目录结构，只替换文件名并插入 Season =====
+                rel_parts = list(rel.parts)
 
-                # 关键修复：当 cloud_show_name 找到后，需要检查 webdav_path 中是否包含 Season 层级
-                if cloud_show_name:
-                    webdav_parts = webdav_path.strip("/").split("/")
-                    season_index = None
-                    for i, part in enumerate(webdav_parts):
-                        part_lower = part.lower()
-                        if part_lower.startswith("season") or re.match(
-                                r"^s\d{1,2}$", part_lower):
-                            season_index = i
-                            break
+                # 检查 A 区路径中是否已有 Season 目录或中文季目录
+                has_season_dir = False
+                season_dir_index = -1
+                cn_season_dir_index = -1
+                for i, part in enumerate(rel_parts[:-1]):  # 排除文件名
+                    if re.match(r"(?i)^season\s*\d+$", part):
+                        has_season_dir = True
+                        season_dir_index = i
+                        break
+                    # 检测中文季目录如 "第二季"
+                    if re.match(r"^第[一二三四五六七八九十\d]+季$", part):
+                        cn_season_dir_index = i
 
-                    if season_index is not None and season_index >= 1:
-                        show_name = webdav_parts[season_index - 1]
-                    else:
-                        show_name = cloud_show_name
+                if has_season_dir:
+                    # 已有 Season 目录：替换为正确的季号，标准化文件名
+                    # 保留 Season 之前的所有目录结构
+                    new_rel = Path(
+                        *rel_parts[:season_dir_index]) / f"Season {season:02d}" / standard_name
+                elif cn_season_dir_index >= 0:
+                    # 有中文季目录：替换为 Season XX，移除中文季目录
+                    new_rel = Path(
+                        *rel_parts[:cn_season_dir_index]) / f"Season {season:02d}" / standard_name
+                else:
+                    # 无 Season 目录：在文件名的父目录下添加 Season XX
+                    # 保留所有父目录结构
+                    new_rel = Path(*rel_parts[:-1]) / \
+                        f"Season {season:02d}" / standard_name
 
-                if show_name:
-                    # 使用 build_season_path 构建标准路径
-                    new_path = build_season_path(
-                        self.b_root / root_name,
-                        show_name,
-                        season,
-                        standard_name,
-                    )
-                    # ===== 验证源文件存在性 =====
-                    if not a_local.exists():
-                        logging.warning(
-                            "[build_b_path] 源文件不存在，但返回路径: %s -> %s",
-                            a_local, new_path
-                        )
-                    # ====================================
-                    return new_path
+                return self.b_root / new_rel
+                # ========================================================================
 
         # 默认行为：保持原有结构
-        return self.b_root / root_name / rel
+        return self.b_root / rel
 
     def _reverse_map_b_to_a(self, b_local_path: str | Path) -> str | None:
         """根据 B 区路径，反推其合法的 A 区对应路径"""
@@ -564,17 +546,16 @@ class AppService:
         except ValueError:
             return None
 
-        parts = rel.parts
-        if not parts:
+        if not rel.parts:
             return None
 
-        a_root_name = parts[0]
-        sub_path = Path(*parts[1:])
+        sub_path = Path(rel)
 
-        # 寻找匹配的 A 区根目录
+        # 遍历所有 A 区根目录，尝试构建匹配路径
         for a_root in self.a_roots:
-            if a_root.name == a_root_name:
-                return str(a_root / sub_path)
+            candidate = a_root / sub_path
+            if candidate.exists():
+                return str(candidate)
         return None
 
     def update_engine_configs(self):
@@ -645,184 +626,278 @@ class AppService:
     def _verify_b_path_lineage(
             self, b_local_path: str, webdav_path: str, is_sync_phase: bool = False) -> bool:
         """
-        [剧集归属感校验]
-        补充了详细的排查日志输出。
+        [血统校验]
+        适配 build_b_path_from_a 行为：保留A区完整层级 + 插入 Season XX
         """
         fingerprint = make_strm_fingerprint(webdav_path)
         b_local = Path(b_local_path).resolve()
 
-        # 🚀 修复：通过 B 区路径反推其所属的 A 区根目录
-        a_root_path = None
-        try:
-            # 剥离 B 区根目录 (例如剥离 C:\Users\1\Downloads\测试b)
-            rel_to_b = b_local.relative_to(self.b_root)
-            if len(rel_to_b.parts) > 0:
-                # 第一级目录就是 A 区根目录的名称 (例如 "测试a")
-                a_root_name = rel_to_b.parts[0]
-                a_root_path = next(
-                    (ar for ar in self.a_roots if ar.name == a_root_name), None)
-        except ValueError:
-            pass
+        # 1. 通过指纹查找 A 区源记录（最可靠）
+        a_record = self.db.get_a_by_webdav(webdav_path)
+        if not a_record:
+            identity = self.db.get_identity_by_fingerprint(fingerprint)
+            if identity and identity[2]:
+                a_local_path = Path(identity[2])
+                if a_local_path.exists():
+                    a_record = (str(a_local_path), webdav_path, "", 0)
 
-        if not a_root_path:
-            logging.debug("[血统校验失败] 无法从B区路径反推对应的A区根目录: %s", b_local_path)
+        if not a_record:
+            logging.debug("[血统校验失败] 无A区源记录: %s", b_local_path)
             return False
 
+        a_local_path = Path(a_record[0]).resolve()
+        if not a_local_path.exists():
+            logging.debug("[血统校验失败] A区源文件不存在: %s", a_local_path)
+            return False
+
+        # 2. 找到 A 区根目录
+        a_root = self.get_a_root_for_path(a_local_path)
+        if not a_root:
+            logging.debug("[血统校验失败] A区源不在任何根目录下: %s", a_local_path)
+            return False
+
+        # 3. 提取相对路径
+        try:
+            a_rel = a_local_path.relative_to(a_root)
+            b_rel = b_local.relative_to(self.b_root)
+        except ValueError:
+            logging.debug("[血统校验失败] 路径超出根目录")
+            return False
+
+        a_rel_dir = a_rel.parent
+        b_rel_dir = b_rel.parent
+
+        # 4. 快速通过：完全一致（不含 Season 的情况）
+        if a_rel_dir == b_rel_dir:
+            logging.debug("[血统校验通过] 路径完全一致: %s", b_local_path)
+            return True
+
+        # 5. 处理 Season 层级差异
+        a_parts = list(a_rel_dir.parts)
+        b_parts = list(b_rel_dir.parts)
+
+        # 检查 B 是否比 A 多一层 Season XX
+        if len(b_parts) == len(a_parts) + 1:
+            # B 的前缀应该等于 A
+            if b_parts[:len(a_parts)] == a_parts:
+                # 最后一层是 Season XX
+                last_part = b_parts[-1]
+                if re.match(r"(?i)^season\s*\d+$", last_part):
+                    logging.debug("[血统校验通过] B区自动添加Season层级: %s", b_local_path)
+                    return True
+
+        # 5.5 处理多层 Season 变化（如 S01 -> S02）
+        # 检查是否是同一媒体文件夹下的 Season 变化
+        if len(a_parts) >= 1 and len(b_parts) >= 1:
+            # 提取媒体文件夹名（假设是 Season 的父级或更上级）
+            a_media_name = None
+            b_media_name = None
+
+            for i, part in enumerate(a_parts):
+                if re.match(r"(?i)^season\s*\d+$", part):
+                    if i > 0:
+                        a_media_name = a_parts[i - 1]
+                    break
+
+            for i, part in enumerate(b_parts):
+                if re.match(r"(?i)^season\s*\d+$", part):
+                    if i > 0:
+                        b_media_name = b_parts[i - 1]
+                    break
+
+            # 如果媒体文件夹名相同，或者通过边界映射关联，允许
+            if a_media_name and b_media_name:
+                if a_media_name == b_media_name:
+                    logging.debug("[血统校验通过] 同一媒体不同Season: %s", b_local_path)
+                    return True
+
+                # 检查边界映射
+                boundary = self.db.get_media_boundary_by_source_name_only(
+                    a_media_name)
+                if boundary:
+                    _, mapped_source, mapped_current, _, _ = boundary
+                    if b_media_name in (mapped_source, mapped_current):
+                        logging.debug(
+                            "[血统校验通过] 边界映射Season变化: %s", b_local_path)
+                        return True
+
+        # 6. 引擎配置检查（用于后续边界映射）
         if not hasattr(self, "engine_configs") or not self.engine_configs:
-            logging.debug("[血统校验放行] 引擎配置未加载，默认放行: %s", b_local_path)
+            logging.debug("[血统校验放行] 引擎配置未加载: %s", b_local_path)
             return True
 
+        # 找到匹配的引擎配置
+        a_root_norm = str(a_root.resolve())
         config = next(
-            (c for c in self.engine_configs if c["a_root_norm"] == str(
-                a_root_path.resolve())), None)
+            (c for c in self.engine_configs if c["a_root_norm"]
+             == a_root_norm),
+            None,
+        )
         if not config:
-            logging.debug("[血统校验放行] 未找到该库的引擎配置，默认放行: %s", b_local_path)
+            logging.debug("[血统校验放行] 未找到引擎配置: %s", b_local_path)
             return True
 
-        # 3. 识别云端“媒体根目录” (这里的 webdav_path 是 STRM 里读取的最真实的物理路径)
+        # 7. 识别云端媒体根目录
         source_path = next(
             (sp for sp in config["source_paths"] if webdav_path.startswith(
                 sp.rstrip("/") + "/")), None)
         if not source_path:
-            logging.debug("[血统校验放行] 真实云盘路径不在配置监控范围内，默认放行: %s", webdav_path)
+            logging.debug("[血统校验放行] 不在监控范围内: %s", b_local_path)
             return True
 
-        rel_cloud_str = webdav_path[len(source_path.rstrip("/")):].lstrip("/")
-        rel_parts = rel_cloud_str.split("/")
-
-        # 4. 识别 B 区物理层级
-        # 注意：B 区路径结构是 {b_root}/{a_root_name}/{media_folder}/{season_folder}/{file}
-        # 没有中间层级（如 "番剧"），所以 engine_entry_path 只到 a_root_name
-        engine_entry_path = self.b_root / a_root_path.name
-
-        # 从 webdav_path 提取媒体文件夹名
         rel_cloud_str = webdav_path[len(source_path.rstrip("/")):].lstrip("/")
         rel_parts = rel_cloud_str.split("/")
         cloud_show_name = rel_parts[0] if len(rel_parts) >= 2 else None
 
-        try:
-            rel_to_entry = b_local.relative_to(engine_entry_path)
+        # 8. 识别 B 区物理层级中的"媒体文件夹"
+        # 当前 B 区路径：b_root / 测试番剧 / [2023] 女神的露天咖啡厅 / Season 01
+        # physical_media_folder_name 应该是 [2023] 女神的露天咖啡厅（Season 的父级）
+        physical_media_folder_name = None
+        for i, part in enumerate(b_parts):
+            if re.match(r"(?i)^season\s*\d+$", part):
+                # Season 的前一级是媒体文件夹
+                if i > 0:
+                    physical_media_folder_name = b_parts[i - 1]
+                break
 
-            # 边界校验：不能提到引擎根目录
-            if len(rel_to_entry.parts) < 2:
-                # 如果原本在云端就是电影(直接放在根目录没有子文件夹)，则合法
-                if len(rel_parts) < 2:
-                    logging.debug("[血统校验] 判定为根目录电影，放行: %s", b_local_path)
-                    return True
-                logging.warning(
-                    "[血统校验失败] 发现越界文件(不可提至根目录): 物理路径=%s, 云端=%s",
-                    b_local_path, webdav_path
-                )
-                return False
+        # 如果没有 Season，取最后一级
+        if physical_media_folder_name is None and b_parts:
+            physical_media_folder_name = b_parts[-1]
 
-            # 处理 Season XX 层级：允许在 Season 层级下的文件
-            physical_media_folder_name = rel_to_entry.parts[0]
+        # 9. 边界校验：不能提到引擎根目录
+        if len(b_parts) < 2:
+            if len(rel_parts) < 2:
+                logging.debug("[血统校验] 根目录电影，放行: %s", b_local_path)
+                return True
+            logging.warning("[血统校验失败] 越界文件: %s", b_local_path)
+            return False
 
-            # 如果存在 Season 层级，提取真正的媒体文件夹名
-            if len(rel_to_entry.parts) >= 2 and rel_to_entry.parts[1].lower(
-            ).startswith("season"):
-                season_folder = rel_to_entry.parts[1]
+        # 10. 边界映射检查
+        boundary = self.db.get_media_boundary_by_fingerprint(fingerprint)
+        if boundary:
+            _, source_media_name, current_media_name, _, _ = boundary
+            if physical_media_folder_name == current_media_name:
                 logging.debug(
-                    "[血统校验] 检测到 Season 层级: %s/%s",
-                    physical_media_folder_name,
-                    season_folder,
-                )
-
-            # 查询是否有历史边界映射
-            boundary = self.db.get_media_boundary_by_fingerprint(fingerprint)
-            if boundary:
-                _, source_media_name, current_media_name, _, _ = boundary
-                # 如果当前物理文件夹名与映射记录一致，直接放行
-                if physical_media_folder_name == current_media_name:
-                    logging.debug(
-                        "[血统校验] 边界映射匹配，放行: %s -> %s",
-                        source_media_name,
-                        current_media_name,
-                    )
-                    return True
-                # 如果当前物理文件夹名与源名称一致，更新映射
-                if physical_media_folder_name == source_media_name:
-                    logging.debug(
-                        "[血统校验] 回到源边界，放行: %s", physical_media_folder_name
-                    )
-                    return True
-
-            cloud_show_name = rel_parts[0] if len(rel_parts) >= 2 else None
-
-            if is_sync_phase:
-                # 同步阶段：记录边界映射
-                if cloud_show_name and physical_media_folder_name != cloud_show_name:
-                    # 检查是否已有映射
-                    existing = self.db.get_media_boundary_by_fingerprint(
-                        fingerprint)
-                    if not existing:
-                        self.db.upsert_media_boundary(
-                            fingerprint=fingerprint,
-                            source_media_name=cloud_show_name,
-                            current_media_name=physical_media_folder_name,
-                            engine_entry_path=str(engine_entry_path),
-                        )
-                        logging.info(
-                            "[边界映射] 记录新映射: %s -> %s (指纹: %s...)",
-                            cloud_show_name,
-                            physical_media_folder_name,
-                            fingerprint[:8],
-                        )
-                    elif existing[2] != physical_media_folder_name:
-                        # 更新映射到新的边界
-                        self.db.upsert_media_boundary(
-                            fingerprint=fingerprint,
-                            source_media_name=existing[1],  # 保持原始源名称
-                            current_media_name=physical_media_folder_name,
-                            engine_entry_path=str(engine_entry_path),
-                        )
-                        logging.info(
-                            "[边界映射] 更新映射: %s -> %s (指纹: %s...)",
-                            existing[1],
-                            physical_media_folder_name,
-                            fingerprint[:8],
-                        )
+                    "[血统校验] 边界映射匹配: %s (路径: %s)",
+                    current_media_name,
+                    b_local_path)
+                return True
+            if physical_media_folder_name == source_media_name:
+                logging.debug(
+                    "[血统校验] 回到源边界: %s (路径: %s)",
+                    source_media_name,
+                    b_local_path)
                 return True
 
-            # 如果是个存在文件夹的番剧，且本地被重命名了
-            if cloud_show_name and physical_media_folder_name != cloud_show_name:
-                cloud_media_root = f"{
-                    source_path.rstrip('/')}/{cloud_show_name}"
-
-                total_a_episodes = self.db.get_a_count_under_root(
-                    cloud_media_root)
-                if total_a_episodes <= 1:
+        # 10.5 交叉边界映射检查（处理更新番剧场景）
+        # 检查：当前物理位置是否匹配某个"源媒体名"对应的"当前媒体名"
+        # 或者：当前物理位置是"源媒体名"，而某个映射的"当前媒体名"是另一个已知位置
+        if cloud_show_name and physical_media_folder_name:
+            # 情况A：当前在"源边界"位置，检查是否有映射到"当前边界"
+            boundary_by_source = self.db.get_media_boundary_by_source_name_only(
+                physical_media_folder_name
+            )
+            if boundary_by_source:
+                # 找到了：physical_media_folder_name 作为 source_media_name 的映射
+                _, mapped_source, mapped_current, _, _ = boundary_by_source
+                # 验证 cloud_show_name 是否匹配（确保是同一部番剧）
+                if cloud_show_name == mapped_source or cloud_show_name == mapped_current:
                     logging.debug(
-                        "[血统校验] 整个番剧只有一集(或A区无数据)，放行重命名: %s",
-                        b_local_path)
-                    return True  # 整个番剧只有一集，允许放行
-
-                physical_media_root_dir = engine_entry_path / physical_media_folder_name
-                local_matches = 0
-                if physical_media_root_dir.exists():
-                    for p in physical_media_root_dir.rglob("*.strm"):
-                        s_webdav = read_strm_webdav_path(p)
-                        if s_webdav and s_webdav.startswith(
-                                cloud_media_root + "/"):
-                            local_matches += 1
-
-                if local_matches <= 1:
-                    logging.info(
-                        "[血统校验] 发现潜在的单兵非法重命名，进入观察期: 目录=%s",
-                        physical_media_root_dir)
-                    self.trigger_delayed_solo_check(
-                        str(physical_media_root_dir), cloud_media_root)
+                        "[血统校验] 交叉边界映射匹配(源->当前): %s -> %s (路径: %s)",
+                        physical_media_folder_name, mapped_current, b_local_path)
                     return True
 
-            logging.debug("[血统校验] 校验通过: %s", b_local_path)
+            # 情况B：当前在"当前边界"位置，检查反向映射
+            boundary_by_current = self.db.get_media_boundary_by_current_name(
+                physical_media_folder_name, str(self.b_root)
+            )
+            if boundary_by_current:
+                _, mapped_source, mapped_current, _, _ = boundary_by_current
+                if cloud_show_name == mapped_source or cloud_show_name == mapped_current:
+                    logging.debug(
+                        "[血统校验] 交叉边界映射匹配(当前->源): %s <- %s (路径: %s)",
+                        physical_media_folder_name, mapped_source, b_local_path)
+                    return True
+
+            # 情况C：检查 cloud_show_name 是否有映射记录
+            boundary_by_cloud = self.db.get_media_boundary_by_source_name_only(
+                cloud_show_name
+            )
+            if boundary_by_cloud:
+                _, mapped_source, mapped_current, _, _ = boundary_by_cloud
+                # 如果当前物理位置是映射的任一端，都允许
+                if physical_media_folder_name in (
+                        mapped_source, mapped_current):
+                    logging.debug(
+                        "[血统校验] 交叉边界映射匹配(云端): %s -> %s (路径: %s)",
+                        cloud_show_name, mapped_current, b_local_path)
+                    return True
+
+        # 11. 同步阶段：记录边界映射
+        if is_sync_phase and cloud_show_name and physical_media_folder_name != cloud_show_name:
+            existing = self.db.get_media_boundary_by_fingerprint(fingerprint)
+            if not existing:
+                self.db.upsert_media_boundary(
+                    fingerprint=fingerprint,
+                    source_media_name=cloud_show_name,
+                    current_media_name=physical_media_folder_name,
+                    engine_entry_path=str(self.b_root),
+                )
+                logging.info(
+                    "[边界映射] 记录新映射: %s -> %s",
+                    cloud_show_name, physical_media_folder_name,
+                )
+            elif existing[2] != physical_media_folder_name:
+                self.db.upsert_media_boundary(
+                    fingerprint=fingerprint,
+                    source_media_name=existing[1],
+                    current_media_name=physical_media_folder_name,
+                    engine_entry_path=str(self.b_root),
+                )
+                logging.info(
+                    "[边界映射] 更新映射: %s -> %s",
+                    existing[1], physical_media_folder_name,
+                )
             return True
-        except ValueError:
-            # 文件逃逸出了 engine_entry_path (说明被移到了不相干的地方)
-            logging.warning("[血统校验失败] 物理路径完全脱离引擎监控目录: %s", b_local_path)
-            return False
-        except Exception as e:
-            logging.debug("[血统校验] 异常放行: %s", e)
-            return True
+
+        # 12. 群体改名 / 单兵改名检测
+        if cloud_show_name and physical_media_folder_name != cloud_show_name:
+            cloud_media_root = f"{source_path.rstrip('/')}/{cloud_show_name}"
+
+            # 检查整个番剧只有一集
+            total_a_episodes = self.db.get_a_count_under_root(cloud_media_root)
+            if total_a_episodes <= 1:
+                logging.debug("[血统校验] 单集番剧，放行: %s", b_local_path)
+                return True
+
+            # 检查是否是群体改名（B 区该目录下多个文件来自同一云端媒体）
+            physical_media_root_dir = self.b_root
+            # 构建物理媒体根目录路径
+            for i, part in enumerate(b_parts):
+                if part == physical_media_folder_name:
+                    physical_media_root_dir = self.b_root / \
+                        Path(*b_parts[:i + 1])
+                    break
+
+            local_matches = 0
+            if physical_media_root_dir.exists():
+                for p in physical_media_root_dir.rglob("*.strm"):
+                    s_webdav = read_strm_webdav_path(p)
+                    if s_webdav and s_webdav.startswith(
+                            cloud_media_root + "/"):
+                        local_matches += 1
+
+            if local_matches <= 1:
+                logging.info(
+                    "[血统校验] 潜在单兵重命名，进入观察期: %s",
+                    physical_media_root_dir,
+                )
+                self.trigger_delayed_solo_check(
+                    str(physical_media_root_dir), cloud_media_root)
+                return True
+
+        logging.debug("[血统校验通过] 默认放行: %s", b_local_path)
+        return True
 
     def trigger_delayed_solo_check(
             self, physical_dir: str, cloud_media_root: str):
@@ -1030,17 +1105,24 @@ class AppService:
 
     def initial_scan_a(self) -> None:
         logging.info("[初始化] 扫描A区")
-        total_files = 0
+        total_strm = 0
+        total_subtitle = 0
         for a_root in self.a_roots:
             if not a_root.exists():
                 continue
-            for root, _, files in os.walk(a_root):
+            for root, _dirs, files in os.walk(a_root):
                 for name in files:
-                    if not name.lower().endswith(".strm"):
-                        continue
-                    self.handle_a_created_or_modified(str(Path(root) / name))
-                    total_files += 1
-        logging.info("[初始化] A区扫描完成，共处理 %s 个 STRM 文件", total_files)
+                    file_path = Path(root) / name
+                    if name.lower().endswith(".strm"):
+                        self.handle_a_created_or_modified(str(file_path))
+                        total_strm += 1
+                    elif is_subtitle_file(file_path):
+                        self.process_subtitle_file(file_path)
+                        total_subtitle += 1
+        logging.info(
+            "[初始化] A区扫描完成，共处理 %s 个 STRM 文件，%s 个字幕文件",
+            total_strm,
+            total_subtitle)
 
     def scan_a_to_b_full_sync(
             self, valid_engine_paths: list[str] | None = None) -> None:
@@ -1248,6 +1330,11 @@ class AppService:
             logging.debug("[A区跳过] 不属于任何A根目录: %s", local)
             return
 
+        # 字幕文件独立处理，不进入 STRM 流程
+        if is_subtitle_file(local):
+            self.process_subtitle_file(local)
+            return
+
         webdav_path = read_strm_webdav_path(local)
         if not webdav_path:
             logging.warning("[A区] 无法解析STRM: %s", local)
@@ -1258,6 +1345,21 @@ class AppService:
         self.db.save_known_folder(parent, source="a")
 
         fingerprint = make_strm_fingerprint(webdav_path)
+        # 如果 WebDAV 已经没有该文件，直接在 A 区删除 STRM 并同步 DB
+        if not self.admin_api.check_exists(webdav_path):
+            logging.warning(
+                "[A区即时清理] WebDAV 已不存在，删除本地冗余 STRM: %s",
+                local,
+            )
+            safe_remove_file(str(local))
+            self.db.delete_a_by_local(str(local))
+            self.db.set_ghost_protection(
+                webdav_path,
+                self.config.behavior.ghost_protect_seconds,
+                reason="webdav_not_exists",
+            )
+            return
+        # -----------------------------------------
         old_identity = self.db.get_identity_by_fingerprint(fingerprint)
         current_b_path = old_identity[3] if old_identity else None
 
@@ -1322,9 +1424,15 @@ class AppService:
         if old_identity and current_b_path is None:
             if not self.admin_api.check_exists(webdav_path):
                 logging.warning(
-                    "[A->B跳过] WebDAV源文件已不存在，跳过复制: %s",
+                    "[A->B跳过] WebDAV源文件已不存在，跳过复制并清理A区: %s",
                     webdav_path,
                 )
+                # 清理 A 区冗余文件
+                a_local_path = str(local)
+                if local.exists():
+                    safe_remove_file(a_local_path)
+                    logging.info("[A区清理] 删除冗余STRM: %s", a_local_path)
+                self.db.delete_a_by_local(a_local_path)
                 self.db.set_ghost_protection(
                     webdav_path,
                     self.config.behavior.ghost_protect_seconds,
@@ -1335,8 +1443,10 @@ class AppService:
         self.copy_a_record_to_b(str(local), webdav_path, parent)
 
     def handle_a_deleted(self, local_path: str) -> None:
-        """A 区删除由 OpenList 引擎同步模式直接处理，本程序不介入 WebDAV 删除。
-        这里仅清理 A 区索引，并在后续主动刷新 / 延迟清理中修正 B 区冗余。
+        """A 区删除处理（update 模式下）。
+        OpenList 的 update 模式不会自动删除本地 STRM，
+        所以监控到的删除都是真实的用户删除或程序清理。
+        这里清理 A 区索引，并在后续主动刷新 / 延迟清理中修正 B 区冗余。
         """
         # 如果文件仍然存在，说明是修改操作而非真正的删除，跳过清理
         if Path(local_path).exists():
@@ -1406,7 +1516,25 @@ class AppService:
                 except Exception as e:
                     logging.error("[A->B跳过失败] %s", e)
                     return False
-
+        # 如果 WebDAV 源文件已不存在，说明 A 区是冗余文件，清理掉
+        if not self.admin_api.check_exists(webdav_path):
+            logging.warning(
+                "[A->B跳过] WebDAV源文件已不存在，跳过复制并清理A区: %s",
+                webdav_path,
+            )
+            # 清理 A 区冗余文件
+            if Path(a_local_path).exists():
+                safe_remove_file(a_local_path)
+                logging.info("[A区清理] 删除冗余STRM: %s", a_local_path)
+            self.db.delete_a_by_local(a_local_path)
+            # 设置 ghost 保护，防止再次同步
+            self.db.set_ghost_protection(
+                webdav_path,
+                self.config.behavior.ghost_protect_seconds,
+                reason="webdav_not_exists",
+            )
+            return False
+        # ====================================
         # 4. 执行物理拷贝
         try:
             b_local.parent.mkdir(parents=True, exist_ok=True)
@@ -1443,6 +1571,293 @@ class AppService:
             logging.error("[A->B复制失败] DB错误: %s", e)
             safe_remove_file(b_local)
             return False
+
+    def _find_related_subtitles(self, strm_path: str | Path) -> list[Path]:
+        """查找与STRM文件同目录下的所有字幕文件"""
+        strm = Path(strm_path)
+        if not strm.parent.exists():
+            return []
+
+        subtitles = []
+        for ext in SUBTITLE_EXTS:
+            subtitles.extend(strm.parent.glob(f"*{ext}"))
+            subtitles.extend(strm.parent.glob(f"*{ext.upper()}"))
+
+        # 去重并排序
+        seen = set()
+        result = []
+        for sub in subtitles:
+            key = sub.resolve()
+            if key not in seen:
+                seen.add(key)
+                result.append(sub)
+        return result
+
+    def _should_treat_as_movie(
+            self, a_local_path: str | Path, webdav_path: str | None = None) -> bool:
+        """判断是否应该按电影处理"""
+        # 1. 检查路径中的目录名
+        media_type = detect_media_type_from_path(a_local_path)
+        if media_type == "movie":
+            return True
+        if media_type == "anime":
+            return False
+
+        # 2. 检查webdav_path
+        if webdav_path:
+            media_type = detect_media_type_from_path(webdav_path)
+            if media_type == "movie":
+                return True
+            if media_type == "anime":
+                return False
+
+        # 3. 默认：如果无法识别季集信息，可能是电影
+        season, episode = _extract_season_episode(Path(a_local_path).name)
+        if season is None or episode is None:
+            # 检查是否是单文件目录
+            parent = Path(a_local_path).parent
+            strm_count = len(list(parent.glob("*.strm")))
+            if strm_count <= 1:
+                # 可能是电影或单集
+                return True
+
+        return False
+
+    def process_subtitle_file(self, a_subtitle_path: str | Path) -> None:
+        """
+        独立处理单个字幕文件：从文件名提取季集信息，直接复制到B区标准目录。
+        使用数据库记录已处理字幕，避免重复处理。
+        """
+        sub_file = Path(a_subtitle_path).resolve()
+        if not sub_file.exists():
+            return
+
+        # 获取A区根目录
+        a_root = self.get_a_root_for_path(sub_file)
+        if a_root is None:
+            return
+
+        # 计算字幕指纹（基于文件路径和内容修改时间）
+        stat = sub_file.stat()
+        fingerprint = hashlib.sha256(
+            f"{sub_file}:{stat.st_size}:{stat.st_mtime}".encode()
+        ).hexdigest()
+
+        # 检查数据库：已存在且目标文件仍在，跳过
+        existing = self.db.get_subtitle_by_local(str(sub_file))
+        logging.debug("[字幕数据库] 查询 %s: %s", sub_file, existing is not None)
+        if existing:
+            target_path = existing[2]
+            logging.debug(
+                "[字幕数据库] 目标路径: %s, 存在: %s",
+                target_path,
+                Path(target_path).exists())
+            if Path(target_path).exists():
+                logging.debug("[字幕跳过] 已处理且目标存在: %s", sub_file)
+                return
+            # 目标不存在，重新处理
+
+        # ========== 关键修复：先判断媒体类型，再决定处理方式 ==========
+
+        # 1. 优先基于路径判断媒体类型
+        media_type = detect_media_type_from_path(sub_file)
+        logging.debug("[字幕处理] 路径: %s, 媒体类型: %s", sub_file, media_type)
+
+        # 2. 如果是电影，直接走电影模式
+        if media_type == "movie":
+            self._process_movie_subtitle(sub_file, a_root, fingerprint)
+            return
+
+        # 3. 检查同目录STRM文件，辅助判断是电影还是番剧
+        parent_dir = sub_file.parent
+        strm_files = list(parent_dir.glob("*.strm"))
+
+        # 单STRM且无法提取季集 → 电影
+        if len(strm_files) <= 1:
+            if not strm_files:
+                # 无STRM，按电影处理
+                self._process_movie_subtitle(sub_file, a_root, fingerprint)
+                return
+            # 有1个STRM，检查是否能提取季集
+            strm_season, strm_episode = _extract_season_episode(
+                strm_files[0].name)
+            if strm_season is None or strm_episode is None:
+                # STRM无季集信息，是电影
+                self._process_movie_subtitle(sub_file, a_root, fingerprint)
+                return
+
+        # ========== 番剧模式 ==========
+        self._process_anime_subtitle(sub_file, a_root, fingerprint)
+
+    def _process_movie_subtitle(
+            self, sub_file: Path, a_root: Path, fingerprint: str) -> None:
+        """处理电影字幕：复制到B区同目录，重命名为 电影名.forced.zho.简体.ass"""
+        # 查找同目录下的STRM文件作为关联目标
+        parent_dir = sub_file.parent
+        strm_files = list(parent_dir.glob("*.strm"))
+
+        if strm_files:
+            # 使用STRM文件名（不含扩展名）作为基础
+            movie_stem = strm_files[0].stem
+        else:
+            # 没有STRM，使用字幕文件名（去掉语言标识）
+            movie_stem = sub_file.stem
+            # 去掉常见的语言后缀
+            for suffix in [".forced", ".zho", ".简体", ".繁体",
+                           ".sc", ".tc", ".chs", ".cht", ".scjp"]:
+                movie_stem = movie_stem.replace(suffix, "")
+            movie_stem = movie_stem.rstrip(".")
+
+        # 构建目标路径：保持同目录结构
+        rel_parent = sub_file.relative_to(a_root).parent
+        b_target_dir = self.b_root / rel_parent
+        b_target_dir.mkdir(parents=True, exist_ok=True)
+
+        # 语言信息
+        lang_info = detect_subtitle_language(sub_file.name)
+        if lang_info is None:
+            new_name = f"{movie_stem}.forced.zho.中文{sub_file.suffix.lower()}"
+        else:
+            _code, _label, _priority = lang_info
+            new_name = f"{movie_stem}.forced.{_code}.{_label}{
+                sub_file.suffix.lower()}"
+
+        target = b_target_dir / new_name
+
+        # 如果目标已存在，更新数据库并跳过
+        if target.exists():
+            logging.debug("[字幕跳过] 目标文件已存在: %s", target)
+            self.db.upsert_subtitle(
+                local_path=str(sub_file),
+                target_path=str(target),
+                fingerprint=fingerprint,
+                season=None,
+                episode=None,
+                lang_code=lang_info[0] if lang_info else None,
+            )
+            return
+
+        try:
+            shutil.copyfile(sub_file, target)
+            logging.info("[字幕复制] 电影字幕: %s -> %s", sub_file, target)
+
+            self.db.upsert_subtitle(
+                local_path=str(sub_file),
+                target_path=str(target),
+                fingerprint=fingerprint,
+                season=None,
+                episode=None,
+                lang_code=lang_info[0] if lang_info else None,
+            )
+        except Exception as e:
+            logging.warning("[字幕复制失败] %s: %s", sub_file, e)
+
+    def _process_anime_subtitle(
+            self, sub_file: Path, a_root: Path, fingerprint: str) -> None:
+        """处理番剧字幕：提取季集，复制到 Season XX/S01E01..."""
+        # 提取季集信息
+        season, episode = _extract_season_episode(sub_file.name)
+
+        # 如果字幕本身没有季集信息，尝试从相邻的 STRM 文件提取
+        if season is None or episode is None:
+            parent_dir = sub_file.parent
+
+            # 1. 先查同目录
+            for strm_file in parent_dir.glob("*.strm"):
+                season, episode = _extract_season_episode(strm_file.name)
+                if season is not None and episode is not None:
+                    logging.debug("[字幕关联] 从同目录STRM提取: %s -> S%02dE%02d",
+                                  strm_file.name, season, episode)
+                    break
+
+            # 2. 如果当前在媒体根目录（不是Season目录），查子目录
+            if (season is None or episode is None) and not re.match(
+                    r"(?i)^season\s*\d+$", parent_dir.name):
+                for sub_dir in parent_dir.iterdir():
+                    if sub_dir.is_dir() and re.match(r"(?i)^season\s*\d+$", sub_dir.name):
+                        for strm_file in sub_dir.glob("*.strm"):
+                            season, episode = _extract_season_episode(
+                                strm_file.name)
+                            if season is not None and episode is not None:
+                                logging.debug("[字幕关联] 从子目录STRM提取: %s -> S%02dE%02d",
+                                              strm_file.name, season, episode)
+                                break
+                        if season is not None and episode is not None:
+                            break
+
+        # 如果还是无法提取，降级为电影处理
+        if season is None or episode is None:
+            logging.warning("[字幕处理] 无法提取番剧季集，降级为电影模式: %s", sub_file)
+            self._process_movie_subtitle(sub_file, a_root, fingerprint)
+            return
+
+        # 构建标准路径
+        rel = sub_file.relative_to(a_root)
+        rel_parts = list(rel.parts)
+
+        # 检查是否已有 Season 目录或中文季目录
+        has_season_dir = False
+        cn_season_index = -1
+        for i, part in enumerate(rel_parts[:-1]):
+            if re.match(r"(?i)^season\s*\d+$", part):
+                has_season_dir = True
+                break
+            if re.match(r"^第[一二三四五六七八九十\d]+季$", part):
+                cn_season_index = i
+
+        if has_season_dir:
+            b_target_dir = self.b_root / rel.parent
+        elif cn_season_index >= 0:
+            b_target_dir = self.b_root / \
+                Path(*rel_parts[:cn_season_index]) / f"Season {season:02d}"
+        else:
+            if len(rel_parts) >= 2:
+                b_target_dir = self.b_root / \
+                    Path(*rel_parts[:-1]) / f"Season {season:02d}"
+            else:
+                b_target_dir = self.b_root / rel.parent
+
+        b_target_dir.mkdir(parents=True, exist_ok=True)
+
+        base_name = _build_standard_name(season, episode)
+        lang_info = detect_subtitle_language(sub_file.name)
+
+        if lang_info is None:
+            new_name = f"{base_name}.forced.zho.中文{sub_file.suffix.lower()}"
+        else:
+            _code, _label, _priority = lang_info
+            new_name = f"{base_name}.forced.{_code}.{_label}{
+                sub_file.suffix.lower()}"
+
+        target = b_target_dir / new_name
+
+        # 如果目标已存在，更新数据库并跳过
+        if target.exists():
+            logging.debug("[字幕跳过] 目标文件已存在: %s", target)
+            self.db.upsert_subtitle(
+                local_path=str(sub_file),
+                target_path=str(target),
+                fingerprint=fingerprint,
+                season=season,
+                episode=episode,
+                lang_code=lang_info[0] if lang_info else None,
+            )
+            return
+
+        try:
+            shutil.copyfile(sub_file, target)
+            logging.info("[字幕复制] 番剧字幕: %s -> %s", sub_file, target)
+
+            self.db.upsert_subtitle(
+                local_path=str(sub_file),
+                target_path=str(target),
+                fingerprint=fingerprint,
+                season=season,
+                episode=episode,
+                lang_code=lang_info[0] if lang_info else None,
+            )
+        except Exception as e:
+            logging.warning("[字幕复制失败] %s: %s", sub_file, e)
 
     def _is_standard_media_name(self, name: str) -> bool:
         """
@@ -2013,14 +2428,15 @@ class AppService:
 
     def request_openlist_index_update(
             self, webdav_path: str, parent_webdav_path: str) -> None:
-        """删除/MOVE 成功后，通知 OpenList 更新搜索索引。"""
+        """删除/MOVE 成功后，通知 OpenList 更新索引。"""
         del webdav_path
 
         # 将真实云盘路径映射为引擎入口路径
         engine_paths = self._cloud_path_to_engine_paths(parent_webdav_path)
         if not engine_paths:
             logging.debug(
-                "[OpenListAdmin] 无法映射引擎路径，跳过索引更新: %s",
+                "[OpenListAdmin]"
+                " 无法映射引擎路径，跳过索引更新: %s",
                 parent_webdav_path)
             return
 
@@ -2030,7 +2446,7 @@ class AppService:
 
         ok = self.admin_api.trigger_refresh_via_fs_list(engine_paths)
         if ok:
-            logging.info("[OpenListAdmin] 已请求更新搜索索引: %s", engine_paths)
+            logging.info("[OpenListAdmin] 已请求更新strm索引: %s", engine_paths)
         else:
             logging.warning("[OpenListAdmin] 索引更新触发失败: %s", engine_paths)
 
@@ -2051,19 +2467,64 @@ class AppService:
                     logging.info("[B区删除] 检测到程序恢复操作，跳过追删: %s", local_path)
                     return
 
-            # 检查是否还有其他同指纹文件存在
+            # 检查是否还有其他同指纹文件存在（数据库层面）
             if self.db.has_other_b_instance(fingerprint, str(local)):
                 logging.info("[B区删除联动] B区中仍存在同指纹文件，跳过WebDAV删除: %s", local_path)
+                self.db.delete_b_by_local(str(local))
+                return
+
+            # 文件可能只是移动了位置（如从 Season 03 移动到上级目录），而不是真正被删除
+            if fingerprint and self._check_fingerprint_exists_in_b(
+                    fingerprint, exclude_path=str(local)):
+                logging.info(
+                    "[B区删除联动] B区文件系统中仍存在同指纹文件，跳过WebDAV删除: %s",
+                    local_path)
                 self.db.delete_b_by_local(str(local))
                 return
 
             # 执行 WebDAV 源文件删除/MOVE（带 ghost 保护）
             if webdav_path:
                 self._execute_webdav_deletion(webdav_path, _parent_webdav_path)
-
+                # ===== 更新模式触发钩子也不会删除strm,所以删除 A 区文件需要程序来做 =====
+                self._delete_a_file_by_webdav(webdav_path)
+                # ========================================================================
             self.db.delete_b_by_local(str(local))
             if fingerprint:
                 self.refresh_identity_current_b_path(fingerprint)
+
+    def _check_fingerprint_exists_in_b(
+            self, fingerprint: str, exclude_path: str | None = None) -> bool:
+        """检查 B 区文件系统中是否还有指定指纹的文件存在。"""
+        # 首先检查数据库中其他记录对应的文件是否存在
+        b_instances = self.db.get_b_instances_by_fingerprint(fingerprint)
+        for instance in b_instances:
+            instance_path = instance[0]
+            if exclude_path and instance_path == exclude_path:
+                continue
+            if Path(instance_path).exists():
+                return True
+
+        # 如果数据库中没有找到，扫描 B 区文件系统
+        # 这是一个兜底检查，防止 watchdog 事件顺序问题
+        try:
+            b_root = Path(self.config.paths.b_root)
+            if b_root.exists():
+                for strm_file in b_root.rglob("*.strm"):
+                    if exclude_path and str(strm_file) == exclude_path:
+                        continue
+                    try:
+                        file_webdav = read_strm_webdav_path(str(strm_file))
+                        if file_webdav:
+                            file_fingerprint = make_strm_fingerprint(
+                                file_webdav)
+                            if file_fingerprint == fingerprint:
+                                return True
+                    except Exception:
+                        continue
+        except Exception as e:
+            logging.debug("[指纹检查] 扫描 B 区文件系统失败: %s", e)
+
+        return False
 
     def _execute_webdav_deletion(
             self, webdav_path: str, parent_webdav_path: str) -> bool:
@@ -2083,6 +2544,17 @@ class AppService:
             else:
                 logging.warning("[B区删除联动] WebDAV处理失败: %s", webdav_path)
             return ok
+
+    def _delete_a_file_by_webdav(self, webdav_path: str) -> None:
+        """根据 WebDAV 路径找到并删除对应的 A 区文件"""
+        # 从数据库查找 A 区路径
+        a_record = self.db.get_a_by_webdav(webdav_path)
+        if a_record:
+            a_path = a_record[0]  # local_path
+            if Path(a_path).exists():
+                safe_remove_file(a_path)
+                logging.info("[A区删除] B区删除联动，清理A区: %s", a_path)
+            self.db.delete_a_by_local(a_path)
 
     # ---------- 下方是修复真实的 WebDAV 请求动作 ----------
 
@@ -2676,7 +3148,7 @@ class AppService:
         if result["non_sync_mode"]:
             for s in result["non_sync_mode"]:
                 logging.warning(
-                    "[STRM存储验证] 非同步模式的存储: %s (mode=%s)",
+                    "[STRM存储验证] 非更新模式的存储: %s (mode=%s, 需要改为更新模式)",
                     s.mount_path,
                     s.save_local_mode,
                 )
@@ -2806,3 +3278,47 @@ class AppService:
                 return _cn_to_int_func(cn_match.group(1))
 
         return None
+
+    def cleanup_a_deleted_on_cloud(self, engine_path: str) -> None:
+        """扫描 A 区，删除云端已不存在的 STRM 文件（update 模式核心逻辑）"""
+        # 从配置中找到对应的 A 区根目录
+        a_root = None
+        for entry_path, mapping in self.config.strm_storage_map.items():
+            if engine_path == entry_path or engine_path.startswith(
+                    entry_path + "/"):
+                a_root = Path(mapping.local_path)
+                # 拼接 paths[0] 的最后一级目录
+                if mapping.paths:
+                    last_dir = mapping.paths[0].rstrip("/").split("/")[-1]
+                    a_root = a_root / last_dir
+                break
+
+        if not a_root or not a_root.exists():
+            return
+
+        for strm_file in a_root.rglob("*.strm"):
+            webdav_path = read_strm_webdav_path(str(strm_file))
+            if not webdav_path:
+                continue
+
+            if not self.admin_api.check_exists(webdav_path):
+                self._safe_delete_a_file(str(strm_file), webdav_path)
+
+    def _safe_delete_a_file(self, local_path: str, webdav_path: str) -> None:
+        """安全删除 A 区文件，同步清理数据库和 B 区"""
+        local = Path(local_path)
+
+        # 1. 删除 A 区物理文件
+        if local.exists():
+            safe_remove_file(local)
+            logging.info("[A区删除] 云端已删除，清理本地: %s", local_path)
+
+        # 2. 清理 A 区数据库记录
+        self.db.delete_a_by_local(local_path)
+
+        # 3. 触发 B 区延迟清理
+        parent = webdav_parent(webdav_path)
+        self.trigger_delayed_cleanup(parent)
+
+        # 4. 清理空目录
+        self.cleanup_local_empty_dirs()
