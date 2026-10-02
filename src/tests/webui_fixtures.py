@@ -91,11 +91,30 @@ def make_mock_db(tmp_path: Path) -> MagicMock:
     return db
 
 
+def _restore_env(snapshot: dict) -> None:
+    """把环境变量还原到快照记录的原始状态。
+
+    必须区分「原本不存在」与「原本有值」：前者用 pop 删除，后者写回原值。
+    """
+    for key, value in snapshot.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 def start_webui_server(tmp_path: Path):
     """启动真实 WebUIServer，登录并返回 (server, base_url, session_token)。
 
-    PROJECT_ROOT / STATIC_DIR 被 monkeypatch 到 tmp_path，不污染真实项目目录。
-    调用方负责在结束时 server.stop()。
+    PROJECT_ROOT / STATIC_DIR 被 patch 到 tmp_path，且 patch 在**服务器存活期内
+    持续有效**——server.py 的 STATIC_DIR 是模块级全局，_send_static_file、静态
+    资源路径守卫与 favicon/logo 处理器都在**请求时**读取它，因此 patch 必须等到
+    调用方 server.stop() 才撤销，不能随本函数 return 结束。
+
+    环境变量（WEBUI_TEST_MODE / WEBUI_ADMIN_PASSWORD_FOR_TEST）同样在
+    server.stop() 时还原，避免泄漏到同一进程内的后续用例。
+
+    调用方负责在结束时 server.stop()，还原由包装后的 stop 自动完成。
     """
     from webui.routes import _login_attempts
     _login_attempts.clear()
@@ -105,8 +124,28 @@ def start_webui_server(tmp_path: Path):
     port = free_port()
     cfg.webui.port = port
 
-    with patch("webui.server.PROJECT_ROOT", tmp_path), \
-         patch("webui.server.STATIC_DIR", tmp_path / "static"):
+    env_snapshot = {
+        key: os.environ.get(key)
+        for key in ("WEBUI_TEST_MODE", "WEBUI_ADMIN_PASSWORD_FOR_TEST")
+    }
+
+    project_root_patch = patch("webui.server.PROJECT_ROOT", tmp_path)
+    static_dir_patch = patch("webui.server.STATIC_DIR", tmp_path / "static")
+    torn_down = False
+
+    def _teardown():
+        # 幂等闩：登录失败路径与外层 except 兜底可能重复触发清理
+        nonlocal torn_down
+        if torn_down:
+            return
+        torn_down = True
+        static_dir_patch.stop()
+        project_root_patch.stop()
+        _restore_env(env_snapshot)
+
+    project_root_patch.start()
+    try:
+        static_dir_patch.start()
         (tmp_path / "static").mkdir(exist_ok=True)
         (tmp_path / "static" / "index.html").write_text(
             "<html><body>test</body></html>", encoding="utf-8")
@@ -116,6 +155,17 @@ def start_webui_server(tmp_path: Path):
         server = WebUIServer(cfg.webui, db, app_config=cfg)
         os.environ["WEBUI_TEST_MODE"] = "1"
         os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = TEST_PASSWORD
+
+        original_stop = server.stop
+
+        def stop_and_restore():
+            try:
+                original_stop()
+            finally:
+                _teardown()
+
+        server.stop = stop_and_restore
+
         server.start()
         deadline = time.time() + 2.0
         while not server._server and time.time() < deadline:
@@ -127,6 +177,9 @@ def start_webui_server(tmp_path: Path):
             server.stop()
             raise RuntimeError(f"test server login failed: {status} {body}")
         return server, base_url, body["token"]
+    except BaseException:
+        _teardown()
+        raise
 
 
 def http_get(base_url: str, path: str, session_token: str | None = None, timeout: float = 3.0):

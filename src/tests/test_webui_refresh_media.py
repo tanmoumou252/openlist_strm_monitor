@@ -7,7 +7,7 @@
 - _do_media_refresh：差异检测与同步逻辑
 
 运行方式：
-  pytest src/tests/test_refresh_media.py -v
+  pytest src/tests/test_webui_refresh_media.py -v
 """
 from __future__ import annotations
 

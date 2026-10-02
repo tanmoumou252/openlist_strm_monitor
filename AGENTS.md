@@ -14,8 +14,8 @@ This file provides guidance to AI coding assistants when working with code in th
 8. **Prefer small, targeted changes** over large rewrites. This project is close to completion.
 9. **Do NOT fake verification** — use real commands, real server startup, and real API/UI checks when available. Do not claim tests were run unless they were actually executed.
 
-11. **No exact line numbers in markdown docs.** Reference method, function, or class names instead of `file.py:123` or "lines 45-67".
-15. **`todo.md` is off-limits** — user's personal memo, not part of the workspace. Never read, audit, or edit it.
+10. **No exact line numbers in markdown docs.** Reference method, function, or class names instead of `file.py:123` or "lines 45-67".
+11. **`todo.md` is off-limits** — user's personal memo, not part of the workspace. Never read, audit, or edit it.
 
 ### Fail-closed caller contracts (硬性调用方契约)
 
@@ -96,7 +96,7 @@ Detailed, authoritative write-ups live in `wiki/`（与 `docs/否决方案.md`�
 
 - `run_webui_regression.bat`（仓库根）：先 `node.exe --test "src/webui/tests/*.test.mjs"`（零 npm 依赖的 node:test 纯逻辑用例），后 `python.exe -m pytest src/tests -m webui`；失败透传非零码。
 - `webui` marker 由 `src/tests/conftest.py` 按文件名自动打标（`test_webui_*.py`、`test_e2e_full_flow.py`、`test_onboarding_e2e.py`）；共享服务器夹具沉淀在 `src/tests/webui_fixtures.py`。
-- dist 存在性与新鲜度护栏：`src/tests/test_dist_freshness.py`（源码比 dist 新 → fail，提示 rebuild）。
+- dist 存在性与新鲜度护栏：`src/tests/test_webui_dist_freshness.py`（源码比 dist 新 → fail，提示 rebuild；`index.html` 悬空 asset 引用 → fail）。
 
 ## Key Files Reference
 

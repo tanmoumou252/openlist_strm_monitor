@@ -1,6 +1,6 @@
 ---
 name: md3-fluent2-ui-skill
-description: Use this skill when optimizing the existing openlist_strm_bridge WebUI according to the project's MD3 / Material Design 3 and Fluent 2 dual-theme UI rules. Design tokens, color systems, semantic colors, surface hierarchy, radius, elevation, density, spacing, typography, buttons, switches, inputs, cards, tables, badges, chips, navigation, dialogs, tooltips, dark/light themes, theme switching (data-system / data-color / data-fontsize), and component-level visual consistency. 中文触发词：MD3 风格微调、Fluent2 风格微调、双主题、控件规范、按钮规范、开关样式、色彩规范、圆角规范、组件比例、设计令牌、不要重做只是按规范优化。
+description: Use this skill when optimizing the existing openlist_strm_bridge WebUI according to the project's MD3 / Material Design 3 and Fluent 2 dual-theme UI rules. Design tokens, color systems, semantic colors, surface hierarchy, radius, elevation, density, spacing, typography, buttons, switches, inputs, cards, tables, badges, chips, navigation, dialogs, tooltips, dark/light themes, theme switching (data-system / data-color / data-font), and component-level visual consistency. 中文触发词：MD3 风格微调、Fluent2 风格微调、双主题、控件规范、按钮规范、开关样式、色彩规范、圆角规范、组件比例、设计令牌、不要重做只是按规范优化。
 ---
 
 # MD3 / Fluent 2 双主题 UI Skill
@@ -35,12 +35,12 @@ description: Use this skill when optimizing the existing openlist_strm_bridge We
 主题由 `<html>` 上的属性控制，挂载点在 `src/webui/index.html`，协议细则见 DESIGN.md「主题切换协议」节。
 
 ```html
-<html lang="zh-CN" data-system="material" data-color="blue" data-fontsize="sm">
+<html lang="zh-CN" data-system="material" data-color="blue" data-font="sm">
 ```
 
 - `data-system`：`material` | `fluent` —— MD3 / Fluent 2 双设计系统切换。
 - `data-color`：`blue` | `purple` | `green` | `orange` —— 四套主色。
-- `data-fontsize`：`xs` | `sm` | `lg` —— 字号级别。
+- `data-font`：`xs` | `sm` | `lg` —— 字号级别（DOM 属性名为 `data-font`；localStorage 键为 `webui_theme_fontsize`，二者不可混淆）。
 
 同一 DOM 结构承载两套视觉语言：
 
@@ -52,7 +52,7 @@ description: Use this skill when optimizing the existing openlist_strm_bridge We
 协议语义约束：
 
 - `data-color` 只允许改变合法品牌/色彩角色映射，不得借主色切换夹带布局变化。
-- `data-fontsize` 只映射项目语义排版角色（经 `--font-base` 等变量），不得直接覆盖官方全局字号，不得对所有文本等比缩放，不得破坏组件官方层级、布局与可访问性。
+- `data-font` 只映射项目语义排版角色（经 `--font-base` 等变量），不得直接覆盖官方全局字号，不得对所有文本等比缩放，不得破坏组件官方层级、布局与可访问性。
 
 协议红线：
 
@@ -151,7 +151,7 @@ description: Use this skill when optimizing the existing openlist_strm_bridge We
 
 **排版**：
 
-- 字号档位经 `data-fontsize` 映射；标题/正文/辅助文本（`--text-main` / `--text-muted`）的层级比例从 DESIGN.md 的 type ramp 取值，不要自创档位。
+- 字号档位经 `data-font` 映射（CSS 选择器为 `:root[data-font="lg"]` 等，见 `src/webui/styles/main.css`）；标题/正文/辅助文本（`--text-main` / `--text-muted`）的层级比例从 DESIGN.md 的 type ramp 取值，不要自创档位。
 
 **focus 可见性**：
 
@@ -191,7 +191,7 @@ description: Use this skill when optimizing the existing openlist_strm_bridge We
 - **图标系统**：`src/webui/modules/core/icons.js` 内联 SVG + `icon()` 包装；`FILLED_ICONS` / `BRAND_ICONS` 集合决定附加类名。
 - 视觉调整不要绕过该包装直接内联 SVG 字符串。
 - **浮层层级**：dropdown 打开态用 `.dropdown-wrap.open`；外点击收起逻辑在 `theme.js` `initDropdowns()`——只调样式，不动事件绑定。
-- **构建产物**：浏览器加载 `dist/assets/` 的 hashed 文件；改完必构建（见 ③），`src/tests/test_dist_freshness.py` 会拦截"源码新于 dist"的遗忘。
+- **构建产物**：浏览器加载 `dist/assets/` 的 hashed 文件；改完必构建（见 ③），`src/tests/test_webui_dist_freshness.py` 会拦截"源码新于 dist"的遗忘与 `index.html` 悬空 asset 引用。
 
 ## ⑥ 常见反模式对照
 

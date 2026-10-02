@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
 
@@ -47,14 +48,30 @@ def _dist_js_chunks() -> list[Path]:
 class TestDistExistence:
     """dist 存在性与 hashed assets 引用完整性。"""
 
-    def test_dist_index_references_existing_hashed_assets(self):
+    def test_dist_index_referenced_assets_all_exist(self):
+        """index.html 引用到的每个产物 asset 都必须真实存在于磁盘。
+
+        断言方向为「html 引用 → 磁盘存在」。反向写法（对 glob 出的文件断
+        exists）恒为真：glob 只返回已存在的文件，无法捕获 index.html 引用了
+        已删 chunk 的悬空引用。
+        """
         html = DIST_INDEX.read_text(encoding="utf-8")
-        for chunk in _dist_js_chunks():
-            name = chunk.name
-            # index.html 或其 CSS 链路应引用产物 chunk（至少 entry chunk）
-            if name.split("-")[0] in html:
-                assert chunk.exists(), f"index.html 引用的 chunk 缺失: {name}"
-        # entry chunk 必须物理存在
+        # 字符类含 "/" 以覆盖 assets/ 下的嵌套子目录引用（vite 可输出
+        # assets/icons/x.svg 形态）；缺 "/" 会让嵌套悬空引用被静默跳过
+        referenced = set(re.findall(
+            r"\.?/?assets/([A-Za-z0-9_.\-/]+\.(?:js|css|ico|png|svg|woff2?))", html))
+        # 空集判红：解析器与产物结构脱节时必须暴露，而非静默通过
+        assert referenced, (
+            "未能从 dist/index.html 解析出任何 assets 引用——产物结构漂移或"
+            "解析正则失效，本护栏已失去检测能力")
+        missing = sorted(
+            name for name in referenced
+            if not (DIST_DIR / "assets" / name).is_file())
+        assert not missing, (
+            "dist/index.html 引用了磁盘上不存在的产物（悬空引用，通常是 dist 被"
+            f"部分清理或改名后未完整 rebuild）: {missing}")
+
+    def test_dist_entry_chunk_exists(self):
         entries = [c for c in _dist_js_chunks() if c.name.startswith("index-")]
         assert entries, "dist/assets 缺少 index entry chunk"
 

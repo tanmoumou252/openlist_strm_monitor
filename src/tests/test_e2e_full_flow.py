@@ -527,7 +527,12 @@ class TestSuccessfulFlow:
         with patch("webdav_client.OpenListAdminClient", return_value=mock_client), \
              patch("app_service.AppService", return_value=fake_app), \
              patch("logger_setup.setup_logging"):
+            # 后台 worker 会调用 load_strm_storage_from_api；测试内替换为
+            # 无害桩，避免 MagicMock 客户端返回值触发真实解析分支的不确定性。
+            server._config.load_strm_storage_from_api = (
+                lambda admin_client=None: None)
             status, _, resp = _http_post(base, "/api/main/start", {}, token)
+        # 异步启动语义：HTTP 立即受理，status=starting
         assert status == 200
         assert resp.get("success") is True, f"启动应成功: {resp}"
         assert resp.get("status") == "starting", f"应异步受理: {resp}"
@@ -698,7 +703,11 @@ class TestSevenStepFailureReasons:
         assert server._app_running is False
 
     def test_step4_openlist_login_failure_reports_reason(self, webui_server, tmp_path):
-        """④失败原因：OpenList 登录失败。成功条件：可达 OpenList + 正确凭据。"""
+        """④失败原因：OpenList 登录失败。
+
+        异步启动语义：HTTP 侧立即受理（200 + starting），失败原因经
+        AppService 生命周期状态机的 fail_safe 阶段与 error 字段暴露。
+        """
         from config import ABMapping
         server, base, token = webui_server
         server._config.a_b_mappings = [ABMapping(
@@ -998,12 +1007,12 @@ class TestFailureScenarios:
         """POST /api/webui/config/openlist 确实路由到 _hot_reload_openlist_config。
 
         仅验证 HTTP→hotreload 的接线（wiring），逻辑覆盖见
-        test_openlist_hotreload.py::TestHotReloadOpenlistConfig。
+        test_webui_openlist_hotreload.py::TestHotReloadOpenlistConfig。
         本用例不验证 hotreload 的内部行为（异常吞咽、刷新服务重配等），
         只确认 reload 方法在 HTTP 保存后被调用。
         """
         server, base, token = webui_server
-        # 替换实例属性为 MagicMock（对齐 test_openlist_hotreload 的方式）
+        # 替换实例属性为 MagicMock（对齐 test_webui_openlist_hotreload 的方式）
         server._config.load_strm_storage_from_api = MagicMock()
 
         mock_client = MagicMock()

@@ -12,7 +12,7 @@
   密码仅输出到控制台（print），不写入日志文件
 
 会话绑定、跨站请求伪造、暴力破解速率限制、超时限制、旧密码验证、
-测试模式安全、错误消息披露等已由 test_integration_security.py / test_webui_http.py /
+测试模式安全、错误消息披露等已由 test_webui_integration_security.py / test_webui_http.py /
 test_real_server.py 覆盖，此处不重复。
 
 测试策略：

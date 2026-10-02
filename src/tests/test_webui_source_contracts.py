@@ -202,7 +202,7 @@ def test_dialog_html_content_assert_regex():
 def test_shipped_docs_have_no_line_number_references():
     r"""交付文档（wiki/、docs/、README.md、src/tests/README.md）不应含行号引用。
 
-    排除 .kilo/plans/（历史计划文件，gitignored）和 AGENTS.md（其规则 12 本身含示例）。
+    排除 .kilo/plans/（历史计划文件，gitignored）和 AGENTS.md（其规则 10「No exact line numbers」本身含示例）。
     正则限定：\.(py|js):\d+、lines?\s+\d+\s*-\s*\d+、第\s*\d+\s*行、:\d+-\d+
     避免误报端口（如 127.0.0.1:8579）。
     """

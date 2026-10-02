@@ -20,7 +20,7 @@
 4. **经批准的偏离项**：仅在官方目标经实际验证不适用后生效，并记录原因、证据、影响范围、审批人和复核日期。
 5. **当前实现值**：仅用于迁移盘点；与以上层级不一致时必须标记为“待迁移”，不得称为规范值。
 
-`data-system`、`data-color`、`data-fontsize` 是必须保留的项目切换协议，但不改变官方令牌和组件规范的优先级。本文未附官方页面或官方仓库文件及核验日期的精确值，一律不得标记为“官方值”。
+`data-system`、`data-color`、`data-font` 是必须保留的项目切换协议，但不改变官方令牌和组件规范的优先级。本文未附官方页面或官方仓库文件及核验日期的精确值，一律不得标记为“官方值”。
 
 ### 0.3 官方参考来源
 
@@ -52,16 +52,16 @@
 
 ## 1. 项目架构与切换机制
 
-系统通过 `<html>` 标签上的 `data-system`、`data-color` 与 `data-fontsize` 控制主题与样式变量：
+系统通过 `<html>` 标签上的 `data-system`、`data-color` 与 `data-font` 控制主题与样式变量：
 
 ```html
 <!-- 示例：Material 3 蓝色主题，正常字号 -->
-<html lang="zh-CN" data-system="material" data-color="blue" data-fontsize="sm">
+<html lang="zh-CN" data-system="material" data-color="blue" data-font="sm">
 ```
 
 - **设计系统（`data-system`）**：`material` | `fluent`
 - **主色调（`data-color`）**：`blue` | `purple` | `green` | `orange`
-- **字号级别（`data-fontsize` / `--font-base`）**：
+- **字号级别（`data-font` / `--font-base`）**：
   - `lg`: `15px`（大）
   - `sm`: `13px`（正常 / 默认）
   - `xs`: `11px`（小）
@@ -223,7 +223,7 @@
 
 ## 5. 可执行迁移流程
 
-1. 盘点组件、变体、槽位、状态与当前项目变量；保留 `data-system`、`data-color`、`data-fontsize` 协议。
+1. 盘点组件、变体、槽位、状态与当前项目变量；保留 `data-system`、`data-color`、`data-font` 协议。
 2. Material 查找对应 M3 Web 组件规范与令牌；Fluent 查找 Fluent 2 组件规范及 Fluent UI React v9 组件源码、样式和主题令牌。
 3. 建立逐组件映射，不允许从 Card、Button 或 Input 的值推导其他组件，也不允许把一个 shape scale 值套给全部组件。
 4. 将颜色、排版、形状、尺寸、间距、描边、阴影、motion、状态和可访问性行为一并迁移。
@@ -258,8 +258,8 @@
 
 迁移期间必须保持以下外部可观察行为：
 
-- 保留 `data-system="material|fluent"`、`data-color="blue|purple|green|orange"` 和 `data-fontsize="xs|sm|lg"` 的名称、取值与切换能力。
-- `data-fontsize` 只能映射项目语义排版角色，不得直接覆盖官方全局字号或对所有文本等比缩放。
+- 保留 `data-system="material|fluent"`、`data-color="blue|purple|green|orange"` 和 `data-font="xs|sm|lg"` 的名称、取值与切换能力。
+- `data-font` 只能映射项目语义排版角色，不得直接覆盖官方全局字号或对所有文本等比缩放。
 - 任一主题、颜色和字号组合均不得产生文本裁切、意外重叠、非预期横向滚动或不可操作控件。
 - 主要任务流程、操作语义、键盘顺序和完成步骤不得因纯视觉迁移而改变。
 - 同一组件在 Material 与 Fluent 之间切换时可以体现官方视觉差异，但不得引发容器溢出、内容跳失或焦点丢失。
@@ -402,7 +402,7 @@
 - 所有精确官方数值均附官方页面或官方仓库文件、固定版本或提交号以及核验日期 2026-08-28。
 - Material 已按组件令牌映射 M3 color、type、shape、elevation、state 与 motion roles。
 - Fluent 已按 Fluent UI React v9 组件槽位映射 alias/global tokens，没有用 Fluent 1 或 Web Components 值代替。
-- `data-system` 切换不泄漏另一主题的令牌；`data-color` 只改变合法品牌或色彩角色；`data-fontsize` 缩放不破坏组件官方层级、布局和可访问性。
+- `data-system` 切换不泄漏另一主题的令牌；`data-color` 只改变合法品牌或色彩角色；`data-font` 缩放不破坏组件官方层级、布局和可访问性。
 - 当前自定义颜色、`11px/13px/15px` 字号、阴影、聚焦环和组件固定值仍标记为待迁移，除非已有完整偏离审批。
 - 未把单个圆角值跨 Card、Button、Tabs、Input、Search、Dialog、Tooltip 或 Header 粗暴复用。
 - 已完成视觉、交互、辅助技术、响应式、RTL、强制颜色、高对比和跨浏览器验证。
@@ -411,5 +411,5 @@
 
 - Material：Button、Tabs、segmented control 对应物、text field、Search、Card、Dialog、Tooltip 与 top app bar 的 Web 组件令牌及状态值。
 - Fluent UI React v9：Button、TabList/Tab、segmented control 组合方案、Input/Textarea/Select、Search 组合方案、Card、Dialog、Tooltip 与 Header 对应组件的 size、appearance、shape、槽位及状态令牌。
-- 跨主题：四套 `data-color` 调色板到官方 color roles 的生成或映射方式，以及 `data-fontsize` 与官方 type ramp 的兼容策略。
+- 跨主题：四套 `data-color` 调色板到官方 color roles 的生成或映射方式，以及 `data-font` 与官方 type ramp 的兼容策略。
 - 当前阴影、focus ring、表面色、状态色、组件高度、间距、字重和 motion 尚无逐组件固定版本证据，继续保持待迁移状态。
