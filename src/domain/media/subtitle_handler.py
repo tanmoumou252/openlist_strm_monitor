@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +22,9 @@ from media_renamer import (
     _build_standard_name,
     extract_season_from_path,
 )
+# 已替换 shutil.copyfile：copy_subtitle_utf8 将字幕标准化为无 BOM 的 UTF-8，
+# 解决 GBK/Big5/UTF-16 等编码字幕在跨平台播放器中乱码的问题。
+from utils.encoding_utils import copy_subtitle_utf8
 
 
 class SubtitleHandler:
@@ -72,7 +74,7 @@ class SubtitleHandler:
             return
 
         # 2.5 如果是番剧（路径明确为番剧目录），直接走番剧模式
-        # 修复 L0：避免 anime 路径被后续 STRM 辅助判断误降级为 movie
+        # 避免 anime 路径被后续 STRM 辅助判断误降级为 movie
         if media_type == "anime":
             self._process_anime_subtitle(sub_file, a_root, fingerprint)
             return
@@ -119,7 +121,12 @@ class SubtitleHandler:
 
         # 构建目标路径：保持同目录结构
         rel_parent = sub_file.relative_to(a_root).parent
-        b_target_dir = self.app.b_root / rel_parent
+        mapping = self.app.get_mapping_for_a(sub_file)
+        if mapping is None:
+            logging.warning("[字幕跳过] 无法唯一解析 A/B 映射: %s", sub_file)
+            return
+        _, _, b_root = mapping
+        b_target_dir = b_root / rel_parent
         b_target_dir.mkdir(parents=True, exist_ok=True)
 
         # 语言信息
@@ -146,7 +153,8 @@ class SubtitleHandler:
             return
 
         try:
-            shutil.copyfile(sub_file, target)
+            # 替代 shutil.copyfile：UTF-8 编码标准化，防止字幕乱码（已验证 GB18030/Big5/UTF-16）
+            copy_subtitle_utf8(sub_file, target)
             logging.info("[字幕复制] 电影字幕: %s -> %s", sub_file, target)
 
             self.db.upsert_subtitle(
@@ -213,17 +221,20 @@ class SubtitleHandler:
             if re.match(r"^第[一二三四五六七八九十\d]+季$", part):
                 cn_season_index = i
 
+        mapping = self.app.get_mapping_for_a(sub_file)
+        if mapping is None:
+            logging.warning("[字幕跳过] 无法唯一解析 A/B 映射: %s", sub_file)
+            return
+        _, _, b_root = mapping
         if has_season_dir:
-            b_target_dir = self.app.b_root / rel.parent
+            b_target_dir = b_root / rel.parent
         elif cn_season_index >= 0:
-            b_target_dir = self.app.b_root / \
-                Path(*rel_parts[:cn_season_index]) / f"Season {season:02d}"
+            b_target_dir = b_root / Path(*rel_parts[:cn_season_index]) / f"Season {season:02d}"
         else:
             if len(rel_parts) >= 2:
-                b_target_dir = self.app.b_root / \
-                    Path(*rel_parts[:-1]) / f"Season {season:02d}"
+                b_target_dir = b_root / Path(*rel_parts[:-1]) / f"Season {season:02d}"
             else:
-                b_target_dir = self.app.b_root / rel.parent
+                b_target_dir = b_root / rel.parent
 
         b_target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -237,9 +248,11 @@ class SubtitleHandler:
                 if s == season and e == episode:
                     episode_subs.append(sub)
 
+        # 统一先检测语言，避免多字幕成功映射分支未定义 lang_info 导致 NameError
+        lang_info = detect_subtitle_language(sub_file.name)
+
         # 如果只有当前一个字幕，直接处理
         if len(episode_subs) <= 1:
-            lang_info = detect_subtitle_language(sub_file.name)
             if lang_info is None:
                 new_name = f"{base_name}.forced.und{sub_file.suffix.lower()}"
             else:
@@ -263,6 +276,21 @@ class SubtitleHandler:
                 else:
                     _code, _label, _priority = lang_info
                     new_name = f"{base_name}.forced.{_code}.{_label}{sub_file.suffix.lower()}"
+            else:
+                # 从分组重命名结果中提取实际分配的语言代码
+                # 格式：{base_name}[.forced].{lang_code}.{label}{ext}
+                # 先去掉扩展名，再剥离 base_name + 可选的 .forced 前缀
+                stem = new_name[: -len(sub_file.suffix)] if new_name.endswith(sub_file.suffix) else new_name
+                rest = stem[len(base_name):]  # 去掉 S01E01 前缀
+                if rest.startswith(".forced"):
+                    rest = rest[len(".forced"):]
+                # 此时 rest 格式为 ".{lang_code}.{label}"，提取 lang_code
+                if rest.startswith("."):
+                    parts = rest[1:].split(".")
+                    if parts:
+                        group_lang_code = parts[0]
+                        # 更新 lang_info，使后续 DB 写入使用分组后的语言代码
+                        lang_info = (group_lang_code, parts[1] if len(parts) > 1 else group_lang_code, 0)
 
         target = b_target_dir / new_name
 
@@ -280,7 +308,8 @@ class SubtitleHandler:
             return
 
         try:
-            shutil.copyfile(sub_file, target)
+            # 替代 shutil.copyfile：UTF-8 编码标准化，防止字幕乱码（已验证 GB18030/Big5/UTF-16）
+            copy_subtitle_utf8(sub_file, target)
             logging.info("[字幕复制] 番剧字幕: %s -> %s", sub_file, target)
 
             self.db.upsert_subtitle(

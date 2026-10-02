@@ -3,7 +3,7 @@ import threading
 import time
 import socket
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -19,7 +19,6 @@ def _free_port() -> int:
 
 def _make_mock_config(tmp_path: Path) -> MagicMock:
     cfg = MagicMock()
-    cfg.webui.enabled = True
     cfg.webui.port = 0
     cfg.webui.bind = "127.0.0.1"
     cfg.tmdb.access_token = ""
@@ -27,7 +26,6 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     cfg.tmdb.language = "zh-CN"
     cfg.tmdb.host = ""
     cfg.tmdb.csv_watchlist_file = ""
-    cfg.tmdb.watchlist_db = ""
     cfg.tmdb.watchlist_cache_ttl = 604800
     cfg.tmdb.fuzzy_threshold = 0.60
     cfg.tmdb.anime_min_ep_ratio = 0.3
@@ -67,33 +65,33 @@ class TestConcurrency:
     def test_concurrent_login_attempts(self, tmp_path):
         """测试多个客户端同时尝试登录（验证服务器不会崩溃）"""
         cfg = _make_mock_config(tmp_path)
-        
+
         from database import Database
         bridge_db = Database(cfg.local.db_file)
-        
-        server = WebUIServer(cfg.webui, bridge_db, app_config=cfg)
-        server._has_password = True
-        # Set password on the server's actual watchlist_db
-        if server._watchlist_db:
-            from webui.routes import _hash_password_pbkdf2
-            server._watchlist_db.set_config("ui", "admin_password", _hash_password_pbkdf2("test_password"))
-        
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path):
+            server = WebUIServer(cfg.webui, bridge_db, app_config=cfg)
+            server._has_password = True
+            if server._watchlist_db:
+                from utils.password_utils import hash_password
+                server._watchlist_db.set_config("ui", "admin_password", hash_password("1111"))
+
         port = _free_port()
         server._port = port
-        
+
         # 启动服务器
         server.start()
         time.sleep(0.5)
-        
+
         results = []
-        
+
         def login_attempt(attempt_id):
             import urllib.request
             import json
             try:
                 req = urllib.request.Request(
                     f"http://127.0.0.1:{port}/api/login",
-                    data=json.dumps({"password": "test_password"}).encode(),
+                    data=json.dumps({"password": "1111"}).encode(),
                     headers={"Content-Type": "application/json"},
                     method="POST"
                 )
@@ -105,20 +103,20 @@ class TestConcurrency:
                 results.append((attempt_id, e.code, None))
             except Exception as e:
                 results.append((attempt_id, "error", str(e)))
-        
+
         # 启动 10 个并发登录尝试
         threads = []
         for i in range(10):
             t = threading.Thread(target=login_attempt, args=(i,))
             threads.append(t)
             t.start()
-        
+
         # 等待所有线程完成
         for t in threads:
             t.join(timeout=10)
-        
+
         server.stop()
-        
+
         # 验证：所有请求都有响应（200 或 429），没有崩溃
         valid_responses = sum(1 for _, status, _ in results if status in (200, 429))
         # 由于服务器是单线程的，并发请求可能会超时或失败，这是预期行为
@@ -132,24 +130,23 @@ class TestConcurrency:
         cfg = _make_mock_config(tmp_path)
         db_path = tmp_path / "tmdb_watchlist.db"
         wdb = TmdbWatchlistDb(db_path)
-        
+
         from database import Database
         bridge_db = Database(cfg.local.db_file)
-        
+
         server = WebUIServer(cfg.webui, bridge_db, app_config=cfg)
         server._has_password = True
-        
-        # 添加有效 session
-        import time
-        server._sessions["valid_token"] = time.time() + 3600
-        
+
+        # 添加有效 session（预存 bug：需存 tuple (expiry, stored_ip)，非纯 float）
+        server._sessions["valid_token"] = (time.time() + 3600, "")
+
         port = _free_port()
         server._port = port
         server.start()
         time.sleep(0.5)
-        
+
         results = []
-        
+
         def validate_session(attempt_id):
             import urllib.request
             try:
@@ -162,19 +159,19 @@ class TestConcurrency:
                     results.append((attempt_id, resp.status))
             except Exception as e:
                 results.append((attempt_id, "error"))
-        
+
         # 启动 20 个并发验证
         threads = []
         for i in range(20):
             t = threading.Thread(target=validate_session, args=(i,))
             threads.append(t)
             t.start()
-        
+
         for t in threads:
             t.join(timeout=10)
-        
+
         server.stop()
-        
+
         # 验证：所有请求都应该成功（200）
         success_count = sum(1 for _, status in results if status == 200)
         assert success_count == 20, f"所有 20 个请求都应该成功，实际成功: {success_count}"

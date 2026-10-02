@@ -1,4 +1,5 @@
 # 九、WebUI 前端架构
+> 最后更新：2026-08-06
 
 ## 架构概述
 
@@ -25,7 +26,7 @@ src/webui/
 │   │   ├── area.js      # A/B/C 区浏览
 │   │   ├── config.js    # 配置页
 │   │   ├── login.js     # 登录页
-│   │   ├── logs.js      # 日志页（TMDB 操作日志 + 主程序日志双来源）
+│   │   ├── logs.js      # 日志页（WebUI 操作日志 + 主程序日志双来源）
 │   │   ├── openlist.js  # OpenList 配置
 │   │   └── tmdb.js      # TMDB 待看列表
 │   └── components/      # 可复用组件
@@ -77,7 +78,7 @@ npx vite          # 开发服务器（HMR）
 | `#dashboard` | `dashboard.js` | `renderDashboard` |
 | `#area_*` | `area.js` | `renderArea(el, area, params)` |
 | `#tmdb` | `tmdb.js` | `renderTmdb(el, params)` |
-| `#logs` | `logs.js` | `renderLogs`（TMDB 操作日志 `/api/tmdb/logs` + 主程序日志 `/api/logs` 双来源，Tab 切换） |
+| `#logs` | `logs.js` | `renderLogs`（WebUI 操作日志 `/api/tmdb/logs` + 主程序日志 `/api/logs` 双来源，Tab 切换） |
 | `#config` | `config.js` | `renderConfig(el, params)` |
 
 ### `state.js` — 状态管理
@@ -86,6 +87,18 @@ npx vite          # 开发服务器（HMR）
 - 鉴权状态 — `_hasPassword`（null = 未初始化）
 - TMDB 状态 — 待看列表缓存（30 分钟 TTL）、类型缓存（1000 LRU）
 - UI 配置 — 带 `AbortController` 取消进行中的保存
+
+### 表单字段帮助文本系统（`helpIcon` / `helpKey` / `_openlistHelpTexts`）
+
+OpenList 配置页（`openlist.js`）实现了结构化的帮助系统，以 **info 图标 tooltip** 形式在字段标签旁展示上下文帮助（Issue 34 注释收敛后，原 10 个字段的常驻 `.field-helper-text` 明文已移除，统一改为图标提示）：
+
+- **`_openlistHelpTexts`** — 常量对象，定义所有帮助文本的键值对。键名对应控件的 `helpKey`，值为帮助文本字符串。
+- **`helpKey`** — `olField()` / `olSelect()` / `olToggle()` 的形参（非 `createField` 配置项）。当渲染 OpenList 表单时，`helpKey` 用于从 `_openlistHelpTexts` 查找帮助文本。
+- **`helpIcon`** — `createField()` 的形参（`utils.js`），值为已渲染的 HTML 片段，渲染在浮动标签 `<label>` 内、字段名之后。`olField()` 通过 `_olHelpIcon(key)` 生成该片段后作为 `helpIcon` 传入 `createField`；`olSelect()` / `olToggle()` 直接在各自标签内渲染 `_olHelpIcon(key)`。
+- **帮助图标（tooltip）**：`_olHelpIcon(key)` 根据 `helpKey` 查 `_openlistHelpTexts`，生成 `<span class="ol-help-icon" data-tooltip="...">${icon('info')}</span>`——hover 时显示 tooltip 提示。当前 OpenList 字段的帮助均以该图标呈现，不再渲染常驻 `.field-helper-text` 明文（`helperText` 形参保留，但当前调用点均传空字符串）。
+- **`helperText`** — `createField()` / `olField()` / `olSelect()` / `olToggle()` 仍保留的形参，非空时渲染为 `<div class="field-helper-text">` 元素（紧接输入框之后）。当前 OpenList 字段未使用，仅个别场景（如 config.js 死字段标注）可能使用。
+
+`utils.js` 的 `createField()` 函数接收 `helpIcon` 与 `helperText` 两个形参：`helpIcon` 渲染在标签内，`helperText` 渲染为输入框下方的 `.field-helper-text` div。`olField()` / `olSelect()` / `olToggle()` 是 OpenList 页面的封装函数，负责 `helpKey`→`_openlistHelpTexts` 查找并生成 `helpIcon` 后调用 `createField`。
 
 ### `theme.js` — 双主题系统
 - `syncTheme()` — 应用 `data-system`、`data-color`、`data-font` 到 `<html>`，持久化到 localStorage
@@ -100,11 +113,20 @@ Canvas 水墨鼠标擦除效果（`destination-out` 合成模式）。5 种笔�
 
 > 注意：以下两项均为后端函数，不属于前端代码。
 
-- **PBKDF2-HMAC-SHA256** 密码哈希（600,000 次迭代）— `_hash_password()` 为后端 `server.py` 中 `WebUIServer` 的方法（`routes.py` 另有等价的 `_hash_password_pbkdf2()` 供配置写入场景使用，前端不直接调用）。
+- **PBKDF2-HMAC-SHA256** 密码哈希（600,000 次迭代）— `server.py` 中 `WebUIServer._hash_password()` 和 `routes.py` 中的配置写入路径均统一调用 `utils.password_utils.hash_password()`，前端不直接调用。
 
 - IP 白名单（仅局域网）— `_is_lan_ip()` 为后端 `routes.py` 中定义的工具函数，`server.py` 导入并复用，前端不涉及。
 
-免 Token 路径：`/api/config`、`/api/webui/config/ui`、`/api/tmdb/avatar`、`/api/tmdb/poster`、`/api/openlist/status`、`/api/openlist/ping`、`/api/admin/status`、`/api/login`、静态资源
+免 Token 路径：`/api/config`、`/api/webui/config/ui`、`/api/tmdb/avatar`、`/api/tmdb/poster`、`/api/openlist/status`、`/api/openlist/ping`、`/api/admin/status`、`/api/login`、`/api/page`、`/login`、静态资源
+
+## 仪表盘
+
+仪表盘由 `modules/pages/dashboard.js`（`renderDashboard(el)`）负责，对应后端 `GET /api/dashboard`。展示两组统计卡片：
+
+- **A/B/C 区记录数卡**：A 区 STRM 数、B 区 STRM 数、C 区幽灵数、B 区 valid/duplicate/quarantined 分布、TMDB 配置状态、WebUI 运行时间。
+- **索引元数据卡（四卡）**：索引代次（`index_generation`）、最近索引时间（`last_full_index_at`，hover 显示精确时间）、映射版本（`mapping_version`，hover 显示完整哈希）、映射版本生成时间（`mapping_version_generated_at`，hover 显示精确时间）。
+
+此外提供 **『立即全量审计』** 按钮：点击后异步触发 `POST /api/index/audit`，按钮进入「审计中...」状态并通过 `GET /api/index/audit/status` 轮询进度，完成后显示「审计完成，索引代次 #N」，失败时显示错误信息。
 
 ## 新手引导（Onboarding）
 

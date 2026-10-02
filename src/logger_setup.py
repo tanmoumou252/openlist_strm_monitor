@@ -4,8 +4,12 @@ import logging
 import os
 import sys
 import tempfile
+import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+
+_startup_banner_written = False
 
 
 class MaxLevelFilter(logging.Filter):
@@ -26,12 +30,65 @@ class MaxLevelFilter(logging.Filter):
         return record.levelno <= self.max_level
 
 
+class EncodingSafeStreamHandler(logging.StreamHandler):
+    """控制台 handler：写出前把目标编码无法表示的字符降级为替代符。
+
+    Windows 中文控制台默认 GBK，emoji（如启动横幅的 🚀）或韩文等字符会让
+    StreamHandler.emit 抛 UnicodeEncodeError，logging 随即调用 handleError
+    打印 traceback，整条记录从控制台消失。文件 handler 已用 utf-8，不受影响。
+
+    刻意不调用 stream.reconfigure()：sys.stdout / sys.stderr 的全局 errors
+    策略必须保持原样，否则会连带改变 print() 等其它写入方的行为。
+
+    写-刷用 self.lock 包住，保证 write + flush 的原子性。Handler.handle()
+    调用 emit() 时其实已持有该锁，这里是防御直接调用 emit() 绕过 handle()
+    的路径；logging.Handler 的 lock 是 RLock（Python 3.14 实测同线程可重入），
+    所以重复获取不会死锁。
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record)
+        except Exception:
+            self.handleError(record)
+            return
+        encoding = getattr(self.stream, "encoding", None) or "utf-8"
+        try:
+            message.encode(encoding)
+        except (UnicodeEncodeError, LookupError):
+            message = message.encode(encoding, errors="replace").decode(
+                encoding, errors="replace")
+        try:
+            with self.lock:
+                self.stream.write(message + self.terminator)
+                self.flush()
+        except Exception:
+            self.handleError(record)
+
+
+def _has_available_windows_drive(path: Path) -> bool:
+    """Return False only when an absolute Windows path uses a missing drive."""
+    if os.name != "nt" or not path.is_absolute():
+        return True
+    drive = path.drive
+    # UNC 路径（\\server\\share\\...）不是盘符路径，保持原有行为。
+    if len(drive) != 2 or drive[1] != ":":
+        return True
+    import ctypes
+    mask = ctypes.windll.kernel32.GetLogicalDrives()
+    if not mask:
+        return True
+    drive_index = ord(drive[0].upper()) - ord("A")
+    return 0 <= drive_index < 26 and bool(mask & (1 << drive_index))
+
+
 def setup_logging(
     *,
     level: str = "INFO",
     log_file: str = "strm_bridge.log",
     max_size_mb: int = 10,
     backup_count: int = 5,
+    write_startup_banner: bool | None = None,
 ) -> None:
     """
     初始化日志系统。
@@ -45,13 +102,21 @@ def setup_logging(
 
     original_log_path = Path(log_file)
     final_log_path = original_log_path
-    
-    # Attempt to create parent directory for the original log file
-    try:
-        original_log_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        logging.warning(f"[日志] 无法创建日志目录 '{original_log_path.parent}'：{e}。将尝试使用临时日志文件。")
+
+    # 缺失 Windows 盘符时跳过 mkdir，直接回退临时目录，避免不可用盘符上阻塞。
+    if not _has_available_windows_drive(original_log_path):
+        logging.warning("[日志] 日志盘符不可用，将回退到临时日志文件: %s", original_log_path)
         final_log_path = Path(tempfile.gettempdir()) / original_log_path.name
+    else:
+        try:
+            original_log_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logging.warning(
+                "[日志] 无法创建日志目录 %s: %s。将使用临时日志文件。",
+                original_log_path.parent,
+                e,
+            )
+            final_log_path = Path(tempfile.gettempdir()) / original_log_path.name
 
     # Check write permissions for the chosen log path
     if not os.access(final_log_path.parent, os.W_OK):
@@ -59,7 +124,7 @@ def setup_logging(
         final_log_path = Path(tempfile.gettempdir()) / original_log_path.name
         # Ensure temp directory exists, though tempfile.gettempdir() should be safe
         final_log_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # If a fallback occurred, log it
     if final_log_path != original_log_path:
         logging.info(f"[日志] 实际日志文件路径已设置为：'{final_log_path}'")
@@ -82,23 +147,38 @@ def setup_logging(
     )
 
     # stdout: DEBUG/INFO/WARNING
-    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler = EncodingSafeStreamHandler(sys.stdout)
     stdout_handler.setLevel(log_level)
     stdout_handler.addFilter(MaxLevelFilter(logging.WARNING))
     stdout_handler.setFormatter(formatter)
 
     # stderr: ERROR/CRITICAL
-    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler = EncodingSafeStreamHandler(sys.stderr)
     stderr_handler.setLevel(logging.ERROR)
     stderr_handler.setFormatter(formatter)
 
     # file: 按大小轮转
-    file_handler = RotatingFileHandler(
-        filename=str(final_log_path),
-        maxBytes=max_size_mb * 1024 * 1024,
-        backupCount=backup_count,
-        encoding="utf-8",
-    )
+    # 日志目标为只读文件/目录路径时 RotatingFileHandler 构造会抛
+    # OSError 导致整个启动崩溃。回退到系统临时目录，仅降级不阻断启动。
+    try:
+        file_handler = RotatingFileHandler(
+            filename=str(final_log_path),
+            maxBytes=max_size_mb * 1024 * 1024,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+    except OSError as e:
+        fallback_path = os.path.join(
+            tempfile.gettempdir(), "openlist_strm_bridge_fallback.log")
+        logging.warning(
+            "日志文件 %s 无法写入（%s），回退到临时目录 %s",
+            final_log_path, e, fallback_path)
+        file_handler = RotatingFileHandler(
+            filename=fallback_path,
+            maxBytes=max_size_mb * 1024 * 1024,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
     file_handler.setLevel(log_level)
     file_handler.setFormatter(formatter)
 
@@ -118,3 +198,22 @@ def setup_logging(
         max_size_mb,
         backup_count,
     )
+
+    # 生产调用默认每进程只写一次；测试可显式传 True/False 隔离模块状态。
+    global _startup_banner_written
+    should_write_banner = (
+        not _startup_banner_written
+        if write_startup_banner is None
+        else write_startup_banner
+    )
+    if should_write_banner:
+        logging.info("")
+        logging.info("=" * 70)
+        logging.info(
+            " 🚀 strm_bridge 启动 — %s",
+            datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        logging.info("=" * 30 + " 以上为上一次日志 " + "=" * 30)
+        logging.info("")
+        if write_startup_banner is None:
+            _startup_banner_written = True

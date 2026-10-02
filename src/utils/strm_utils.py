@@ -11,7 +11,6 @@ from urllib.parse import unquote, urlparse
 
 FINGERPRINT_VERSION = "strmfp:v1"
 
-
 def parse_strm_content(content: str) -> str | None:
     """
     从 STRM 内容中解析真实 WebDAV 路径。
@@ -43,13 +42,20 @@ def parse_strm_content(content: str) -> str | None:
         if path.startswith("/d/"):
             path = "/" + path[3:]
 
+        # 形如 http://host?sign=xxx 的内容 parsed.path 为空，
+        # canonicalize_webdav_path 会抛 ValueError，而 read_strm_webdav_path
+        # 的捕获元组不含 ValueError。畸形但可读的 STRM 应返回 None 而非崩溃。
+        # 用 not path.strip() 兜底纯空白路径（如 %20 编码空格），
+        # 避免 canonicalize_webdav_path 对空白-only 路径抛 ValueError。
+        if not path.strip():
+            return None
+
         return canonicalize_webdav_path(path, case_sensitive=True)
 
     if content.startswith("/"):
         return canonicalize_webdav_path(content, case_sensitive=True)
 
     return None
-
 
 def canonicalize_webdav_path(webdav_path: str, *,
                              case_sensitive: bool = True) -> str:
@@ -95,7 +101,6 @@ def canonicalize_webdav_path(webdav_path: str, *,
 
     return canonical
 
-
 def make_strm_fingerprint(webdav_path: str, *,
                           case_sensitive: bool = True) -> str:
     """
@@ -114,15 +119,15 @@ def make_strm_fingerprint(webdav_path: str, *,
     payload = f"{FINGERPRINT_VERSION}:{canonical}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-
 def read_strm_webdav_path(file_path: str | Path) -> str | None:
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             return parse_strm_content(f.read())
-    except (FileNotFoundError, OSError, PermissionError):
-        # 如果文件不存在或无法读取，返回 None 而不是崩溃
+    except (FileNotFoundError, OSError, PermissionError, UnicodeDecodeError, ValueError, TypeError):
+        # 捕获 ValueError / TypeError（canonicalize_webdav_path 对空白/畸形
+        # 路径或非 str 类型抛出），返回 None 而非崩溃。
+        # 如果文件不存在、无法读取或包含非法字节，返回 None 而不是崩溃
         return None
-
 
 def escape_like(value: str) -> str:
     """转义 SQL LIKE 通配符（% _ \\），配合 ``ESCAPE '\\'`` 子句使用。
@@ -130,5 +135,8 @@ def escape_like(value: str) -> str:
     用于构建 LIKE 模式时，确保路径/媒体名中的下划线、百分号不被当作通配符。
     顺序很重要：必须先转义反斜杠本身，否则后面对 %/_ 加的反斜杠会被这一步再次转义。
     转义只作用于传入的 LIKE 模式值，不影响被匹配列的内容（如 Windows 路径中的反斜杠）。
+
+    本函数已转义全部 SQLite LIKE 元字符，勿添加 [] 转义。
     """
+    # LIKE 转义已完整（[] 非 SQLite 语法）
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

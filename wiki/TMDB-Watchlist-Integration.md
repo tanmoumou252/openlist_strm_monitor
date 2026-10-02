@@ -1,4 +1,5 @@
 # 八、TMDB 待看列表集成
+> 最后更新：2026-08-06
 
 ## 架构
 
@@ -46,7 +47,7 @@ TMDB 集成由三个组件组成：
 
 ### 数据库
 
-六张表：`movies`、`tv`、`meta`、`webui_config`、`tmdb_operation_log`（操作日志，level 含 `success`）、`tmdb_watchlist_fts`（FTS5 虚拟表，用于标题搜索）。`TmdbWatchlistDb` 使用 `ThreadPoolExecutor` 仅用于 `_populate_tv_details` 批量补齐 TV 详情（非全量并行同步）。
+七张表：`movies`、`tv`、`meta`、`webui_config`、`tmdb_operation_log`（操作日志，level 含 `success`），以及 2 张 FTS5 虚拟表 `movies_fts`（索引 `movies.title`/`original_title`/`overview`）与 `tv_fts`（索引 `tv.name`/`tv.original_name`/`overview`），分别用于电影/电视剧标题搜索。`TmdbWatchlistDb` 使用 `ThreadPoolExecutor` 仅用于 `_populate_tv_details` 批量补齐 TV 详情（非全量并行同步）。
 
 ### 缓存 TTL
 
@@ -139,3 +140,7 @@ TMDB 待看列表页面提供：
 ### 手动覆盖机制
 
 `POST /api/tmdb/watchlist/match/override` 允许手动设置匹配状态。写入 `match_status` + `manual_override_at`（时间戳）+ `match_reason`（默认 `"manual_override"`）。后续自动匹配不会覆盖 `manual_override_at > 0` 的条目（除非用户再次手动触发）。
+
+### 清除覆盖
+
+`POST /api/tmdb/watchlist/match/clear` 允许清除手动覆盖，将条目恢复为 `uncomputed` 状态。写入 `match_status='uncomputed'`，清除 `manual_override_at` 和 `manual_override_by`。请求体：`{media_type: str, id: int}`。前端 TMDB 卡片翻转视图中的"恢复自动匹配"按钮调用此端点。调用前需检查 `watchlist_enabled` 开关（与 `/match/override` 行为一致）。

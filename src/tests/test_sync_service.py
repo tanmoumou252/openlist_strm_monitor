@@ -5,7 +5,12 @@ Covers: initial_scan_a, scan_a_to_b_full_sync, copy_a_record_to_b_if_needed,
 """
 from __future__ import annotations
 
+import shutil
+import logging
+import sqlite3
 import sys
+import tempfile
+import time
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -14,8 +19,9 @@ import pytest
 # Add src/ to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from domain.sync.sync_service import SyncService
-from database import ARecord
+from domain.sync.sync_service import SyncService, _SyncPrep
+from database import ARecord, Database
+from config import ABMapping
 from _test_helpers import build_mock_app
 
 
@@ -55,43 +61,173 @@ class TestSyncServiceInitialScanA:
         app = _make_app(tmp_path)
         a_root = app.a_roots[0]
         # Create some STRM files
-        (a_root / "movie.strm").write_text("/mount/movie.mp4", encoding="utf-8")
+        (a_root / "movie.strm").write_text(
+            "/mount/movie.mp4", encoding="utf-8")
         subdir = a_root / "show" / "Season 01"
         subdir.mkdir(parents=True)
-        (subdir / "ep01.strm").write_text("/mount/show/S01E01.mp4", encoding="utf-8")
+        (subdir / "ep01.strm").write_text(
+            "/mount/show/S01E01.mp4", encoding="utf-8")
 
         svc = SyncService(app)
-        svc.initial_scan_a()
+        # Use patch to capture the batch before it's cleared
+        with patch.object(svc.db, "upsert_a_batch") as mock_upsert:
+            svc.initial_scan_a(use_bulk=False)
+            assert mock_upsert.call_count == 1
+            # Mock stores a reference; call_args_list preserves the reference
+            # at call time. Verify via the captured list argument.
+            # Note: call_args reflects current state (after clear), so
+            # verify count and that save_known_folders was called.
+            saved_folders = app.db.save_known_folders_batch.call_args[0][0]
+            assert "/mount" in saved_folders
+            assert "/mount/show" in saved_folders
 
-        assert app.handle_a_created_or_modified.call_count == 2
+    def test_scan_a_saves_parent_folders(self, tmp_path):
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        (a_root / "movie.strm").write_text(
+            "/mount/movie.mp4", encoding="utf-8")
+        subdir = a_root / "show"
+        subdir.mkdir(parents=True)
+        (subdir / "ep01.strm").write_text(
+            "/mount/show/ep01.mp4", encoding="utf-8")
+
+        svc = SyncService(app)
+        svc.initial_scan_a(use_bulk=False)
+
+        assert app.db.save_known_folders_batch.call_count == 1
+        saved_folders = app.db.save_known_folders_batch.call_args[0][0]
+        assert "/mount" in saved_folders
+        assert "/mount/show" in saved_folders
+
+    def test_scan_a_explicit_root_subset(self, tmp_path):
+        """周期刷新可显式只扫描命中 refresh_paths 的 A root。"""
+        first = tmp_path / "a1"
+        second = tmp_path / "a2"
+        first.mkdir()
+        second.mkdir()
+        (first / "one.strm").write_text("/engine-a/one.mp4", encoding="utf-8")
+        (second / "two.strm").write_text("/engine-b/two.mp4", encoding="utf-8")
+        app = _make_app(tmp_path, a_dirs=[first, second])
+        svc = SyncService(app)
+
+        captured: list[tuple[str, str, str]] = []
+
+        def capture(records):
+            captured.extend(list(records))
+            return len(records)
+
+        app.db.upsert_a_batch.side_effect = capture
+        svc.initial_scan_a(use_bulk=False, a_roots=[first])
+
+        assert [Path(row[0]).name for row in captured] == ["one.strm"]
+        assert all(not row[0].startswith(str(second)) for row in captured)
+
+    def test_scan_a_explicit_empty_roots_is_noop(self, tmp_path):
+        """refresh_paths 无匹配时传空列表，不能回退为扫描全部 A root。"""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        (a_root / "movie.strm").write_text("/mount/movie.mp4", encoding="utf-8")
+        svc = SyncService(app)
+
+        svc.initial_scan_a(use_bulk=False, a_roots=[])
+
+        app.db.upsert_a_batch.assert_not_called()
+        app.db.save_known_folders_batch.assert_not_called()
 
     def test_scan_a_empty_directory(self, tmp_path):
         app = _make_app(tmp_path)
-        # a_root exists but is empty
         svc = SyncService(app)
-        svc.initial_scan_a()
-        app.handle_a_created_or_modified.assert_not_called()
+        svc.initial_scan_a(use_bulk=False)
+        app.db.upsert_a_batch.assert_not_called()
+        app.db.save_known_folders_batch.assert_not_called()
 
     def test_scan_a_missing_root_is_skipped(self, tmp_path):
         app = _make_app(tmp_path)
         missing_root = tmp_path / "nonexistent"
-        app.a_roots = [missing_root]  # override to a non-existing path
+        app.a_roots = [missing_root]
         svc = SyncService(app)
-        svc.initial_scan_a()
-        app.handle_a_created_or_modified.assert_not_called()
+        svc.initial_scan_a(use_bulk=False)
+        app.db.upsert_a_batch.assert_not_called()
 
     def test_scan_a_ignores_non_strm_files(self, tmp_path):
         app = _make_app(tmp_path)
         a_root = app.a_roots[0]
         (a_root / "video.mp4").write_text("binary", encoding="utf-8")
         (a_root / "info.nfo").write_text("nfo", encoding="utf-8")
-        (a_root / "real.strm").write_text("/mount/file.mp4", encoding="utf-8")
+        (a_root / "real.strm").write_text(
+            "/mount/file.mp4", encoding="utf-8")
 
         svc = SyncService(app)
-        svc.initial_scan_a()
+        svc.initial_scan_a(use_bulk=False)
 
-        # Only the .strm file triggers handle_a_created_or_modified
-        assert app.handle_a_created_or_modified.call_count == 1
+        # Only the .strm file is batched
+        assert app.db.upsert_a_batch.call_count == 1
+
+    def test_scan_a_batch_flush_at_boundary(self, tmp_path):
+        """Records are flushed when batch reaches BATCH_SIZE."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        # Create 1001 files to trigger one flush at 1000 + one final flush of 1
+        for i in range(1001):
+            (a_root / f"file{i}.strm").write_text(
+                f"/mount/f{i}.mp4", encoding="utf-8")
+
+        svc = SyncService(app)
+        svc.initial_scan_a(use_bulk=False)
+
+        # BATCH_SIZE=1000, so 1001 files → 2 upsert calls (1000 + 1)
+        assert app.db.upsert_a_batch.call_count == 2
+
+    def test_scan_a_skips_unparseable_strm(self, tmp_path):
+        """STRM files that can't be parsed are skipped."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        (a_root / "good.strm").write_text(
+            "/mount/good.mp4", encoding="utf-8")
+        # Empty STRM file — read_strm_webdav_path returns None
+        (a_root / "empty.strm").write_text("", encoding="utf-8")
+
+        svc = SyncService(app)
+        svc.initial_scan_a(use_bulk=False)
+
+        assert app.db.upsert_a_batch.call_count == 1
+
+    def test_scan_a_bulk_mode_writes_to_bulk_connection(self, tmp_path):
+        """use_bulk=True 时使用 bulk_connection 而非 upsert_a_batch。"""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        (a_root / "movie.strm").write_text("/mount/movie.mp4", encoding="utf-8")
+
+        svc = SyncService(app)
+        mock_conn = Mock()
+        mock_conn.__enter__ = Mock(return_value=mock_conn)
+        mock_conn.__exit__ = Mock(return_value=False)
+        # Mock execute().fetchall() to return empty list (no existing records)
+        mock_conn.execute.return_value.fetchall.return_value = []
+        app.db.bulk_connection.return_value = mock_conn
+
+        svc.initial_scan_a(use_bulk=True)
+
+        # bulk_connection 被调用
+        app.db.bulk_connection.assert_called_once()
+        # upsert_a_batch 不被调用（bulk 模式用 _upsert_a_batch_bulk）
+        app.db.upsert_a_batch.assert_not_called()
+        # rebuild_fts_table 被调用
+        app.db.rebuild_fts_table.assert_called_once_with("a_strm_files", "a_strm_files_fts")
+
+    def test_scan_a_non_bulk_mode_rebuilds_no_fts(self, tmp_path):
+        """use_bulk=False 时不调用 rebuild_fts_table。"""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        (a_root / "movie.strm").write_text("/mount/movie.mp4", encoding="utf-8")
+
+        svc = SyncService(app)
+        svc.initial_scan_a(use_bulk=False)
+
+        # rebuild_fts_table 不被调用（upsert_a_batch 已逐批维护 FTS）
+        app.db.rebuild_fts_table.assert_not_called()
+        # upsert_a_batch 被调用
+        app.db.upsert_a_batch.assert_called()
 
 
 # ===========================================================================
@@ -109,6 +245,23 @@ class TestSyncServiceScanAToBFullSync:
         app.db.get_all_a_records.return_value = records
         app.db.is_ghost_protected.return_value = False
         app.db.b_fingerprint_exists.return_value = False
+        app.db.get_all_ghost_protected_paths.return_value = set()
+        app.db.get_all_b_fingerprints.return_value = set()
+        # Set up mapping resolution (scan_a_to_b_full_sync now calls get_mapping_for_a)
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
+        app.a_b_mappings = [ABMapping(mapping_id="test_m1", a_root="/a_root", b_root="/b_root")]
+
+    def _make_bulk_conn_mock(self, app):
+        """Create a mock connection that supports context manager protocol."""
+        mock_conn = Mock()
+        mock_conn.__enter__ = Mock(return_value=mock_conn)
+        mock_conn.__exit__ = Mock(return_value=False)
+        # use_bulk=False 走 self.db.connection()，需同时 mock
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        app.db.connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.connection.return_value.__exit__ = Mock(return_value=False)
+        return mock_conn
 
     def test_full_sync_all_records(self, tmp_path):
         app = _make_app(tmp_path)
@@ -120,13 +273,28 @@ class TestSyncServiceScanAToBFullSync:
         self._setup_records(app, records, tmp_path)
         b_root = tmp_path / "b"
         b_root.mkdir()
-        app.build_b_path_from_a.return_value = b_root / "file1.strm"
+        # 两个源映射到不同 B 目标（非冲突场景）
+        def _build_side_effect(local_path, webdav_path=None, **_kwargs):
+            name = Path(local_path).stem
+            return b_root / f"{name}.strm"
+        app.build_b_path_from_a.side_effect = _build_side_effect
 
         svc = SyncService(app)
-        with patch.object(svc, "copy_a_record_to_b", return_value=True) as mock_copy:
-            svc.scan_a_to_b_full_sync()
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        # T3：use_bulk=True 走 prepare → commit 分块路径（_sync_one_record 不参与）
+        def _prep(rec, valid_engine_paths, mapping_id=None):
+            return _SyncPrep(
+                local_path=rec.local_path, b_local=b_root / f"{Path(rec.local_path).stem}.strm",
+                webdav_path=rec.webdav_path, parent=rec.parent_webdav_path,
+                fingerprint=f"fp_{rec.local_path}", mapping_id="test_m1",
+                needs_copy=False)
+        with patch.object(svc, "_prepare_sync_one", side_effect=_prep), \
+             patch.object(svc, "_commit_sync_one", return_value="success") as mock_commit:
+            svc.scan_a_to_b_full_sync(use_bulk=True)
 
-        assert mock_copy.call_count == 2
+        assert mock_commit.call_count == 2
 
     def test_full_sync_with_engine_path_filter(self, tmp_path):
         app = _make_app(tmp_path)
@@ -138,38 +306,501 @@ class TestSyncServiceScanAToBFullSync:
         self._setup_records(app, records, tmp_path)
 
         svc = SyncService(app)
-        with patch.object(svc, "copy_a_record_to_b", return_value=True) as mock_copy:
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
             svc.scan_a_to_b_full_sync(valid_engine_paths=["/engine"])
 
-        # only /engine path should be synced
-        assert mock_copy.call_count == 1
-        call_args = mock_copy.call_args[0]
-        assert call_args[1].startswith("/engine")
+        # 两遍结构中，过滤在索引阶段完成，只有 1 条通过引擎路径过滤
+        assert mock_sync.call_count == 1
 
     def test_full_sync_skip_ghost_protected(self, tmp_path):
         app = _make_app(tmp_path)
         a_root = app.a_roots[0]
         records = [_make_a_record(str(a_root / "f1.strm"), "/m/f1.mp4", "/m")]
         self._setup_records(app, records, tmp_path)
-        app.db.is_ghost_protected.return_value = True
+        app.db.get_all_ghost_protected_paths.return_value = {"/m/f1.mp4"}
 
         svc = SyncService(app)
-        with patch.object(svc, "copy_a_record_to_b") as mock_copy:
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="skip_ghost") as mock_sync:
             svc.scan_a_to_b_full_sync()
 
-        mock_copy.assert_not_called()
+        # 两遍结构中，ghost 检查在索引阶段完成，_sync_one_record 不被调用
+        mock_sync.assert_not_called()
 
     def test_full_sync_skip_missing_source(self, tmp_path):
         app = _make_app(tmp_path)
         records = [_make_a_record("/nonexistent/path/file.strm", "/m/f.mp4", "/m")]
         app.db.get_all_a_records.return_value = records
-        app.db.is_ghost_protected.return_value = False
+        app.db.get_all_ghost_protected_paths.return_value = set()
+        app.db.get_all_b_fingerprints.return_value = set()
 
         svc = SyncService(app)
-        with patch.object(svc, "copy_a_record_to_b") as mock_copy:
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="skip_missing") as mock_sync:
             svc.scan_a_to_b_full_sync()
 
-        mock_copy.assert_not_called()
+        # 两遍结构中，文件存在性检查在索引阶段完成，_sync_one_record 不被调用
+        mock_sync.assert_not_called()
+
+    def _setup_bulk_records(self, app: Mock, count: int, tmp_path: Path = None):
+        """Set up db mocks for *count* A records and write files to disk.
+
+        _sync_one_record is patched by the caller, so real STRM content
+        is not needed, but the files must exist for the index pass to pass.
+        """
+        base_dir = tmp_path if tmp_path else Path("/a")
+        records = [_make_a_record(str(base_dir / f"f{i}.strm"), f"/m/f{i}.mp4", "/m")
+                   for i in range(count)]
+        # Write files to disk so the index pass doesn't skip them
+        for rec in records:
+            p = Path(rec.local_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(rec.webdav_path, encoding="utf-8")
+        app.db.get_all_a_records.return_value = records
+        app.db.get_all_ghost_protected_paths.return_value = set()
+        app.db.get_all_b_fingerprints.return_value = set()
+        # Set up mapping resolution (scan_a_to_b_full_sync now calls get_mapping_for_a)
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
+        app.a_b_mappings = [ABMapping(mapping_id="test_m1", a_root="/a_root", b_root="/b_root")]
+        # 每个记录映射到不同的 B 目标路径（避免全部冲突）
+        b_root = tmp_path / "b" if tmp_path else Path("/b")
+        b_root.mkdir(exist_ok=True)
+        app.build_b_path_from_a.side_effect = lambda local, webdav=None, **_k: b_root / Path(local).name
+
+    def test_full_sync_with_bulk_mode_single_commit(self, tmp_path):
+        """use_bulk=True with >BATCH_COMMIT_SIZE records: exactly 1 commit.
+
+        Bulk mode never issues interim commits.  The only commit comes from
+        the final ``if batch_count > 0: conn.commit()`` after the loop.
+        T3：use_bulk=True 走 prepare → 4 线程拷贝 → commit 分块路径。
+        """
+        app = _make_app(tmp_path)
+        N = 1001  # > BATCH_COMMIT_SIZE (1000)
+        self._setup_bulk_records(app, N, tmp_path)
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        b_root = tmp_path / "b"
+
+        def _prep(rec, valid_engine_paths, mapping_id=None):
+            return _SyncPrep(
+                local_path=rec.local_path,
+                b_local=b_root / f"{Path(rec.local_path).stem}.strm",
+                webdav_path=rec.webdav_path, parent=rec.parent_webdav_path,
+                fingerprint=f"fp_{rec.local_path}", mapping_id="test_m1",
+                needs_copy=False)
+
+        with patch.object(svc, "_prepare_sync_one", side_effect=_prep), \
+             patch.object(svc, "_commit_sync_one", return_value="success") as mock_commit:
+            svc.scan_a_to_b_full_sync(use_bulk=True)
+
+        assert mock_commit.call_count == N
+        # Bulk mode: only the trailing commit after the loop
+        assert mock_conn.commit.call_count == 1
+
+    def test_full_sync_with_batch_mode_multi_commit(self, tmp_path):
+        """use_bulk=False with >BATCH_COMMIT_SIZE records: interim + final.
+
+        Batch mode commits every BATCH_COMMIT_SIZE records and once at the
+        end.  With 1001 records that means 1 interim commit (after record
+        1000) + 1 trailing commit = 2 total.
+        """
+        app = _make_app(tmp_path)
+        N = 1001  # > BATCH_COMMIT_SIZE (1000)
+        self._setup_bulk_records(app, N, tmp_path)
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
+            svc.scan_a_to_b_full_sync(use_bulk=False)
+
+        assert mock_sync.call_count == N
+        # Batch mode: interim commit at 1000 + trailing commit = 2
+        assert mock_conn.commit.call_count == 2
+
+    def test_full_sync_batch_mode_exact_boundary(self, tmp_path):
+        """use_bulk=False with exactly BATCH_COMMIT_SIZE records.
+
+        1000 records: batch_count reaches 1000 at the last record and commits
+        (interim), then the loop ends with batch_count reset to 0, so the
+        trailing ``if batch_count > 0`` is False → exactly 1 commit.
+        """
+        app = _make_app(tmp_path)
+        N = 1000  # exactly BATCH_COMMIT_SIZE
+        self._setup_bulk_records(app, N, tmp_path)
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
+            svc.scan_a_to_b_full_sync(use_bulk=False)
+
+        assert mock_sync.call_count == N
+        # Exactly at boundary: 1 interim commit (at record 1000), trailing is skipped
+        assert mock_conn.commit.call_count == 1
+
+    def test_full_sync_bulk_mode_under_threshold(self, tmp_path):
+        """use_bulk=True with <BATCH_COMMIT_SIZE records: still 1 commit.
+
+        T3：use_bulk=True 走 prepare → 4 线程拷贝 → commit 分块路径。
+        """
+        app = _make_app(tmp_path)
+        N = 999
+        self._setup_bulk_records(app, N, tmp_path)
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        b_root = tmp_path / "b"
+
+        def _prep(rec, valid_engine_paths, mapping_id=None):
+            return _SyncPrep(
+                local_path=rec.local_path,
+                b_local=b_root / f"{Path(rec.local_path).stem}.strm",
+                webdav_path=rec.webdav_path, parent=rec.parent_webdav_path,
+                fingerprint=f"fp_{rec.local_path}", mapping_id="test_m1",
+                needs_copy=False)
+
+        with patch.object(svc, "_prepare_sync_one", side_effect=_prep), \
+             patch.object(svc, "_commit_sync_one", return_value="success") as mock_commit:
+            svc.scan_a_to_b_full_sync(use_bulk=True)
+
+        assert mock_commit.call_count == N
+        assert mock_conn.commit.call_count == 1
+
+    def test_full_sync_batch_mode_under_threshold(self, tmp_path):
+        """use_bulk=False with <BATCH_COMMIT_SIZE records: 1 trailing commit only."""
+        app = _make_app(tmp_path)
+        N = 999
+        self._setup_bulk_records(app, N, tmp_path)
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
+            svc.scan_a_to_b_full_sync(use_bulk=False)
+
+        assert mock_sync.call_count == N
+        # Under threshold: no interim commits, just the trailing commit
+        assert mock_conn.commit.call_count == 1
+
+    def test_full_sync_caches_cleared_on_exception(self, tmp_path):
+        """Caches are cleared even if an exception occurs."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        records = [_make_a_record(str(a_root / "f.strm"), "/m/f.mp4", "/m")]
+        self._setup_records(app, records, tmp_path)
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError):
+                svc.scan_a_to_b_full_sync()
+
+        # Caches should be cleared after exception
+        assert svc._cache_ghost is None
+        assert svc._cache_b_fp is None
+
+    def test_full_sync_uses_bulk_connection(self, tmp_path):
+        """scan_a_to_b_full_sync uses bulk_connection() instead of per-record upsert_b."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        records = [
+            _make_a_record(str(a_root / "file1.strm"), "/m/f1.mp4", "/m"),
+            _make_a_record(str(a_root / "file2.strm"), "/m/f2.mp4", "/m"),
+        ]
+        self._setup_records(app, records, tmp_path)
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        # 两个源映射到不同 B 目标
+        app.build_b_path_from_a.side_effect = lambda local, webdav=None, **_k: b_root / Path(local).name
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+
+        # Patch _bulk_upsert_b to verify it's called
+        with patch.object(svc, "_bulk_upsert_b") as mock_bulk_upsert:
+            svc.scan_a_to_b_full_sync()
+            # _bulk_upsert_b should be called for each record
+            assert mock_bulk_upsert.call_count >= 1
+
+    def test_full_sync_skips_lineage(self, tmp_path):
+        """scan_a_to_b_full_sync does NOT call _verify_b_path_lineage (startup sync skips lineage)."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        records = [
+            _make_a_record(str(a_root / "file1.strm"), "/m/f1.mp4", "/m"),
+        ]
+        self._setup_records(app, records, tmp_path)
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        app.build_b_path_from_a.return_value = b_root / "file1.strm"
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+
+        # _verify_b_path_lineage should NOT be called during bulk sync
+        with patch.object(app, "_verify_b_path_lineage") as mock_lineage:
+            svc.scan_a_to_b_full_sync()
+            # Lineage verification is skipped in bulk sync
+            assert mock_lineage.call_count == 0
+
+    def test_full_sync_target_conflict_all_sources_skipped(self, tmp_path):
+        """两个 A 源映射到同一 B 目标但 WebDAV 不同 → 全部跳过，无文件拷贝"""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        records = [
+            _make_a_record(str(a_root / "ep10_a.strm"), "/show/ep10_ver1.mp4", "/show"),
+            _make_a_record(str(a_root / "ep10_b.strm"), "/show/ep10_ver2.mp4", "/show"),
+        ]
+        self._setup_records(app, records, tmp_path)
+        # 两个源计算出相同的 B 目标路径
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        app.build_b_path_from_a.return_value = b_root / "Season 20" / "S20E10.strm"
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
+            svc.scan_a_to_b_full_sync()
+
+        # 冲突目标全部在索引阶段被跳过，_sync_one_record 不被调用
+        mock_sync.assert_not_called()
+
+    def test_full_sync_target_conflict_same_webdav_not_conflict(self, tmp_path):
+        """两个 A 源映射到同一 B 目标且 WebDAV 相同 → 不是冲突，正常去重"""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        records = [
+            _make_a_record(str(a_root / "ep10_a.strm"), "/show/ep10.mp4", "/show"),
+            _make_a_record(str(a_root / "ep10_b.strm"), "/show/ep10.mp4", "/show"),
+        ]
+        self._setup_records(app, records, tmp_path)
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        app.build_b_path_from_a.return_value = b_root / "Season 20" / "S20E10.strm"
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync:
+            svc.scan_a_to_b_full_sync()
+
+        # 同 WebDAV 的两个源都通过索引阶段，由 _sync_one_record 去重
+        assert mock_sync.call_count == 2
+
+    def test_full_sync_no_network_during_index_phase(self, tmp_path):
+        """索引阶段不触发任何网络调用"""
+        import shutil
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        records = [
+            _make_a_record(str(a_root / "f1.strm"), "/m/f1.mp4", "/m"),
+        ]
+        self._setup_records(app, records, tmp_path)
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        app.build_b_path_from_a.return_value = b_root / "f1.strm"
+
+        svc = SyncService(app)
+        mock_conn = self._make_bulk_conn_mock(app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+
+        # 确保 admin_api（网络客户端）在扫描阶段未被调用
+        with patch.object(svc, "_sync_one_record", return_value="success"):
+            svc.scan_a_to_b_full_sync()
+        app.admin_api.check_exists.assert_not_called()
+
+    def test_full_sync_concurrent_no_typeerror(self, tmp_path):
+        """并发 scan_a_to_b_full_sync(use_bulk=False) 不因缓存生命周期竞态抛错误。
+
+        手动审计(run_full_audit_now) 与周期 _scan_and_sync 可并发调用本方法。
+        若预加载与 finally 清空都在 rw_lock.write_locked() 之外，线程 A 的
+        finally 把 _cache_ghost 置 None 时线程 B 正在 pass1/pass2 访问 → TypeError。
+        预加载+索引+执行+清空全程纳入 write_locked 串行化，不再交错。
+        """
+        import threading
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        records = [
+            _make_a_record(str(a_root / f"f{i}.strm"), f"/m/f{i}.mp4", "/m")
+            for i in range(5)
+        ]
+        self._setup_records(app, records, tmp_path)
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        app.build_b_path_from_a.side_effect = (
+            lambda lp, webdav=None, **_k: b_root / f"{Path(lp).stem}.strm")
+
+        svc = SyncService(app)
+        self._make_bulk_conn_mock(app)
+
+        with patch.object(svc, "_sync_one_record", return_value="success"):
+            errors: list[Exception] = []
+
+            def _run():
+                try:
+                    svc.scan_a_to_b_full_sync(use_bulk=False)
+                except Exception as e:  # 期待无 TypeError/AttributeError
+                    errors.append(e)
+
+            threads = [threading.Thread(target=_run) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        assert errors == [], f"并发全量同步出现异常: {errors}"
+        # 缓存已清空
+        assert svc._cache_ghost is None
+        assert svc._cache_b_fp is None
+
+
+# ===========================================================================
+# P0 Step 3: R3 计数插桩 —— skip_unmapped / skip_invalid_path 守恒
+# ===========================================================================
+
+
+class TestPass1SilentSkipCounters:
+    """pass1 两处静默丢弃（mapping 无法解析 / build_b_path ValueError）必须入计数。
+
+    红线：谓词、分支顺序、决策逻辑零改动；仅计数旁挂，且新键必须
+    进入"索引阶段完成"汇总与完成日志，守恒等式在 tripwire 前成立。
+    """
+
+    def _setup(self, app, tmp_path, records):
+        for rec in records:
+            p = Path(rec.local_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(rec.webdav_path, encoding="utf-8")
+        app.db.get_all_a_records.return_value = records
+        app.db.get_all_ghost_protected_paths.return_value = set()
+        app.db.get_all_b_fingerprints.return_value = set()
+        b_root = tmp_path / "b"
+        b_root.mkdir(exist_ok=True)
+        return b_root
+
+    def test_pass1_unmapped_and_invalid_path_counted(self, tmp_path, caplog):
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        ok = a_root / "ok.strm"
+        outside = a_root / "outside.strm"
+        bad = a_root / "bad.strm"
+        records = [
+            _make_a_record(str(ok), "/m/ok.mp4", "/m"),
+            _make_a_record(str(outside), "/m/outside.mp4", "/m"),
+            _make_a_record(str(bad), "/m/bad.mp4", "/m"),
+        ]
+        b_root = self._setup(app, tmp_path, records)
+
+        def _map_side(local_path, *a, **k):
+            # outside.strm 落在任何 mapping 之外 → _get_mapping_for_a_fast None
+            if Path(local_path).name == "outside.strm":
+                return None
+            return ("test_m1", Path("/a_root"), Path("/b_root"))
+        app.get_mapping_for_a.side_effect = _map_side
+
+        def _build_side(local_path, webdav=None, **k):
+            # bad.strm 在 build_b_path_from_a 抛 ValueError
+            if Path(local_path).name == "bad.strm":
+                raise ValueError("not under root")
+            return b_root / f"{Path(local_path).stem}.strm"
+        app.build_b_path_from_a.side_effect = _build_side
+
+        svc = SyncService(app)
+        mock_conn = TestSyncServiceScanAToBFullSync._make_bulk_conn_mock(None, app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+
+        with patch.object(svc, "_sync_one_record", return_value="success") as mock_sync, \
+                caplog.at_level(logging.INFO):
+            svc.scan_a_to_b_full_sync(use_bulk=False)
+
+        # 只有 ok.strm 进入执行阶段
+        assert mock_sync.call_count == 1
+        done = [r for r in caplog.records
+                if "A -> B 全量同步完成" in str(r.msg)]
+        assert done, "缺少完成日志"
+        line = done[0].getMessage()
+        assert "未映射=1" in line
+        assert "路径无效=1" in line
+        assert "成功=1" in line
+        # 守恒：成功 + 跳过 + 失败 == 总待处理（3 条）
+        assert "守恒" not in "".join(r.getMessage() for r in caplog.records
+                                    if r.levelno >= logging.WARNING)
+
+    def test_pass1_skip_keys_in_index_phase_summary(self, tmp_path, caplog):
+        """新键计入 pass1 预跳过 → "索引阶段完成"条数口径自动修正。"""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        outside = a_root / "outside.strm"
+        records = [_make_a_record(str(outside), "/m/outside.mp4", "/m")]
+        self._setup(app, tmp_path, records)
+        app.get_mapping_for_a.return_value = None
+
+        svc = SyncService(app)
+        mock_conn = TestSyncServiceScanAToBFullSync._make_bulk_conn_mock(None, app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record") as mock_sync, \
+                caplog.at_level(logging.INFO):
+            svc.scan_a_to_b_full_sync(use_bulk=False)
+        mock_sync.assert_not_called()
+        idx = [r.getMessage() for r in caplog.records
+               if "索引阶段完成" in str(r.msg)]
+        assert idx
+        # 1 条总数 - 1 条预跳过 = 0 条索引
+        assert "0 条索引" in idx[0]
+        assert "预跳过=1" in idx[0]
+
+    def test_conservation_tripwire_warning_on_imbalance(self, tmp_path, caplog):
+        """守恒破坏时记 WARNING（不抛异常、不 fail-safe）。
+
+        构造计数不守恒场景：注入 _sync_one_record 返回未知键。
+        """
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        f = a_root / "f.strm"
+        records = [_make_a_record(str(f), "/m/f.mp4", "/m")]
+        self._setup(app, tmp_path, records)
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
+        b_root = tmp_path / "b"
+        app.build_b_path_from_a.return_value = b_root / "f.strm"
+
+        svc = SyncService(app)
+        mock_conn = TestSyncServiceScanAToBFullSync._make_bulk_conn_mock(None, app)
+        app.db.bulk_connection.return_value.__enter__ = Mock(return_value=mock_conn)
+        app.db.bulk_connection.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(svc, "_sync_one_record", return_value="bogus_status"), \
+                caplog.at_level(logging.INFO):
+            svc.scan_a_to_b_full_sync(use_bulk=False)
+        warns = [r.getMessage() for r in caplog.records
+                 if r.levelno >= logging.WARNING and "守恒" in str(r.msg)]
+        assert warns, "计数守恒破坏必须记录 WARNING"
 
 
 # ===========================================================================
@@ -188,6 +819,7 @@ class TestCopyARecordToBIfNeeded:
     def test_skip_when_fingerprint_exists_in_b(self, tmp_path):
         app = _make_app(tmp_path)
         app.db.is_ghost_protected.return_value = False
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
         app.db.b_fingerprint_exists.return_value = True
         svc = SyncService(app)
         result = svc.copy_a_record_to_b_if_needed("/a/f.strm", "/m/f.mp4", "/m")
@@ -196,11 +828,12 @@ class TestCopyARecordToBIfNeeded:
     def test_delegates_to_copy_a_record_to_b(self, tmp_path):
         app = _make_app(tmp_path)
         app.db.is_ghost_protected.return_value = False
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
         app.db.b_fingerprint_exists.return_value = False
         svc = SyncService(app)
         with patch.object(svc, "copy_a_record_to_b", return_value=True) as mock_copy:
             result = svc.copy_a_record_to_b_if_needed("/a/f.strm", "/m/f.mp4", "/m")
-        mock_copy.assert_called_once_with("/a/f.strm", "/m/f.mp4", "/m")
+        mock_copy.assert_called_once_with("/a/f.strm", "/m/f.mp4", "/m", mapping_id="test_m1")
         assert result is True
 
 
@@ -218,6 +851,7 @@ class TestCopyARecordToB:
         app.admin_api.check_exists.return_value = True
         app.db.upsert_b = Mock()
         app.db.upsert_identity = Mock()
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), "/mount/file.mp4", "/mount")
@@ -233,6 +867,7 @@ class TestCopyARecordToB:
         b_file = tmp_path / "b" / "file.strm"
         app.build_b_path_from_a.return_value = b_file
         app._verify_b_path_lineage.return_value = False
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), "/mount/file.mp4", "/mount")
@@ -255,6 +890,7 @@ class TestCopyARecordToB:
         app._verify_b_path_lineage.return_value = True
         app.db.upsert_b = Mock()
         app.db.upsert_identity = Mock()
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), webdav_path, "/mount")
@@ -276,6 +912,7 @@ class TestCopyARecordToB:
         app.admin_api.check_exists.return_value = False
         app.db.delete_a_by_local = Mock()
         app.db.set_ghost_protection = Mock()
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), webdav_path, "/mount")
@@ -297,6 +934,7 @@ class TestCopyARecordToB:
         app.build_b_path_from_a.return_value = b_file
         app._verify_b_path_lineage.return_value = True
         app.admin_api.check_exists.return_value = True
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         with patch("shutil.copyfile", side_effect=OSError("disk full")):
@@ -318,6 +956,7 @@ class TestCopyARecordToB:
         app._verify_b_path_lineage.return_value = True
         app.admin_api.check_exists.return_value = True
         app.db.upsert_b.side_effect = Exception("db failure")
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), webdav_path, "/mount")
@@ -341,6 +980,7 @@ class TestCopyARecordToB:
         app.build_b_path_from_a.return_value = b_file
         app._verify_b_path_lineage.return_value = True
         app.admin_api.check_exists.return_value = True
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), webdav_path, "/mount")
@@ -354,8 +994,954 @@ class TestCopyARecordToB:
         a_file = a_root / "file.strm"
         a_file.write_text("/mount/file.mp4", encoding="utf-8")
         app.build_b_path_from_a.side_effect = ValueError("not under any root")
+        app.get_mapping_for_a.return_value = ("test_m1", Path("/a_root"), Path("/b_root"))
 
         svc = SyncService(app)
         result = svc.copy_a_record_to_b(str(a_file), "/mount/file.mp4", "/mount")
 
         assert result is False
+
+
+# ===========================================================================
+# TestSyncServiceSyncOneRecord
+# ===========================================================================
+
+
+class TestSyncServiceSyncOneRecord:
+    """Tests for _sync_one_record() helper method."""
+
+    def test_sync_one_record_skip_missing(self, tmp_path):
+        """Skip when source file does not exist."""
+        app = _make_app(tmp_path)
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        rec = _make_a_record("/nonexistent/file.strm", "/m/f.mp4", "/m")
+        conn = Mock()
+        result = svc._sync_one_record(rec, None, conn)
+
+        assert result == "skip_missing"
+
+    def test_sync_one_record_skip_filtered(self, tmp_path):
+        """Skip when path is not in valid_engine_paths."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/other/file.mp4", encoding="utf-8")
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        rec = _make_a_record(str(a_file), "/other/file.mp4", "/other")
+        conn = Mock()
+        result = svc._sync_one_record(rec, ["/engine"], conn)
+
+        assert result == "skip_filtered"
+
+    def test_sync_one_record_skip_ghost(self, tmp_path):
+        """Skip when path is ghost protected."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/m/file.mp4", encoding="utf-8")
+
+        svc = SyncService(app)
+        svc._cache_ghost = {"/m/file.mp4"}
+        svc._cache_b_fp = set()
+
+        rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
+        conn = Mock()
+        result = svc._sync_one_record(rec, None, conn)
+
+        assert result == "skip_ghost"
+
+    def test_sync_one_record_skip_fingerprint(self, tmp_path):
+        """Skip when fingerprint already exists in B."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/m/file.mp4", encoding="utf-8")
+        app.get_mapping_for_a.return_value = ("test_m1", a_root, tmp_path / "b")
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        # Pre-populate with a known (mapping_id, fingerprint) compound key
+        from utils import make_strm_fingerprint
+        fp = make_strm_fingerprint("/m/file.mp4")
+        svc._cache_b_fp = {("test_m1", fp)}
+
+        rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
+        conn = Mock()
+        result = svc._sync_one_record(rec, None, conn, mapping_id="test_m1")
+
+        assert result == "skip_fp"
+
+    def _make_db_conn_mock(self):
+        """Create a mock sqlite3 connection with proper cursor behavior."""
+        mock_conn = Mock()
+        mock_cursor = Mock()
+        mock_cursor.fetchone.return_value = None
+        mock_conn.execute.return_value = mock_cursor
+        return mock_conn
+
+    def test_sync_one_record_success_new_file(self, tmp_path):
+        """Copy and write new file to B zone."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/m/file.mp4", encoding="utf-8")
+
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        app.build_b_path_from_a.return_value = b_root / "file.strm"
+        app.get_mapping_for_a.return_value = ("test_m1", a_root, b_root)
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        conn = self._make_db_conn_mock()
+        rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
+        result = svc._sync_one_record(rec, None, conn, mapping_id="test_m1")
+
+        assert result == "success"
+        assert (b_root / "file.strm").exists()
+        # _cache_b_fp should contain the computed fingerprint
+        from utils import make_strm_fingerprint
+        fp = make_strm_fingerprint("/m/file.mp4")
+        assert ("test_m1", fp) in svc._cache_b_fp
+        # DB upserts should have been called on conn
+        assert conn.execute.call_count > 0
+
+    def test_sync_one_record_success_existing_b(self, tmp_path):
+        """B file already exists with same content - just update DB."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        webdav = "/m/file.mp4"
+        a_file = a_root / "file.strm"
+        a_file.write_text(webdav, encoding="utf-8")
+
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+        b_file = b_root / "file.strm"
+        b_file.write_text(webdav, encoding="utf-8")
+        app.build_b_path_from_a.return_value = b_file
+        app.get_mapping_for_a.return_value = ("test_m1", a_root, b_root)
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        conn = self._make_db_conn_mock()
+
+        rec = _make_a_record(str(a_file), webdav, "/m")
+        result = svc._sync_one_record(rec, None, conn, mapping_id="test_m1")
+
+        assert result == "success"
+        # The computed fingerprint should be in cache
+        from utils import make_strm_fingerprint
+        fp = make_strm_fingerprint(webdav)
+        assert ("test_m1", fp) in svc._cache_b_fp
+        # No new file copy should have happened
+        conn.execute.assert_called()
+
+    def test_sync_one_record_fail_build_b_path(self, tmp_path):
+        """Fail when build_b_path_from_a raises ValueError."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/m/file.mp4", encoding="utf-8")
+        app.build_b_path_from_a.side_effect = ValueError("not under root")
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        conn = Mock()
+        rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
+        result = svc._sync_one_record(rec, None, conn)
+
+        assert result == "fail"
+
+    def test_sync_one_record_fail_copy_error(self, tmp_path):
+        """Fail when file copy fails."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/m/file.mp4", encoding="utf-8")
+
+        b_root = tmp_path / "b"
+        app.build_b_path_from_a.return_value = b_root / "file.strm"
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        conn = Mock()
+        rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
+
+        with patch("shutil.copyfile", side_effect=OSError("disk full")):
+            result = svc._sync_one_record(rec, None, conn)
+
+        assert result == "fail"
+
+    def test_sync_one_record_fail_db_error_rolls_back_file(self, tmp_path):
+        """DB error after copy should delete copied file."""
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        a_file = a_root / "file.strm"
+        a_file.write_text("/m/file.mp4", encoding="utf-8")
+
+        b_root = tmp_path / "b"
+        b_file = b_root / "file.strm"
+        app.build_b_path_from_a.return_value = b_file
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        conn = Mock()
+        # First execute for get_all_ghost_protected is not called here
+        # but we need to simulate _bulk_upsert_b failing
+        conn.execute.side_effect = [None, None, None, Exception("db error")]
+
+        rec = _make_a_record(str(a_file), "/m/file.mp4", "/m")
+        result = svc._sync_one_record(rec, None, conn)
+
+        assert result == "fail"
+        assert not b_file.exists()
+
+    def test_sync_one_record_failure_preserves_prior_batch_rows(self, tmp_path):
+        """T2: 单条失败只回滚本记录，不抹掉同批已成功写入的行。
+
+        旧实现：except 分支执行连接级 conn.rollback()，在 use_bulk=True 单事务
+        模式下会抹掉同批所有已落盘 B 区且已计 success 的行，形成
+        "代次已推进 + DB 行缺失 + 磁盘有文件"三方不一致。
+        """
+        from database import Database
+        db = Database(str(tmp_path / "sync_t2.db"))
+
+        app = _make_app(tmp_path)
+        a_root = app.a_roots[0]
+        b_root = tmp_path / "b"
+        b_root.mkdir()
+
+        a1 = a_root / "one.strm"
+        a1.write_text("/m/one.mp4", encoding="utf-8")
+        a2 = a_root / "two.strm"
+        a2.write_text("/m/two.mp4", encoding="utf-8")
+
+        b1 = b_root / "one.strm"
+        b2 = b_root / "two.strm"
+        app.build_b_path_from_a.side_effect = [b1, b2]
+        app.get_mapping_for_a.return_value = ("m1", a_root, b_root)
+
+        svc = SyncService(app)
+        svc._cache_ghost = set()
+        svc._cache_b_fp = set()
+
+        with db.bulk_connection() as conn:
+            # 第 1 条：正常成功（SAVEPOINT 已 RELEASE，写入保留在事务中）
+            r1 = svc._sync_one_record(
+                _make_a_record(str(a1), "/m/one.mp4", "/m"), None, conn, mapping_id="m1")
+            assert r1 == "success"
+
+            # 第 2 条：注入 _bulk_upsert_b 抛异常，触发 ROLLBACK TO sp_rec
+            with patch.object(svc, "_bulk_upsert_b", side_effect=RuntimeError("db error")):
+                r2 = svc._sync_one_record(
+                    _make_a_record(str(a2), "/m/two.mp4", "/m"), None, conn, mapping_id="m1")
+                assert r2 == "fail"
+
+        # bulk_connection 正常退出后统一 commit：第 1 条必须仍在，第 2 条不得残留
+        with db.connection() as conn:
+            rows = conn.execute("SELECT local_path FROM b_strm_files").fetchall()
+        paths = {r[0] for r in rows}
+        assert str(b1) in paths, "第 1 条成功行不应被第 2 条失败回滚"
+        assert str(b2) not in paths, "第 2 条失败行不应残留"
+
+
+# ===========================================================================
+# TestSyncServiceBulkUpsertHelpers
+# ===========================================================================
+
+
+class TestSyncServiceBulkUpsertHelpers:
+    """Tests for _bulk_upsert_b and _bulk_upsert_identity helper methods."""
+
+    def test_bulk_upsert_b_inserts_new_record(self, tmp_path):
+        """Insert a new B record with FTS."""
+        app = _make_app(tmp_path)
+        svc = SyncService(app)
+
+        conn = Mock()
+        # No existing record
+        conn.execute.return_value.fetchone.side_effect = [None, (1,)]
+
+        svc._bulk_upsert_b(
+            conn,
+            local_path="/b/file.strm",
+            webdav_path="/m/file.mp4",
+            parent_webdav_path="/m",
+            source_a_path="/a/file.strm",
+            fingerprint="abc123",
+            mapping_id="test_m1",
+        )
+
+        # Should have: 1 SELECT old row (None), 1 INSERT base,
+        # 1 SELECT new rowid, 1 INSERT FTS
+        calls = conn.execute.call_args_list
+        assert len(calls) >= 3
+        # First call should be SELECT to check for existing row
+        assert "SELECT" in calls[0][0][0] and "b_strm_files" in calls[0][0][0]
+        # Should insert FTS for new record
+        fts_insert_calls = [c for c in calls if "INSERT INTO b_strm_files_fts" in c[0][0]]
+        assert len(fts_insert_calls) >= 1, "Should insert FTS for new record"
+
+    def test_bulk_upsert_b_replaces_existing_record(self, tmp_path):
+        """Update an existing B record when fields change and update FTS."""
+        app = _make_app(tmp_path)
+        svc = SyncService(app)
+
+        conn = Mock()
+        # Existing record with old webdav_path (will trigger change detection)
+        conn.execute.return_value.fetchone.side_effect = [
+            (42, "/m/old.mp4", "/m", "/a/file.strm", "abc123", "test_m1"),  # old row
+            (42,),  # rowid after UPDATE (same rowid, no change)
+        ]
+
+        svc._bulk_upsert_b(
+            conn,
+            local_path="/b/file.strm",
+            webdav_path="/m/file.mp4",  # Changed from /m/old.mp4
+            parent_webdav_path="/m",
+            source_a_path="/a/file.strm",
+            fingerprint="abc123",
+            mapping_id="test_m1",
+        )
+
+        calls = conn.execute.call_args_list
+        # Should delete old FTS row and insert new one (webdav_path changed)
+        delete_calls = [c for c in calls if "DELETE FROM b_strm_files_fts" in c[0][0]]
+        insert_calls = [c for c in calls if "INSERT INTO b_strm_files_fts" in c[0][0]]
+        assert len(delete_calls) >= 1, "Should delete old FTS row when webdav_path changes"
+        assert len(insert_calls) >= 1, "Should insert new FTS row when webdav_path changes"
+
+    def test_bulk_upsert_identity(self, tmp_path):
+        """Insert identity record via bulk helper."""
+        app = _make_app(tmp_path)
+        svc = SyncService(app)
+
+        conn = Mock()
+
+        svc._bulk_upsert_identity(
+            conn,
+            fingerprint="abc123",
+            webdav_path="/m/file.mp4",
+            source_a_path="/a/file.strm",
+            current_b_path="/b/file.strm",
+        )
+
+        conn.execute.assert_called_once()
+        call_args = conn.execute.call_args[0]
+        assert "INSERT OR REPLACE INTO strm_identity" in call_args[0]
+        # Verify parameters include fingerprint, webdav_path, etc.
+        params = call_args[1]
+        assert params[0] == "abc123"
+        assert params[1] == "/m/file.mp4"
+        assert params[2] == "/a/file.strm"
+        assert params[3] == "/b/file.strm"
+
+
+# ===========================================================================
+# TestBulkUpsertTimestampSemantics
+# 时间语义测试：_upsert_a_batch_bulk 与 _bulk_upsert_b（真实 Database）
+# ===========================================================================
+
+
+class TestBulkUpsertTimestampSemantics:
+    """验证 bulk 路径的两个 upsert 实现只在业务字段变化时更新 updated_at，
+    并保留 _bulk_upsert_b 的既有 status（不 SET status）。"""
+
+    @staticmethod
+    def _new_db() -> Database:
+        tmpdir = tempfile.TemporaryDirectory()
+        db = Database(str(Path(tmpdir.name) / "test.db"))
+        return db, tmpdir  # 调用方持有 tmpdir 防止清理
+
+    @staticmethod
+    def _query_a_updated_at(db: Database, local_path: str):
+        with db.read_connection() as conn:
+            return conn.execute(
+                "SELECT webdav_path, parent_webdav_path, updated_at FROM a_strm_files WHERE local_path = ?",
+                (local_path,),
+            ).fetchone()
+
+    @staticmethod
+    def _query_b(db: Database, local_path: str):
+        with db.read_connection() as conn:
+            return conn.execute(
+                "SELECT webdav_path, parent_webdav_path, source_a_path, fingerprint, "
+                "status, updated_at, mapping_id FROM b_strm_files WHERE local_path = ?",
+                (local_path,),
+            ).fetchone()
+
+    @staticmethod
+    def _sleep():
+        time.sleep(0.005)
+
+    # === _upsert_a_batch_bulk ===
+
+    def test_upsert_a_batch_bulk_unchanged_keeps_updated_at(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                svc._upsert_a_batch_bulk(conn, [("/a/1.strm", "/m/1.mp4", "/m")])
+            first = self._query_a_updated_at(db, "/a/1.strm")
+            assert first is not None
+            self._sleep()
+            with db.bulk_connection() as conn:
+                svc._upsert_a_batch_bulk(conn, [("/a/1.strm", "/m/1.mp4", "/m")])
+            second = self._query_a_updated_at(db, "/a/1.strm")
+            assert second[2] == first[2], "无变化时应保留 updated_at"
+        finally:
+            tmpdir.cleanup()
+
+    def test_upsert_a_batch_bulk_changed_updates_updated_at(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                svc._upsert_a_batch_bulk(conn, [("/a/1.strm", "/m/1.mp4", "/m")])
+            first = self._query_a_updated_at(db, "/a/1.strm")
+            self._sleep()
+            with db.bulk_connection() as conn:
+                svc._upsert_a_batch_bulk(conn, [("/a/1.strm", "/m/1b.mp4", "/m")])
+            second = self._query_a_updated_at(db, "/a/1.strm")
+            assert second[2] > first[2], "webdav_path 变化时应更新 updated_at"
+            assert second[0] == "/m/1b.mp4"
+        finally:
+            tmpdir.cleanup()
+
+    def test_upsert_a_batch_bulk_returns_processed_count(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                n = svc._upsert_a_batch_bulk(conn, [("/a/1.strm", "/m/1.mp4", "/m"),
+                                                     ("/a/2.strm", "/m/2.mp4", "/m")])
+            assert n == 2
+            self._sleep()
+            with db.bulk_connection() as conn:
+                n2 = svc._upsert_a_batch_bulk(conn, [("/a/1.strm", "/m/1.mp4", "/m"),
+                                                      ("/a/2.strm", "/m/2.mp4", "/m")])
+            assert n2 == 2, "返回值不得改为变化条数"
+        finally:
+            tmpdir.cleanup()
+
+    def test_upsert_a_batch_bulk_empty_returns_zero(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                n = svc._upsert_a_batch_bulk(conn, [])
+            assert n == 0
+        finally:
+            tmpdir.cleanup()
+
+    # === _bulk_upsert_b ===
+
+    def test_bulk_upsert_b_unchanged_keeps_updated_at(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            first = self._query_b(db, "/b/1.strm")
+            assert first is not None
+            assert first[4] == "valid"
+            self._sleep()
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            second = self._query_b(db, "/b/1.strm")
+            assert second[5] == first[5], "无变化时应保留 updated_at"
+        finally:
+            tmpdir.cleanup()
+
+    def test_bulk_upsert_b_changed_updates_updated_at(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            first = self._query_b(db, "/b/1.strm")
+            self._sleep()
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1b.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            second = self._query_b(db, "/b/1.strm")
+            assert second[5] > first[5], "业务字段变化时应更新 updated_at"
+        finally:
+            tmpdir.cleanup()
+
+    def test_bulk_upsert_b_preserves_duplicate_status(self):
+        """命中既有 duplicate 行时 status 不被改回 valid（ON CONFLICT 不 SET status）。"""
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            # 先用 upsert_b 写入一条 duplicate 记录
+            db.upsert_b("/b/1.strm", "/m/1.mp4", "/m", "/a/1.strm", "m1", "fp1", "duplicate")
+            assert self._query_b(db, "/b/1.strm")[4] == "duplicate"
+            # _bulk_upsert_b 用相同业务字段再次写入（A→B 同步路径）
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            row = self._query_b(db, "/b/1.strm")
+            # status 必须仍为 duplicate，不得被改回 valid
+            assert row[4] == "duplicate", "_bulk_upsert_b 不得把既有 duplicate 改回 valid"
+        finally:
+            tmpdir.cleanup()
+
+    def test_bulk_upsert_b_preserves_quarantined_status(self):
+        """命中既有 quarantined 行时 status 不被改回 valid。"""
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            db.upsert_b("/b/2.strm", "/m/2.mp4", "/m", "/a/2.strm", "m1", "fp2", "quarantined")
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/2.strm", "/m/2.mp4", "/m",
+                                   "/a/2.strm", "fp2", "m1")
+            row = self._query_b(db, "/b/2.strm")
+            assert row[4] == "quarantined", "_bulk_upsert_b 不得把既有 quarantined 改回 valid"
+        finally:
+            tmpdir.cleanup()
+
+    def test_bulk_upsert_b_mapping_id_required(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                with pytest.raises(ValueError):
+                    svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                       "/a/1.strm", "fp1", "")
+        finally:
+            tmpdir.cleanup()
+
+    def test_bulk_upsert_b_no_duplicate_fts(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            self._sleep()
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/1.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            with db.read_connection() as conn:
+                main = conn.execute("SELECT COUNT(*) FROM b_strm_files").fetchone()[0]
+                fts = conn.execute("SELECT COUNT(*) FROM b_strm_files_fts").fetchone()[0]
+            assert main == 1 and fts == 1
+        finally:
+            tmpdir.cleanup()
+
+    def test_bulk_upsert_b_webdav_change_fts_swaps(self):
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/old.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            self._sleep()
+            with db.bulk_connection() as conn:
+                svc._bulk_upsert_b(conn, "/b/1.strm", "/m/new.mp4", "/m",
+                                   "/a/1.strm", "fp1", "m1")
+            with db.read_connection() as conn:
+                row = conn.execute("SELECT rowid FROM b_strm_files WHERE local_path = ?", ("/b/1.strm",)).fetchone()
+                rid = row[0]
+                new_hit = conn.execute(
+                    "SELECT rowid FROM b_strm_files_fts WHERE rowid = ? AND webdav_path MATCH 'new'",
+                    (rid,),
+                ).fetchone()
+                old_hit = conn.execute(
+                    "SELECT rowid FROM b_strm_files_fts WHERE rowid = ? AND webdav_path MATCH 'old'",
+                    (rid,),
+                ).fetchone()
+            assert new_hit is not None and old_hit is None
+        finally:
+            tmpdir.cleanup()
+
+
+# ===========================================================================
+# TestBulkUpsertOver900Records
+# _upsert_a_batch_bulk 的 >900 条 SQL 变量上限切片回归（Task B）
+# ===========================================================================
+
+
+class TestBulkUpsertOver900Records:
+    """验证 _upsert_a_batch_bulk 传入 >900 条记录不触发 SQL 变量上限崩溃。"""
+
+    @staticmethod
+    def _new_db() -> Database:
+        tmpdir = tempfile.TemporaryDirectory()
+        db = Database(str(Path(tmpdir.name) / "test.db"))
+        return db, tmpdir
+
+    def test_upsert_a_batch_bulk_over_900_records(self):
+        """1000 条记录经 _upsert_a_batch_bulk 写入不抛异常，返回计数正确。"""
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            records = [
+                (f"/a/bulk_{i:04d}.strm", f"/m/file_{i:04d}.mp4", "/m")
+                for i in range(1000)
+            ]
+            with db.bulk_connection() as conn:
+                n = svc._upsert_a_batch_bulk(conn, records)
+            assert n == 1000, f"返回值应为 1000，实际 {n}"
+
+            with db.read_connection() as conn:
+                count = conn.execute("SELECT COUNT(*) FROM a_strm_files").fetchone()[0]
+            assert count == 1000
+
+            # 第二次重复扫描（全部无变化）不抛异常
+            with db.bulk_connection() as conn:
+                n2 = svc._upsert_a_batch_bulk(conn, records)
+            assert n2 == 1000
+            with db.read_connection() as conn:
+                count2 = conn.execute("SELECT COUNT(*) FROM a_strm_files").fetchone()[0]
+            assert count2 == 1000  # 未新增
+        finally:
+            tmpdir.cleanup()
+
+    def test_upsert_a_batch_bulk_1500_records_merges_existing_map(self):
+        """1500 条（跨越 2 个 900 切片）预读合并 existing_map 正确。"""
+        db, tmpdir = self._new_db()
+        try:
+            svc = SyncService(_make_app(Path(tmpdir.name)))
+            # 先插入 500 条
+            first = [
+                (f"/a/bm_{i:04d}.strm", f"/m/old_{i:04d}.mp4", "/m")
+                for i in range(500)
+            ]
+            with db.bulk_connection() as conn:
+                svc._upsert_a_batch_bulk(conn, first)
+
+            # 再插入 1500 条：前 500 更新，后 1000 新增
+            second = [
+                (f"/a/bm_{i:04d}.strm", f"/m/new_{i:04d}.mp4", "/m")
+                if i < 500 else
+                (f"/a/bn_{i:04d}.strm", f"/m/new_{i:04d}.mp4", "/m")
+                for i in range(1500)
+            ]
+            with db.bulk_connection() as conn:
+                n2 = svc._upsert_a_batch_bulk(conn, second)
+            assert n2 == 1500
+
+            with db.read_connection() as conn:
+                count = conn.execute("SELECT COUNT(*) FROM a_strm_files").fetchone()[0]
+                row = conn.execute(
+                    "SELECT webdav_path FROM a_strm_files WHERE local_path = ?",
+                    ("/a/bm_0000.strm",),
+                ).fetchone()
+            assert count == 1500
+            assert row[0] == "/m/new_0000.mp4", "前 500 条应被更新为新 webdav_path"
+        finally:
+            tmpdir.cleanup()
+
+
+# ===========================================================================
+# T1: _flush_dedup_queue 双分支（启动模式批量 / refresh 模式逐条）
+# ===========================================================================
+
+
+class TestFlushDedupQueueBranches:
+    """_flush_dedup_queue 分支行为（真实 DB/AppService/SyncService 沙盒）。
+
+    - use_bulk=True 且 watchers 未启动（启动模式，双条件门控）→ 会话批量路径；
+    - use_bulk=False（refresh 模式）→ 现行逐条 ensure（不创建会话）。
+    """
+
+    def setup_method(self):
+        import shutil as _shutil
+        import app_service_core as _asc
+        self._asc = _asc
+        self._shutil = _shutil
+        self.tmp = Path(tempfile.mkdtemp(prefix="flush_dedup_"))
+        self.a_dir = self.tmp / "a"
+        self.b_dir = self.tmp / "b"
+        self.c_dir = self.tmp / "c"
+        for d in (self.a_dir, self.b_dir, self.c_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        self.db = Database(str(self.tmp / "bridge.db"))
+        from config import AppConfig as _AppConfig
+        from unittest.mock import Mock as _Mock
+        config = _Mock(spec=_AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [
+            ABMapping(mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
+        config.paths = _Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.behavior = _Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.strm_engine_paths = []
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SubtitleHandler"):
+            # 不 patch SyncService——_flush_dedup_queue 是其真实闭包
+            self.app = _asc.AppService(config, self.db, _Mock())
+        self.svc = self.app.sync_service
+
+    def teardown_method(self):
+        self._shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _seed(self):
+        """A 源 + 同指纹双实例 B 文件（均入库 valid）+ 固定目标路径。"""
+        from utils import make_strm_fingerprint as _fp_of
+        webdav = "/mount/show/ep.mp4"
+        fp = _fp_of(webdav)
+        a_file = self.a_dir / "ep.strm"
+        a_file.write_text(webdav, encoding="utf-8")
+        self.db.upsert_a(str(a_file), webdav, "/mount/show")
+        target = self.b_dir / "show" / "Season 01" / "ep.strm"
+        dup = self.b_dir / "show" / "Season 01" / "ep (1).strm"
+        for p in (target, dup):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(webdav, encoding="utf-8")
+            self.db.upsert_b(
+                str(p), webdav, "/mount/show", None,
+                fingerprint=fp, status="valid", mapping_id="test_m1")
+        return webdav, fp, target, dup
+
+    def _run_sync(self, use_bulk: bool, target):
+        """以固定目标路径跑全量同步（绕开 build_b_path_from_a 的重命名推导）。"""
+        with patch.object(
+                self.app, "build_b_path_from_a",
+                side_effect=lambda a, w, **kw: target), \
+             patch.object(self.db, "get_all_b_fingerprints",
+                          return_value=set()), \
+             patch.object(self.db, "get_all_ghost_protected_paths",
+                          return_value=set()):
+            self.svc.scan_a_to_b_full_sync(use_bulk=use_bulk)
+
+    def test_startup_mode_uses_batch_path(self):
+        """use_bulk=True 且 watchers 未启动 → 会话批量路径（run_group 生效）。"""
+        from utils import make_strm_fingerprint as _fp_of
+        webdav, fp, target, dup = self._seed()
+        assert self.app._watchers_live() is False
+        with patch.object(
+                self.app, "_quarantine_duplicate_groups_batch",
+                wraps=self.app._quarantine_duplicate_groups_batch) as mock_batch:
+            self._run_sync(use_bulk=True, target=target)
+        mock_batch.assert_called_once()
+        dup_files = list(self.b_dir.rglob("*.duplicate"))
+        assert len(dup_files) == 1
+        rows = {
+            r.local_path: r.status
+            for r in self.db.get_all_b_by_fingerprint(fp, "test_m1")}
+        assert len([p for p in rows if p.endswith(".duplicate")]) == 1
+
+    def test_refresh_mode_uses_per_item_path(self):
+        """use_bulk=False（refresh 模式）→ 现行逐条 ensure（不创建会话）。"""
+        webdav, fp, target, dup = self._seed()
+        with patch.object(self.db, "quarantine_session") as mock_session, \
+             patch.object(
+                 self.app, "ensure_single_visible_instance",
+                 wraps=self.app.ensure_single_visible_instance) as mock_ensure:
+            self._run_sync(use_bulk=False, target=target)
+        mock_session.assert_not_called()
+        mock_ensure.assert_called_once()
+        dup_files = list(self.b_dir.rglob("*.duplicate"))
+        assert len(dup_files) == 1
+
+    def test_startup_mode_falls_back_when_watchers_live(self):
+        """use_bulk=True 但 watchers 活跃 → 防御性回退逐条（双条件门控）。"""
+        webdav, fp, target, dup = self._seed()
+        self.app.observer = Mock()
+        self.app.observer.is_alive.return_value = True
+        with patch.object(self.db, "quarantine_session") as mock_session, \
+             patch.object(
+                 self.app, "ensure_single_visible_instance",
+                 wraps=self.app.ensure_single_visible_instance) as mock_ensure:
+            self._run_sync(use_bulk=True, target=target)
+        mock_session.assert_not_called()
+        mock_ensure.assert_called_once()
+        assert len(list(self.b_dir.rglob("*.duplicate"))) == 1
+
+
+# ===========================================================================
+# T3: pass2 分块并行拷贝——差分等价与失败注入（真实 DB）
+# ===========================================================================
+
+
+class TestPass2ParallelCopyRealDb:
+    """T3：use_bulk=True 分块并行拷贝与 use_bulk=False 串行路径差分等价。"""
+
+    def setup_method(self):
+        import shutil as _shutil
+        import app_service_core as _asc
+        from config import AppConfig as _AppConfig
+        from unittest.mock import Mock as _Mock
+        self._shutil = _shutil
+        self.tmp = Path(tempfile.mkdtemp(prefix="pass2_copy_"))
+        self.a_dir = self.tmp / "a"
+        self.b_dir = self.tmp / "b"
+        self.c_dir = self.tmp / "c"
+        for d in (self.a_dir, self.b_dir, self.c_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        self.db = Database(str(self.tmp / "bridge.db"))
+        config = _Mock(spec=_AppConfig)
+        config.a_folders = [str(self.a_dir)]
+        config.a_b_mappings = [
+            ABMapping(mapping_id="test_m1", a_root=str(self.a_dir), b_root=str(self.b_dir))]
+        config.paths = _Mock()
+        config.paths.b_root = str(self.b_dir)
+        config.paths.c_root = str(self.c_dir)
+        config.behavior = _Mock()
+        config.behavior.ghost_protect_seconds = 300
+        config.strm_engine_paths = []
+        with patch("app_service_core.RefreshService"), \
+             patch("app_service_core.SubtitleHandler"):
+            self.app = _asc.AppService(config, self.db, _Mock())
+        self.svc = self.app.sync_service
+
+    def teardown_method(self):
+        self._shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _seed_a_records(self, count: int):
+        """播种 count 条 A 记录 + 真实 A 文件（B 为空 → 全部 needs_copy=True）。"""
+        records = []
+        for i in range(count):
+            webdav = f"/mount/show/ep{i:03d}.mp4"
+            a_file = self.a_dir / f"ep{i:03d}.strm"
+            a_file.write_text(webdav, encoding="utf-8")
+            self.db.upsert_a(str(a_file), webdav, "/mount/show")
+            records.append(_make_a_record(str(a_file), webdav, "/mount/show"))
+        return records
+
+    def _run(self, use_bulk: bool, targets: dict):
+        """以注入的目标路径表跑全量同步（绕开 build_b_path_from_a 推导）。"""
+        with patch.object(
+                self.app, "build_b_path_from_a",
+                side_effect=lambda a, w, **kw: targets[w]), \
+             patch.object(self.db, "get_all_b_fingerprints",
+                          return_value=set()), \
+             patch.object(self.db, "get_all_ghost_protected_paths",
+                          return_value=set()), \
+             patch.object(self.db, "get_all_a_records",
+                          return_value=self._records):
+            self.svc.scan_a_to_b_full_sync(use_bulk=use_bulk)
+
+    def _terminal_state(self):
+        files = sorted(
+            (p.name, p.read_text(encoding="utf-8"))
+            for p in self.b_dir.rglob("*.strm"))
+        rows = sorted(
+            (Path(r.local_path).name, r.webdav_path, r.status, r.mapping_id)
+            for r in self.db.get_all_b_records())
+        return files, rows
+
+    def test_parallel_copy_differential_equivalence(self):
+        """同 fixture：use_bulk=True 并行拷贝与 use_bulk=False 串行终态一致。"""
+        self._records = self._seed_a_records(12)
+        targets = {
+            rec.webdav_path: self.b_dir / f"target{i:03d}.strm"
+            for i, rec in enumerate(self._records)}
+
+        # 沙盒 A：use_bulk=True（分块并行拷贝）
+        self._run(use_bulk=True, targets=targets)
+        files_parallel, rows_parallel = self._terminal_state()
+
+        # 沙盒 B：use_bulk=False（串行逐条）——重建同构状态
+        import shutil
+        for p in self.b_dir.rglob("*.strm"):
+            p.unlink()
+        with self.db.rw_lock.write_locked(), self.db.connection() as conn:
+            conn.execute("DELETE FROM b_strm_files")
+            conn.execute("DELETE FROM b_strm_files_fts")
+            conn.execute("DELETE FROM strm_identity")
+            conn.commit()
+        self._records = self._seed_a_records(12)  # 重新播种（upsert_a 幂等）
+        self._run(use_bulk=False, targets=targets)
+        files_serial, rows_serial = self._terminal_state()
+
+        assert files_parallel == files_serial
+        assert rows_parallel == rows_serial
+        assert len(files_parallel) == 12
+        with self.db.read_connection() as conn:
+            fts = conn.execute("SELECT count(*) FROM b_strm_files_fts").fetchone()[0]
+            main = conn.execute("SELECT count(*) FROM b_strm_files").fetchone()[0]
+        assert fts == main
+
+    def test_single_copy_failure_keeps_partial_and_continues(self):
+        """单条拷贝失败注入：半拷贝残留保留（现行 C4 语义）、同 chunk 其余成功、count fail。"""
+        self._records = self._seed_a_records(5)
+        targets = {
+            rec.webdav_path: self.b_dir / f"target{i:03d}.strm"
+            for i, rec in enumerate(self._records)}
+        victim = targets[self._records[2].webdav_path]
+        real_copyfile = shutil.copyfile
+
+        def flaky_copyfile(src, dst, *args, **kwargs):
+            if Path(dst) == victim:
+                # 模拟半拷贝后失败（现行语义：不清理、仅记日志）
+                Path(dst).parent.mkdir(parents=True, exist_ok=True)
+                Path(dst).write_text("partial", encoding="utf-8")
+                raise OSError("simulated disk full")
+            return real_copyfile(src, dst, *args, **kwargs)
+
+        counters = {}
+        with patch.object(
+                self.app, "build_b_path_from_a",
+                side_effect=lambda a, w, **kw: targets[w]), \
+             patch.object(self.db, "get_all_b_fingerprints", return_value=set()), \
+             patch.object(self.db, "get_all_ghost_protected_paths", return_value=set()), \
+             patch.object(self.db, "get_all_a_records", return_value=self._records), \
+             patch("domain.sync.sync_service.shutil.copyfile", flaky_copyfile):
+            self.svc.scan_a_to_b_full_sync(use_bulk=True)
+
+        # 半拷贝残留保留（不清理）
+        assert victim.exists() and victim.read_text(encoding="utf-8") == "partial"
+        # 其余 4 条成功（拷贝 + 入库）
+        rows = {Path(r.local_path).name: r for r in self.db.get_all_b_records()}
+        assert len(rows) == 4
+        assert victim.name not in rows
+
+    def test_single_db_write_failure_rolls_back_and_continues(self):
+        """单条 DB 写失败注入（_commit_sync_one）：SAVEPOINT 回滚 + unlink + 同批其余成功。"""
+        self._records = self._seed_a_records(4)
+        targets = {
+            rec.webdav_path: self.b_dir / f"target{i:03d}.strm"
+            for i, rec in enumerate(self._records)}
+        victim = targets[self._records[1].webdav_path]
+        real_upsert = self.svc._bulk_upsert_b
+
+        def flaky_upsert_b(conn, local_path, *args, **kwargs):
+            if local_path == str(victim):
+                raise sqlite3.Error("simulated db failure")
+            return real_upsert(conn, local_path, *args, **kwargs)
+
+        with patch.object(
+                self.app, "build_b_path_from_a",
+                side_effect=lambda a, w, **kw: targets[w]), \
+             patch.object(self.db, "get_all_b_fingerprints", return_value=set()), \
+             patch.object(self.db, "get_all_ghost_protected_paths", return_value=set()), \
+             patch.object(self.db, "get_all_a_records", return_value=self._records), \
+             patch.object(self.svc, "_bulk_upsert_b", flaky_upsert_b):
+            self.svc.scan_a_to_b_full_sync(use_bulk=True)
+
+        # 失败项：拷贝文件被 unlink 回滚、无 DB 行
+        assert not victim.exists()
+        rows = {Path(r.local_path).name for r in self.db.get_all_b_records()}
+        assert victim.name not in rows
+        # 其余 3 条成功
+        assert len(rows) == 3
+        with self.db.read_connection() as conn:
+            fts = conn.execute("SELECT count(*) FROM b_strm_files_fts").fetchone()[0]
+            main = conn.execute("SELECT count(*) FROM b_strm_files").fetchone()[0]
+        assert fts == main

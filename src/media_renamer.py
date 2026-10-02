@@ -15,36 +15,29 @@ SUBTITLE_EXTS = {".ass", ".ssa", ".srt"}
 
 SEASON_EPISODE_PATTERNS = [
     # S01E01, s01e01, S1E1 (最标准)
-    (re.compile(r"[Ss](\d{1,2})[Ee](\d{1,2})"), "S{season:02d}E{episode:02d}"),
+    (re.compile(r"[Ss](\d{1,2})[Ee](\d{1,4})(?!\d)"), "S{season:02d}E{episode:02d}"),
     # 1x01, 01x21
-    (re.compile(r"(\d{1,2})[xX](\d{1,2})"), "S{season:02d}E{episode:02d}"),
+    (re.compile(r"(\d{1,2})[xX](\d{1,4})(?!\d)"), "S{season:02d}E{episode:02d}"),
 ]
 
-# 中文数字映射
-CN_NUMBERS = {
-    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
-    "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15,
-}
+# ========== 噪音标签剥离（用于 suggest_rename 预处理） ==========
+NOISE_TAG_PATTERNS = [
+    # 分辨率（如 1920x1080, 1280x720, 3840x2160）
+    # 使用数字边界而非单词边界，因为 _ 是单词字符，\b 无法匹配 _1920 的边界
+    re.compile(r"(?<![0-9])1920x1080(?![0-9])", re.IGNORECASE),
+    re.compile(r"(?<![0-9])1280x720(?![0-9])", re.IGNORECASE),
+    re.compile(r"(?<![0-9])3840x2160(?![0-9])", re.IGNORECASE),
+    re.compile(r"(?<![0-9])2560x1440(?![0-9])", re.IGNORECASE),
+    # 常见媒体标签（括号/下划线/空格/点号包围，或位于字符串末尾）
+    re.compile(r"[\[\(\s._-](1080p|2160p|720p|4k|hdr|bd|blu-?ray|web-?dl|webrip|hdtv|x264|x265|hevc|avc|aac|flac|ddp?|atmos|remux|proper|repack|10bit|8bit)(?=[\]\)\s._-]|$)", re.IGNORECASE),
+    # 码率/采样率（如 320kbps, 48kHz）
+    re.compile(r"\b\d{2,4}(?:kbps|khz)\b", re.IGNORECASE),
+    # 年份（如 2020, 2024）
+    re.compile(r"[\[\(\s._-]((?:19|20)\d{2})(?=[\]\)\s._-]|$)"),
+]
 
-
-def _cn_to_int(s: str) -> int | None:
-    """将中文数字转换为整数"""
-    s = s.strip()
-    if s.isdigit():
-        return int(s)
-    if s.startswith("十"):
-        if len(s) == 1:
-            return 10
-        rest = s[1:]
-        return 10 + (_cn_to_int(rest) or 0)
-    if "十" in s:
-        parts = s.split("十")
-        if len(parts) == 2:
-            left = _cn_to_int(parts[0]) or 0
-            right = _cn_to_int(parts[1]) or 0
-            return left * 10 + right
-    return CN_NUMBERS.get(s)
+# 移至 utils.file_utils 共享模块
+from utils.file_utils import cn_to_int as _cn_to_int
 
 
 def extract_season_from_path(path: str | Path) -> int | None:
@@ -76,6 +69,20 @@ def extract_season_from_path(path: str | Path) -> int | None:
     return None
 
 
+def _strip_noise_tags(filename: str) -> str:
+    """剥离文件名中的噪音标签（分辨率/编码/音频等），返回清理后的文件名。
+
+    用于 suggest_rename 提取季集号前预处理，避免 1920x1080 被误解析为 S20E1080。
+    剥离后保留原始空格/标点结构，不影响后续提取逻辑。
+    """
+    cleaned = filename
+    for pattern in NOISE_TAG_PATTERNS:
+        cleaned = pattern.sub(" ", cleaned)
+    # 合并多余空格
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
     """从文件名中提取季和集数（增强版）"""
     season: int | None
@@ -102,12 +109,12 @@ def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
                 # 在后面的括号内容中找集数
                 for j in range(i + 1, len(bracket_contents)):
                     later_content = bracket_contents[j]
-                    # 纯数字且是2-3位
-                    if re.match(r'^\d{2,3}$', later_content):
+                    # 纯数字且最多4位，且不能被更长数字部分匹配
+                    if re.match(r'^\d{1,4}(?!\d)$', later_content):
                         episode = int(later_content)
                         return season, episode
                     # 或者包含 "第X集"
-                    ep_match = re.search(r'第(\d{1,3})集', later_content)
+                    ep_match = re.search(r'第(\d{1,4})(?!\d)集', later_content)
                     if ep_match:
                         episode = int(ep_match.group(1))
                         return season, episode
@@ -118,13 +125,14 @@ def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
     if s_season_match:
         season = int(s_season_match.group(1))
         # 找集数：中括号内的数字、第X集、或紧跟的数字
-        episode_match = re.search(r"\[(\d{2,3})\](?!.*\[\d{2,3}\])", filename)
+        episode_match = re.search(
+            r"\[(\d{1,4})(?!\d)\](?!.*\[\d{1,4}(?!\d)\])", filename)
         if not episode_match:
             # 尝试匹配 "第X集" 格式
-            episode_match = re.search(r"第(\d{1,3})集", filename)
+            episode_match = re.search(r"第(\d{1,4})(?!\d)集", filename)
         if not episode_match:
             # 尝试匹配 - 01 - 或 _01_ 格式
-            episode_match = re.search(r"[-_\s](\d{2,3})[-_\s]", filename)
+            episode_match = re.search(r"[-_\s](\d{1,4})(?!\d)[-_\s]", filename)
         if episode_match:
             episode = int(episode_match.group(1))
             return season, episode
@@ -134,7 +142,8 @@ def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
     if season_match:
         season = int(season_match.group(1))
         episode_match = re.search(
-            r"\[(\d{2,3})\]|第(\d{1,3})集|[-_\s](\d{2,3})[-_\s]", filename)
+            r"\[(\d{1,4})(?!\d)\]|第(\d{1,4})(?!\d)集|[-_\s](\d{1,4})(?!\d)[-_\s]",
+            filename[season_match.end():])
         if episode_match:
             # 安全地获取匹配的集数，添加空值检查
             episode_str = next(
@@ -162,7 +171,8 @@ def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
     # 5. 尝试纯数字匹配（如 01.mp4, 第01集）
     if season is None and episode is None:
         # 匹配 [01], [001] 格式（前面有S1标记或Season标记的）
-        pure_ep_match = re.search(r"(?:\[|第)(\d{2,3})(?:\]|集)", filename)
+        pure_ep_match = re.search(
+            r"(?:\[|第)(\d{1,4})(?!\d)(?:\]|集)", filename)
         if pure_ep_match:
             season = 1
             episode = int(pure_ep_match.group(1))
@@ -280,10 +290,12 @@ def suggest_rename(src_path: str | Path) -> str | None:
     ext = path.suffix
 
     # 已经是标准格式？
-    if re.match(r"^[Ss]\d{2}[Ee]\d{2}$", filename):
+    if re.match(r"^[Ss]\d{2}[Ee]\d{2,4}$", filename):
         return filename + ext
 
-    season, episode = _extract_season_episode(filename)
+    # 先剥离噪音标签（分辨率/编码/音频等），避免 1920x1080 被误解析为 S20E1080
+    cleaned_filename = _strip_noise_tags(filename)
+    season, episode = _extract_season_episode(cleaned_filename)
     if season is not None and episode is not None:
         # 返回完整格式 S01E01.ext
         new_name = f"S{season:02d}E{episode:02d}{ext}"

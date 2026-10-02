@@ -49,6 +49,40 @@
 
 ---
 
+## ⚡ 性能优化
+
+### 启动性能
+
+当前版本对启动流程进行了重大优化：
+
+**优化前**：
+- 4000 条记录：~18 分钟
+- 每个文件独立开关数据库连接（~15ms/次）
+- 逐文件处理，无批量操作
+- A 区冗余清理：5 万次 `check_exists` × 150ms = 2 小时
+
+**优化后**：
+- 启动期优先完成本地 A 区秒级 STRM 索引，再进行 B 区历史核对和真实同步；`_running=True` 只在核心同步与 Watcher 就绪后设置，不使用假就绪。
+- 字幕补偿扫描在 Watcher 启动后由受控后台线程执行，不阻塞核心引擎就绪；`sync_on_startup_wait` 仅允许 0-60 秒并可被停止操作中断。
+- 运行时手动或周期性的全量 API 冗余审计是独立维护操作，可能访问全部订阅根目录，不等同于启动期本地快速索引。
+- 批量索引 + 预加载缓存
+- A 区冗余清理：500 次 API 请求 × 100ms / 5 并发 = 10 秒
+- **主动刷新路径**（`refresh_paths`）：留空时跳过周期性扫描，但 B 区删除联动仍正常工作
+- **全量审计周期**（`full_audit_interval_days`）：每隔多少天执行一次 A→B 全量审计（默认周期执行，`0` 关闭）。周期配置来自 `tmdb_watchlist.db` 的 `webui_config` 表（scope=`openlist`，DB 键 `refresh_full_audit_interval_days`）；上次审计时间 `last_full_audit_at` 则来自 `bridge.db` 的 `sync_control` 表，两者是不同的持久化字段
+
+**关键技术**：
+- `initial_scan_a()` 批量索引 A 区 STRM 文件（多线程 4 线程并发读取，每 100 条或每 2 秒输出进度日志 + records/s 性能基准）
+- `cleanup_a_redundant_using_api()` 使用 OpenList API 批量清理冗余（并发分页 + 客户端过滤）
+- A 区冗余清理采用 **fail-closed** 策略：若某父目录的云端文件列表不可信（网络异常、响应畸形、分页不完整），该目录下的本地 A 记录整组不参与冗余差集，确保不会误删。
+- `OpenListAdminClient.check_exists()` 采用 **三态** 语义（`True` / `False` / `None`）：不可信响应（`data=None`、`content=None`、bool `total`、非 0/200 code、安全阀耗尽）返回 `None` 而非 `False`。所有「不存在则删」的清理调用方仅当 `check_exists() is False`（权威不存在）才执行删除；`None` 视为不可信而跳过清理，避免假阴性误删。
+- `ensure_single_visible_instance()` 在 quarantine 失败或 DB 迁移回滚成功后，把重复实例的 status 恢复为 `valid`（B3-A），避免「DB=duplicate / 磁盘仍为原 .strm」分叉导致 ensure 永不重试的死锁；DB 迁移回滚也失败时尝试把 DB local_path 对齐到 quarantined 路径（B3-B），再 raise 暴露极端态。
+- `scan_a_to_b_full_sync()` 双模式同步（单事务 / 分批提交）
+- 预加载 ghost 保护和 B 区指纹到内存缓存
+- 跳过启动时的 per-file HTTP `check_exists` 和血统校验
+- **B 区历史记录核对优化**（`_reconcile_b_historical_records`）：对 B 区历史记录核对引入按 `mapping_id` 隔离的只读预载缓存（一次性加载 A 区记录、媒体边界映射与 lineage snapshot 到内存，避免逐条 DB 读），并把核对通过后的 lineage snapshot 改为每 1000 条批量写入（单行失败不阻断其余行）。逐条校验、越界删除、路径迁移与身份刷新逻辑不变，缓存未命中或未初始化时回退 DB，行为与优化前一致。首启耗时以启动日志「B 区历史记录核对完成 (%d/%d 条, %.1fs)」为度量点。
+
+---
+
 ## 🗺️ 系统工作流与架构图
 
 ```mermaid
@@ -134,7 +168,7 @@ flowchart TD
 ## 📂 目录模型说明 (A / B / C 三分区)
 
 - **A 区 (生肉区)**：OpenList 引擎更新模式的输出目录。程序在此区提取 WebDAV 映射和建立身份指纹。同时监控同目录下的字幕文件（`.ass`、`.srt`、`.ssa`）。
-- **B 区 (熟肉区)**：Emby / Jellyfin真正扫描的目录。用户在此区自由改名、整理、删除。程序将用户的操作翻译为云端 API 指令。字幕文件按媒体类型智能归档：电影字幕保持同目录，番剧字幕进入 `Season XX/` 子目录。
+- **B 区 (熟肉区)**：Emby / Jellyfin真正扫描的目录。用户在此区自由改名、整理、删除。程序将用户的操作翻译为云端 API 指令。字幕文件按媒体类型智能归档：电影字幕保持同目录，番剧字幕进入 `Season XX/` 子目录。支持**多 A↔多 B 映射**（`a_b_mappings`）：每个 A 区根目录对应一个独立的 B 区根目录，通过 `mapping_id` 隔离（跨映射不去重、不共享血统）（`mapping_id` 由程序按 A 区根路径自动生成，WebUI 无需手动填写）。
 - **C 区 (幽灵区)**：用于收容因为云盘根目录大改版、挂载点删除而导致的失效路径。保留历史痕迹，不污染媒体库，也避免直接蒸发导致找不回原文件。
 
 ---
@@ -149,7 +183,7 @@ flowchart TD
 | **番剧** | 路径含"番剧/anime"等关键词，或STRM/文件名可提取季集 | `Season XX/` 子目录 | `S01E01.forced.zho.简体.ass` |
 
 - 字幕语言自动识别：支持 `.sc`、`.chs`、`.tc`、`.cht` 等后缀标识，以及"简中""繁体"等关键词
-- 多语种时简中优先标记 `forced`
+- 所有字幕统一加 `.forced.` 前缀（与语言无关），识别到语言时追加 `.代码.中文标签`，未识别时回退 `.und`
 - 无法识别语言时回退为 `.forced.und`（undetermined）
 - 使用数据库 `subtitles` 表追踪处理状态，避免重复处理
 
@@ -194,7 +228,9 @@ pip install -r src/tests/requirements-dev.txt
 
 - `pytest` (测试框架)
 - `pytest-cov` (测试覆盖率)
-- `flask` (测试用 Mock 服务器)
+- `flask` (Mock 服务器，仅 `test_tmdb_api.py` 使用)
+
+> **前端构建依赖**：WebUI 使用 Vite 8.x 构建，需 **Node.js >= 20.19.0**（见 `src/webui/package.json` 的 engines 字段）。若只需运行已构建的 `dist/` 则无需 Node.js；仅修改前端源码后需执行 `cd src/webui && npx vite build` 时需 Node.js。
 
 ### 2. 运行程序
 
@@ -205,7 +241,27 @@ pip install -r src/tests/requirements-dev.txt
 python src/webui/server.py
 ```
 
-启动后访问 `http://127.0.0.1:8579` 即可使用 WebUI 管理面板。
+启动后访问 `http://127.0.0.1:8579`(默认端口,实际端口由 `config.toml` 的 `[webui].port` 决定) 即可使用 WebUI 管理面板。
+
+### 3. 运行测试
+
+```bash
+# 全套测试
+python -m pytest src/tests/ -v
+
+# 日志风险模拟专项测试（Issue1–Issue8，90 个测试）
+python -m pytest src/tests/test_log_issues_simulation.py -v
+
+# ##26 全新用户模拟 E2E（七步全链路正向测试）
+python -m pytest src/tests/test_e2e_full_flow.py::TestSuccessfulFlow::test_complete_seven_step_onboarding -v
+
+# 新手引导单步跟踪与预检
+python -m pytest src/tests/test_onboarding_e2e.py -v
+```
+
+> 七步全链路与新手引导步骤跟踪分别覆盖不同层面，详见 §新手引导 章节。
+
+日志风险模拟测试（`test_log_issues_simulation.py`）针对 `strm_bridge.log` 中出现的八类真实问题进行沙盒实验，生成 100+ 虚拟 strm/图片/字幕文件于 `src/tests/strm.test.A/`（幂等保留），经真实 `AppService` 同步到 `src/tests/strm.test.B/`（测试后清理），日志留存于 `test_logs/`。
 
 ---
 
@@ -259,7 +315,7 @@ python src/webui/server.py
 | **B 区浏览** | 查看媒体库消费区目录，基本和A区一致 支持删除联动操作 |
 | **C 区浏览** | 查看幽灵/隔离区内容，基本和A区一致 |
 | **TMDB 待看列表** | 对接 TMDB API，展示用户待看列表并与本地已收录内容做对比 |
-| **日志查看** | 实时查看程序运行日志，支持 TMDB/主程序日志切换 |
+| **日志查看** | 实时查看程序运行日志，支持 WebUI 操作日志/主程序日志切换 |
 | **壁纸** | 内置水墨风遮罩壁纸效果 |
 
 ### TMDB 待看列表
@@ -278,11 +334,13 @@ python src/webui/server.py
 
 | 配置项 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| `[webui] port` | `8579` | 监听端口 |
+| `[webui] port` | `8579`(默认,可自定义) | 监听端口 |
 | `[webui] bind` | `0.0.0.0` | 监听地址（仅本地和局域网） |
 | `access_token` | — | TMDB API 访问令牌（通过 WebUI 配置页填写，存储在 `tmdb_watchlist.db`） |
 
-> 🔐 **登录密码**：WebUI 访问需要管理员密码。**首次启动** WebUI 时，程序会自动生成一个随机密码，并**仅打印一次到控制台**（不写入日志文件），请务必记下；之后再次启动不会再显示该密码。密码以 PBKDF2-HMAC-SHA256 加盐哈希后存储在 `tmdb_watchlist.db` 的 `webui_config` 表（`scope='ui'`、`key='admin_password'`），明文不落盘。
+> 🔐 **登录密码**：WebUI 访问需要管理员密码。**首次启动** WebUI 时，程序会自动生成一个随机密码，并**仅打印一次到控制台**（不写入日志文件），请务必记下；之后再次启动不会再显示该密码。密码通过 `src/utils/password_utils.py` 统一管理，使用 PBKDF2-HMAC-SHA256 加盐哈希（`salt$iterations$hash` 格式，600k 次迭代），存储在 `tmdb_watchlist.db` 的 `webui_config` 表（`scope='ui'`、`key='admin_password'`），明文不落盘。
+>
+> **会话安全（M-4）**：登录成功后，服务端将客户端 IP 与会话 token 绑定。后续请求若来自不同 IP，服务端返回 401 拒绝，防止被盗 token 跨 IP 使用。
 >
 > **忘记密码 / 自定义密码**：运行项目根目录的 `reset_admin.py`：
 > - `python reset_admin.py` —— 生成随机新密码并打印。
@@ -328,6 +386,28 @@ python src/webui/server.py
 
 - 📚 [Wiki 首页](https://github.com/tanmoumou252/openlist_strm_monitor/wiki)
 - 🛡️ [安全与自保机制](https://github.com/tanmoumou252/openlist_strm_monitor/wiki/Safety-and-Security)
+
+---
+
+## 📚 项目文档导航
+
+项目文档分为多个层次，按需查阅：
+
+| 文档 | 说明 |
+| :--- | :--- |
+| [部署指南](docs/部署指南.md) | 完整的部署流程、系统要求、常见问题 |
+| [用户手册](docs/用户手册.md) | 功能说明、操作指南、使用技巧 |
+| [工作流程](docs/工作流程.md) | A/B/C 三区同步流程详解、字幕处理 |
+| [设计思路](docs/设计思路.md) | 架构决策、安全机制设计理念 |
+| [Python 规范审计](docs/Python规范审计与Lint检查报告.md) | 全量 Python 文件 Lint 审计、决策锚点与文档一致性结论 |
+| [接入文档](docs/ink-reveal/接入文档.md) | 壁纸晕染特效接入文档 |
+| [Wiki 首页](https://github.com/tanmoumou252/openlist_strm_monitor/wiki) | 社区维护的 FAQ、最佳实践 |
+
+---
+
+## 📎 其他文件
+
+**`edgeone_tmdb_api.js`**：这是一个部署在腾讯 EdgeOne（边缘函数平台，对标 Cloudflare Workers）上的 **TMDB API/图片反代**脚本，专供无法直接访问 TMDB 的网络环境使用。该文件是本项目的**可选配套工具**，不是核心引擎运行时依赖，可按需自行部署到 EdgeOne 上。
 
 ---
 

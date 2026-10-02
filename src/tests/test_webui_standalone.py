@@ -6,9 +6,9 @@ WebUI 独立集成测试（需要真实服务器运行）。
 
 测试范围:
   - 登录认证
-  - TMDB 操作日志 API (/api/tmdb/logs)
+  - WebUI 操作日志 API (/api/tmdb/logs)
   - 主程序日志 API (/api/logs)
-  - TMDB 操作日志下载 (/api/tmdb/logs/download)
+  - WebUI 操作日志下载 (/api/tmdb/logs/download)
   - 主程序日志下载 (/api/logs/download)
   - 配置 API (/api/config)
   - 操作码覆盖验证（确保前端 opLabel 覆盖后端所有 op code）
@@ -46,6 +46,11 @@ OP_LABEL = {
     'rate_limit': '速率限制', 'auth': '认证', 'token_refresh': '令牌刷新',
     'watchlist_sync': '待看列表同步', 'watchlist_refresh': '待看列表刷新',
     'info': '信息', 'warn': '警告', 'error': '错误', 'success': '成功',
+    'sync_cache_expired': '缓存过期', 'sync_movies_done': '电影同步完成',
+    'sync_movies_error': '电影同步失败', 'sync_tv_done': '剧集同步完成',
+    'sync_tv_error': '剧集同步失败', 'sync_tv_details_start': '剧集详情获取启动',
+    'sync_tv_details_done': '剧集详情获取完成', 'sync_tv_details_error': '剧集详情获取失败',
+    'sync_summary': '同步汇总', 'openlist_config_save': 'OpenList 配置保存',
 }
 
 BASE_URL = "http://127.0.0.1:8579"
@@ -124,12 +129,12 @@ def _check_login(token):
 
 
 def _check_tmdb_logs(token):
-    """测试 TMDB 操作日志 API。"""
+    """测试 WebUI 操作日志 API。"""
     data = _api_get('/api/tmdb/logs?limit=5', token)
     logs = data.get('logs', [])
     assert isinstance(logs, list), "logs 应为列表"
     assert 'count' in data, "应包含 count 字段"
-    print(f"  [PASS] TMDB 操作日志: {len(logs)} 条")
+    print(f"  [PASS] WebUI 操作日志: {len(logs)} 条")
     if logs:
         op = logs[0].get('op', '?')
         msg = logs[0].get('msg', '')[:60]
@@ -147,14 +152,14 @@ def _check_main_logs(token):
 
 
 def _check_tmdb_logs_download(token):
-    """测试 TMDB 操作日志下载端点。"""
+    """测试 WebUI 操作日志下载端点。"""
     resp = _api_get_raw('/api/tmdb/logs/download', token)
     assert resp.status == 200, f"应返回 200，实际 {resp.status}"
     content_type = resp.headers.get('Content-Type', '')
     assert 'text/plain' in content_type, f"Content-Type 应为 text/plain: {content_type}"
     content = resp.read().decode('utf-8', errors='replace')
     assert len(content) > 0, "下载内容不应为空"
-    print(f"  [PASS] TMDB 日志下载: {len(content)} 字符")
+    print(f"  [PASS] WebUI 操作日志下载: {len(content)} 字符")
     print(f"         首行: {content.split(chr(10))[0][:100]}")
 
 
@@ -223,13 +228,13 @@ def main():
     _check_login(token)
 
     # 测试各项 API
-    print("\n2. TMDB 操作日志")
+    print("\n2. WebUI 操作日志")
     logs = _check_tmdb_logs(token)
 
     print("\n3. 主程序日志")
     _check_main_logs(token)
 
-    print("\n4. TMDB 日志下载")
+    print("\n4. WebUI 操作日志下载")
     _check_tmdb_logs_download(token)
 
     print("\n5. 主程序日志下载")

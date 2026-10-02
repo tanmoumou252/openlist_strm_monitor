@@ -182,7 +182,6 @@ cython_debug/
 .cursorindexingignore
 *.db
 bridge.db
-*.code-workspace
 python_embed/
 *.db-wal
 *.db-shm
@@ -192,7 +191,12 @@ Superpower.md
 openlist_strm_monitor_debug.bat
 test_logs/
 src/tests/test_logs/
+# 日志问题模拟测试的生成目录（幂等生成/清理，不入库）
+src/tests/strm.test.A/
+src/tests/strm.test.B/
 .playwright-mcp/
+# 性能测试的原始数据文件（CSV 结果、YAML 配置）不入库；
+# 仅汇总后的 results.json（src/tests/perf/results_verify/results.json）纳入版本控制
 *.yml
 *.csv
 src/.tmdb_account.json
@@ -207,7 +211,10 @@ src/.admin_token.json
 src/.secret_key
 review.md
 src/webui/node_modules/
-_*
+# 仅忽略根目录下以下划线开头的文件（如 _build.tmp），
+# 不可用裸 _*（会误伤 src/tests/_test_helpers.py、wiki/_Sidebar.md、wiki/_Footer.md 等已入库文件）
+/_*
 libsimple-windows-x64.zip
 /电影
 /番剧
+/perf-results

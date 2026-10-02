@@ -3,17 +3,23 @@ import { icon } from '../core/icons.js';
 import { esc, createField } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
 import { showConfirmDialog } from '../components/dialog.js';
-import { navigate } from '../core/router.js';
-import { _tmdbCache, _getUiConfig, _setUiConfig } from '../core/state.js';
+import { navigate, captureRenderGuard } from '../core/router.js';  // 导入 captureRenderGuard 用于轮询竞态防护
+import { _tmdbCache, _fetchPromises, _getUiConfig, _setUiConfig } from '../core/state.js';
 import { _renderOpenListConfig } from './openlist.js';
 
 export async function renderConfig(el, params) {
+  // 代际快照工厂——在首次 await 前捕获
+  const isStale = captureRenderGuard();
   const cfg = await api('/api/config');
+  // await 期间若发生新导航，放弃渲染，避免旧页覆盖
+  if (isStale()) return;
   // /api/config 是白名单端点，代理 URL 已脱敏为 tmdb_proxy_configured（布尔值）。
   // 配置页需要回显代理 URL，从已认证的 /api/webui/config/tmdb 获取。
   if (cfg.tmdb_proxy_configured) {
     try {
       const tmdbCfg = await api('/api/webui/config/tmdb');
+      // 第二个 await 后已有渲染护栏（isStale 代际校验）
+      if (isStale()) return;
       if (tmdbCfg && tmdbCfg.config && typeof tmdbCfg.config.proxy_http === 'string') {
         cfg.tmdb_proxy_http = tmdbCfg.config.proxy_http;
       } else {
@@ -63,7 +69,8 @@ export async function renderConfig(el, params) {
   document.querySelectorAll('.config-entrance-btn').forEach(btn => btn.addEventListener('click', () => {
     if (!entrance) return navigate(`#config?sub=${btn.dataset.sub}`);
     entrance.classList.add('fade-out');
-    const go = () => navigate(`#config?sub=${btn.dataset.sub}`);
+    let navigated = false;
+    const go = () => { if (navigated) return; navigated = true; navigate(`#config?sub=${btn.dataset.sub}`); };
     entrance.addEventListener('animationend', go, { once: true });
     setTimeout(go, 300);
   }));
@@ -72,20 +79,36 @@ export async function renderConfig(el, params) {
     const subpage = document.getElementById('config-subpage');
     if (!subpage) return navigate('#config');
     subpage.classList.add('exiting');
-    const go = () => { sessionStorage.setItem('_config_back', '1'); navigate('#config'); };
+    let navigated = false;
+    const go = () => { if (navigated) return; navigated = true; sessionStorage.setItem('_config_back', '1'); navigate('#config'); };
     subpage.addEventListener('animationend', go, { once: true });
     setTimeout(go, 350);
   });
   if (sub === 'config') _bindConfigFormEvents(cfg);
-  if (sub === 'openlist') _renderOpenListConfig(cfg);
+  if (sub === 'openlist') _renderOpenListConfig(cfg).catch(e => console.warn('[Config] 渲染 OpenList 配置子页失败:', e));
+}
+
+const _configHelpTexts = {
+  fuzzy_threshold: '模糊匹配相似度阈值（0.0~1.0）。越高要求越严格，建议 0.60。',
+  anime_min_ep_ratio: '番剧最少集数占总集数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。',
+  anime_max_season_diff: '番剧最大允许季数差。超过此差值视为未收录，建议 1。当前版本未接入匹配逻辑（保留待用）。',
+  anime_min_season_ratio: '番剧最少季数占总季数比例（0.0~1.0）。超过此比例才视为已收录，建议 0.30。当前版本未接入匹配逻辑（保留待用）。',
+  watchlist_cache_ttl: 'TMDB 缓存有效期（秒）。过期后重新从 TMDB 拉取数据，建议 604800（7 天）。',
+};
+
+function _configHelpIcon(key) {
+  const text = _configHelpTexts[key];
+  if (!text) return '';
+  const safeText = esc(text);
+  return `<span class="ol-help-icon" data-tooltip="${safeText}" aria-label="帮助">${icon('info')}</span>`;
 }
 
 function _renderConfigContent(cfg) {
   function section(titleIcon, title, rowsHtml) {
     return `<div class="config-section"><h3>${icon(titleIcon)} ${esc(title)}</h3>${rowsHtml}</div>`;
   }
-  function field(id, label, value, placeholder, type = 'text', persistLabel = false, readOnly = false, htmlLabel = '') {
-    return createField(id, label, value, { placeholder, type, persistLabel, readOnly, htmlLabel });
+  function field(id, label, value, placeholder, type = 'text', persistLabel = false, readOnly = false, htmlLabel = '', helpIcon = '', helperText = '', extraOpts = {}) {
+    return createField(id, label, value, { placeholder, type, persistLabel, readOnly, htmlLabel, helpIcon, helperText, ...extraOpts });
   }
 
   const presetLangs = ['zh-CN', 'en-US', 'ja-JP'];
@@ -109,11 +132,10 @@ function _renderConfigContent(cfg) {
   html += `</div>`;
 
   const tokenIsConfigured = cfg.tmdb_token_configured === true;
-const tokenValue = '';  // 不预填截断预览，避免误保存覆盖真实 token
-  const apiKeyValue = '';  // 不预填明文 API key（B-3：后端仅返回 bool），避免误保存覆盖
+  const tokenValue = '';  // 不预填截断预览，避免误保存覆盖真实 token
+  const apiKeyValue = '';  // 不预填明文 API key（后端仅返回 bool），避免误保存覆盖
   const hostValue = cfg.tmdb_host || '';
   const proxyValue = cfg.tmdb_proxy_http || '';
-  const watchlistDbValue = cfg.tmdb_watchlist_db || '';
 
   const langLabelCls = 'floating-label is-shown is-floating is-filled';
   const langCustomValue = isCustomLang ? savedLang : '';
@@ -131,7 +153,7 @@ const tokenValue = '';  // 不预填截断预览，避免误保存覆盖真实 t
     </div>`;
 
   const tmdbWatchlistEnabled = cfg.tmdb_watchlist_enabled !== false && cfg.tmdb_watchlist_enabled !== 'false';
-  html += `<div class="config-section tmdb-section"><h3>${icon('tmdb')} TMDB <span style="font-size:calc(var(--font-base) - 1px);color:var(--text-muted);font-weight:400">(保存后即时生效，不需重启)</span></h3>`;
+  html += `<div class="config-section tmdb-section"><h3>${icon('tmdb')} TMDB <span class="ol-help-icon" data-tooltip="保存后即时生效，不需重启" aria-label="帮助">${icon('info')}</span></h3>`;
   html += `<div class="field-grid">`;
   html += `<div class="floating-field" data-field="cfg-tmdb-status">
     <div class="field-control">
@@ -145,21 +167,20 @@ const tokenValue = '';  // 不预填截断预览，避免误保存覆盖真实 t
     </div>
   </div>`;
   html += field('cfg-tmdb-account', 'account_id', cfg.tmdb_account_id || '未获取', '', 'text', true, true);
-  const tokenBadge = tokenIsConfigured ? '<span class="badge configured-badge" style="color:var(--success);margin-left:6px;font-size:calc(var(--font-base) - 1px)">✓ 已配置</span>' : '';
-html += field('cfg-tmdb-token', 'Access Token', tokenValue, '输入 TMDB Access Token', 'password', false, false, tokenBadge);
+  const tokenBadge = tokenIsConfigured ? '<span class="badge configured-badge">✓ 已配置</span>' : '';
+  html += field('cfg-tmdb-token', 'Access Token', tokenValue, '输入 TMDB Access Token', 'password', false, false, tokenBadge);
   const apiKeyIsConfigured = cfg.tmdb_api_key_configured === true;
-  const apiKeyBadge = apiKeyIsConfigured ? '<span class="badge configured-badge" style="color:var(--success);margin-left:6px;font-size:calc(var(--font-base) - 1px)">✓ 已配置</span>' : '';
+  const apiKeyBadge = apiKeyIsConfigured ? '<span class="badge configured-badge">✓ 已配置</span>' : '';
   html += field('cfg-tmdb-apikey', 'API Key', apiKeyValue, '输入 TMDB API Key', 'password', false, false, apiKeyBadge);
   html += langField;
   html += field('cfg-tmdb-host', '反代 Host', hostValue, '留空则使用官方 API');
   html += field('cfg-tmdb-proxy', 'HTTP 代理', proxyValue, '例: http://127.0.0.1:7890', 'text', true);
-html += field('cfg-tmdb-wldb', 'Watchlist DB', watchlistDbValue, '留空默认 tmdb_watchlist.db', 'text', true);
-	  html += field('cfg-tmdb-fuzzy', '模糊匹配阈值', cfg.tmdb_fuzzy_threshold || '0.60', '0.0~1.0', 'text');
-	  html += field('cfg-tmdb-ep-ratio', '番剧最少集数比例', cfg.tmdb_anime_min_ep_ratio || '0.30', '0.0~1.0', 'text');
-	  html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '1', '', 'text');
-	  html += field('cfg-tmdb-min-season-ratio', '番剧最少季数比例', cfg.tmdb_anime_min_season_ratio || '0.30', '0.0~1.0', 'text');
-	  html += field('cfg-tmdb-cache-ttl', '缓存 TTL（秒）', cfg.tmdb_cache_ttl || '43200', '', 'text');
-	  html += `</div>`;
+  html += field('cfg-tmdb-fuzzy', '模糊匹配阈值', cfg.tmdb_fuzzy_threshold || '0.60', '0.0~1.0', 'number', false, false, '', _configHelpIcon('fuzzy_threshold'), '', { min: '0.01', max: '1', step: '0.01', inputMode: 'decimal' });
+    html += field('cfg-tmdb-ep-ratio', '番剧最少集数比例', cfg.tmdb_anime_min_ep_ratio || '0.30', '0.0~1.0', 'number', false, false, '', _configHelpIcon('anime_min_ep_ratio'), '', { min: '0.01', max: '1', step: '0.01', inputMode: 'decimal' });
+    html += field('cfg-tmdb-season-diff', '番剧最大季数差', cfg.tmdb_anime_max_season_diff || '0.3', '', 'number', false, false, '', _configHelpIcon('anime_max_season_diff'), '', { min: '0', step: '1', inputMode: 'numeric' });
+    html += field('cfg-tmdb-min-season-ratio', '番剧最少季数比例', cfg.tmdb_anime_min_season_ratio || '0.30', '0.0~1.0', 'number', false, false, '', _configHelpIcon('anime_min_season_ratio'), '', { min: '0.01', max: '1', step: '0.01', inputMode: 'decimal' });
+    html += field('cfg-tmdb-cache-ttl', '缓存 TTL（秒）', cfg.tmdb_cache_ttl || '604800', '', 'number', false, false, '', _configHelpIcon('watchlist_cache_ttl'), '', { min: '1', step: '1', inputMode: 'numeric' });
+    html += `</div>`;
   html += `<div class="config-form-actions"><button class="toolbar-btn primary" id="cfg-tmdb-save">${icon('save')} 保存 TMDB 配置</button><button class="toolbar-btn" id="cfg-tmdb-refresh"> 刷新待看列表</button><button class="toolbar-btn" id="cfg-tmdb-match-refresh" style="background:color-mix(in srgb,var(--primary) 15%,var(--bg-card));border-color:color-mix(in srgb,var(--primary) 30%,var(--border-color))"> 刷新收录状态</button><button class="toolbar-btn secondary" id="cfg-tmdb-restart" style="color:#e37400;border-color:#e37400">${icon('refresh')} 重启 WebUI</button></div>`;
   html += `<div class="toggle-row"><span>关闭全屏 TMDB 缓存过期提醒</span><div class="segmented-switch" data-key="tmdb_cache_never_remind"><button type="button" data-value="off" class="active">否</button><button type="button" data-value="on">是</button></div></div>`;
   html += `<div class="toggle-row"><span>关闭右上角"建议刷新列表"提醒</span><div class="segmented-switch" data-key="tmdb_match_toast_disabled"><button type="button" data-value="off" class="active">否</button><button type="button" data-value="on">是</button></div></div>`;
@@ -242,7 +263,7 @@ function _renderConfigHelp() {
     {
       label: 'OpenList 配置',
       cards: [
-        { icon: 'globe', title: 'OpenList 连接配置', body: 'WebDAV 地址通常格式为 <code>http://127.0.0.1:5244/dav</code>。如果使用主动刷新功能，必须使用 <strong>admin 权限账户</strong>以调用 API 刷新路径。配置已从 <code>config.toml</code> 迁移到数据库，保存后即时生效，无需重启。2FA 密钥（TOTP）在 OpenList 开启二次验证时才需要填写。' },
+        { icon: 'globe', title: 'OpenList 连接配置', body: 'WebDAV 地址通常格式为 <code>http://127.0.0.1:5244/dav</code>。如果使用主动刷新功能，必须使用 <strong>admin 权限账户</strong>以调用 API 刷新路径。配置已从 <code>config.toml</code> 迁移到数据库。<p><strong>即时生效</strong>：连接信息（地址/用户名/密码/2FA）、刷新配置（开关/间隔/深度/审计周期）、行为配置（删除动作/回收站/ghost 保护/恢复延迟）、日志配置（级别/大小/路径）保存后无需重启。</p><p><strong>需重启主程序</strong>：STRM 引擎映射（引擎入口/监控目录）、A↔B 目录映射、C 区根目录变更。这些在启动期由 <code>start_watchers()</code> 读取，热更新不会重挂 watcher。</p><p>2FA 密钥（TOTP）在 OpenList 开启二次验证时才需要填写。</p>' },
         { icon: 'area_a', title: 'STRM 引擎配置表格', body: '第 1 列选择 STRM 引擎入口（如 <code>/strm</code>），第 2 列自动从 API 获取该引擎下的监控目录并显示为 tag。<p><strong>交互方式：</strong></p><ol><li>点击「测试连接」验证 API 可用性</li><li>选择引擎入口 → 自动填充监控目录 tag</li><li>可删除不需要的 tag（不监控某些目录）</li><li>点击「添加行」添加更多引擎</li></ol><p>A 区文件夹从 API 的 <code>SaveStrmLocalPath</code> 自动获取，配置页底部只读展示。</p>' },
         { icon: 'refresh', title: '主动刷新机制', body: 'OpenList 的 STRM 引擎有时需要有人去"点"一下目录，才会触发文件的生成。启用主动刷新后，程序会每隔几分钟去"模拟点击"（调用 API 获取列表），从而唤醒 OpenList 强制生成或更新最新的 STRM 文件到 A 区。<p><strong>刷新路径填写注意：</strong>不要填网盘的"真实路径"，要填 STRM 引擎映射出来的"虚拟路径"。例如真实路径 <code>/天翼云/家庭/电影</code>，引擎挂载在 <code>/strm</code>，则应填 <code>/strm/电影</code>。</p><p><strong>深度清理：</strong>如果填写的路径属于引擎管辖范围，程序刷新完后会对比本地，把云端已不存在的废弃 STRM 文件删掉。如果填错路径（不在引擎白名单），程序只会"只读刷新"，绝不清理本地文件。</p>' },
         { icon: 'settings', title: '行为配置说明', body: '<p><strong>删除动作：</strong>B 区 STRM 被删除后对 WebDAV 源文件的动作。<code>MOVE</code> = 移动到回收站目录（推荐），<code>DELETE</code> = 直接删除（危险）。</p><p><strong>Ghost 保护：</strong>B 区删除 STRM 后，A 区可能因同步延迟又短暂生成同一 STRM。Ghost 保护阻止刚删除的内容被立刻重新同步回 B 区。建议至少 300 秒。</p><p><strong>A→B 恢复延迟：</strong>等待 OpenList / STRM 引擎 / 文件系统事件落地的时间。</p>' }
@@ -342,28 +363,27 @@ async function _bindConfigFormEvents(cfg) {
       const langValue = langChoice === 'custom' ? (document.getElementById('cfg-tmdb-lang').value || 'zh-CN') : langChoice;
       const _wmActiveBtn = document.querySelector('#cfg-tmdb-watchlist-enabled-switch button.active');
       const watchlistEnabled = !(_wmActiveBtn && _wmActiveBtn.dataset.value === 'off');
-const body = {
-	        language: langValue,
-	        host: document.getElementById('cfg-tmdb-host').value,
-	        proxy_http: document.getElementById('cfg-tmdb-proxy').value,
-	        proxy_enabled: document.getElementById('cfg-tmdb-proxy').value.trim() !== '',
-	        watchlist_db: document.getElementById('cfg-tmdb-wldb').value,
-	        watchlist_enabled: watchlistEnabled ? 'true' : 'false',
-	        fuzzy_threshold: document.getElementById('cfg-tmdb-fuzzy').value || '0.60',
-	        anime_min_ep_ratio: document.getElementById('cfg-tmdb-ep-ratio').value || '0.30',
-	        anime_max_season_diff: document.getElementById('cfg-tmdb-season-diff').value || '1',
-	        anime_min_season_ratio: document.getElementById('cfg-tmdb-min-season-ratio').value || '0.30',
-	        watchlist_cache_ttl: document.getElementById('cfg-tmdb-cache-ttl').value || '43200',
-	      };
+      const body = {
+        language: langValue,
+        host: document.getElementById('cfg-tmdb-host').value,
+        proxy_http: document.getElementById('cfg-tmdb-proxy').value,
+        proxy_enabled: document.getElementById('cfg-tmdb-proxy').value.trim() !== '',
+        watchlist_enabled: watchlistEnabled ? 'true' : 'false',
+        fuzzy_threshold: document.getElementById('cfg-tmdb-fuzzy').value || '0.60',
+        anime_min_ep_ratio: document.getElementById('cfg-tmdb-ep-ratio').value || '0.30',
+        anime_max_season_diff: document.getElementById('cfg-tmdb-season-diff').value || '0.3',
+        anime_min_season_ratio: document.getElementById('cfg-tmdb-min-season-ratio').value || '0.30',
+        watchlist_cache_ttl: document.getElementById('cfg-tmdb-cache-ttl').value || '604800',
+      };
       // token 已配置时若输入框为空则不上传，避免截断预览覆盖真实 token
       if (tokenInput.value.trim()) body.access_token = tokenInput.value;
       if (document.getElementById('cfg-tmdb-apikey').value.trim()) body.api_key = document.getElementById('cfg-tmdb-apikey').value;
-const data = await api('/api/tmdb/configure', {
-	        method: 'POST',
-	        body,
-	      });
-	      if (data.success === false) throw new Error(data.error || data.message || '保存失败');
-	      showToast(data.message || '已保存', 'success');
+      const data = await api('/api/tmdb/configure', {
+        method: 'POST',
+        body,
+      });
+      if (data.success === false) throw new Error(data.error || data.message || '保存失败');
+      showToast(data.message || '已保存', 'success');
     } catch (e) {
       showToast('保存失败: ' + e.message, 'error');
     } finally {
@@ -377,9 +397,10 @@ const data = await api('/api/tmdb/configure', {
     btn.disabled = true;
     btn.innerHTML = '启动同步中...';
     try {
-const data = await api('/api/tmdb/watchlist/sync', { method: 'POST' });
-	      if (data.success) showToast('待看列表同步已启动', 'success');
-	      else showToast('同步失败: ' + (data.error || '未知错误'), 'error');
+      // 缩进对齐（原列 0，现缩进 6 空格）
+      const data = await api('/api/tmdb/watchlist/sync', { method: 'POST' });
+      if (data.success) showToast('待看列表同步已启动', 'success');
+      else showToast('同步失败: ' + (data.error || '未知错误'), 'error');
     } catch (e) {
       showToast('同步失败: ' + e.message, 'error');
     } finally {
@@ -393,8 +414,8 @@ const data = await api('/api/tmdb/watchlist/sync', { method: 'POST' });
       const btn = document.getElementById('cfg-tmdb-restart');
       btn.disabled = true;
       btn.innerHTML = '重启中...';
-try {
-	        await api('/api/restart-webui', { method: 'POST' });
+      try {
+          await api('/api/restart-webui', { method: 'POST' });
         showToast('WebUI 正在重启...', 'info');
       } catch (e) {
         showToast('重启失败: ' + e.message, 'error');
@@ -406,27 +427,38 @@ try {
   });
 
   document.getElementById('cfg-tmdb-match-refresh').addEventListener('click', async () => {
+    // 收录刷新轮询独立捕获代际，仅对该 handler 生效
+    const isStale = captureRenderGuard();
     const btn = document.getElementById('cfg-tmdb-match-refresh');
     btn.disabled = true;
     btn.innerHTML = '启动刷新中...';
     try {
-const data = await api('/api/tmdb/watchlist/match/refresh', { method: 'POST' });
+      // 缩进对齐（原列 0，现缩进 6 空格）
+      const data = await api('/api/tmdb/watchlist/match/refresh', { method: 'POST' });
       if (data.success) {
         showToast(data.message || '后台收录状态刷新已启动', 'info');
         btn.innerHTML = '刷新中...';
         const maxPolls = 120;
         for (let i = 0; i < maxPolls; i++) {
           await new Promise(r => setTimeout(r, 1000));
+          // 轮询循环含 isStale 检查
+          if (isStale()) return;
           try {
             const st = await api('/api/tmdb/watchlist/match/status');
             if (!st.running && st.result) {
               const r = st.result;
               if (r.error) {
                 showToast('收录状态刷新失败: ' + r.error, 'error');
+                // 匹配刷新失败时 break，避免错误toast风暴
+                break;
               } else {
-                showToast(`收录状态已刷新: ${r.matched} 已收录 / ${r.fuzzy} 待确认 / ${r.unmatched} 未收录 (共 ${r.total} 项)`, 'success');
+                const manualInfo = r.skipped_manual > 0 ? ` · 跳过 ${r.skipped_manual} 个人工覆盖` : '';
+                const uncomputedInfo = r.uncomputed > 0 ? ` · ${r.uncomputed} 项未计算` : '';
+                showToast(`收录状态已刷新: ${r.matched} 已收录 / ${r.fuzzy} 待确认 / ${r.unmatched} 未收录${uncomputedInfo} (共 ${r.total} 项)${manualInfo}`, 'success');
                 _tmdbCache.movies = null;
                 _tmdbCache.tv = null;
+                _fetchPromises.movies = null;
+                _fetchPromises.tv = null;
               }
               break;
             }

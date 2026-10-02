@@ -1,7 +1,7 @@
 import { api } from '../core/api.js';
 import { icon } from '../core/icons.js';
-import { esc, fmtTime, createSortLink, renderTmdbResults } from '../core/utils.js';
-import { navigate, isRenderStale } from '../core/router.js';
+import { esc, fmtTime, createSortLink, renderTmdbResults, formatTimestamp } from '../core/utils.js';
+import { navigate, captureRenderGuard } from '../core/router.js';
 import { showToast } from '../components/toast.js';
 import { showConfirmDialog } from '../components/dialog.js';
 
@@ -21,6 +21,8 @@ export async function renderArea(el, area, params) {
 }
 
 async function renderAreaList(el, area, params) {
+  // 代际快照工厂——在首次 await 前捕获
+  const isStale = captureRenderGuard();
   const kind = params.kind || 'anime';
   const q = params.q || '';
   const sort = params.sort || 'name';
@@ -38,6 +40,7 @@ async function renderAreaList(el, area, params) {
   if (qs.length) url += '?' + qs.join('&');
 
   const d = await api(url);
+  if (isStale()) return;
   const kindLabel = d.kind_label;
 
   // Category tabs
@@ -55,15 +58,31 @@ async function renderAreaList(el, area, params) {
   const tabsHtml = kinds.map(k => {
     const active = (kind || '') === k.v ? ' active' : '';
     // tab href 保留搜索词，点击 tab 切分类时 q 不丢失
-    const href = `#area_${area}?kind=${k.v}&sort=${sort}&order=${order}${q ? '&q=' + encodeURIComponent(q) : ''}`;
+    const href = `#area_${area}?kind=${k.v}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}&page_size=${pageSize}${q ? '&q=' + encodeURIComponent(q) : ''}`;
     // "全部"tab 计数用 d.total（跨分类去重总数）；后端 kind_counts 无 all 键，直接读会恒为 0
-    const count = k.v === 'all' ? (d.total || 0) : (d.kind_counts[k.v] || 0);
+    const count = k.v === 'all' ? (d.total || 0) : ((d.kind_counts || {})[k.v] || 0);
     return `<button class="category-tab${active}" data-kind-href="${href}">${icon(k.i)} ${k.l} <span class="count">${count}</span></button>`;
   }).join('');
 
   // Sort link helper
   function sortLink(colName, colKey) {
-    return createSortLink(area, sort, order, colName, colKey, { kind, q });
+    return createSortLink(area, sort, order, colName, colKey, { kind, q, page_size: pageSize });
+  }
+
+  // 详情链接：完整保留来源列表状态 {page, q, sort, order, kind, page_size}，
+  // 使「从列表进入详情再返回」可恢复来源页。page_size 仅在来源 URL 中为
+  // 列表允许值 50/100/200 时透传，其余非法值省略使用默认值。
+  function detailHref(name) {
+    const p = [];
+    if (kind) p.push('kind=' + encodeURIComponent(kind));
+    if (q) p.push('q=' + encodeURIComponent(q));
+    p.push('sort=' + encodeURIComponent(sort));
+    p.push('order=' + encodeURIComponent(order));
+    if (page && page > 1) p.push('page=' + page);
+    if (pageSize === 50 || pageSize === 100 || pageSize === 200) {
+      p.push('page_size=' + pageSize);
+    }
+    return `#area_${area}?media=${encodeURIComponent(name)}&` + p.join('&');
   }
 
   // Media cards
@@ -75,7 +94,7 @@ async function renderAreaList(el, area, params) {
     cardsHtml = `<div class="empty-search-state" style="height:200px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:14px">${esc(areaLabel)}暂无搜索结果</div>`;
   } else {
     cardsHtml = d.media_items.map(item => {
-      const href = `#area_${area}?media=${encodeURIComponent(item.name)}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}`;
+      const href = detailHref(item.name);
       const cardIcon = _kindIconMap[item.kind] || 'tv';
       return `<a class="media-card" href="${href}">${icon(cardIcon)}<div class="title">${esc(item.name)}</div><div class="meta">${item.count} 个文件</div></a>`;
     }).join('');
@@ -86,11 +105,11 @@ async function renderAreaList(el, area, params) {
   if (d.total_pages > 1) {
     pagerHtml = '<div class="pager">';
     if (d.page > 1) {
-      pagerHtml += `<a href="#area_${area}?page=${d.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">${icon('chevron_l')} 上一页</a>`;
+      pagerHtml += `<a href="#area_${area}?page=${d.page - 1}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}&page_size=${d.page_size}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">${icon('chevron_l')} 上一页</a>`;
     }
     pagerHtml += `<span class="current">第 ${d.page} / ${d.total_pages} 页 (共 ${d.total} 项)</span>`;
     if (d.page < d.total_pages) {
-      pagerHtml += `<a href="#area_${area}?page=${d.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">下一页 ${icon('chevron_r')}</a>`;
+      pagerHtml += `<a href="#area_${area}?page=${d.page + 1}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}&page_size=${d.page_size}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}">下一页 ${icon('chevron_r')}</a>`;
     }
     pagerHtml += '</div>';
   }
@@ -120,11 +139,11 @@ ${pagerHtml}
     const searchContainer = document.getElementById('tmdb-search-results');
     api(`/api/tmdb/search?query=${encodeURIComponent(q)}`)
       .then(results => {
-        if (isRenderStale()) return;  // 双保险 1：页面代际校验
+        if (isStale()) return;  // 双保险 1：页面代际校验
         renderTmdbResults(results, "你可能还在找", q, searchContainer);  // 双保险 2：container.isConnected 在函数内校验
       })
       .catch(() => {
-        if (isRenderStale()) return;
+        if (isStale()) return;
         showToast('TMDB 在线搜索失败，请稍后重试', 'error');
       });
   }
@@ -159,111 +178,160 @@ ${pagerHtml}
   // Bind page size selector
   document.getElementById('page-size-select')?.addEventListener('change', (e) => {
     const newSize = e.target.value;
-    const newHash = `#area_${area}?kind=${encodeURIComponent(kind)}&sort=${sort}&order=${order}&page_size=${newSize}&page=1`;
+    // 改页大小丢失搜索词 q
+    const newHash = `#area_${area}?kind=${encodeURIComponent(kind)}&sort=${sort}&order=${order}&page_size=${newSize}&page=1${q ? '&q=' + encodeURIComponent(q) : ''}`;
     navigate(newHash);
   });
 }
 
 async function renderAreaDetail(el, area, params) {
+  // 代际快照工厂——在首次 await 前捕获
+  const isStale = captureRenderGuard();
   const media = params.media;
   const kind = params.kind || '';
   const sort = params.sort || 'name';
   const order = params.order || 'asc';
   const page = parseInt(params.page) || 1;
   const q = params.q || '';
+  const pageSizeRaw = parseInt(params.page_size);
+  // page_size 仅透传列表允许值 50/100/200；非法值（0/负数/NaN/其他）省略用默认
+  const pageSize = (pageSizeRaw === 50 || pageSizeRaw === 100 || pageSizeRaw === 200) ? pageSizeRaw : null;
+
+  // 返回按钮：恢复来源列表的完整状态 {page, q, sort, order, kind, page_size}
+  const backParts = [];
+  if (kind) backParts.push('kind=' + encodeURIComponent(kind));
+  if (q) backParts.push('q=' + encodeURIComponent(q));
+  backParts.push('sort=' + encodeURIComponent(sort));
+  backParts.push('order=' + encodeURIComponent(order));
+  if (page && page > 1) backParts.push('page=' + page);
+  if (pageSize !== null) backParts.push('page_size=' + pageSize);
+  const kindPart = backParts.length ? '?' + backParts.join('&') : '';
 
   let url = `/api/area/${area}/detail?media=${encodeURIComponent(media)}`;
   if (sort) url += '&sort=' + encodeURIComponent(sort);
   if (order) url += '&order=' + encodeURIComponent(order);
+  if (kind) url += '&kind=' + encodeURIComponent(kind);
   url += '&page=' + page;
+  // mapping_id 已从 URL 中移除（后端不消费该参数）
 
   const d = await api(url);
-
-  function stripPath(p, root) {
-    if (root && p.startsWith(root)) return p.slice(root.length);
-    return p;
-  }
-  const localRoot = d.local_root || '';
-  const webdavRoot = d.webdav_root || '';
-  const strmEngineRoot = d.strm_engine_root || '';
-
-  const kindPart = kind ? '?kind=' + encodeURIComponent(kind) : '';
+  if (isStale()) return;
   const areaLabels = { a: 'A 区', b: 'B 区', c: 'C 区' };
   const areaLabel = areaLabels[area] || area.toUpperCase() + ' 区';
+  
+  // 检测是否为多 mapping 场景
+  const isMultiMapping = d.mappings && Array.isArray(d.mappings) && d.mappings.length > 0;
+  
+  // expandBtns 提到分支外统一渲染一次
+  const expandBtns = `<div class="detail-actions">
+  <button class="toolbar-btn" id="expand-all-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('expand')} 展开全部</button>
+  <button class="toolbar-btn" id="collapse-all-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('collapse')} 折叠全部</button>
+  </div>`;
+
   let html = `
 <div class="toolbar" style="gap:12px">
   <a href="#area_${area}${kindPart}" class="back-icon-btn" title="返回列表">${icon('back')}</a>
   <span style="color:var(--text-main);font-size:14px;font-weight:600">${esc(media)}</span>
   <span style="color:var(--text-muted);font-size:calc(var(--font-base) - 1px)">· ${d.total} 个文件</span>
-  ${(area === 'a' || area === 'b') ? `<button class="toolbar-btn" id="refresh-media-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button>` : ''}
+  ${((area === 'a' || area === 'b') && !isMultiMapping) ? `<button class="toolbar-btn refresh-media-btn" data-mapping-id="${esc(d.mapping_id || '')}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button>` : ''}
 </div>`;
 
-  const expandBtns = `<div class="detail-actions">
-  <button class="toolbar-btn" id="expand-all-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('expand')} 展开全部</button>
-  <button class="toolbar-btn" id="collapse-all-btn" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('collapse')} 折叠全部</button>
-</div>`;
-
-  if (localRoot || webdavRoot || strmEngineRoot) {
-    html += `<div class="area-detail-head"><div class="area-path-block">`;
-    if (localRoot) html += `<div class="path-line"><span class="path-label">${areaLabel} 本地根：</span><span class="path-value mono">${esc(localRoot)}</span></div>`;
-    if (webdavRoot) html += `<div class="path-line"><span class="path-label">WebDAV 根：</span><span class="path-value mono">${esc(webdavRoot)}</span></div>`;
-    if (strmEngineRoot) html += `<div class="path-line"><span class="path-label">STRM 入口：</span><span class="path-value mono">${esc(strmEngineRoot)}</span></div>`;
-    html += `</div>${expandBtns}</div>`;
-  } else {
-    html += `<div class="area-detail-head" style="justify-content:flex-end">${expandBtns}</div>`;
-  }
-
-  function sortLink(colName, colKey) {
-    return createSortLink(area, sort, order, colName, colKey, { kind, q, media });
-  }
-
-  const seasonParts = [];
-  for (const season of d.seasons) {
-    seasonParts.push(`<details class="season-details" open><summary>${esc(season.label)} <span style="font-size:calc(var(--font-base) - 1px);color:var(--text-muted)">(${season.records.length} 个文件)</span></summary>`);
-    seasonParts.push('<div class="table-wrap"><table><thead><tr><th>序号</th>');
-
-if (area === 'a') {
-	      seasonParts.push(`<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>${sortLink('时间', 'updated_at')}</th>`);
-	    } else if (area === 'b') {
-	      seasonParts.push(`<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>指纹</th><th>状态</th><th>${sortLink('时间', 'updated_at')}</th>`);
-	    } else if (area === 'c') {
-	      seasonParts.push(`<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>原 B 路径</th><th>幽灵根</th><th>${sortLink('时间', 'moved_at')}</th>`);
-	    }
-
-    seasonParts.push('</tr></thead><tbody>');
-
-    const recordParts = [];
-    season.records.forEach((r, i) => {
-      let row = '<tr>';
-      row += `<td>${i + 1}</td>`;
-      if (area === 'a') {
-        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td>${fmtTime(r.updated_at)}</td>`;
-      } else if (area === 'b') {
-        const fp = r.fingerprint || '-'; const fpShort = fp.length > 5 ? fp.substring(0, 5) + '...' : fp;
-        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono" style="font-size:calc(var(--font-base) - 2px);cursor:default" title="${esc(fp)}">${esc(fpShort)}</td><td class="${_statusClass(r.status || '-')}">${esc(r.status || '-')}</td><td>${fmtTime(r.updated_at)}</td>`;
-      } else if (area === 'c') {
-        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono">${esc(r.original_b_path || '-')}</td><td class="mono">${esc(r.ghost_root || '-')}</td><td>${fmtTime(r.moved_at)}</td>`;
+  // 多 mapping 场景渲染
+  if (isMultiMapping) {
+    // 为每个 mapping 渲染独立分区
+    for (const mapping of d.mappings) {
+      const mappingId = mapping.mapping_id || 'unknown';
+      const localRoot = mapping.local_root || '';
+      const webdavRoot = mapping.webdav_root || '';
+      const strmEngineRoot = mapping.strm_engine_root || '';
+      const indexMetadata = mapping.index_metadata;
+      
+      // Mapping 分区标题
+      html += `<div style="margin:16px 0 8px;padding:12px;background:var(--bg-subtle);border-radius:8px;border:1px solid var(--surface-border)">`;
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">`;
+      html += `<span style="font-weight:600;color:var(--text-main)">${mappingId === 'unknown' ? '未知映射' : '映射 ' + esc(mappingId)}</span>`;
+      if (indexMetadata && indexMetadata.mapping_index_generation) {
+        html += `<span style="font-size:11px;color:var(--text-muted)">索引 #${indexMetadata.mapping_index_generation} · ${indexMetadata.mapping_index_generation_at ? formatTimestamp(indexMetadata.mapping_index_generation_at) : '未索引'}</span>`;
       }
-      row += '</tr>';
-      recordParts.push(row);
-    });
-
-    seasonParts.push(recordParts.join(''));
-    seasonParts.push('</tbody></table></div></details>');
-  }
-  html += seasonParts.join('');
-
-  // Pager
-  if (d.total_pages > 1) {
-    html += '<div class="pager">';
-    if (d.page > 1) {
-      html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page - 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}">${icon('chevron_l')} 上一页</a>`;
+      html += `</div>`;
+      
+      // 路径信息
+      html += `<div class="area-path-block" style="font-size:12px">`;
+      if (localRoot) html += `<div class="path-line"><span class="path-label">${areaLabel} 本地根：</span><span class="path-value mono">${esc(localRoot)}</span></div>`;
+      if (webdavRoot) html += `<div class="path-line"><span class="path-label">WebDAV 根：</span><span class="path-value mono">${esc(webdavRoot)}</span></div>`;
+      if (strmEngineRoot) html += `<div class="path-line"><span class="path-label">STRM 入口：</span><span class="path-value mono">${esc(strmEngineRoot)}</span></div>`;
+      html += `</div>`;
+      
+      // 多 mapping 模式下使用 class 而非重复 id（HTML 要求 id 唯一）
+      if (area === 'a' || area === 'b') {
+        html += `<div class="toolbar" style="margin-top:8px;justify-content:flex-end"><button class="toolbar-btn refresh-media-btn" data-mapping-id="${esc(mappingId)}" style="display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--primary) 10%,transparent);border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:var(--radius-control);padding:6px 14px;color:var(--primary);font-size:calc(var(--font-base) - 1px);font-weight:500;cursor:pointer;font-family:inherit">${icon('refresh')} 刷新</button></div>`;
+      }
+      html += `</div>`;
+      
+      // 季分组（独立）
+      html += _renderSeasons(area, mapping.seasons || [], sort, order, kind, q, media, localRoot, webdavRoot);
+      
+      // 分页（独立）
+      // 删除死参数 mapping_id，后端分区由记录自身 mapping_id 列派生
+      if (mapping.total_pages > 1) {
+        html += '<div class="pager">';
+        if (mapping.page > 1) {
+          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page - 1}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}${pageSize !== null ? '&page_size=' + pageSize : ''}">${icon('chevron_l')} 上一页</a>`;
+        }
+        html += `<span class="current">第 ${mapping.page} / ${mapping.total_pages} 页</span>`;
+        if (mapping.page < mapping.total_pages) {
+          html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${mapping.page + 1}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}${pageSize !== null ? '&page_size=' + pageSize : ''}">下一页 ${icon('chevron_r')}</a>`;
+        }
+        // 请求页码超出该 mapping 记录数被 clamp 时，明确提示而非静默截断
+        if (mapping.clamped) {
+          html += `<span class="pager-clamped" style="color:var(--text-muted);font-size:12px;margin-left:8px">（该分区记录较少，已回退到最后一页）</span>`;
+        }
+        html += '</div>';
+      }
     }
-    html += `<span class="current">第 ${d.page} / ${d.total_pages} 页</span>`;
-    if (d.page < d.total_pages) {
-      html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page + 1}&sort=${sort}&order=${order}${kind ? '&kind=' + encodeURIComponent(kind) : ''}">下一页 ${icon('chevron_r')}</a>`;
+  } else {
+    // 单 mapping 或旧 API（向后兼容）— 使用函数开头的 areaLabels/areaLabel 定义
+    const localRoot = d.local_root || '';
+    const webdavRoot = d.webdav_root || '';
+    const strmEngineRoot = d.strm_engine_root || '';
+    const mappingId = d.mapping_id || '';
+    const indexMetadata = d.index_metadata;
+    // 删除外层死定义（areaLabels 和 areaLabel 已在函数开头定义）
+    
+    // 索引元数据（单 mapping）
+    if (indexMetadata && indexMetadata.mapping_index_generation) {
+      html += `<div style="margin:8px 0;padding:8px 12px;background:var(--bg-subtle);border-radius:6px;font-size:12px;color:var(--text-muted)">`;
+      html += `索引代次 #${indexMetadata.mapping_index_generation} · `;
+      html += `最近索引: ${indexMetadata.mapping_index_generation_at ? formatTimestamp(indexMetadata.mapping_index_generation_at) : '未索引'}`;
+      html += `</div>`;
     }
-    html += '</div>';
+    
+    // 路径信息
+    if (localRoot || webdavRoot || strmEngineRoot) {
+      html += `<div class="area-detail-head"><div class="area-path-block">`;
+      if (localRoot) html += `<div class="path-line"><span class="path-label">${areaLabel} 本地根：</span><span class="path-value mono">${esc(localRoot)}</span></div>`;
+      if (webdavRoot) html += `<div class="path-line"><span class="path-label">WebDAV 根：</span><span class="path-value mono">${esc(webdavRoot)}</span></div>`;
+      if (strmEngineRoot) html += `<div class="path-line"><span class="path-label">STRM 入口：</span><span class="path-value mono">${esc(strmEngineRoot)}</span></div>`;
+      html += `</div>${expandBtns}</div>`;
+    } else {
+      html += `<div class="area-detail-head" style="justify-content:flex-end">${expandBtns}</div>`;
+    }
+    
+    // 季分组
+    html += _renderSeasons(area, d.seasons || [], sort, order, kind, q, media, localRoot, webdavRoot);
+    
+    // 分页
+    if (d.total_pages > 1) {
+      html += '<div class="pager">';
+      if (d.page > 1) {
+        html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page - 1}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}${pageSize !== null ? '&page_size=' + pageSize : ''}">${icon('chevron_l')} 上一页</a>`;
+      }
+      html += `<span class="current">第 ${d.page} / ${d.total_pages} 页</span>`;
+      if (d.page < d.total_pages) {
+        html += `<a href="#area_${area}?media=${encodeURIComponent(media)}&page=${d.page + 1}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(order)}${kind ? '&kind=' + encodeURIComponent(kind) : ''}${q ? '&q=' + encodeURIComponent(q) : ''}${pageSize !== null ? '&page_size=' + pageSize : ''}">下一页 ${icon('chevron_r')}</a>`;
+      }
+      html += '</div>';
+    }
   }
 
   el.innerHTML = html;
@@ -285,31 +353,36 @@ if (area === 'a') {
   });
   setDetailToggleState(document.querySelectorAll('.season-details').length > 0);
 
-  // 绑定刷新按钮事件
-  const refreshBtn = document.getElementById('refresh-media-btn');
-  if (refreshBtn) {
+  // 绑定刷新按钮事件（支持多 mapping 模式下的多个刷新按钮）
+  // 选择器改为 class（HTML 按钮用 class="refresh-media-btn"，非 id）
+  document.querySelectorAll('.refresh-media-btn').forEach(refreshBtn => {
+    const btnMappingId = refreshBtn.dataset.mappingId || '';
     const doRefresh = async () => {
       refreshBtn.disabled = true;
       refreshBtn.innerHTML = `${icon('loading')} 刷新中...`;
       try {
+        const body = { media };
+        if (btnMappingId) body.mapping_id = btnMappingId;
         const result = await api(`/api/area/${area}/refresh`, {
           method: 'POST',
-          body: JSON.stringify({ media })
+          body: JSON.stringify(body)
         });
 
+        // api() 对非 2xx 直接 throw，故此处 result.ok 恒为 true，失败统一由下方 catch 呈现
         if (result.ok) {
           const msg = result.message || '刷新完成';
           showToast(msg, 'success');
           // 自动刷新页面数据
           await renderAreaDetail(el, area, params);
-        } else {
-          showToast(`刷新失败：${result.error || '未知错误'}`, 'error');
         }
       } catch (err) {
         showToast(`刷新请求失败：${err.message}`, 'error');
       } finally {
-        refreshBtn.disabled = false;
-        refreshBtn.innerHTML = `${icon('refresh')} 刷新`;
+        // 刷新期间若已导航离开，按钮已从 DOM 脱离，跳过恢复避免操作分离节点
+        if (!isStale()) {
+          refreshBtn.disabled = false;
+          refreshBtn.innerHTML = `${icon('refresh')} 刷新`;
+        }
       }
     };
 
@@ -318,8 +391,57 @@ if (area === 'a') {
         '刷新媒体数据',
         `将触发 STRM 引擎重新生成并同步。<br><br>媒体：${esc(media)}<br><br>是否继续？`,
         async () => { await doRefresh(); },
-        null
+        null,
+        { htmlContent: true }
       );
     });
+  });
+}
+
+// 渲染季分组和记录表
+function _renderSeasons(area, seasons, sort, order, kind, q, media, localRoot, webdavRoot) {
+  function stripPath(p, root) {
+    if (root && p.startsWith(root)) return p.slice(root.length);
+    return p;
   }
+  
+  function sortLink(colName, colKey) {
+    return createSortLink(area, sort, order, colName, colKey, { kind, q, media });
+  }
+  
+  let html = '';
+  for (const season of seasons) {
+    html += `<details class="season-details" open><summary>${esc(season.label)} <span style="font-size:calc(var(--font-base) - 1px);color:var(--text-muted)">(${season.records.length} 个文件)</span></summary>`;
+    html += '<div class="table-wrap"><table><thead><tr><th>序号</th>';
+
+    if (area === 'a') {
+      html += `<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>${sortLink('时间', 'updated_at')}</th><th>${sortLink('最后核对', 'last_verified_at')}</th>`;
+    } else if (area === 'b') {
+      html += `<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>指纹</th><th>状态</th><th>${sortLink('时间', 'updated_at')}</th><th>${sortLink('最后核对', 'last_verified_at')}</th>`;
+    } else if (area === 'c') {
+      html += `<th>${sortLink('本地路径', 'local_path')}</th><th>WebDAV 路径</th><th>原 B 路径</th><th>幽灵根</th><th>${sortLink('时间', 'moved_at')}</th>`;
+    }
+
+    html += '</tr></thead><tbody>';
+
+    const recordParts = [];
+    season.records.forEach((r, i) => {
+      let row = '<tr>';
+      row += `<td>${i + 1}</td>`;
+      if (area === 'a') {
+        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td>${fmtTime(r.updated_at)}</td><td>${fmtTime(r.last_verified_at)}</td>`;
+      } else if (area === 'b') {
+        const fp = r.fingerprint || '-'; const fpShort = fp.length > 5 ? fp.substring(0, 5) + '...' : fp;
+        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono" style="font-size:calc(var(--font-base) - 2px);cursor:default" title="${esc(fp)}">${esc(fpShort)}</td><td class="${_statusClass(r.status || '-')}">${esc(r.status || '-')}</td><td>${fmtTime(r.updated_at)}</td><td>${fmtTime(r.last_verified_at)}</td>`;
+      } else if (area === 'c') {
+        row += `<td class="mono" title="${esc(r.local_path)}">${esc(stripPath(r.local_path, localRoot))}</td><td class="mono" title="${esc(r.webdav_path)}">${esc(stripPath(r.webdav_path, webdavRoot))}</td><td class="mono">${esc(r.original_b_path || '-')}</td><td class="mono">${esc(r.ghost_root || '-')}</td><td>${fmtTime(r.moved_at)}</td>`;
+      }
+      row += '</tr>';
+      recordParts.push(row);
+    });
+
+    html += recordParts.join('');
+    html += '</tbody></table></div></details>';
+  }
+  return html;
 }

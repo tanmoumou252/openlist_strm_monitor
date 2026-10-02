@@ -18,8 +18,8 @@ import json
 import os
 import socket
 import sys
-import threading
 import time
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -31,6 +31,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from webui.server import WebUIServer, _WebUIHandler  # noqa: E402
+from _test_helpers import FakeConfigDb  # noqa: E402
 
 
 # ============================================================
@@ -49,7 +50,6 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     """构造最小化 AppConfig mock，满足 WebUIServer 初始化需求。"""
     cfg = MagicMock()
     # webui
-    cfg.webui.enabled = True
     cfg.webui.port = 0  # 由 _free_port() 覆盖
     cfg.webui.bind = "127.0.0.1"
     # tmdb
@@ -58,7 +58,6 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     cfg.tmdb.language = "zh-CN"
     cfg.tmdb.host = ""
     cfg.tmdb.csv_watchlist_file = ""
-    cfg.tmdb.watchlist_db = ""
     cfg.tmdb.watchlist_cache_ttl = 604800
     cfg.tmdb.fuzzy_threshold = 0.60
     cfg.tmdb.anime_min_ep_ratio = 0.3
@@ -69,7 +68,7 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     proxy.http = ""
     cfg.tmdb.proxy = proxy
     # webdav
-    cfg.webdav.host = ""
+    cfg.webdav.host = "http://openlist:5244"
     cfg.webdav.user = ""
     cfg.webdav.password = ""
     cfg.webdav.totp_secret = ""
@@ -83,6 +82,8 @@ def _make_mock_config(tmp_path: Path) -> MagicMock:
     cfg.strm_engine_paths = []
     # DB 覆盖（no-op）
     cfg.update_from_db = MagicMock()
+    # base_dir
+    cfg.base_dir = str(tmp_path)
     return cfg
 
 
@@ -90,7 +91,7 @@ def _make_mock_db(tmp_path: Path) -> MagicMock:
     """构造最小化 Database mock。"""
     db = MagicMock(spec=["db_path", "get_table_counts", "get_b_status_counts",
                          "get_db_file_size", "get_subtitle_by_local",
-                         "read_connection"])
+                         "read_connection", "get_index_metadata", "get_all_config"])
     db.db_path = str(tmp_path / "bridge.db")
     db.get_table_counts.return_value = {
         "a_strm_files": 0, "b_strm_files": 0, "c_ghost_files": 0,
@@ -100,7 +101,8 @@ def _make_mock_db(tmp_path: Path) -> MagicMock:
     }
     db.get_db_file_size.return_value = 0
     db.get_subtitle_by_local.return_value = None
-    
+    db.get_index_metadata.return_value = {"mapping_index_generation": 1, "mapping_index_generation_at": 1000.0}
+    db.get_all_config.return_value = {}
     # read_connection 需要返回一个上下文管理器
     mock_conn = MagicMock()
     mock_conn.execute.return_value.fetchone.return_value = (0,)
@@ -108,7 +110,7 @@ def _make_mock_db(tmp_path: Path) -> MagicMock:
     mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
     mock_conn_ctx.__exit__ = MagicMock(return_value=False)
     db.read_connection.return_value = mock_conn_ctx
-    
+
     return db
 
 
@@ -136,7 +138,7 @@ def webui_server(tmp_path):
 
         server = WebUIServer(cfg.webui, db, app_config=cfg)
         # 设置测试密码环境变量
-        test_password = "test_password_123"
+        test_password = "1111"
         os.environ["WEBUI_TEST_MODE"] = "1"
         os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
         server.start()
@@ -245,6 +247,26 @@ class TestStaticRoutes:
         assert isinstance(body, dict)
         assert "error" in body
 
+    def test_login_returns_spa_index_html(self, webui_server):
+        """GET /login 应返回 SPA index.html（与 / 和 /api/page 一致）。
+
+        回归守卫：do_GET 调用不存在的 _send_login_page()，
+        导致 AttributeError 或非 200 响应。
+        """
+        server, base, session_token = webui_server
+        status, headers, body = _http_get(base, "/login", session_token)
+        assert status == 200
+        assert "text/html" in headers.get("Content-Type", "")
+        assert b"<html>" in body
+
+    def test_login_without_token_returns_spa_index_html(self, webui_server):
+        """GET /login 无需 token 即可访问（白名单路径），返回 SPA index.html。"""
+        server, base, _ = webui_server
+        status, headers, body = _http_get(base, "/login", session_token=None)
+        assert status == 200
+        assert "text/html" in headers.get("Content-Type", "")
+        assert b"<html>" in body
+
 
 # ============================================================
 # Dashboard / 日志 / 记录 / 配置
@@ -258,7 +280,7 @@ class TestCoreRoutes:
         status, _, body = _http_get(base, "/api/dashboard", session_token)
         # dashboard 调用 _db_get_table_counts / _db_get_b_status_counts / _db_get_db_file_size
         # mock 下可能因 MagicMock 属性访问返回非预期类型而 500
-        assert status in (200, 500)
+        assert status == 200
         assert isinstance(body, dict)
 
     def test_records_api_returns_list(self, webui_server):
@@ -305,6 +327,238 @@ class TestCoreRoutes:
         assert "count" in body
         assert isinstance(body["lines"], list)
         assert isinstance(body["count"], int)
+
+
+# ============================================================
+# 日志排序与下载文件名（Task A：日志行为测试）
+# ============================================================
+
+def _make_tmdb_log(ts: float, msg: str) -> dict:
+    """构造一条 get_tmdb_logs 返回的记录（与 tmdb_watchlist_db 字段一致）。"""
+    return {"id": int(ts), "ts": ts, "op": "test", "level": "info",
+            "msg": msg, "detail": None}
+
+
+class TestLogsOrdering:
+    """锁定 /api/tmdb/logs 与 /api/logs 的截取与展示顺序契约。
+
+    语义：
+    - get_tmdb_logs 内部按 ts DESC LIMIT ? 截取最近 N 条（数据层行为，这里
+      用 mock 忠实模拟：传入 limit 后返回按 ts 倒序截取的结果）；
+    - 路由层对这批结果整体反转，使展示为旧到新（最新在底部）；
+    - count == len(logs)；
+    - 响应无分页字段。
+    """
+
+    def _install_log_mock(self, server, logs: list[dict]):
+        """用可控 get_tmdb_logs 替换 server._watchlist_db。
+
+        mock 忠实模拟真实 DB 的 DESC LIMIT 截取语义：传入 limit 后，
+        按 ts 倒序排序并取前 limit 条。
+        """
+        wdb = MagicMock()
+
+        def _fake_get(limit=100):
+            return sorted(logs, key=lambda r: r["ts"], reverse=True)[:limit]
+
+        wdb.get_tmdb_logs.side_effect = _fake_get
+        server._watchlist_db = wdb
+
+    def test_empty_logs(self, webui_server):
+        server, base, session_token = webui_server
+        self._install_log_mock(server, [])
+        status, _, body = _http_get(base, "/api/tmdb/logs", session_token)
+        assert status == 200
+        assert body["logs"] == []
+        assert body["count"] == 0
+
+    def test_less_than_limit_returns_all_old_to_new(self, webui_server):
+        """少于 limit：全部返回，且顺序为旧到新（ts 升序）。"""
+        server, base, session_token = webui_server
+        logs = [
+            _make_tmdb_log(100.0, "oldest"),
+            _make_tmdb_log(200.0, "middle"),
+            _make_tmdb_log(300.0, "newest"),
+        ]
+        self._install_log_mock(server, logs)
+        status, _, body = _http_get(base, "/api/tmdb/logs", session_token)
+        assert status == 200
+        assert [r["msg"] for r in body["logs"]] == ["oldest", "middle", "newest"]
+        assert body["count"] == len(body["logs"]) == 3
+
+    def test_equal_to_limit_returns_all_old_to_new(self, webui_server):
+        """等于 limit：全部返回，旧到新。"""
+        server, base, session_token = webui_server
+        logs = [_make_tmdb_log(float(i), f"msg-{i}") for i in range(1, 6)]
+        self._install_log_mock(server, logs)
+        status, _, body = _http_get(base, "/api/tmdb/logs?limit=5", session_token)
+        assert status == 200
+        assert body["count"] == 5
+        assert body["logs"][0]["msg"] == "msg-1"
+        assert body["logs"][-1]["msg"] == "msg-5"
+
+    def test_exceeds_limit_keeps_recent_n_old_to_new(self, webui_server):
+        """超过 limit：仅保留最近 N 条（截取语义），且旧到新展示。"""
+        server, base, session_token = webui_server
+        # 10 条，ts 升序 msg-1..msg-10；真实 DB 会按 ts DESC 截取最近 3 条
+        logs = [_make_tmdb_log(float(i), f"msg-{i}") for i in range(1, 11)]
+        self._install_log_mock(server, logs)
+        status, _, body = _http_get(base, "/api/tmdb/logs?limit=3", session_token)
+        assert status == 200
+        # 最近 3 条 = msg-8, msg-9, msg-10；展示为旧到新
+        assert [r["msg"] for r in body["logs"]] == ["msg-8", "msg-9", "msg-10"]
+        assert body["count"] == 3
+        # 必须确认截取了最近 N 条而非全部——最旧记录不得出现
+        assert all(r["msg"] not in ("msg-1", "msg-2", "msg-3", "msg-4",
+                                    "msg-5", "msg-6", "msg-7") for r in body["logs"])
+
+    def test_same_timestamp_records_present_no_relative_order_assert(self,
+                                                                    webui_server):
+        """同时间戳记录：不断言相对顺序（SQL 仅按 ts DESC），仅断言均返回。"""
+        server, base, session_token = webui_server
+        logs = [
+            _make_tmdb_log(100.0, "same-ts-a"),
+            _make_tmdb_log(100.0, "same-ts-b"),
+            _make_tmdb_log(100.0, "same-ts-c"),
+        ]
+        self._install_log_mock(server, logs)
+        status, _, body = _http_get(base, "/api/tmdb/logs", session_token)
+        assert status == 200
+        msgs = {r["msg"] for r in body["logs"]}
+        assert msgs == {"same-ts-a", "same-ts-b", "same-ts-c"}
+        assert body["count"] == 3
+
+    def test_response_has_no_pagination_fields(self, webui_server):
+        """响应仅 logs + count，无分页字段（page/total/limit 等）。"""
+        server, base, session_token = webui_server
+        self._install_log_mock(server, [_make_tmdb_log(1.0, "x")])
+        status, _, body = _http_get(base, "/api/tmdb/logs", session_token)
+        assert status == 200
+        assert set(body.keys()) == {"logs", "count"}
+        assert "page" not in body
+        assert "total" not in body
+        assert "pages" not in body
+
+    def test_main_logs_api_old_to_new_no_reverse(self, webui_server):
+        """/api/logs 主程序日志：文件原序返回（旧到新、最新在底部）。"""
+        server, base, session_token = webui_server
+        log_file = Path(server._config.base_dir) / "test_strm_bridge.log"
+        log_file.write_text(
+            "2026-07-10 12:00:00 INFO line-1\n"
+            "2026-07-10 12:00:01 INFO line-2\n"
+            "2026-07-10 12:00:02 INFO line-3\n",
+            encoding="utf-8",
+        )
+        server._log_file = str(log_file)
+        server._config.log = None
+        status, _, body = _http_get(base, "/api/logs", session_token)
+        assert status == 200
+        lines = body["lines"]
+        assert len(lines) == 3
+        assert "line-1" in lines[0]
+        assert "line-2" in lines[1]
+        assert "line-3" in lines[2]
+        assert body["count"] == 3
+
+
+class TestLogsDownloadFilename:
+    """锁定下载文件名与下载内容范围契约。"""
+
+    def test_tmdb_logs_download_uses_webui_operations_filename(self, webui_server):
+        """/api/tmdb/logs/download 的 Content-Disposition 文件名应为 webui_operations.log。"""
+        server, base, session_token = webui_server
+        logs = [
+            _make_tmdb_log(100.0, "download-msg-1"),
+            _make_tmdb_log(200.0, "download-msg-2"),
+        ]
+        wdb = MagicMock()
+        wdb.get_tmdb_logs.return_value = logs  # limit=100000 全量
+        server._watchlist_db = wdb
+
+        status, headers, body = _http_get(
+            base, "/api/tmdb/logs/download", session_token)
+        assert status == 200
+        cdisp = headers.get("Content-Disposition", "")
+        assert "attachment" in cdisp
+        assert "webui_operations.log" in cdisp
+        assert "tmdb_operations.log" not in cdisp
+        # 下载内容包含两条日志消息
+        content = body.decode("utf-8")
+        assert "download-msg-1" in content
+        assert "download-msg-2" in content
+
+    def test_tmdb_logs_download_not_truncated_by_page_limit(self, webui_server):
+        """下载内容不受页面 limit 截断：mock 全量返回 200 条（远大于页面 100 上限）。
+
+        路由以 limit=100000 调用 get_tmdb_logs，断言 mock 收到 100000 而非页面 limit。
+        """
+        server, base, session_token = webui_server
+        wdb = MagicMock()
+        wdb.get_tmdb_logs.return_value = [_make_tmdb_log(float(i), f"m{i}")
+                                          for i in range(200)]
+        server._watchlist_db = wdb
+
+        status, headers, body = _http_get(
+            base, "/api/tmdb/logs/download", session_token)
+        assert status == 200
+        # 下载调用应请求全量（100000），不受页面 limit 影响
+        wdb.get_tmdb_logs.assert_called_once_with(limit=100000)
+        content = body.decode("utf-8")
+        assert "m0" in content
+        assert "m199" in content
+
+    def test_main_logs_download_still_strm_bridge_filename(self, tmp_path,
+                                                           monkeypatch):
+        """/api/logs/download 文件名仍为 strm_bridge.log（主程序日志下载不变）。"""
+        from webui.server import WebUIServer
+        from webui.routes import _login_attempts
+        _login_attempts.clear()
+
+        log_file = tmp_path / "strm_bridge.log"
+        log_file.write_text("2026-07-10 12:00:00 INFO test line\n",
+                            encoding="utf-8")
+
+        cfg = _make_mock_config(tmp_path)
+        db = _make_mock_db(tmp_path)
+        port = _free_port()
+        cfg.webui.port = port
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"):
+            (tmp_path / "static").mkdir(exist_ok=True)
+            (tmp_path / "static" / "index.html").write_text(
+                "<html><body>test</body></html>", encoding="utf-8")
+            (tmp_path / "static" / "assets").mkdir(exist_ok=True)
+            (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
+
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            os.environ["WEBUI_TEST_MODE"] = "1"
+            os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = "1111"
+            server.start()
+            deadline = time.time() + 2.0
+            while not server._server and time.time() < deadline:
+                time.sleep(0.05)
+
+            try:
+                server._log_file = str(log_file)
+                server._config.log = None
+                base_url = f"http://127.0.0.1:{port}"
+                login_status, _, login_body = _http_post(
+                    base_url, "/api/login", {"password": "1111"})
+                assert login_status == 200
+                token = login_body.get("token")
+                assert token is not None
+
+                status, headers, body = _http_get(
+                    base_url, "/api/logs/download", session_token=token)
+                assert status == 200
+                cdisp = headers.get("Content-Disposition", "")
+                assert "attachment" in cdisp
+                assert "strm_bridge.log" in cdisp
+                assert isinstance(body, bytes)
+                assert "test line" in body.decode("utf-8")
+            finally:
+                server.stop()
 
 
 # ============================================================
@@ -376,7 +630,7 @@ class TestLogsDownloadRoute:
             (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
 
             server = WebUIServer(cfg.webui, db, app_config=cfg)
-            test_password = "test_password_123"
+            test_password = "1111"
             os.environ["WEBUI_TEST_MODE"] = "1"
             os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
             server.start()
@@ -446,6 +700,29 @@ class TestAreaRoutes:
         assert isinstance(body, dict)
         assert "error" in body
 
+    def test_area_detail_a_returns_last_verified_at(self, webui_server):
+        """A 区详情每条记录应包含 last_verified_at 字段"""
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/area/a/detail?media=test", session_token)
+        assert status == 200
+        assert isinstance(body, dict)
+        # 如果有记录，检查 last_verified_at 字段存在
+        if "records" in body:
+            for rec in body.get("records", []):
+                assert "last_verified_at" in rec, \
+                    f"记录应包含 last_verified_at 字段: {rec}"
+
+    def test_area_detail_b_returns_last_verified_at(self, webui_server):
+        """B 区详情每条记录应包含 last_verified_at 字段"""
+        server, base, session_token = webui_server
+        status, _, body = _http_get(base, "/api/area/b/detail?media=test", session_token)
+        assert status == 200
+        assert isinstance(body, dict)
+        if "records" in body:
+            for rec in body.get("records", []):
+                assert "last_verified_at" in rec, \
+                    f"记录应包含 last_verified_at 字段: {rec}"
+
 
 # ============================================================
 # OpenList 路由
@@ -456,6 +733,8 @@ class TestOpenListRoutes:
 
     def test_openlist_status_unconfigured(self, webui_server):
         server, base, session_token = webui_server
+        # 显式设为未配置（_make_mock_config 默认有 host，此处覆盖）
+        server._config.webdav.host = ""
         status, _, body = _http_get(base, "/api/openlist/status", session_token)
         assert status == 200
         assert isinstance(body, dict)
@@ -485,9 +764,9 @@ class TestOpenListRoutes:
     def test_openlist_ping_unreachable_host_returns_offline(self, webui_server):
         """ping 接口在 host 不可达时返回 offline，而非 online。
 
-        回归守卫：修复前 _handle_openlist_ping 调用 client.login()（无 force=True），
+        回归守卫：_handle_openlist_ping 若调用 client.login()（无 force=True），
         新实例会加载缓存 token 直接返回 True，导致状态误报为"已连接"。
-        修复后调用 client.login(force=True)，强制真实验证连接。
+        必须调用 client.login(force=True) 强制真实验证连接。
         """
         server, base, session_token = webui_server
         # 设置一个非空 host，使 ping 接口进入登录逻辑
@@ -505,8 +784,8 @@ class TestOpenListRoutes:
 
         assert status == 200
         assert body.get("status") == "offline"
-        # 验证 login 被调用时传入了 force=True（关键回归断言）
-        mock_instance.login.assert_called_once_with(force=True)
+        # 验证 login 被调用时传入了 force=True(关键回归断言)
+        mock_instance.login.assert_called_once_with(force=True, source="ping")
 
     def test_openlist_ping_login_succeeds_returns_online(self, webui_server):
         """ping 接口在登录成功时返回 online。"""
@@ -523,7 +802,7 @@ class TestOpenListRoutes:
 
         assert status == 200
         assert body.get("status") == "online"
-        mock_instance.login.assert_called_once_with(force=True)
+        mock_instance.login.assert_called_once_with(force=True, source="ping")
 
     def test_openlist_ping_not_configured_returns_offline(self, webui_server):
         """ping 接口在 host 无效（not_configured）时返回 offline。
@@ -697,6 +976,31 @@ class TestWebUIConfigRoutes:
             base, "/api/webui/config/invalid_scope", {"k": "v"}, session_token)
         assert status == 403
 
+    def test_config_post_scope_whitelist_rejects_unknown_key(self, webui_server):
+        """tmdb/openlist scope 配置写入被未知 key 拒绝（403）。
+
+        三个 scope（ui/tmdb/openlist）均有独立白名单，未知 key 整次拒绝。
+        openlist scope 测试任意未知 key（如 nonexistent_key）应返回 403。
+        """
+        server, base, session_token = webui_server
+        for scope in ("openlist", "tmdb", "ui"):
+            status, _, body = _http_post(
+                base, f"/api/webui/config/{scope}",
+                {"nonexistent_key": "should_be_rejected"}, session_token)
+            assert status == 403, (
+                f"{scope} scope 应拒绝未知 key，实际 {status}: {body}")
+            assert isinstance(body, dict)
+            assert "不允许的配置项" in body.get("error", ""), (
+                f"{scope} scope 错误消息应含'不允许的配置项'，实际: {body}")
+
+    def test_config_post_scope_whitelist_allows_known_key(self, webui_server):
+        """已知 key 可正常写入，白名单不应误拒合法 key。"""
+        server, base, session_token = webui_server
+        status, _, body = _http_post(
+            base, "/api/webui/config/openlist",
+            {"webdav_host": "http://10.0.0.1:5244"}, session_token)
+        assert status == 200, f"已知 key 应接受，实际 {status}: {body}"
+
     def test_config_post_invalid_json_400(self, webui_server):
         server, base, session_token = webui_server
         status, _, body = _http_post(
@@ -718,6 +1022,8 @@ class TestPostRoutes:
 
     def test_openlist_test_connection_empty_host(self, webui_server):
         server, base, session_token = webui_server
+        # 显式设为空以测试"未配置"路径（_make_mock_config 默认有 host）
+        server._config.webdav.host = ""
         status, _, body = _http_post(
             base, "/api/openlist/test-connection",
             {"host": "", "user": "", "password": ""}, session_token)
@@ -881,6 +1187,101 @@ class TestPostRoutes:
             {"media_type": "movie", "id": 1, "status": "bogus"}, session_token)
         assert status == 400
 
+
+class TestMatchClearEndpoint:
+    """POST /api/tmdb/watchlist/match/clear 端点测试。"""
+
+    def test_clear_requires_auth(self, tmp_path):
+        """未携带 token 时返回 401/403（不在免鉴权白名单）。"""
+        from webui.routes import _login_attempts
+        _login_attempts.clear()
+
+        cfg = _make_mock_config(tmp_path)
+        db = _make_mock_db(tmp_path)
+        port = _free_port()
+        cfg.webui.port = port
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"):
+            (tmp_path / "static").mkdir(exist_ok=True)
+            (tmp_path / "static" / "index.html").write_text(
+                "<html><body>test</body></html>", encoding="utf-8")
+            (tmp_path / "static" / "assets").mkdir(exist_ok=True)
+            (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
+
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            test_password = "1111"
+            os.environ["WEBUI_TEST_MODE"] = "1"
+            os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
+            server.start()
+            deadline = time.time() + 2.0
+            while not server._server and time.time() < deadline:
+                time.sleep(0.05)
+
+            try:
+                base_url = f"http://127.0.0.1:{port}"
+                status, _, body = _http_post(
+                    base_url, "/api/tmdb/watchlist/match/clear",
+                    {"media_type": "movie", "id": 1}, session_token=None)
+                assert status in (401, 403), f"未认证应返回 401/403，实际: {status}"
+            finally:
+                server.stop()
+
+    def test_clear_invalid_media_type_returns_400(self, webui_server):
+        server, base, session_token = webui_server
+        status, _, body = _http_post(
+            base, "/api/tmdb/watchlist/match/clear",
+            {"media_type": "invalid", "id": 1}, session_token)
+        assert status == 400
+        assert isinstance(body, dict)
+
+    def test_clear_invalid_id_returns_400(self, webui_server):
+        server, base, session_token = webui_server
+        status, _, body = _http_post(
+            base, "/api/tmdb/watchlist/match/clear",
+            {"media_type": "movie", "id": -1}, session_token)
+        assert status == 400
+
+    def test_clear_missing_item_returns_404(self, webui_server):
+        server, base, session_token = webui_server
+        status, _, body = _http_post(
+            base, "/api/tmdb/watchlist/match/clear",
+            {"media_type": "movie", "id": 999999}, session_token)
+        assert status == 404
+
+    def test_clear_success(self, webui_server):
+        """成功清除人工覆盖后返回 success=True。"""
+        server, base, session_token = webui_server
+        wdb = server._watchlist_db
+        if not wdb:
+            pytest.skip("watchlist_db not initialized")
+        # 先插入一条记录并设为手动覆盖
+        wdb._upsert_movie({"id": 1, "title": "Test", "original_title": "Test"}, 0.0)
+        wdb.override_match_state("movie", 1, "matched", "manual")
+        assert wdb.get_match_state("movie", 1)["manual_override_at"] > 0
+
+        status, _, body = _http_post(
+            base, "/api/tmdb/watchlist/match/clear",
+            {"media_type": "movie", "id": 1}, session_token)
+        assert status == 200
+        assert body.get("success") is True
+
+        # 验证清除后状态
+        state = wdb.get_match_state("movie", 1)
+        assert state["manual_override_at"] == 0.0
+        assert state["manual_override_by"] == ""
+        assert state["match_status"] == "uncomputed"
+
+    def test_clear_endpoint_reachable_via_do_post(self, webui_server):
+        """新端点经 do_POST 可达（覆盖 server.py 分发）。"""
+        server, base, session_token = webui_server
+        # 不存在的 id → 404 表示端点可达（不是 404 from do_POST）
+        status, _, body = _http_post(
+            base, "/api/tmdb/watchlist/match/clear",
+            {"media_type": "movie", "id": 0}, session_token)
+        # id<=0 → 400
+        assert status == 400
+
     def test_openlist_save_with_empty_optional_fields_accepted(
             self, webui_server):
         """2FA/b_root/c_root 为空仍可保存（后端支持空 b/c，前端软警告不阻断）"""
@@ -926,6 +1327,272 @@ class TestPostRoutes:
 
 
 # ============================================================
+# OpenList 数字字段校验（Task B）
+# ============================================================
+
+_OPENLIST_NUM_FIELDS = [
+    "refresh_interval_minutes",
+    "refresh_depth",
+    "refresh_full_audit_interval_days",
+    "behavior_ghost_protect_seconds",
+    "behavior_a_to_b_restore_delay_seconds",
+    "behavior_sync_on_startup_wait",
+    "log_max_size_mb",
+    "log_backup_count",
+]
+
+# 字段允许的最小值：refresh_full_audit_interval_days 与
+# behavior_sync_on_startup_wait 允许 0（关闭/立即），其余必须 >= 1
+_OPENLIST_NUM_MIN = {
+    "refresh_interval_minutes": 1,
+    "refresh_depth": 1,
+    "refresh_full_audit_interval_days": 0,
+    "behavior_ghost_protect_seconds": 1,
+    "behavior_a_to_b_restore_delay_seconds": 1,
+    "behavior_sync_on_startup_wait": 0,
+    "log_max_size_mb": 1,
+    "log_backup_count": 1,
+}
+
+
+class TestOpenListNumericValidation:
+    """POST /api/webui/config/openlist 数字字段整批校验。
+
+    契约：任一数字字段非法 → HTTP 400 且零写入（set_config 完全未调用）；
+    合法零值（refresh_full_audit_interval_days=0）与空字符串字段
+    （webdav_password / webdav_totp_secret / b_root / c_root / log_file）
+    必须保持可保存。
+    """
+
+    def _post(self, base, session_token, body):
+        return _http_post(base, "/api/webui/config/openlist", body, session_token)
+
+    def _get_current_openlist(self, server):
+        """读取当前 openlist scope 配置值（对比前后，验证零写入）。"""
+        wdb = server._watchlist_db
+        return {
+            key: wdb.get_config("openlist", key)
+            for key in _OPENLIST_NUM_FIELDS
+        }
+
+    def test_all_fields_accept_valid_integers(self, webui_server):
+        server, base, session_token = webui_server
+        body = {k: str(_OPENLIST_NUM_MIN[k] + 5) for k in _OPENLIST_NUM_FIELDS}
+        body["refresh_full_audit_interval_days"] = "7"
+        body["behavior_sync_on_startup_wait"] = "60"  # 上限内合法
+        status, _, resp = self._post(base, session_token, body)
+        assert status == 200, f"合法整数应保存成功，实际 {status}: {resp}"
+        assert resp.get("success") is True
+
+    def test_startup_wait_above_upper_bound_rejected(self, webui_server):
+        """behavior_sync_on_startup_wait 超过 60 返回 400 且零写入。"""
+        server, base, session_token = webui_server
+        before = self._get_current_openlist(server)
+        body = {"behavior_sync_on_startup_wait": "61"}
+        status, _, resp = self._post(base, session_token, body)
+        assert status == 400, f"61 应返回 400，实际 {status}: {resp}"
+        assert "不能超过 60" in resp.get("error", "")
+        after = self._get_current_openlist(server)
+        assert before == after
+
+    def test_startup_wait_large_value_rejected_without_write(self, webui_server):
+        """超大启动等待值拒绝且不写入。"""
+        server, base, session_token = webui_server
+        before = self._get_current_openlist(server)
+        body = {"behavior_sync_on_startup_wait": "999999"}
+        status, _, resp = self._post(base, session_token, body)
+        assert status == 400
+        after = self._get_current_openlist(server)
+        assert before == after
+
+    def test_negative_values_rejected(self, webui_server):
+        server, base, session_token = webui_server
+        for field in _OPENLIST_NUM_FIELDS:
+            before = self._get_current_openlist(server)
+            body = {field: "-1"}
+            status, _, resp = self._post(base, session_token, body)
+            assert status == 400, (
+                f"{field}=-1 应返回 400，实际 {status}: {resp}")
+            assert resp.get("success") is False
+            # min=0 字段报"不能为负数"，min=1 字段报"必须大于等于 1"
+            assert ("不能为负数" in resp.get("error", "")
+                    or "必须大于等于" in resp.get("error", "")), \
+                f"{field}=-1 错误文案不符: {resp.get('error')}"
+            # 零写入
+            after = self._get_current_openlist(server)
+            assert before == after, f"{field} 非法值不应产生任何写入"
+
+    def test_chinese_and_english_text_rejected(self, webui_server):
+        server, base, session_token = webui_server
+        bad_values = ["abc", "一", "10.5", "1e3", "1E3"]
+        for field in _OPENLIST_NUM_FIELDS:
+            for bad in bad_values:
+                before = self._get_current_openlist(server)
+                status, _, resp = self._post(
+                    base, session_token, {field: bad})
+                assert status == 400, (
+                    f"{field}={bad!r} 应返回 400，实际 {status}: {resp}")
+                assert "必须是整数" in resp.get("error", "")
+                after = self._get_current_openlist(server)
+                assert before == after, f"{field}={bad!r} 非法值不应产生任何写入"
+
+    def test_decimal_and_scientific_notation_rejected(self, webui_server):
+        server, base, session_token = webui_server
+        bad_values = ["1.5", "0.5", "1e3", "1E3", "+1e3"]
+        for field in _OPENLIST_NUM_FIELDS:
+            for bad in bad_values:
+                before = self._get_current_openlist(server)
+                status, _, resp = self._post(
+                    base, session_token, {field: bad})
+                assert status == 400, (
+                    f"{field}={bad!r} 应返回 400，实际 {status}: {resp}")
+                after = self._get_current_openlist(server)
+                assert before == after
+
+    def test_bool_and_none_rejected(self, webui_server):
+        server, base, session_token = webui_server
+        for field in _OPENLIST_NUM_FIELDS:
+            for bad in (True, False, None):
+                before = self._get_current_openlist(server)
+                status, _, resp = self._post(
+                    base, session_token, {field: bad})
+                assert status == 400, (
+                    f"{field}={bad!r} 应返回 400，实际 {status}: {resp}")
+                after = self._get_current_openlist(server)
+                assert before == after
+
+    def test_zero_value_for_full_audit_interval_accepted(self, webui_server):
+        """refresh_full_audit_interval_days=0 合法（关闭周期审计），不得吞零。"""
+        server, base, session_token = webui_server
+        body = {"refresh_full_audit_interval_days": "0"}
+        status, _, resp = self._post(base, session_token, body)
+        assert status == 200, f"合法零值应保存成功，实际 {status}: {resp}"
+        stored = server._watchlist_db.get_config(
+            "openlist", "refresh_full_audit_interval_days")
+        assert stored == "0", f"合法零值应原样写入，实际: {stored!r}"
+
+    def test_zero_value_for_startup_wait_accepted(self, webui_server):
+        """behavior_sync_on_startup_wait=0 合法（立即启动同步）。"""
+        server, base, session_token = webui_server
+        body = {"behavior_sync_on_startup_wait": "0"}
+        status, _, resp = self._post(base, session_token, body)
+        assert status == 200, f"合法零值应保存成功，实际 {status}: {resp}"
+        stored = server._watchlist_db.get_config(
+            "openlist", "behavior_sync_on_startup_wait")
+        assert stored == "0", f"合法零值应原样写入，实际: {stored!r}"
+
+    def test_zero_below_minimum_for_other_fields_rejected(self, webui_server):
+        """其余 6 个字段 min=1，0 应被拒绝。"""
+        server, base, session_token = webui_server
+        min1_fields = [f for f in _OPENLIST_NUM_FIELDS
+                       if _OPENLIST_NUM_MIN[f] == 1]
+        for field in min1_fields:
+            before = self._get_current_openlist(server)
+            status, _, resp = self._post(base, session_token, {field: "0"})
+            assert status == 400, (
+                f"{field}=0 应返回 400，实际 {status}: {resp}")
+            assert "必须大于等于 1" in resp.get("error", "")
+            after = self._get_current_openlist(server)
+            assert before == after
+
+    def test_batch_atomicity_any_invalid_field_blocks_whole_write(
+            self, webui_server):
+        """整批原子性：一个非法字段 → 400，其余字段也不写入。"""
+        server, base, session_token = webui_server
+        before = self._get_current_openlist(server)
+        # 合法字段 + 一个非法字段混合
+        body = {
+            "refresh_interval_minutes": "10",
+            "refresh_depth": "5",
+            "refresh_full_audit_interval_days": "7",
+            "behavior_ghost_protect_seconds": "300",
+            "behavior_a_to_b_restore_delay_seconds": "30",
+            "behavior_sync_on_startup_wait": "0",
+            "log_max_size_mb": "abc",   # 非法：非整数
+            "log_backup_count": "5",
+        }
+        status, _, resp = self._post(base, session_token, body)
+        assert status == 400, f"混合非法字段应返回 400，实际 {status}: {resp}"
+        assert "log_max_size_mb" in resp.get("error", "")
+        after = self._get_current_openlist(server)
+        assert before == after, "任一字段非法时整个 openlist 配置应零写入"
+
+    def test_batch_atomicity_set_config_never_called(self, webui_server):
+        """原子性硬断言：非法请求时 set_config 完全未被调用。"""
+        server, base, session_token = webui_server
+        wdb = server._watchlist_db
+        original_set_config = wdb.set_config
+
+        class _TrackingDb:
+            """包装真实 watchlist_db，跟踪 set_config 调用。"""
+
+            def __init__(self, inner):
+                self._inner = inner
+                self.set_config_called = False
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def set_config(self, scope, key, value):
+                self.set_config_called = True
+                return self._inner.set_config(scope, key, value)
+
+        tracker = _TrackingDb(wdb)
+        server._watchlist_db = tracker
+        try:
+            body = {"refresh_interval_minutes": "abc"}
+            status, _, resp = self._post(base, session_token, body)
+            assert status == 400
+            assert tracker.set_config_called is False, \
+                "非法数字字段应在 set_config 写循环前终止，不得调用 set_config"
+        finally:
+            server._watchlist_db = wdb
+
+    def test_empty_optional_fields_still_accepted(self, webui_server):
+        """允许空值字段（webdav_password/totp_secret/b_root/c_root/log_file）仍可保存。"""
+        server, base, session_token = webui_server
+        body = {
+            "webdav_host": "http://192.168.1.100:5244",
+            "webdav_user": "admin",
+            "webdav_password": "",
+            "webdav_totp_secret": "",
+            "b_root": "",
+            "c_root": "",
+            "strm_engines": "[]",
+            "refresh_paths": "[]",
+            "log_level": "INFO",
+            "log_max_size_mb": "2",
+            "log_backup_count": "5",
+            "log_file": "",
+        }
+        status, _, resp = self._post(base, session_token, body)
+        assert status == 200, f"允许空值字段应保存成功，实际 {status}: {resp}"
+        assert resp.get("success") is True
+
+    def test_empty_string_rejected(self, webui_server):
+        """空字符串 '' 应被拒绝（int('') 抛 ValueError）。"""
+        server, base, session_token = webui_server
+        for field in _OPENLIST_NUM_FIELDS:
+            before = self._get_current_openlist(server)
+            status, _, resp = self._post(base, session_token, {field: ""})
+            assert status == 400, (
+                f"{field}='' 应返回 400，实际 {status}: {resp}")
+            assert "必须是整数" in resp.get("error", "")
+            after = self._get_current_openlist(server)
+            assert before == after, f"{field}='' 空字符串不应产生任何写入"
+
+    def test_whitespace_only_string_rejected(self, webui_server):
+        """纯空白串 ' ' 应被拒绝（int(' ') 抛 ValueError）。"""
+        server, base, session_token = webui_server
+        before = self._get_current_openlist(server)
+        status, _, resp = self._post(
+            base, session_token, {"refresh_interval_minutes": "  "})
+        assert status == 400, f"纯空白串应返回 400，实际 {status}: {resp}"
+        after = self._get_current_openlist(server)
+        assert before == after
+
+
+# ============================================================
 # 安全 / 局域网限制
 # ============================================================
 
@@ -961,6 +1628,296 @@ class TestSecurity:
         assert _is_lan_ip("203.0.113.1") is False
         assert _is_lan_ip("8.8.8.8") is False
         assert _is_lan_ip("1.2.3.4") is False
+
+    def test_rate_limit_returns_429_after_five_failures(self, webui_server):
+        """连续 5 次错误密码后第 6 次返回 429（登录限流端到端验证）。"""
+        from webui.routes import _login_attempts
+
+        server, base_url, session_token = webui_server
+        # fixture 已成功登录一次，_login_attempts 已清空；重新确认
+        _login_attempts.clear()
+
+        # 连续发送 6 次错误密码
+        for i in range(6):
+            status, _, resp = _http_post(base_url, "/api/login", {"password": "wrong_password"})
+            if i < 5:
+                assert status == 401, f"第 {i + 1} 次错误密码应返回 401，实际: {status}"
+            else:
+                assert status == 429, f"第 6 次错误密码应返回 429，实际: {status}"
+                assert "登录尝试过于频繁" in resp.get("error", ""), \
+                    f"429 响应应包含限流提示，实际: {resp}"
+
+        # 断言对应 IP 有 5 条失败时间戳（第 6 次被 429 拒绝，不追加）
+        ip = "127.0.0.1"
+        assert ip in _login_attempts
+        assert len(_login_attempts[ip]) == 5, \
+            f"期望 5 条失败记录（第 6 次被 429 拒绝不追加），实际: {len(_login_attempts[ip])}"
+
+
+class TestWebuiConfigGetSanitization:
+    """R25: GET /api/webui/config/{scope} 敏感凭据只返回布尔值，不返回明文。"""
+
+    def _make_handler(self, scope_cfg: dict):
+        wdb = MagicMock()
+        wdb.get_all_config.return_value = dict(scope_cfg)
+        server = MagicMock()
+        server._watchlist_db = wdb
+        handler = MagicMock()
+        handler.client_address = ("127.0.0.1", 12345)
+        return handler, server
+
+    def test_tmdb_scope_sanitizes_sensitive(self):
+        from webui.routes import _handle_webui_config_get
+        handler, server = self._make_handler({
+            "access_token": "secret_token_abc",
+            "api_key": "secret_key_xyz",
+            "language": "zh-CN",
+        })
+        _handle_webui_config_get(handler, server, "tmdb")
+        payload = handler._send_json.call_args[0][0]
+        assert payload["success"] is True
+        cfg = payload["config"]
+        assert cfg["access_token"] is True
+        assert cfg["api_key"] is True
+        assert "secret_token_abc" not in json.dumps(payload)
+        assert cfg["language"] == "zh-CN"
+
+    def test_openlist_scope_sanitizes_sensitive(self):
+        from webui.routes import _handle_webui_config_get
+        handler, server = self._make_handler({
+            "webdav_password": "p@ssw0rd_secret",
+            "webdav_totp_secret": "JBSWY3DPEHPK3PXP_secret",
+            "webdav_host": "http://openlist:5244",
+        })
+        _handle_webui_config_get(handler, server, "openlist")
+        payload = handler._send_json.call_args[0][0]
+        cfg = payload["config"]
+        assert cfg["webdav_password"] is True
+        assert cfg["webdav_totp_secret"] is True
+        assert "p@ssw0rd_secret" not in json.dumps(payload)
+        assert cfg["webdav_host"] == "http://openlist:5244"
+
+    def test_ui_scope_sanitizes_admin_password(self):
+        from webui.routes import _handle_webui_config_get
+        handler, server = self._make_handler({
+            "admin_password": "pbkdf2$100000$secret_hash",
+        })
+        _handle_webui_config_get(handler, server, "ui")
+        payload = handler._send_json.call_args[0][0]
+        cfg = payload["config"]
+        assert cfg["admin_password"] is True
+        assert "pbkdf2" not in json.dumps(payload)
+
+
+class TestOpenListPingRateLimit:
+    """R26: /api/openlist/ping 的 IP 级 10 次/分钟速率限制。"""
+
+    @staticmethod
+    def _last_status(handler) -> int:
+        """提取 _send_json 最后一次调用的 HTTP 状态码（位置参数或 kwargs）。"""
+        args, kwargs = handler._send_json.call_args
+        return kwargs.get("status", args[1] if len(args) > 1 else 200)
+
+    def test_prefilled_attempts_immediately_429(self):
+        from webui.routes import _handle_openlist_ping, _ping_attempts, _ping_attempts_lock
+        _ping_attempts.clear()
+        try:
+            handler = MagicMock()
+            handler.client_address = ("192.168.1.50", 12345)
+            server = MagicMock()
+            now = time.time()
+            with _ping_attempts_lock:
+                _ping_attempts["192.168.1.50"] = [now - i for i in range(10)]
+            _handle_openlist_ping(handler, server)
+            status = self._last_status(handler)
+            payload = handler._send_json.call_args[0][0]
+            assert status == 429
+            assert payload["status"] == "rate_limited"
+            assert payload["success"] is False
+        finally:
+            _ping_attempts.clear()
+
+    def test_eleventh_call_returns_429(self):
+        """速率限制检查在 host 检查之前，故第 11 次仍 429。"""
+        from webui.routes import _handle_openlist_ping, _ping_attempts
+        _ping_attempts.clear()
+        try:
+            handler = MagicMock()
+            handler.client_address = ("192.168.1.60", 12345)
+            server = MagicMock(name="no-host-server")
+            fake_client = MagicMock()
+            fake_client.login.return_value = True
+            with patch("webui.routes._openlist_merged_webdav_cfg",
+                       return_value=("http://openlist:5244", "u", "p", "")), \
+                 patch("webdav_client.OpenListAdminClient", return_value=fake_client):
+                for i in range(10):
+                    _handle_openlist_ping(handler, server)
+                    status = self._last_status(handler)
+                    assert status != 429, f"第 {i + 1} 次不应限流"
+                _handle_openlist_ping(handler, server)
+                status = self._last_status(handler)
+                payload = handler._send_json.call_args[0][0]
+                assert status == 429, f"第 11 次应返回 429，实际 {status}"
+                assert payload["status"] == "rate_limited"
+        finally:
+            _ping_attempts.clear()
+
+
+class TestLoginToctouDoubleCheck:
+    """R27: 登录失败双重检查锁定——已达上限时 429 且不追加记录。"""
+
+    def _make_handler(self):
+        handler = MagicMock()
+        handler.client_address = ("127.0.0.1", 9999)
+        server = MagicMock()
+        server._watchlist_db = MagicMock()
+        server._watchlist_db.get_config.return_value = "salt$100000$hash"
+        return handler, server
+
+    def test_locked_out_returns_429_without_appending(self):
+        from webui.routes import _handle_login, _login_attempts, _login_attempts_lock
+        _login_attempts.clear()
+        try:
+            handler, server = self._make_handler()
+            now = time.time()
+            with _login_attempts_lock:
+                _login_attempts["127.0.0.1"] = [now] * 5
+            _handle_login(handler, server, b'{"password":"wrong"}')
+            status = handler._send_json.call_args[0][1]
+            payload = handler._send_json.call_args[0][0]
+            assert status == 429
+            assert "登录尝试过于频繁" in payload.get("error", "")
+            with _login_attempts_lock:
+                assert len(_login_attempts["127.0.0.1"]) == 5
+        finally:
+            _login_attempts.clear()
+
+    def test_double_check_blocks_toctou_race(self):
+        """模拟 TOCTOU：初始检查通过（4 条），verify 期间并发补满第 5 条，
+        双重检查应返回 429 且不追加——验证 R27 修复分支。"""
+        import webui.routes as routes
+        _login_attempts = routes._login_attempts
+        _login_attempts.clear()
+        try:
+            handler, server = self._make_handler()
+            now = time.time()
+            with routes._login_attempts_lock:
+                _login_attempts["127.0.0.1"] = [now - 1] * 4  # 初始检查通过
+
+            def _race_verify(password, stored):
+                # 模拟并发请求在慢哈希期间补满第 5 条
+                with routes._login_attempts_lock:
+                    cur = _login_attempts.get("127.0.0.1", [])
+                    cur.append(time.time())
+                    _login_attempts["127.0.0.1"] = cur
+                return False
+
+            with patch("utils.password_utils.verify_password", side_effect=_race_verify):
+                routes._handle_login(handler, server, b'{"password":"wrong"}')
+            status = handler._send_json.call_args[0][1]
+            payload = handler._send_json.call_args[0][0]
+            assert status == 429, f"双重检查应返回 429，实际 {status}"
+            assert "登录尝试过于频繁" in payload.get("error", "")
+            with routes._login_attempts_lock:
+                assert len(_login_attempts["127.0.0.1"]) == 5, \
+                    "双重检查已达上限应 429 且不追加"
+        finally:
+            _login_attempts.clear()
+
+
+class TestConfigApiUnifiedSession:
+    """R28: handle_config_api 用统一 _validate_session_token 校验（滑动续期 + 空 IP 兼容）。"""
+
+    def _make_handler(self, tmp_path):
+        from config import AppConfig
+        toml_path = tmp_path / "config.toml"
+        toml_path.write_text('[local]\ndb_file = "bridge.db"\n', encoding="utf-8")
+        cfg = AppConfig.from_file(str(toml_path))
+        handler = MagicMock()
+        handler.webui._config = cfg
+        handler.webui._tmdb_client = None
+        handler.webui._watchlist_db = FakeConfigDb()
+        handler.webui._has_password = True
+        handler.webui._sessions = {}
+        handler.webui._sessions_lock = threading.Lock()
+        handler.client_address = ("192.168.1.10", 12345)
+        handler.headers = {"X-Session-Token": "valid-token"}
+
+        # 真实 _validate_session_token 实现（含滑动续期 + 空 IP 兼容）
+        def _validate_token(token: str, client_ip: str) -> bool:
+            import hmac
+            webui = handler.webui
+            now = time.time()
+            with webui._sessions_lock:
+                if token in webui._sessions:
+                    expiry, stored_ip = webui._sessions[token]
+                    if now < expiry and (stored_ip == "" or stored_ip == client_ip):
+                        webui._sessions[token] = (now + 604800, client_ip)
+                        return True
+            return False
+
+        handler._validate_session_token = _validate_token
+        return handler
+
+    def test_valid_token_authenticates_and_slides_expiry(self, tmp_path):
+        from webui.routes import handle_config_api
+        handler = self._make_handler(tmp_path)
+        token = "valid-token"
+        old_expiry = time.time() + 3600
+        handler.webui._sessions[token] = (old_expiry, "192.168.1.10")
+        handle_config_api(handler)
+        payload = handler._send_json.call_args[0][0]
+        assert payload["_authenticated"] is True
+        # 滑动续期：过期时间被推进 ~7 天
+        new_expiry, stored_ip = handler.webui._sessions[token]
+        assert new_expiry > old_expiry + 600000, "有效会话应被滑动续期"
+        assert stored_ip == "192.168.1.10"
+
+    def test_empty_stored_ip_compatible(self, tmp_path):
+        from webui.routes import handle_config_api
+        handler = self._make_handler(tmp_path)
+        handler.webui._sessions["valid-token"] = (time.time() + 3600, "")
+        handle_config_api(handler)
+        payload = handler._send_json.call_args[0][0]
+        assert payload["_authenticated"] is True
+
+    def test_invalid_token_not_authenticated(self, tmp_path):
+        from webui.routes import handle_config_api
+        handler = self._make_handler(tmp_path)
+        handler.webui._sessions["other-token"] = (time.time() + 3600, "192.168.1.10")
+        handle_config_api(handler)
+        payload = handler._send_json.call_args[0][0]
+        assert payload["_authenticated"] is False
+
+
+class TestMainStartHidesExceptionDetail:
+    """R29: start_main 异常时不回传内部路径/异常文本。"""
+
+    def test_start_main_returns_generic_message_on_exception(self, tmp_path):
+        from config import ABMapping
+        cfg = _make_mock_config(tmp_path)
+        cfg.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+        db = _make_mock_db(tmp_path)
+
+        internal_path = str(tmp_path / "secret" / "config.py")
+
+        def _boom(*args, **kwargs):
+            raise FileNotFoundError(f"No such file: {internal_path}")
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"), \
+             patch("webdav_client.OpenListAdminClient", side_effect=_boom):
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            result = server.start_main()
+
+        assert result["success"] is False
+        assert result["message"] == "启动失败，请查看服务端日志"
+        assert result.get("error_type") == "exception"
+        assert internal_path not in result["message"]
+        assert "FileNotFoundError" not in json.dumps(result)
 
 
 # ============================================================
@@ -1059,7 +2016,7 @@ class TestAreaRefreshAPI:
             (tmp_path / "static" / "assets" / "favicon.ico").write_bytes(b"\x00")
 
             server = WebUIServer(cfg.webui, db, app_config=cfg)
-            test_password = "test_password_123"
+            test_password = "1111"
             os.environ["WEBUI_TEST_MODE"] = "1"
             os.environ["WEBUI_ADMIN_PASSWORD_FOR_TEST"] = test_password
             server.start()
@@ -1092,34 +2049,32 @@ class TestAreaRefreshAPI:
         server, base, session_token = webui_server
         # 模拟主程序运行
         mock_app_service = MagicMock()
-        mock_app_service._refresh_lock = threading.Lock()
         server._app_service = mock_app_service
-        
+
         # 测试包含 .. 的路径
         body = {"media": "../etc/passwd"}
         status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         assert status == 400
         assert "媒体名包含非法字符" in resp.get("error", "")
-        
+
         # 测试以 / 开头的路径
         body = {"media": "/etc/passwd"}
         status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         assert status == 400
         assert "媒体名包含非法字符" in resp.get("error", "")
-        
+
         # 测试以 \ 开头的路径
         body = {"media": "\\etc\\passwd"}
         status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
         assert status == 400
         assert "媒体名包含非法字符" in resp.get("error", "")
-    
+
     def test_area_refresh_dangerous_characters_rejected(self, webui_server):
         """危险字符应返回 400"""
         server, base, session_token = webui_server
         mock_app_service = MagicMock()
-        mock_app_service._refresh_lock = threading.Lock()
         server._app_service = mock_app_service
-        
+
         # 测试各种危险字符
         dangerous_inputs = [
             "test\x00name",        # null byte
@@ -1132,21 +2087,20 @@ class TestAreaRefreshAPI:
             "test|name",           # pipe
             "C:\\Windows\\System", # Windows absolute path with drive letter
         ]
-        
+
         for dangerous_input in dangerous_inputs:
             body = {"media": dangerous_input}
             status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
             assert status == 400, f"Expected 400 for input {repr(dangerous_input)}, got {status}"
             assert "媒体名包含非法字符" in resp.get("error", ""), \
                 f"Expected '媒体名包含非法字符' error for {repr(dangerous_input)}, got {resp.get('error')}"
-    
+
     def test_area_refresh_media_name_length_limit(self, webui_server):
         """超长媒体名应返回 400"""
         server, base, session_token = webui_server
         mock_app_service = MagicMock()
-        mock_app_service._refresh_lock = threading.Lock()
         server._app_service = mock_app_service
-        
+
         # 测试超过 255 字符的媒体名
         long_name = "a" * 256
         body = {"media": long_name}
@@ -1157,14 +2111,14 @@ class TestAreaRefreshAPI:
     def test_refresh_is_non_destructive(self, webui_server):
         """刷新不再因删除数超阈值要求确认，而是直接完成非破坏性 A→B 同步"""
         server, base, session_token = webui_server
-        
+
         # Mock database 返回 15 条 A 区记录（旧逻辑下会超过阈值要求确认）
         mock_db = MagicMock()
         mock_records = [
             {"local_path": f"/a/zone/file{i}.strm", "webdav_path": f"/webdav/file{i}.strm", "parent_webdav_path": "/webdav"}
             for i in range(1, 16)
         ]
-        
+
         # Mock read_connection context manager
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
@@ -1174,28 +2128,27 @@ class TestAreaRefreshAPI:
         mock_conn.__exit__ = MagicMock(return_value=None)
         mock_conn.row_factory = None
         mock_db.read_connection.return_value = mock_conn
-        
+
         mock_app_service = MagicMock()
-        mock_app_service._refresh_lock = threading.Lock()
         mock_app_service.db = mock_db
         mock_app_service.config = None
         # 新契约：映射到引擎入口路径 + 逐条 A→B 同步
         mock_app_service._cloud_path_to_engine_paths.return_value = ["/strm/webdav"]
         mock_app_service.copy_a_record_to_b_if_needed.return_value = True
         server._app_service = mock_app_service
-        
+
         # Mock OpenList Admin API 返回空列表
         mock_admin_api = MagicMock()
         mock_admin_api.list_directory.return_value = {"code": 0, "data": {"content": []}}
         mock_app_service.admin_api = mock_admin_api
-        
+
         # patch Path.exists 返回 True，使记录计入 synced 而非 skipped
         with patch("webui.routes.Path") as mock_path:
             mock_path.return_value.exists.return_value = True
             mock_path.return_value.is_absolute.return_value = False
             body = {"media": "test_movie"}
             status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
-        
+
         # 验证非破坏性同步：不再要求确认，直接完成
         assert status == 200, f"Expected 200, got {status}. Response: {resp}"
         assert resp.get("ok") is True, f"Expected ok=True, got {resp}"
@@ -1207,14 +2160,14 @@ class TestAreaRefreshAPI:
     def test_refresh_calls_copy_per_record(self, webui_server):
         """刷新逐条调用 copy_a_record_to_b_if_needed，不删除文件、不调用 delete_a_by_local"""
         server, base, session_token = webui_server
-        
+
         # Mock database
         mock_db = MagicMock()
         mock_records = [
             {"local_path": f"/a/zone/file{i}.strm", "webdav_path": f"/webdav/file{i}.strm", "parent_webdav_path": "/webdav"}
             for i in range(1, 16)
         ]
-        
+
         # Mock read_connection context manager
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
@@ -1224,28 +2177,27 @@ class TestAreaRefreshAPI:
         mock_conn.__exit__ = MagicMock(return_value=None)
         mock_conn.row_factory = None
         mock_db.read_connection.return_value = mock_conn
-        
+
         mock_app_service = MagicMock()
-        mock_app_service._refresh_lock = threading.Lock()
         mock_app_service.db = mock_db
         mock_app_service.config = None
         # 新契约：映射到引擎入口路径 + 逐条 A→B 同步
         mock_app_service._cloud_path_to_engine_paths.return_value = ["/strm/webdav"]
         mock_app_service.copy_a_record_to_b_if_needed.return_value = True
         server._app_service = mock_app_service
-        
+
         # Mock OpenList Admin API 返回空列表
         mock_admin_api = MagicMock()
         mock_admin_api.list_directory.return_value = {"code": 0, "data": {"content": []}}
         mock_app_service.admin_api = mock_admin_api
-        
+
         # patch Path.exists 返回 True，使记录计入 synced
         with patch("webui.routes.Path") as mock_path:
             mock_path.return_value.exists.return_value = True
             mock_path.return_value.is_absolute.return_value = False
             body = {"media": "test_movie"}
             status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
-        
+
         # 验证逐条同步、非破坏性
         assert status == 200, f"Expected 200, got {status}. Response: {resp}"
         assert resp.get("ok") is True, f"Expected ok=True, got {resp}"
@@ -1258,13 +2210,13 @@ class TestAreaRefreshAPI:
     def test_refresh_timeout(self, webui_server):
         """刷新不再有超时逻辑，响应中不应出现 timeout 字段"""
         server, base, session_token = webui_server
-        
+
         # Mock database 返回 1 条记录
         mock_db = MagicMock()
         mock_records = [
             {"local_path": "/a/zone/file1.strm", "webdav_path": "/webdav/file1.strm", "parent_webdav_path": "/webdav"}
         ]
-        
+
         # Mock read_connection context manager
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
@@ -1274,27 +2226,26 @@ class TestAreaRefreshAPI:
         mock_conn.__exit__ = MagicMock(return_value=None)
         mock_conn.row_factory = None
         mock_db.read_connection.return_value = mock_conn
-        
+
         mock_app_service = MagicMock()
-        mock_app_service._refresh_lock = threading.Lock()
         mock_app_service.db = mock_db
         mock_app_service.config = None
         mock_app_service._cloud_path_to_engine_paths.return_value = ["/strm/webdav"]
         mock_app_service.copy_a_record_to_b_if_needed.return_value = True
         server._app_service = mock_app_service
-        
+
         # Mock OpenList Admin API 返回空列表
         mock_admin_api = MagicMock()
         mock_admin_api.list_directory.return_value = {"code": 0, "data": {"content": []}}
         mock_app_service.admin_api = mock_admin_api
-        
+
         # patch Path.exists 返回 True
         with patch("webui.routes.Path") as mock_path:
             mock_path.return_value.exists.return_value = True
             mock_path.return_value.is_absolute.return_value = False
             body = {"media": "test_movie"}
             status, _, resp = _http_post(base, "/api/area/a/refresh", body, session_token)
-        
+
         # 验证无超时字段（超时逻辑已移除，防止被误加回）
         assert status == 200, f"Expected 200, got {status}. Response: {resp}"
         assert resp.get("ok") is True, f"Expected ok=True, got {resp}"
@@ -1312,13 +2263,15 @@ class TestOnboardingAPI:
     def test_config_status_unconfigured(self, webui_server):
         """未配置时返回基础状态"""
         server, base, session_token = webui_server
+        # 显式设为未配置（_make_mock_config 默认有 host，此处覆盖）
+        server._config.webdav.host = ""
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert status == 200
         assert resp["password_set"] is True  # 测试模式自动生成密码
         assert resp["tmdb_configured"] is False
         assert resp["openlist_configured"] is False
         assert resp["main_running"] is False
-        assert resp["onboarding_completed"] is False
+        assert resp["onboarding_completed"] == "0"
 
     def test_config_status_partially_configured(self, webui_server):
         """部分配置时返回对应字段"""
@@ -1342,11 +2295,13 @@ class TestOnboardingAPI:
         assert resp["password_set"] is True
         assert resp["tmdb_configured"] is True
         assert resp["openlist_configured"] is True
-        assert resp["onboarding_completed"] is True
+        assert resp["onboarding_completed"] == "1"
 
     def test_config_validate_openlist_unconfigured(self, webui_server):
         """OpenList 未配置时返回 error"""
         server, base, session_token = webui_server
+        # 显式设为未配置（_make_mock_config 默认有 host，此处覆盖）
+        server._config.webdav.host = ""
         status, _, resp = _http_post(base, "/api/config/validate", {}, session_token)
         assert status == 200
         assert resp["ok"] is False
@@ -1412,3 +2367,996 @@ class TestOnboardingAPI:
         # 检查第二个参数（status code）
         if len(call_args) > 1 and call_args[1]:
             assert call_args[1].get("status") == 500
+
+
+# ============================================================
+# Area Detail API Tests
+# ============================================================
+
+class TestAreaDetailKindParameter:
+    """测试 /api/area/{area}/detail 的 kind 参数处理。"""
+
+    def _setup_mock_db(self, mock_db, records, total=1, area="b"):
+        """设置 mock 数据库连接，处理多次 execute 调用。"""
+        mock_conn = MagicMock()
+
+        # 定义列名（根据 area 不同）
+        if area == "a":
+            columns = ["local_path", "webdav_path", "parent_webdav_path", "updated_at"]
+        elif area == "b":
+            columns = ["local_path", "webdav_path", "parent_webdav_path", "source_a_path", "fingerprint", "status", "updated_at", "mapping_id"]
+        else:  # area == "c"
+            columns = ["local_path", "webdav_path", "original_b_path", "ghost_root", "moved_at"]
+
+        # 将记录转换为字典列表
+        dict_records = [dict(zip(columns, record)) for record in records]
+
+        # 使用 side_effect 处理多次 execute 调用
+        def execute_side_effect(sql, params=None):
+            mock_result = MagicMock()
+            if "COUNT(*)" in sql:
+                mock_result.fetchone.return_value = (total,)
+            else:
+                mock_result.fetchall.return_value = dict_records
+            return mock_result
+
+        mock_conn.execute.side_effect = execute_side_effect
+
+        mock_conn_ctx = MagicMock()
+        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+        mock_db.read_connection.return_value = mock_conn_ctx
+
+    def test_detail_api_without_kind_defaults_to_all(self, webui_server):
+        """详情 API 不传 kind 时按 all 安全行为处理（不按文件名分季）"""
+        server, base, session_token = webui_server
+        # Mock 数据库返回包含文件名 S01E01 的记录
+        mock_db = server._db
+        records = [
+            ("/b/movie/test_movie/Movie.S01E01.strm", "/webdav/movie/test_movie/Movie.S01E01.strm", "/webdav/movie/test_movie", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        # 不传 kind 参数
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_movie", session_token)
+        assert status == 200
+        # 验证返回的季标签为"默认"（因为 movie kind 不允许文件名 fallback）
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "默认", f"movie kind 无 kind 参数时应归入默认，实际: {seasons[0]['label']}"
+
+    def test_detail_api_with_invalid_kind_defaults_to_all(self, webui_server):
+        """详情 API 传非法 kind（如 kind=../etc）降级为 all，不报错"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        records = [
+            ("/b/movie/test_movie/Movie.S01E01.strm", "/webdav/movie/test_movie/Movie.S01E01.strm", "/webdav/movie/test_movie", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        # 传非法 kind
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_movie&kind=../etc", session_token)
+        assert status == 200
+        # 应降级为 all 行为，归入默认
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "默认", f"非法 kind 应降级为 all，实际: {seasons[0]['label']}"
+
+    def test_detail_api_movie_kind_no_filename_fallback(self, webui_server):
+        """movie kind 下文件名 SxxExx 不产生季，落入默认"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        records = [
+            ("/b/movie/test_movie/Movie.S01E01.strm", "/webdav/movie/test_movie/Movie.S01E01.strm", "/webdav/movie/test_movie", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_movie&kind=movie", session_token)
+        assert status == 200
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "默认", f"movie kind 应不从文件名提取季，实际: {seasons[0]['label']}"
+
+    def test_detail_api_anime_kind_filename_fallback_works(self, webui_server):
+        """anime kind 下文件名 SxxExx 仍产生季"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        records = [
+            ("/b/anime/test_anime/Show.S01E01.strm", "/webdav/anime/test_anime/Show.S01E01.strm", "/webdav/anime/test_anime", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_anime&kind=anime", session_token)
+        assert status == 200
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "S01", f"anime kind 应从文件名提取季，实际: {seasons[0]['label']}"
+
+    def test_detail_api_movie_kind_skips_explicit_season_dir(self, webui_server):
+        """movie kind 下显式 Season 2 目录不识别，落入默认"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        records = [
+            ("/b/movie/test_movie/Season 2/Movie.S02E01.strm", "/webdav/movie/test_movie/Season 2/Movie.S02E01.strm", "/webdav/movie/test_movie", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        # movie kind 不识别目录级季节
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_movie&kind=movie", session_token)
+        assert status == 200
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "默认", f"movie kind 应跳过显式 Season 目录，实际: {seasons[0]['label']}"
+
+    def test_detail_api_anime_kind_explicit_season_dir_recognized(self, webui_server):
+        """anime kind 下显式 Season 2 目录被正确识别为 S02"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        records = [
+            ("/b/anime/test_anime/Season 2/Show.S02E01.strm", "/webdav/anime/test_anime/Season 2/Show.S02E01.strm", "/webdav/anime/test_anime", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_anime&kind=anime", session_token)
+        assert status == 200
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "S02", f"anime kind 应识别显式 Season 2 目录，实际: {seasons[0]['label']}"
+
+    def test_detail_api_movie_kind_season1_dir_to_default(self, webui_server):
+        """movie kind 下 Season 1 目录不识别，落入默认"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        records = [
+            ("/b/movie/test_movie/Season 1/Movie.S01E01.strm", "/webdav/movie/test_movie/Season 1/Movie.S01E01.strm", "/webdav/movie/test_movie", "fingerprint1", "valid", 1000.0, "m1"),
+        ]
+        self._setup_mock_db(mock_db, records, total=1, area="b")
+
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=test_movie&kind=movie", session_token)
+        assert status == 200
+        seasons = resp.get("seasons", [])
+        assert len(seasons) == 1
+        assert seasons[0]["label"] == "默认", f"movie kind 应跳过 Season 1 目录，实际: {seasons[0]['label']}"
+
+
+class TestAreaDetailCZonePagination:
+    """测试 C 区详情分页（R2 回归）。"""
+
+    def _setup_mock_db(self, mock_db, records, total):
+        """设置 mock 数据库连接，处理多次 execute 调用。"""
+        mock_conn = MagicMock()
+
+        columns = ["local_path", "webdav_path", "original_b_path", "ghost_root", "moved_at"]
+        dict_records = [dict(zip(columns, record)) for record in records]
+
+        def execute_side_effect(sql, params=None):
+            mock_result = MagicMock()
+            if "COUNT(*)" in sql:
+                mock_result.fetchone.return_value = (total,)
+            else:
+                mock_result.fetchall.return_value = dict_records
+            return mock_result
+
+        mock_conn.execute.side_effect = execute_side_effect
+
+        mock_conn_ctx = MagicMock()
+        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+        mock_db.read_connection.return_value = mock_conn_ctx
+
+    def test_c_zone_detail_page2_records_not_exceed_page_size(self, webui_server):
+        """C 区详情第 2 页返回的记录数不超过 PAGE_SIZE"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+
+        # 创建 150 条记录（PAGE_SIZE=50，共 3 页）
+        records = []
+        for i in range(150):
+            records.append((
+                f"/c/ghost/movie{i}.strm",
+                f"/webdav/ghost/movie{i}.strm",
+                f"/b/original/movie{i}.strm",
+                "/ghost/root",
+                1000.0 + i,
+            ))
+
+        self._setup_mock_db(mock_db, records, total=150)
+
+        # 请求第 2 页
+        status, _, resp = _http_get(base, "/api/area/c/detail?media=ghost&page=2", session_token)
+        assert status == 200
+
+        # 验证第 2 页记录数不超过 PAGE_SIZE (50)
+        total_records = sum(len(s["records"]) for s in resp.get("seasons", []))
+        assert total_records <= 50, f"第 2 页记录数不应超过 PAGE_SIZE，实际: {total_records}"
+
+        # 验证总页数正确
+        assert resp.get("total_pages") == 3, f"总页数应为 3，实际: {resp.get('total_pages')}"
+
+    def test_c_zone_detail_page1_and_page2_no_overlap(self, webui_server):
+        """C 区详情第 1 页和第 2 页记录不重叠"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+
+        records = []
+        for i in range(150):
+            records.append((
+                f"/c/ghost/movie{i}.strm",
+                f"/webdav/ghost/movie{i}.strm",
+                f"/b/original/movie{i}.strm",
+                "/ghost/root",
+                1000.0 + i,
+            ))
+
+        self._setup_mock_db(mock_db, records, total=150)
+
+        # 请求第 1 页
+        status1, _, resp1 = _http_get(base, "/api/area/c/detail?media=ghost&page=1", session_token)
+        assert status1 == 200
+        page1_paths = {r["local_path"] for s in resp1.get("seasons", []) for r in s["records"]}
+
+        # 请求第 2 页
+        status2, _, resp2 = _http_get(base, "/api/area/c/detail?media=ghost&page=2", session_token)
+        assert status2 == 200
+        page2_paths = {r["local_path"] for s in resp2.get("seasons", []) for r in s["records"]}
+
+        # 验证无重叠
+        overlap = page1_paths & page2_paths
+        assert len(overlap) == 0, f"第 1 页和第 2 页不应重叠，重叠路径: {overlap}"
+
+
+class TestAreaDetailSingleMappingMid:
+    """测试单 mapping 响应的 mapping_id 正确性（R3 回归）。"""
+
+    def _setup_mock_db(self, mock_db, records, total):
+        """设置 mock 数据库连接，处理多次 execute 调用。"""
+        mock_conn = MagicMock()
+
+        columns = ["local_path", "webdav_path", "parent_webdav_path", "source_a_path", "fingerprint", "status", "updated_at", "mapping_id"]
+        dict_records = [dict(zip(columns, record)) for record in records]
+
+        def execute_side_effect(sql, params=None):
+            mock_result = MagicMock()
+            if "COUNT(*)" in sql:
+                mock_result.fetchone.return_value = (total,)
+            else:
+                mock_result.fetchall.return_value = dict_records
+            return mock_result
+
+        mock_conn.execute.side_effect = execute_side_effect
+
+        mock_conn_ctx = MagicMock()
+        mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+        mock_db.read_connection.return_value = mock_conn_ctx
+
+    def test_single_mapping_response_mapping_id_correct(self, webui_server):
+        """单 mapping 响应的 mapping_id 等于该 mapping 的真实 id"""
+        server, base, session_token = webui_server
+        mock_db = server._db
+        mock_app_service = server._app_service
+
+        # 设置单个 mapping - 需要先确保 app_service 不为 None
+        if mock_app_service is None:
+            mock_app_service = MagicMock()
+            server._app_service = mock_app_service
+
+        mock_mapping = MagicMock()
+        mock_mapping.mapping_id = "real_mapping_123"
+        mock_mapping.a_root = "/a/m1"
+        mock_mapping.b_root = "/b/m1"
+        mock_app_service.a_b_mappings = [mock_mapping]
+        mock_app_service.get_mapping_for_a.return_value = ("real_mapping_123", "/a/m1", "/b/m1")
+
+        records = [
+            ("/b/m1/movie1.strm", "/webdav/m1/movie1.strm", "/webdav/m1", "/a/m1/movie1.strm", "fingerprint1", "valid", 1000.0, "real_mapping_123"),
+            ("/b/m1/movie2.strm", "/webdav/m1/movie2.strm", "/webdav/m1", "/a/m1/movie2.strm", "fingerprint2", "valid", 1001.0, "real_mapping_123"),
+        ]
+        self._setup_mock_db(mock_db, records, total=2)
+
+        status, _, resp = _http_get(base, "/api/area/b/detail?media=movie", session_token)
+        assert status == 200
+
+        # 单 mapping 应返回扁平响应，包含正确的 mapping_id
+        assert resp.get("mapping_id") == "real_mapping_123", f"单 mapping 响应的 mapping_id 应为真实 id，实际: {resp.get('mapping_id')}"
+
+
+class TestConfigApiFreshInstall:
+    """全新安装（webui_config 无 openlist 作用域）时 /api/config 不得抛异常。
+
+    关键：必须用**真实** AppConfig。本文件的 _make_mock_config 返回 MagicMock，
+    而 MagicMock.__iter__ 默认返回空迭代器，会把 cfg.a_b_mappings 未赋值
+    的问题完全掩盖掉——这也是这个 bug 至今没有被任何测试发现的原因。
+    """
+
+    def _fresh_handler(self, tmp_path: Path):
+        from config import AppConfig
+        toml_path = tmp_path / "config.toml"
+        toml_path.write_text('[local]\ndb_file = "bridge.db"\n', encoding="utf-8")
+        cfg = AppConfig.from_file(str(toml_path))
+        handler = MagicMock()
+        handler.webui._config = cfg
+        handler.webui._tmdb_client = None
+        handler.webui._watchlist_db = FakeConfigDb()  # 空 DB = 首次运行
+        # handle_config_api 改用 handler._validate_session_token 统一校验。
+        # 首次安装未设置管理员密码 → _has_password=False，模拟真实"未认证"场景，
+        # 避免 MagicMock 默认真值导致 _authenticated 误判。
+        handler.webui._has_password = False
+        return handler
+
+    def test_from_file_initializes_mapping_fields(self, tmp_path):
+        """from_file 必须给出可安全读取的默认值，而不是留下未赋值的 slot。"""
+        from config import AppConfig
+        toml_path = tmp_path / "config.toml"
+        toml_path.write_text('[local]\ndb_file = "bridge.db"\n', encoding="utf-8")
+        cfg = AppConfig.from_file(str(toml_path))
+        assert cfg.a_b_mappings == []
+        assert cfg.engines_initialized is False
+
+    def test_config_api_survives_fresh_install(self, tmp_path):
+        from webui.routes import handle_config_api
+        handler = self._fresh_handler(tmp_path)
+        handle_config_api(handler)  # 早期版本抛 AttributeError
+        handler._send_json.assert_called_once()
+        payload = handler._send_json.call_args[0][0]
+        # 未认证响应不泄露 port/bind/counts
+        assert "_authenticated" in payload
+        assert payload["_authenticated"] is False
+        assert "a_b_mappings_count" not in payload
+        assert "webui_port" not in payload
+        assert "webui_bind" not in payload
+        assert "a_folders_count" not in payload
+        assert payload["webdav_configured"] is False
+
+
+class TestStartMainFailSafe:
+    """引擎落入 fail-safe 时，start_main 必须返回失败且不置 _app_running。
+
+    start_main 此前在 src/tests/ 下零引用——这是 D3 未被发现的原因。
+    """
+
+    def test_start_main_reports_fail_safe(self, tmp_path):
+        from config import ABMapping
+        cfg = _make_mock_config(tmp_path)
+        cfg.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+        db = _make_mock_db(tmp_path)
+
+        fake_client = MagicMock()
+        fake_client.login.return_value = True
+        fake_app = MagicMock()
+        fake_app._running = False
+        fake_app.get_config_status.return_value = {
+            "status": "fail_safe_active",
+            "reason": "mapping 缺少唯一 ID 或根路径"}
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"), \
+             patch("webdav_client.OpenListAdminClient", return_value=fake_client), \
+             patch("app_service.AppService", return_value=fake_app):
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            result = server.start_main()
+
+        assert result["success"] is False
+        assert result.get("status") == "fail_safe_active"
+        assert server._app_running is False
+
+    def test_start_main_succeeds_when_ready(self, tmp_path):
+        """配置 ready 时行为不变，避免修复把正常启动路径一起堵死。
+
+        替身必须忠实模拟真实契约：AppService.start() 成功收尾时才置
+        _running=True（不变式由 test_app_service_lifecycle.py 的
+        TestStartMarksRunningWhenReady 锁死）。
+        禁止预先把 _running 设为 True——那会让本用例在引擎根本不置位时也变绿，
+        正是这一点让 start_main 门禁选错信号的回归漏过了测试。
+        """
+        from config import ABMapping
+        cfg = _make_mock_config(tmp_path)
+        cfg.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+        db = _make_mock_db(tmp_path)
+
+        fake_client = MagicMock()
+        fake_client.login.return_value = True
+        fake_app = MagicMock()
+        fake_app._running = False
+        fake_app.get_config_status.return_value = {"status": "ready", "reason": "ok"}
+        fake_app.start.side_effect = lambda: setattr(fake_app, "_running", True)
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"), \
+             patch("webdav_client.OpenListAdminClient", return_value=fake_client), \
+             patch("app_service.AppService", return_value=fake_app):
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            result = server.start_main()
+            # start_main 是异步返回，等待 Worker 真正执行 start()
+            if server._app_worker_thread:
+                server._app_worker_thread.join(timeout=2)
+
+        assert result["success"] is True
+        assert server._app_running is True
+        fake_app.start.assert_called_once()
+
+    def test_worker_calls_refresh_mapping_snapshot_after_storage_mapping(self, tmp_path):
+        """验证 storage mapping 成功后在 svc.start() 前调用 _refresh_mapping_snapshot。"""
+        from config import ABMapping
+        cfg = _make_mock_config(tmp_path)
+        cfg.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+        db = _make_mock_db(tmp_path)
+
+        fake_client = MagicMock()
+        fake_client.login.return_value = True
+        fake_app = MagicMock()
+        fake_app._running = False
+        fake_app.get_config_status.return_value = {"status": "ready", "reason": "ok"}
+
+        calls = []
+        fake_app._refresh_mapping_snapshot.side_effect = lambda: calls.append("refresh")
+        fake_app.start.side_effect = lambda: calls.append("start")
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"), \
+             patch("webdav_client.OpenListAdminClient", return_value=fake_client), \
+             patch("app_service.AppService", return_value=fake_app):
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            result = server.start_main()
+            if server._app_worker_thread:
+                server._app_worker_thread.join(timeout=2)
+
+        assert result["success"] is True
+        fake_app._refresh_mapping_snapshot.assert_called_once()
+        fake_app.start.assert_called_once()
+        assert calls == ["refresh", "start"]
+
+    def test_worker_failsafe_on_storage_mapping_failure(self, tmp_path):
+        """验证 storage mapping 加载失败后置 fail_safe 且不启动 AppService。"""
+        from config import ABMapping
+        cfg = _make_mock_config(tmp_path)
+        cfg.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+        cfg.load_strm_storage_from_api.side_effect = RuntimeError("OpenList API 连接超时")
+        db = _make_mock_db(tmp_path)
+
+        fake_client = MagicMock()
+        fake_client.login.return_value = True
+        fake_app = MagicMock()
+        fake_app._running = False
+        fake_app.get_config_status.return_value = {"status": "ready", "reason": "ok"}
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"), \
+             patch("webdav_client.OpenListAdminClient", return_value=fake_client), \
+             patch("app_service.AppService", return_value=fake_app):
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            result = server.start_main()
+            if server._app_worker_thread:
+                server._app_worker_thread.join(timeout=2)
+
+        assert result["success"] is True
+        assert server._app_running is False
+        fake_app._refresh_mapping_snapshot.assert_not_called()
+        fake_app.start.assert_not_called()
+        # 验证 set_phase 被置为 fail_safe
+        fail_safe_calls = [
+            call for call in fake_app.set_phase.call_args_list
+            if call.args and call.args[0] == "fail_safe"
+        ]
+        assert len(fail_safe_calls) >= 1
+        err_msg = fail_safe_calls[0].kwargs.get("error", "") or (fail_safe_calls[0].args[1] if len(fail_safe_calls[0].args) > 1 else "")
+        assert "OpenList API 连接超时" in str(err_msg) or "STRM 存储映射" in str(err_msg)
+
+    def test_worker_old_generation_does_not_start(self, tmp_path):
+        """验证旧 generation 的 Worker 不执行 _refresh_mapping_snapshot 或 start。"""
+        from config import ABMapping
+        cfg = _make_mock_config(tmp_path)
+        cfg.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+        db = _make_mock_db(tmp_path)
+
+        server_ref = []
+
+        def _login_side_effect(*args, **kwargs):
+            # 在登录阶段使 generation 过期（例如用户点击了停止并再次启动）
+            if server_ref:
+                server_ref[0]._app_generation += 1
+            return True
+
+        fake_client = MagicMock()
+        fake_client.login.side_effect = _login_side_effect
+        fake_app = MagicMock()
+        fake_app._running = False
+        fake_app.get_config_status.return_value = {"status": "ready", "reason": "ok"}
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"), \
+             patch("webdav_client.OpenListAdminClient", return_value=fake_client), \
+             patch("app_service.AppService", return_value=fake_app):
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            server_ref.append(server)
+            result = server.start_main()
+            if server._app_worker_thread:
+                server._app_worker_thread.join(timeout=2)
+
+        assert result["success"] is True
+        fake_app._refresh_mapping_snapshot.assert_not_called()
+        fake_app.start.assert_not_called()
+
+    def test_worker_exception_cleans_up_svc_safely(self, tmp_path):
+        """验证 Worker 捕获异常后，用闭包参数 svc 尽力执行 stop() 清理资源并置 fail_safe。"""
+        from config import ABMapping
+        cfg = _make_mock_config(tmp_path)
+        cfg.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+        db = _make_mock_db(tmp_path)
+
+        fake_client = MagicMock()
+        fake_client.login.return_value = True
+        fake_app = MagicMock()
+        fake_app._running = False
+        fake_app.get_config_status.return_value = {"status": "ready", "reason": "ok"}
+        fake_app.start.side_effect = RuntimeError("Disk full error during start")
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"), \
+             patch("webdav_client.OpenListAdminClient", return_value=fake_client), \
+             patch("app_service.AppService", return_value=fake_app):
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            result = server.start_main()
+            if server._app_worker_thread:
+                server._app_worker_thread.join(timeout=2)
+
+        assert result["success"] is True
+        fake_app.stop.assert_called_once()
+        assert server._app_running is False
+        fail_safe_calls = [
+            call for call in fake_app.set_phase.call_args_list
+            if call.args and call.args[0] == "fail_safe"
+        ]
+        assert len(fail_safe_calls) >= 1
+
+    def test_worker_cleanup_failure_keeps_original_exception(self, tmp_path):
+        """清理 stop() 自身失败时，原始异常信息必须保留并继续置 fail_safe。"""
+        from config import ABMapping
+        cfg = _make_mock_config(tmp_path)
+        cfg.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+        db = _make_mock_db(tmp_path)
+
+        fake_client = MagicMock()
+        fake_client.login.return_value = True
+        fake_app = MagicMock()
+        fake_app._running = False
+        fake_app.get_config_status.return_value = {"status": "ready", "reason": "ok"}
+        fake_app.get_state_summary.return_value = {
+            "phase": "ready",
+            "is_running": False,
+            "is_ready": False,
+            "fail_safe": False,
+            "error": None,
+            "progress": {},
+        }
+        fake_app.start.side_effect = RuntimeError("Original start error")
+        fake_app.stop.side_effect = RuntimeError("Stop also failed")
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"), \
+             patch("webdav_client.OpenListAdminClient", return_value=fake_client), \
+             patch("app_service.AppService", return_value=fake_app):
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+            result = server.start_main()
+            if server._app_worker_thread:
+                server._app_worker_thread.join(timeout=2)
+
+        assert result["success"] is True
+        fake_app.stop.assert_called_once()
+        fail_safe_calls = [
+            call for call in fake_app.set_phase.call_args_list
+            if call.args and call.args[0] == "fail_safe"
+        ]
+        assert len(fail_safe_calls) >= 1
+        # 原始错误保留（不被清理异常覆盖）
+        err = fail_safe_calls[0].kwargs.get("error", "")
+        assert "Original start error" in str(err)
+
+    def test_restart_after_worker_failure_succeeds(self, tmp_path):
+        """Worker 失败清理后，再次 start_main() 可正常重新启动。"""
+        from config import ABMapping
+        cfg = _make_mock_config(tmp_path)
+        cfg.a_b_mappings = [ABMapping(
+            mapping_id="m1",
+            a_root=str(tmp_path / "a"),
+            b_root=str(tmp_path / "b"))]
+        db = _make_mock_db(tmp_path)
+
+        fake_client = MagicMock()
+        fake_client.login.return_value = True
+
+        app_attempts = []
+
+        def _make_app(*args, **kwargs):
+            app = MagicMock()
+            app._running = False
+            app.get_config_status.return_value = {"status": "ready", "reason": "ok"}
+            app.get_state_summary.return_value = {
+                "phase": "ready",
+                "is_running": False,
+                "is_ready": False,
+                "fail_safe": False,
+                "error": None,
+                "progress": {},
+            }
+            app_attempts.append(app)
+            if len(app_attempts) == 1:
+                app.start.side_effect = RuntimeError("First try failed")
+            else:
+                app.start.side_effect = lambda: setattr(app, "_running", True)
+            return app
+
+        with patch("webui.server.PROJECT_ROOT", tmp_path), \
+             patch("webui.server.STATIC_DIR", tmp_path / "static"), \
+             patch("webdav_client.OpenListAdminClient", return_value=fake_client), \
+             patch("app_service.AppService", side_effect=_make_app):
+            server = WebUIServer(cfg.webui, db, app_config=cfg)
+
+            # 第一次启动：失败并清理
+            r1 = server.start_main()
+            assert r1["success"] is True
+            if server._app_worker_thread:
+                server._app_worker_thread.join(timeout=2)
+            assert server._app_running is False
+            app_attempts[0].stop.assert_called_once()
+
+            # 第二次启动：成功
+            r2 = server.start_main()
+            assert r2["success"] is True
+            if server._app_worker_thread:
+                server._app_worker_thread.join(timeout=2)
+            assert server._app_running is True
+            app_attempts[1].start.assert_called_once()
+
+
+class TestStartupMutationGuard:
+    """启动同步期间外部重型写操作保持 HTTP 200 并返回业务状态。"""
+
+    def test_mutating_endpoints_blocked_during_background_sync(self, webui_server):
+        server, base, session_token = webui_server
+        mock_app = MagicMock()
+        mock_app.get_state_summary.return_value = {
+            "phase": "scanning_a",
+            "is_running": True,
+            "is_ready": False,
+        }
+        server._app_service = mock_app
+
+        status, _, resp = _http_post(base, "/api/index/audit", {}, session_token)
+        assert status == 200
+        assert resp.get("status") == "sync_in_progress"
+
+        status_refresh, _, resp_refresh = _http_post(
+            base, "/api/area/a/refresh", {"media": "test"}, session_token)
+        assert status_refresh == 200
+        assert resp_refresh.get("status") == "sync_in_progress"
+
+
+# ============================================================
+# 手动全量审计端点测试
+# ============================================================
+
+
+class TestManualFullIndexAuditAPI:
+    """测试 POST /api/index/audit 和 GET /api/index/audit/status 端点"""
+
+    def test_audit_endpoint_requires_auth(self, webui_server):
+        """审计端点需要鉴权（不在免鉴权白名单）"""
+        server, base, session_token = webui_server
+
+        # 不传 token
+        body = {}
+        status, _, resp = _http_post(base, "/api/index/audit", body, session_token=None)
+        assert status == 401
+        assert resp.get("need_login") is True
+
+    def test_audit_when_app_service_is_none(self, webui_server):
+        """当 app_service 为 None 时，审计应返回 not_configured"""
+        server, base, session_token = webui_server
+        server._app_service = None
+
+        body = {}
+        status, _, resp = _http_post(base, "/api/index/audit", body, session_token)
+        assert status == 400
+        assert resp.get("ok") is False
+        assert resp.get("status") == "not_configured"
+
+    def test_audit_when_engine_not_ready(self, webui_server):
+        """当引擎未 ready 时，审计应返回 not_configured"""
+        server, base, session_token = webui_server
+
+        mock_app = MagicMock()
+        mock_app._running = False
+        server._app_service = mock_app
+
+        body = {}
+        status, _, resp = _http_post(base, "/api/index/audit", body, session_token)
+        assert status == 400
+        assert resp.get("ok") is False
+        assert resp.get("status") == "not_configured"
+
+    def test_audit_concurrent_request_returns_already_running(self, webui_server):
+        """并发请求应返回 200 + already_running，不启动第二个线程"""
+        server, base, session_token = webui_server
+
+        mock_app = MagicMock()
+        mock_app._running = True
+        mock_app.refresh_service = MagicMock()
+        mock_app.refresh_service._maybe_run_full_audit = MagicMock()
+        server._app_service = mock_app
+
+        # 模拟正在进行中
+        server._index_audit_running = True
+
+        body = {}
+        status, _, resp = _http_post(base, "/api/index/audit", body, session_token)
+        assert status == 200
+        assert resp.get("ok") is False  # 已在进行时应返回 ok: False
+        assert resp.get("status") == "already_running"
+
+        # 验证没有调用审计方法
+        mock_app.refresh_service._maybe_run_full_audit.assert_not_called()
+
+    def test_audit_status_endpoint_returns_running_and_result(self, webui_server):
+        """GET /api/index/audit/status 应返回 {running, result} 可轮询"""
+        server, base, session_token = webui_server
+
+        # 默认状态
+        status, _, resp = _http_get(base, "/api/index/audit/status", session_token)
+        assert status == 200
+        assert "running" in resp
+        assert "result" in resp
+        assert resp["running"] is False
+        assert resp["result"] is None
+
+
+# ============================================================
+# TMDB override 端点一致性收口测试
+# ============================================================
+
+
+class TestTMDBWatchlistMatchOverrideConsistency:
+    """测试 TMDB override 端点的一致性校验（与 clear/refresh 对齐）"""
+
+    def test_override_when_watchlist_disabled_returns_400(self, webui_server):
+        """watchlist_enabled 为 'false' 时 POST override 应返回 400"""
+        server, base, session_token = webui_server
+
+        # 设置 watchlist_enabled = "false"（通过 watchlist_db）
+        wdb = server._watchlist_db
+        if not wdb:
+            pytest.skip("watchlist_db not initialized")
+        wdb.set_config("tmdb", "watchlist_enabled", "false")
+
+        body = {"media_type": "movie", "id": 1, "status": "matched"}
+        status, _, resp = _http_post(
+            base, "/api/tmdb/watchlist/match/override", body, session_token)
+        assert status == 400
+        assert resp.get("success") is False
+        assert "禁用" in resp.get("message", "")
+
+    def test_override_with_id_zero_returns_400(self, webui_server):
+        """id=0 应返回 400（无效 ID）"""
+        server, base, session_token = webui_server
+
+        body = {"media_type": "movie", "id": 0, "status": "matched"}
+        status, _, resp = _http_post(base, "/api/tmdb/watchlist/match/override", body, session_token)
+        assert status == 400
+        assert resp.get("success") is False
+
+    def test_override_with_negative_id_returns_400(self, webui_server):
+        """id=-1 应返回 400（无效 ID）"""
+        server, base, session_token = webui_server
+
+        body = {"media_type": "movie", "id": -1, "status": "matched"}
+        status, _, resp = _http_post(base, "/api/tmdb/watchlist/match/override", body, session_token)
+        assert status == 400
+        assert resp.get("success") is False
+
+
+# ============================================================
+# 回归测试：Session IP 绑定 + DB 初始化失败 fail-closed
+# ============================================================
+
+
+class TestSessionIPBinding:
+    """测试 Session IP 绑定功能。"""
+
+    def test_session_ip_binding_rejects_different_ip(self, webui_server):
+        """登录后使用不同IP的token应被拒绝（401）"""
+        server, base, session_token = webui_server
+
+        # 直接修改 _sessions 中的 IP，模拟 token 被盗用到不同 IP
+        with server._sessions_lock:
+            for tok, (exp, _ip) in server._sessions.items():
+                if tok == session_token:
+                    server._sessions[tok] = (exp, "10.99.99.99")
+                    break
+
+        # 用原 token 从 127.0.0.1 请求 → 应被拒绝
+        status, _, resp = _http_get(base, "/api/area/a", session_token)
+        assert status == 401
+        assert resp.get("error") == "unauthorized"
+
+    def test_session_ip_binding_allows_original_ip(self, webui_server):
+        """登录后使用相同IP的token应被接受（200）"""
+        server, base, session_token = webui_server
+
+        # 用原 token 从 127.0.0.1 请求 → 应成功
+        status, _, resp = _http_get(base, "/api/area/a", session_token)
+        assert status == 200
+
+
+class TestRound13Regressions:
+    """superpower 审计回归：媒体名 SQL 别名目录、改密失效、admin/status 鉴权。"""
+
+    def test_media_name_sql_matches_all_alias_dirs(self):
+        """_MEDIA_NAME_SQL 应对 /movies/ /movie/ /anime/ /动漫/ /动画/ 别名目录提取正确媒体名。
+
+        旧实现只匹配 /番剧/ 与 /电影/，别名目录全部坍缩进 '未分类'。
+        """
+        import sqlite3
+        from webui.routes import _MEDIA_NAME_SQL
+
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        cases = {
+            "/movies/Inception/Inception.strm": ("Inception", "电影"),
+            "/movie/Dunkirk/Dunkirk.strm": ("Dunkirk", "电影"),
+            "/anime/Attack/Attack.strm": ("Attack", "番剧"),
+            "/动漫/鬼灭之刃/鬼灭之刃.strm": ("鬼灭之刃", "番剧"),
+            "/动画/咒术回战/咒术回战.strm": ("咒术回战", "番剧"),
+            "/番剧/进击的巨人/进击的巨人.strm": ("进击的巨人", "番剧"),
+            "/电影/流浪地球/流浪地球.strm": ("流浪地球", "电影"),
+        }
+        for path, (exp_name, _exp_kind) in cases.items():
+            sql = f"SELECT {_MEDIA_NAME_SQL} FROM (SELECT ? AS webdav_path, ? AS local_path)"
+            got = cur.execute(sql, (path, path)).fetchone()[0]
+            assert got == exp_name, (
+                f"别名目录 {path} 应提取 '{exp_name}'，实际 '{got}'（未分类坍缩）"
+            )
+
+    def test_password_change_invalidates_old_session(self, webui_server):
+        """改密后旧 token 应立即失效（401），不能继续冒用。"""
+        server, base, session_token = webui_server
+
+        # 改密前旧 token 有效
+        status, _, _ = _http_get(base, "/api/area/a", session_token)
+        assert status == 200
+
+        # 修改管理员密码 → 应清空全部会话
+        status, _, body = _http_post(
+            base, "/api/webui/config/ui",
+            {"admin_password": "new_password_456"}, session_token)
+        assert status == 200, f"改密应成功，实际 {status}: {body}"
+
+        # 旧 token 现在应失效
+        status, _, resp = _http_get(base, "/api/area/a", session_token)
+        assert status == 401, f"改密后旧 token 应返回 401，实际 {status}"
+        assert resp.get("error") == "unauthorized"
+
+        # 会话表应已清空
+        with server._sessions_lock:
+            assert len(server._sessions) == 0
+
+    def test_admin_status_invalid_token_returns_401(self, webui_server):
+        """/api/admin/status 带无效 token 应返回 401（不再无条件 200）。"""
+        server, base, _session_token = webui_server
+        status, _, resp = _http_get(
+            base, "/api/admin/status", "fake-or-expired-token")
+        assert status == 401, f"带无效 token 的 admin/status 应返回 401，实际 {status}"
+        assert resp.get("error") == "unauthorized"
+
+    def test_admin_status_no_token_returns_200(self, webui_server):
+        """/api/admin/status 无 token 应保持白名单直通（200 + has_password）。
+
+        router.js:105 的 has_password 变更检测依赖该 200 响应。
+        """
+        server, base, _session_token = webui_server
+        status, _, body = _http_get(base, "/api/admin/status")
+        assert status == 200, f"无 token 的 admin/status 应返回 200，实际 {status}"
+        assert isinstance(body, dict) and "has_password" in body
+
+
+class TestDBInitFailure:
+    """测试 DB 初始化失败时 fail-closed。"""
+
+    def test_db_init_failure_returns_503(self, webui_server):
+        """模拟 _db_init_failed=True 时 POST 应返回 503"""
+        server, base, session_token = webui_server
+
+        server._db_init_failed = True
+        try:
+            status, _, resp = _http_post(
+                base, "/api/webui/config/ui",
+                {"theme": "dark"}, session_token)
+            assert status == 503
+            assert resp.get("error") == "server_error"
+        finally:
+            server._db_init_failed = False
+
+
+# ============================================================
+# 数据库路径固定 + watchlist_db 移除
+# ============================================================
+
+
+class TestP13WatchlistDbRemoved:
+    """回归验证：watchlist_db 字段已从配置中移除，验证各入口的拒绝/剥离行为。"""
+
+    def test_tmdb_configure_rejects_watchlist_db(self, webui_server):
+        """POST /api/tmdb/configure 含 watchlist_db → 400"""
+        server, base, session_token = webui_server
+
+        body = {"watchlist_db": "/custom/path.db", "language": "zh-CN"}
+        status, _, resp = _http_post(base, "/api/tmdb/configure", body, session_token)
+
+        assert status == 400, f"含 watchlist_db 应返回 400，实际: {status}"
+        assert resp.get("success") is False
+        assert "已移除" in resp.get("error", "")
+
+        # 验证 language 未被写入（请求被整体拒绝）
+        wdb = server._watchlist_db
+        if wdb:
+            stored_lang = wdb.get_config("tmdb", "language")
+            # language 不应被写入（因为请求整体被拒绝）
+            assert stored_lang != "zh-CN" or stored_lang is None, \
+                "watchlist_db 拒绝应阻止整次写入"
+
+    def test_webui_config_tmdb_scope_strips_watchlist_db(self, webui_server):
+        """POST /api/webui/config/tmdb 含 watchlist_db → 剥离该键，其余键正常写入"""
+        server, base, session_token = webui_server
+
+        # 同时发送 watchlist_db（应被剥离）和 language（应被写入）
+        body = {"watchlist_db": "/orphan/path.db", "language": "en"}
+        status, _, resp = _http_post(base, "/api/webui/config/tmdb", body, session_token)
+
+        assert status == 200, f"剥离后应正常返回 200，实际: {status}"
+        assert resp.get("success") is True
+
+        # 验证 language 已写入
+        wdb = server._watchlist_db
+        assert wdb is not None, "watchlist_db 应已初始化"
+        stored_lang = wdb.get_config("tmdb", "language")
+        assert stored_lang == "en", f"language 应为 'en'，实际: {stored_lang}"
+
+        # 验证 watchlist_db 未写入 DB
+        orphan = wdb.get_config("tmdb", "watchlist_db")
+        assert orphan is None or orphan == "", \
+            f"watchlist_db 应被剥离不写入 DB，实际: {orphan!r}"
+
+    def test_config_api_db_file_is_fixed(self, webui_server):
+        """GET /api/config 返回的 db_file 和 tmdb_watchlist_db 为固定项目根路径"""
+        server, base, session_token = webui_server
+
+        status, _, resp = _http_get(base, "/api/config", session_token)
+        assert status == 200
+        db_file = resp.get("db_file", "")
+        tmdb_db = resp.get("tmdb_watchlist_db", "")
+        # 两者应为非空字符串且不含自定义路径标记
+        assert isinstance(db_file, str) and len(db_file) > 0
+        assert isinstance(tmdb_db, str) and len(tmdb_db) > 0
+        # 不应包含用户自定义路径的特征（如 /custom/）
+        assert "/custom/" not in db_file, f"db_file 不应含自定义路径: {db_file}"
+        assert "/custom/" not in tmdb_db, f"tmdb_watchlist_db 不应含自定义路径: {tmdb_db}"

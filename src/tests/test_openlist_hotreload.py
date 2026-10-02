@@ -132,8 +132,8 @@ class TestReinitAdminClient:
     def test_reinit_forces_login_not_cached(self):
         """回归守卫：_reinit_admin_client 必须调用 login(force=True)，而非 login()。
 
-        修复前调用 login()（无 force=True），新实例会加载缓存 token 直接返回 True，
-        导致修改配置后不会真实验证连接。修复后调用 login(force=True)，强制真实验证。
+        若调用 login()（无 force=True），新实例会加载缓存 token 直接返回 True，
+        导致修改配置后不会真实验证连接。必须调用 login(force=True) 强制真实验证。
         """
         server = _make_mock_server()
 
@@ -146,14 +146,14 @@ class TestReinitAdminClient:
             _reinit_admin_client(server)
 
         # 关键回归断言：login 必须被调用时传入了 force=True
-        mock_instance.login.assert_called_once_with(force=True)
+        mock_instance.login.assert_called_once_with(force=True, source="hot_reload")
 
     def test_reinit_login_data_null_does_not_raise(self):
         """回归守卫：真实 OpenListAdminClient + data:null 响应不抛 AttributeError。
 
         模拟用户原始报错场景：OpenList API 返回 {"data": null, "message": "..."}，
-        旧代码 data.get("data", {}).get("token") 会抛
-        'NoneType' object has no attribute 'get'。修复后 login() 安全返回 False，
+        若 data.get("data", {}).get("token") 会抛
+        'NoneType' object has no attribute 'get'。login() 应安全返回 False，
         _reinit_admin_client 保留旧 client，无异常逃逸。
         """
         server = _make_mock_server()
@@ -214,6 +214,21 @@ class TestReinitAdminClient:
 class TestHotReloadOpenlistConfig:
     """_hot_reload_openlist_config 异常吞咽测试。"""
 
+    def test_hot_reload_success_reconfigures_refresh_service(self):
+        server = _make_mock_server()
+        server._config.update_from_db = MagicMock()
+        server._config.load_strm_storage_from_api = MagicMock()
+        server._app_service.refresh_service = MagicMock()
+        _hot_reload_openlist_config(server)
+        server._app_service.refresh_service.reconfigure.assert_called_once_with()
+
+    def test_hot_reload_failure_does_not_reconfigure_refresh_service(self):
+        server = _make_mock_server()
+        server._config.update_from_db = MagicMock(side_effect=RuntimeError("bad config"))
+        server._app_service.refresh_service = MagicMock()
+        _hot_reload_openlist_config(server)
+        server._app_service.refresh_service.reconfigure.assert_not_called()
+
     def test_hot_reload_strm_reload_failure_is_swallowed(self):
         """load_strm_storage_from_api 抛异常 → 被 except 吞咽，无异常逃逸。
 
@@ -273,3 +288,45 @@ class TestHotReloadOpenlistConfig:
 
         # 不应抛出
         _hot_reload_openlist_config(server)
+
+    def test_hot_reload_log_changed_reinitializes_logging(self):
+        """update_from_db 改变 cfg.log.level → setup_logging 用新日志配置被调用。
+
+        断言使用新的 level、log_file、max_size_mb、backup_count 四个参数。
+        _hot_reload_openlist_config 内是局部 `from logger_setup import setup_logging`，
+        运行时从源模块读取名称，因此 patch 目标是 `logger_setup.setup_logging`
+        （与 test_reinit_* 中 patch `webdav_client.OpenListAdminClient` 同理）。
+        通过修改真实 mock 配置字段触发 log_changed，不在测试中复制判断表达式。
+        """
+        server = _make_mock_server()
+        server._config.load_strm_storage_from_api = MagicMock()
+        server._app_service.refresh_service = MagicMock()
+
+        # update_from_db 修改真实 mock 配置字段，使日志配置发生变化
+        def _change_log_config(_wdb):
+            server._config.log.level = "DEBUG"
+            server._config.log.file = "hotreload.log"
+
+        server._config.update_from_db.side_effect = _change_log_config
+
+        with patch("logger_setup.setup_logging") as mock_setup:
+            _hot_reload_openlist_config(server)
+
+        mock_setup.assert_called_once_with(
+            level="DEBUG",
+            log_file="hotreload.log",
+            max_size_mb=2,
+            backup_count=5,
+        )
+
+    def test_hot_reload_log_unchanged_skips_setup_logging(self):
+        """日志配置全部保持不变 → setup_logging 不被调用。"""
+        server = _make_mock_server()
+        server._config.update_from_db = MagicMock()  # 不改任何日志配置
+        server._config.load_strm_storage_from_api = MagicMock()
+        server._app_service.refresh_service = MagicMock()
+
+        with patch("logger_setup.setup_logging") as mock_setup:
+            _hot_reload_openlist_config(server)
+
+        mock_setup.assert_not_called()

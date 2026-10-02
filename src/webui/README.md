@@ -23,6 +23,7 @@ src/webui/
 │   │   ├── toast.js              # showToast
 │   │   └── dialog.js             # showConfirmDialog、showCacheStaleModal
 │   └── pages/                    # 懒加载页面
+│       ├── login.js
 │       ├── dashboard.js
 │       ├── area.js
 │       ├── tmdb.js
@@ -45,7 +46,7 @@ openlist_strm_bridge/
 
 ### 环境要求
 
-- Node.js >= 18
+- Node.js >= 20.19.0
 
 ### 安装依赖
 

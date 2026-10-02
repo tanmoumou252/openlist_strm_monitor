@@ -4,3 +4,8 @@ lxml>=5.0.0
 tomli>=2.0.1; python_version < "3.11"
 # 可选：凭据加密（未安装时降级为明文存储）
 # cryptography>=42.0.0
+#
+# 注意：
+# - 本文件仅包含生产运行时 Python 依赖。
+# - 测试依赖见 src/tests/requirements-dev.txt。
+# - 前端构建依赖（Node.js）见 src/webui/package.json。

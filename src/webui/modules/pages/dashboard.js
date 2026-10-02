@@ -1,7 +1,7 @@
 import { api } from '../core/api.js';
-import { isRenderStale } from '../core/router.js';
+import { captureRenderGuard } from '../core/router.js';
 import { icon } from '../core/icons.js';
-import { esc } from '../core/utils.js';
+import { esc, formatTimestamp } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
 import { showConfirmDialog } from '../components/dialog.js';
 import {
@@ -15,8 +15,6 @@ export { startUptimeTimer, stopUptimeTimer, updateUptime, _loadOnboarding };
 // ============================================================
 // 首次配置引导（Onboarding Guide）
 // ============================================================
-
-let _onboardingState = null;
 
 async function _fetchConfigStatus() {
   try {
@@ -52,7 +50,7 @@ function _renderOnboardingCard(status) {
   if (!status) return '';
 
   // 引导已完成/跳过 → 不渲染卡片，由 renderDashboard 中的按钮处理
-  if (status.onboarding_completed) {
+  if (status.onboarding_completed === '1') {
     return '';
   }
 
@@ -164,8 +162,6 @@ function _bindOnboardingEvents() {
   if (skipBtn) {
     skipBtn.addEventListener('click', async () => {
       await _markOnboardingCompleted();
-      // 立即更新本地状态并刷新 UI
-      if (_onboardingState) _onboardingState.onboarding_completed = true;
       const card = document.getElementById('onboarding-card');
       if (card) card.remove();
       const quickBtn = document.getElementById('onboarding-quick-btn');
@@ -177,8 +173,6 @@ function _bindOnboardingEvents() {
   if (completeBtn) {
     completeBtn.addEventListener('click', async () => {
       await _markOnboardingCompleted();
-      // 立即更新本地状态并刷新 UI
-      if (_onboardingState) _onboardingState.onboarding_completed = true;
       const card = document.getElementById('onboarding-card');
       if (card) card.remove();
       const quickBtn = document.getElementById('onboarding-quick-btn');
@@ -216,7 +210,6 @@ function _bindOnboardingEvents() {
 
 async function _loadOnboarding() {
   const status = await _fetchConfigStatus();
-  _onboardingState = status;
   const container = document.getElementById('onboarding-container');
   if (container) {
     container.innerHTML = _renderOnboardingCard(status);
@@ -226,7 +219,7 @@ async function _loadOnboarding() {
   // Update header quick button visibility
   const quickBtn = document.getElementById('onboarding-quick-btn');
   if (quickBtn) {
-    if (status && status.onboarding_completed) {
+    if (status && status.onboarding_completed === '1') {
       quickBtn.style.display = 'inline-flex';
     } else {
       quickBtn.style.display = 'none';
@@ -289,32 +282,118 @@ export async function updateMainStatus() {
     const dot = document.getElementById('main-status-dot');
     const text = document.getElementById('main-status-text');
     const uptimeText = document.getElementById('main-uptime-text');
+    const progressContainer = document.getElementById('startup-progress-container');
     const startBtn = document.getElementById('main-start-btn');
     const stopBtn = document.getElementById('main-stop-btn');
 
     if (!dot || !text) return;
 
-    if (status.running) {
+    const phase = status.phase || (status.running ? 'ready' : 'stopped');
+
+    const phaseMap = {
+      'starting': '启动初始化中...',
+      'authenticating': '正在连接 OpenList 并加载存储映射...',
+      'scanning_a': `正在索引 A 区 STRM (${status.progress?.a_indexed || 0} 条)...`,
+      'scanning_b': `正在核对 B 区媒体库 (${status.progress?.b_reconciled || 0} 条)...`,
+      'syncing_a_to_b': `正在执行 A→B 差异同步 (${status.progress?.synced_records || 0} 条)...`,
+      'catching_up': '正在收敛差异与挂载监视器...',
+      'ready': '主程序运行中',
+      'stopping': '正在停止...',
+      'fail_safe': `启动受阻: ${status.error || '配置或认证异常'}`,
+      'stopped': '主程序已停止'
+    };
+
+    const isTransitioning = ['starting', 'authenticating', 'scanning_a', 'scanning_b', 'syncing_a_to_b', 'catching_up'].includes(phase);
+
+    if (isTransitioning) {
+      dot.style.background = '#ff9800';
+      dot.style.boxShadow = '0 0 12px rgba(255,152,0,0.6)';
+      text.textContent = phaseMap[phase] || '同步中...';
+      text.style.color = 'var(--text-main)';
+      uptimeText.textContent = '启动同步建立索引中...';
+      if (startBtn) {
+        startBtn.style.display = 'inline-flex';
+        startBtn.disabled = true;
+      }
+      if (stopBtn) {
+        stopBtn.style.display = 'none';
+      }
+      if (progressContainer) {
+        progressContainer.style.display = 'block';
+        const aIndexed = status.progress?.a_indexed || 0;
+        const bReconciled = status.progress?.b_reconciled || 0;
+        const synced = status.progress?.synced_records || 0;
+        const elapsed = status.progress?.elapsed_seconds || 0;
+        progressContainer.innerHTML = `
+          <div class="progress-bar-track" style="height: 4px; background: rgba(0,0,0,0.08); border-radius: 2px; overflow: hidden; margin-top: 6px; width: 100%; max-width: 320px;">
+            <div class="progress-bar-fill" style="width: 100%; height: 100%; background: var(--primary, #0078d4); animation: progress-indeterminate 1.5s infinite linear;"></div>
+          </div>
+          <div style="display: flex; gap: 12px; font-size: 12px; color: var(--text-secondary, #666); margin-top: 4px;">
+            <span>A 区已索引: ${aIndexed}</span>
+            <span>B 区已核对: ${bReconciled}</span>
+            <span>A→B 同步: ${synced}</span>
+            <span>耗时: ${elapsed}s</span>
+          </div>
+        `;
+      }
+    } else if (phase === 'ready' || status.running) {
       dot.style.background = '#4caf50';
       dot.style.boxShadow = '0 0 12px rgba(76,175,80,0.6)';
       text.textContent = '主程序运行中';
       text.style.color = 'var(--text-main)';
-      if (status.uptime) {
+      if (status.uptime != null) {
         const hours = Math.floor(status.uptime / 3600);
         const mins = Math.floor((status.uptime % 3600) / 60);
         const secs = status.uptime % 60;
         uptimeText.textContent = `已运行 ${hours}小时 ${mins}分 ${secs}秒`;
       }
+      if (progressContainer) progressContainer.style.display = 'none';
       if (startBtn) startBtn.style.display = 'none';
-      if (stopBtn) stopBtn.style.display = 'inline-flex';
+      if (stopBtn) {
+        stopBtn.style.display = 'inline-flex';
+        stopBtn.disabled = false;
+      }
+    } else if (phase === 'fail_safe') {
+      dot.style.background = '#f44336';
+      dot.style.boxShadow = '0 0 12px rgba(244,67,54,0.6)';
+      text.textContent = phaseMap[phase];
+      text.style.color = 'var(--error, #f44336)';
+      uptimeText.textContent = '启动失败，请检查配置或日志';
+      if (progressContainer) progressContainer.style.display = 'none';
+      if (startBtn) {
+        startBtn.style.display = 'inline-flex';
+        startBtn.disabled = false;
+        startBtn.innerHTML = `${icon('refresh')} 启动主程序`;
+      }
+      if (stopBtn) stopBtn.style.display = 'none';
     } else {
       dot.style.background = '#f44336';
       dot.style.boxShadow = '0 0 12px rgba(244,67,54,0.6)';
       text.textContent = '主程序已停止';
       text.style.color = 'var(--text-main)';
       uptimeText.textContent = '点击启动按钮开始同步服务';
-      if (startBtn) startBtn.style.display = 'inline-flex';
+      if (progressContainer) progressContainer.style.display = 'none';
+      if (startBtn) {
+        startBtn.style.display = 'inline-flex';
+        startBtn.disabled = false;
+        startBtn.innerHTML = `${icon('refresh')} 启动主程序`;
+      }
       if (stopBtn) stopBtn.style.display = 'none';
+    }
+
+    // 轮询更新 watcher 健康横幅，后端恢复时隐藏 banner
+    if (status.watchers_healthy !== false) {
+      const banner = document.querySelector('.dashboard-warning-banner');
+      if (banner) banner.remove();
+    } else {
+      // 后端降级时显示 banner（如果不存在）
+      if (!document.querySelector('.dashboard-warning-banner')) {
+        const mainControlCard = document.querySelector('.main-control-card');
+        if (mainControlCard) {
+          const bannerHtml = `<div class="dashboard-warning-banner" style="margin:12px 0;padding:10px 14px;background:color-mix(in srgb,var(--error) 12%,transparent);border:1px solid color-mix(in srgb,var(--error) 40%,transparent);border-radius:var(--radius-control);color:var(--error);font-size:13px;display:flex;align-items:center;gap:8px">${icon('warn')} watchdog 监视器降级：部分区域事件可能未同步，请检查 WebUI 日志</div>`;
+          mainControlCard.insertAdjacentHTML('afterend', bannerHtml);
+        }
+      }
     }
   } catch (e) {
     // 静默处理状态获取失败
@@ -331,9 +410,9 @@ export async function startMainProgram() {
       showConfirmDialog(
         '启动前检查未通过',
         preflightHtml,
-        '知道了',
-        '取消',
-        { htmlContent: true }
+        null,
+        null,
+        { htmlContent: true, confirmText: '知道了', cancelText: '取消' }
       );
     }
     return;
@@ -399,9 +478,11 @@ export async function stopMainProgram() {
 }
 
 export async function renderDashboard(el) {
+  // 代际快照工厂——在首次 await 前捕获，供其后所有 isStale() 判定
+  const isStale = captureRenderGuard();
   const d = await api('/api/dashboard');
-  // F-3: await 期间若发生新导航，放弃渲染，避免旧页覆盖 + setInterval 泄漏
-  if (isRenderStale()) return;
+  // await 期间若发生新导航，放弃渲染，避免旧页覆盖 + setInterval 泄漏
+  if (isStale()) return;
   if (d.uptime != null) {
     setServerStartTime(Date.now() - d.uptime * 1000);
   }
@@ -423,6 +504,7 @@ export async function renderDashboard(el) {
     <div>
       <div class="main-status-text" id="main-status-text">检查中...</div>
       <div class="main-uptime-text" id="main-uptime-text">-</div>
+      <div id="startup-progress-container" style="display:none;margin-top:4px"></div>
     </div>
   </div>
   <div class="status-actions">
@@ -431,21 +513,77 @@ export async function renderDashboard(el) {
   </div>
 </div>
 
+<!-- watchdog 降级指示（后端 _watchers_healthy 标志） -->
+${d.watchers_healthy === false ? `<div class="dashboard-warning-banner" style="margin:12px 0;padding:10px 14px;background:color-mix(in srgb,var(--error) 12%,transparent);border:1px solid color-mix(in srgb,var(--error) 40%,transparent);border-radius:var(--radius-control);color:var(--error);font-size:13px;display:flex;align-items:center;gap:8px">${icon('warn')} watchdog 监视器降级：部分区域事件可能未同步，请检查 WebUI 日志</div>` : ''}
+
 <div class="stat-grid">
   <div class="stat-card"><div class="label">${icon('movie')} A 区 STRM</div><div class="value">${d.a_count}</div></div>
   <div class="stat-card"><div class="label">${icon('tv')} B 区 STRM</div><div class="value">${d.b_count}</div></div>
   <div class="stat-card"><div class="label">${icon('area_c')} C 区幽灵</div><div class="value">${d.c_count}</div></div>
 <div class="stat-card"><div class="label">B - valid</div><div class="value stat-value-primary">${d.b_valid}</div></div>
-	  <div class="stat-card"><div class="label">B - duplicate</div><div class="value stat-value-warning">${d.b_duplicate}</div></div>
-	  <div class="stat-card"><div class="label">B - quarantined</div><div class="value stat-value-error">${d.b_quarantined}</div></div>
-  <div class="stat-card"><div class="label">${icon('tmdb')} TMDB</div><div class="value stat-value-large">${d.tmdb_configured ? '已配置' : '未配置'}</div></div>
-  <div class="stat-card"><div class="label">WebUI 运行时间</div><div class="value stat-value-large" id="uptime-val">-</div></div>
+    <div class="stat-card"><div class="label">B - duplicate</div><div class="value stat-value-warning">${d.b_duplicate}</div></div>
+    <div class="stat-card"><div class="label">B - quarantined</div><div class="value stat-value-error">${d.b_quarantined}</div></div>
+  <div class="stat-card meta-compact"><div class="label">${icon('tmdb')} TMDB</div><div class="value stat-value-large">${d.tmdb_configured ? '已配置' : '未配置'}</div></div>
+  <div class="stat-card meta-compact"><div class="label">WebUI 运行时间</div><div class="value stat-value-large" id="uptime-val">-</div></div>
+  <div class="stat-card meta-compact"><div class="label">${icon('sync')} 索引代次</div><div class="value stat-value-primary" id="index-generation">#${d.index_metadata?.index_generation || 0}</div></div>
+  <div class="stat-card meta-compact"><div class="label">${icon('speed')} 最近索引</div><div class="value" title="${_formatExact(d.index_metadata?.last_full_index_at)}">${d.index_metadata?.last_full_index_at ? formatTimestamp(d.index_metadata.last_full_index_at) : '暂无记录'}</div></div>
+  <div class="stat-card meta-compact"><div class="label">${icon('swap_horiz')} 映射版本</div><div class="value" title="${esc(d.index_metadata?.mapping_version || '')}">${d.index_metadata?.mapping_version ? esc(String(d.index_metadata.mapping_version).substring(0, 8) + '...') : '-'}</div></div>
+  <div class="stat-card meta-compact"><div class="label">映射版本生成</div><div class="value" title="${_formatExact(d.index_metadata?.mapping_version_generated_at)}">${d.index_metadata?.mapping_version_generated_at ? formatTimestamp(d.index_metadata.mapping_version_generated_at) : '暂无记录'}</div></div>
 </div>
-	
-	  <!-- 密码提示 -->
-	  <div style="text-align:center;font-size:12px;color:var(--text-muted);margin-top:8px">
+
+<!-- 立即全量审计按钮 -->
+<div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+  <button class="toolbar-btn secondary" id="btn-run-full-audit" style="font-size:calc(var(--font-base) - 1px)">${icon('refresh')} 立即全量审计</button>
+  <span id="audit-status-text" style="font-size:calc(var(--font-base) - 1px);color:var(--text-muted)"></span>
+</div>
+
+<!-- Mapping 列表 -->
+${d.mappings && d.mappings.length > 0 ? `
+<div class="mapping-section">
+  <div class="mapping-section-title">映射配置</div>
+  <div class="mapping-grid">
+    ${d.mappings.map(m => `
+      <div class="mapping-card">
+        <div class="mapping-card-head">
+          <span class="mapping-card-title">${esc(m.label || m.mapping_id)}</span>
+          <span class="mapping-card-generation">#${m.index_generation || 0}</span>
+        </div>
+        <div class="mapping-card-paths">
+          <div>A: ${esc(_shortenPath(m.a_root))}</div>
+          <div>B: ${esc(_shortenPath(m.b_root))}</div>
+        </div>
+        <div class="mapping-card-time">
+          索引时间: <span title="${_formatExact(m.index_generation_at)}">${m.index_generation_at ? formatTimestamp(m.index_generation_at) : '未索引'}</span>
+        </div>
+      </div>
+    `).join('')}
+  </div>
+</div>
+` : ''}
+  
+    <!-- 密码提示 -->
+    <div class="dashboard-password-footnote">
       管理密码仅在首次启动时打印到控制台（不写入日志） · 忘记密码可运行 <code style="background:var(--bg-control);padding:1px 4px;border-radius:3px">python reset_admin.py</code> 重置
-	  </div>`;
+    </div>`;
+
+/** 将 Unix 时间戳转为精确的 YYYY-MM-DD HH:mm:ss 格式（用于 title tooltip） */
+function _formatExact(timestamp) {
+  if (!timestamp || timestamp === 0) return '暂无记录';
+  try {
+    const d = new Date(timestamp * 1000);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  } catch (e) {
+    return '暂无记录';
+  }
+}
+
+function _shortenPath(path) {
+  if (!path) return '/';
+  const parts = path.split('/').filter(Boolean);
+  if (parts.length <= 2) return '/' + parts.join('/');
+  return '/' + parts.slice(0, 2).join('/').replace(/\/$/, '') + '/...';
+}
 
   // Bind start/stop buttons (replaces inline onclick)
   document.getElementById('main-start-btn')?.addEventListener('click', startMainProgram);
@@ -460,10 +598,85 @@ export async function renderDashboard(el) {
           method: 'POST',
           body: JSON.stringify({ onboarding_completed: '0' })
         });
-      } catch (e) {
+      } catch ( e) {
         console.error('Failed to reset onboarding:', e);
       }
       await _loadOnboarding();
+    });
+  }
+
+  // 立即全量审计按钮 + 轮询
+  const auditBtn = document.getElementById('btn-run-full-audit');
+  const auditStatusText = document.getElementById('audit-status-text');
+  if (auditBtn) {
+    auditBtn.addEventListener('click', () => {
+      showConfirmDialog(
+        '执行全量审计',
+        '这是一个重操作，耗时取决于 A 区库大小，会扫描全部 A 区根目录（含机械硬盘）。不会删除任何文件。',
+        async () => {
+          // 审计轮询独立捕获代际，仅对该 handler 生效
+          const isStale = captureRenderGuard();
+          auditBtn.disabled = true;
+      auditBtn.innerHTML = '审计中...';
+      if (auditStatusText) auditStatusText.textContent = '正在启动审计...';
+      try {
+        const resp = await api('/api/index/audit', { method: 'POST' });
+        if (resp.status === 'already_running') {
+          if (auditStatusText) auditStatusText.textContent = '审计已在进行中';
+          auditBtn.disabled = false;
+          auditBtn.innerHTML = `${icon('refresh')} 立即全量审计`;
+          return;
+        }
+        // 轮询状态
+        const maxPolls = 300;
+        for (let i = 0; i < maxPolls; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          // 轮询循环含 isStale 检查
+          if (isStale()) return;
+          try {
+            const st = await api('/api/index/audit/status');
+            // already_running 是"被其他任务占用"，不是完成的假成功
+            if (st.result && st.result.status === 'already_running') {
+              if (auditStatusText) auditStatusText.textContent = '审计被其他任务占用（已在进行中）';
+              auditBtn.disabled = false;
+              auditBtn.innerHTML = `${icon('refresh')} 立即全量审计`;
+              return;
+            }
+            if (!st.running && st.result) {
+              // 显式判断 status === 'completed' 再读 generation，
+              // 避免用 `!error` 推断成功、`|| 0` 掩盖缺 generation 的脆弱性
+              if (st.result.status === 'completed') {
+                if (auditStatusText) auditStatusText.textContent = '审计完成，索引代次 #' + (st.result.index_generation || 0);
+              } else if (st.result.error) {
+                if (auditStatusText) auditStatusText.textContent = '审计失败: ' + st.result.error;
+              } else {
+                if (auditStatusText) auditStatusText.textContent = '审计未完成';
+              }
+              auditBtn.disabled = false;
+              auditBtn.innerHTML = `${icon('refresh')} 立即全量审计`;
+              // 局部刷新索引卡片
+              try {
+                const dashResp = await api('/api/dashboard');
+                if (dashResp && dashResp.index_metadata) {
+                  const genEl = document.getElementById('index-generation');
+                  if (genEl) genEl.textContent = '#' + (dashResp.index_metadata.index_generation || 0);
+                }
+              } catch (e) { /* 忽略刷新失败 */ }
+              return;
+            }
+            if (auditStatusText) auditStatusText.textContent = '审计进行中... (' + (i * 2) + 's)';
+          } catch (e) { /* 轮询失败继续 */ }
+        }
+        if (auditStatusText) auditStatusText.textContent = '审计超时，请稍后重试';
+        auditBtn.disabled = false;
+        auditBtn.innerHTML = `${icon('refresh')} 立即全量审计`;
+      } catch (e) {
+        if (auditStatusText) auditStatusText.textContent = '审计请求失败: ' + e.message;
+        auditBtn.disabled = false;
+        auditBtn.innerHTML = `${icon('refresh')} 立即全量审计`;
+      }
+        }
+      );
     });
   }
 

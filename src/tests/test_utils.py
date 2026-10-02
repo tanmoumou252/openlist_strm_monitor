@@ -4,15 +4,17 @@ Unit tests for utils/ submodules:
                            make_strm_fingerprint, read_strm_webdav_path
   - utils/file_utils.py  — ensure_parent, copy_file, move_file,
                            safe_remove_file, remove_empty_dirs,
-                           local_relative, local_join, quarantine_file,
-                           remove_file_strict
+                           local_relative, local_join, quarantine_file
   - utils/webdav_utils.py — webdav_parent, webdav_root_name,
                             build_webdav_trash_path,
                             _canonicalize_webdav_path_for_cloud
 """
 from __future__ import annotations
 
+import errno
 import hashlib
+import os
+import shutil
 import sys
 import unicodedata
 from pathlib import Path
@@ -38,7 +40,6 @@ from utils.file_utils import (
     move_file,
     quarantine_file,
     remove_empty_dirs,
-    remove_file_strict,
     safe_remove_file,
 )
 from utils.webdav_utils import (
@@ -100,6 +101,11 @@ class TestParseStrmContent:
     def test_strips_whitespace_before_parse(self):
         result = parse_strm_content("  https://host/d/mount/file.mp4  ")
         assert result == "/mount/file.mp4"
+
+    def test_parse_http_url_with_empty_path_returns_none(self):
+        # http://host?sign=xxx 时 parsed.path 为空，不应抛 ValueError
+        assert parse_strm_content("http://host?sign=xxx") is None
+        assert parse_strm_content("https://host?token=abc") is None
 
 
 # ===========================================================================
@@ -233,6 +239,12 @@ class TestReadStrmWebdavPath:
         result = read_strm_webdav_path(str(strm_file))
         assert result == "/some/webdav/path.mp4"
 
+    def test_malformed_strm_returns_none(self, tmp_path):
+        """畸形 STRM（二进制垃圾）应返回 None 而非抛出异常"""
+        path = tmp_path / "bad.strm"
+        path.write_bytes(b"\xff\xfe\x00")
+        assert read_strm_webdav_path(path) is None
+
 
 # ===========================================================================
 # TestFileUtils
@@ -283,6 +295,31 @@ class TestMoveFile:
         dst = tmp_path / "dst.txt"
         move_file(src, dst)
         assert dst.read_text() == "data"
+
+    def test_move_cross_device_fallback(self, tmp_path):
+        """EXDEV error triggers copy+remove fallback."""
+        src = tmp_path / "cross_device.txt"
+        src.write_text("test_content")
+        dst = tmp_path / "dest.txt"
+
+        with patch("shutil.move", side_effect=OSError(errno.EXDEV, "Invalid cross-device link")):
+            # Allow copy2 and os.remove to work normally
+            move_file(src, dst)
+
+            assert dst.exists()
+            assert not src.exists()
+            assert dst.read_text() == "test_content"
+
+    def test_move_non_exdev_oserror_propagates(self, tmp_path):
+        """Non-EXDEV OSError should be re-raised."""
+        src = tmp_path / "src.txt"
+        src.write_text("content")
+        dst = tmp_path / "dst.txt"
+
+        with patch("shutil.move", side_effect=OSError(errno.EACCES, "Permission denied")):
+            with pytest.raises(OSError) as exc_info:
+                move_file(src, dst)
+            assert exc_info.value.errno == errno.EACCES
 
 
 class TestSafeRemoveFile:
@@ -378,25 +415,6 @@ class TestQuarantineFile:
         assert result is not None
         assert result.name.endswith(".quarantined")
 
-
-class TestRemoveFileStrict:
-    def test_removes_existing_file(self, tmp_path):
-        f = tmp_path / "file.txt"
-        f.write_text("x")
-        result = remove_file_strict(f)
-        assert result is True
-        assert not f.exists()
-
-    def test_returns_true_when_file_not_exist(self, tmp_path):
-        result = remove_file_strict(tmp_path / "gone.txt")
-        assert result is True
-
-    def test_returns_false_on_oserror(self, tmp_path):
-        f = tmp_path / "file.txt"
-        f.write_text("x")
-        with patch("utils.file_utils.Path.unlink", side_effect=OSError):
-            result = remove_file_strict(f)
-        assert result is False
 
 
 # ===========================================================================

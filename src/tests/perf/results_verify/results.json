@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "python": "3.14.5 (tags/v3.14.5:5607950, May 10 2026, 10:43:50) [MSC v.1944 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "records": 1000,
+    "delta_pct": 0.05
+  },
+  "runs": [
+    {
+      "name": "baseline",
+      "seconds": 1.5764367,
+      "records": 1000,
+      "verified": 1000,
+      "skipped": 0,
+      "valid": 1000,
+      "invalid": 0,
+      "missing": 0,
+      "digest": "6cc7069d4d71b2b8d5241edddd2b6a7bdd3d17357d08ce6baad6b267b9e2a81c",
+      "peak_bytes": 32775,
+      "counters": {
+        "resolve": 2002,
+        "sql": 1000,
+        "exists": 0
+      }
+    },
+    {
+      "name": "optimized",
+      "seconds": 0.1703928,
+      "records": 1000,
+      "verified": 50,
+      "skipped": 950,
+      "valid": 1000,
+      "invalid": 0,
+      "missing": 0,
+      "digest": "6cc7069d4d71b2b8d5241edddd2b6a7bdd3d17357d08ce6baad6b267b9e2a81c",
+      "peak_bytes": 15749,
+      "counters": {
+        "bulk_sql": 3,
+        "root_resolve": 2,
+        "dynamic_resolve": 100,
+        "exists": 0,
+        "skipped": 950,
+        "verified": 50
+      }
+    },
+    {
+      "name": "baseline",
+      "seconds": 1.5270778,
+      "records": 1000,
+      "verified": 1000,
+      "skipped": 0,
+      "valid": 1000,
+      "invalid": 0,
+      "missing": 0,
+      "digest": "6cc7069d4d71b2b8d5241edddd2b6a7bdd3d17357d08ce6baad6b267b9e2a81c",
+      "peak_bytes": 32647,
+      "counters": {
+        "resolve": 2002,
+        "sql": 1000,
+        "exists": 0
+      }
+    },
+    {
+      "name": "optimized",
+      "seconds": 0.1513508,
+      "records": 1000,
+      "verified": 50,
+      "skipped": 950,
+      "valid": 1000,
+      "invalid": 0,
+      "missing": 0,
+      "digest": "6cc7069d4d71b2b8d5241edddd2b6a7bdd3d17357d08ce6baad6b267b9e2a81c",
+      "peak_bytes": 15749,
+      "counters": {
+        "bulk_sql": 3,
+        "root_resolve": 2,
+        "dynamic_resolve": 100,
+        "exists": 0,
+        "skipped": 950,
+        "verified": 50
+      }
+    },
+    {
+      "name": "baseline",
+      "seconds": 1.5630916,
+      "records": 1000,
+      "verified": 1000,
+      "skipped": 0,
+      "valid": 1000,
+      "invalid": 0,
+      "missing": 0,
+      "digest": "6cc7069d4d71b2b8d5241edddd2b6a7bdd3d17357d08ce6baad6b267b9e2a81c",
+      "peak_bytes": 32647,
+      "counters": {
+        "resolve": 2002,
+        "sql": 1000,
+        "exists": 0
+      }
+    },
+    {
+      "name": "optimized",
+      "seconds": 0.1439579,
+      "records": 1000,
+      "verified": 50,
+      "skipped": 950,
+      "valid": 1000,
+      "invalid": 0,
+      "missing": 0,
+      "digest": "6cc7069d4d71b2b8d5241edddd2b6a7bdd3d17357d08ce6baad6b267b9e2a81c",
+      "peak_bytes": 15749,
+      "counters": {
+        "bulk_sql": 3,
+        "root_resolve": 2,
+        "dynamic_resolve": 100,
+        "exists": 0,
+        "skipped": 950,
+        "verified": 50
+      }
+    }
+  ],
+  "summary": {
+    "baseline": {
+      "median_s": 1.5630916,
+      "median_rps": 639.7577723532006,
+      "digest": "6cc7069d4d71b2b8d5241edddd2b6a7bdd3d17357d08ce6baad6b267b9e2a81c",
+      "peak_bytes": 32775,
+      "counters": {
+        "resolve": 2002,
+        "sql": 1000,
+        "exists": 0
+      },
+      "median_verified": 1000,
+      "median_skipped": 0
+    },
+    "optimized": {
+      "median_s": 0.1513508,
+      "median_rps": 6607.166926108088,
+      "digest": "6cc7069d4d71b2b8d5241edddd2b6a7bdd3d17357d08ce6baad6b267b9e2a81c",
+      "peak_bytes": 15749,
+      "counters": {
+        "bulk_sql": 3,
+        "root_resolve": 2,
+        "dynamic_resolve": 100,
+        "exists": 0,
+        "skipped": 950,
+        "verified": 50
+      },
+      "median_verified": 50,
+      "median_skipped": 950
+    },
+    "comparison": {
+      "speedup_x": 10.327607121997373,
+      "saved_pct": 90.31721493481251,
+      "equivalent": true,
+      "records_total": 1000,
+      "records_verified_optimized": 50,
+      "records_skipped_optimized": 950
+    }
+  }
+}

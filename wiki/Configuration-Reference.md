@@ -1,4 +1,5 @@
 # 十一、配置项完整参考
+> 最后更新：2026-08-06
 
 ## 配置优先级
 
@@ -13,24 +14,20 @@
 
 所有配置类定义在 `src/config.py` 中，为类型化 dataclass。
 
-### `[local]` — `LocalConfig`
-
-```toml
-[local]
-db_file = "./bridge.db"
-```
-
-| 键 | 默认值 | 说明 |
-|-----|------|------|
-| `db_file` | `"./bridge.db"` | 核心数据库路径 |
+> **数据库路径固定**：`bridge.db` 与 `tmdb_watchlist.db` 固定在项目根目录，`[local].db_file` 配置项已移除，**不可通过 config.toml 或 WebUI 更改数据库路径**。
 
 ### `[paths]` — `PathsConfig`
 
 ```toml
 [paths]
-b_root = "./测试b"
+# 旧 b_root 仅为兼容显示，不自动生成生产 mapping
+b_root = ""
 c_root = "./测试c"
+
+# 生产 B 归属通过 WebUI/DB 的 a_b_mappings 显式配置：
+# [{a_root="./测试a1", b_root="./测试b1"}]   # mapping_id 自动生成，无需手写
 ```
+
 
 | 键 | 默认值 | 说明 |
 |-----|------|------|
@@ -62,7 +59,7 @@ totp_secret = ""
 | `interval_minutes` | `10` | 刷新间隔（分钟），内部转秒：`interval_seconds = interval_minutes * 60` |
 | `depth` | `5` | WebDAV PROPFIND 扫描深度 |
 | `timeout_seconds` | `300` | 刷新操作超时时间（秒） |
-| `log_level` | `"INFO"` | 刷新日志级别：DEBUG/INFO/WARNING |
+| `full_audit_interval_days` | `7` | A 区全量审计周期；0 关闭。`refresh_paths` 为空时周期局部扫描停止，但到期全量审计仍可能访问所有 A 根。DB 键名为 `refresh_full_audit_interval_days`（带 `refresh_` 前缀） |
 
 ### `[behavior]` — `BehaviorConfig`
 
@@ -80,16 +77,18 @@ totp_secret = ""
 | 键 | 默认值 | 说明 |
 |-----|------|------|
 | `level` | `"INFO"` | 日志级别：DEBUG/INFO/WARNING/ERROR |
+| | | 媒体刷新与周期刷新共用此全局日志级别，不再提供独立的 `[refresh].log_level` 配置。 |
 | `file` | `"strm_bridge.log"` | 日志文件路径（默认位于项目根目录） |
 | `max_size_mb` | `2` | 单文件最大 MB，超限轮转 |
 | `backup_count` | `5` | 保留的轮转备份数 |
 
 ### `[webui]` — `WebUIConfig`
 
+> **WebUI 是主程序入口**，不提供关闭自身的配置项。旧配置中残留的 `[webui].enabled` 键会被 TOML 加载器自然忽略；Bridge 同步引擎是否启动由启动流程（交互菜单 / `BRIDGE_HEADLESS=1`）控制，不由本段配置控制。
+
 | 键 | 默认值 | 说明 |
 |-----|------|------|
-| `enabled` | `true` | 启用 WebUI |
-| `port` | `8579` | HTTP 监听端口 |
+| `port` | `8579`(默认,可自定义) | HTTP 监听端口 |
 | `bind` | `"0.0.0.0"` | 监听地址。`"127.0.0.1"` 仅本地访问 |
 
 ### `[tmdb]` — `TmdbConfig`
@@ -106,9 +105,8 @@ totp_secret = ""
 | `fuzzy_threshold` | `0.60` | 标题模糊匹配最低相似度（0.0-1.0） |
 | `anime_min_ep_ratio` | `0.30` | 番剧匹配最少集数比例 |
 | `anime_max_season_diff` | `0.3` | 番剧匹配允许的最大季数差（运行时未读取，当前无效） |
-| `anime_min_season_ratio` | `0.3` | 番剧匹配最少季数比例 |
+| `anime_min_season_ratio` | `0.3` | 番剧匹配最少季数比例（**运行时未读取**，仅配置兼容保留） |
 | `csv_watchlist_file` | `""` | CSV 待看列表文件路径（可选） |
-| `watchlist_db` | `""` | 自定义 TMDB 待看列表数据库路径（可选，默认项目根 `tmdb_watchlist.db`）。注：此字段虽存在，但 `routes.py` 硬编码数据库路径，实际未被读取 |
 | `proxy_enabled` | `false` | 启用 TMDB API 代理 |
 | `proxy_http` | `""` | HTTP 代理地址 |
 | `proxy` | `{}` | 嵌套代理配置 `TmdbProxyConfig`（含 `enabled`、`http`、`https`） |
@@ -132,20 +130,20 @@ totp_secret = ""
 | `tmdb` | `anime_max_season_diff` | 番剧最大季数差（运行时未读取，当前无效） |
 | `tmdb` | `anime_min_season_ratio` | 番剧最少季数比例 |
 | `tmdb` | `csv_watchlist_file` | CSV 待看列表文件路径 |
-| `tmdb` | `watchlist_db` | 自定义 TMDB 待看列表数据库路径 |
 | `openlist` | `webdav_host` | OpenList 主机 |
 | `openlist` | `webdav_user` | OpenList 用户 |
 | `openlist` | `webdav_password` | OpenList 密码（加密存储） |
 | `openlist` | `webdav_totp_secret` | TOTP 密钥（加密存储） |
 | `openlist` | `b_root` | B 区根目录 |
 | `openlist` | `c_root` | C 区根目录 |
+| `openlist` | `a_b_mappings` | A↔B 映射列表（JSON 数组，元素含 `a_root`、`b_root`、`label`；由 `openlist.js` 提交，替代旧 `b_root` 单值输入）。`mapping_id` **不由前端提交**，读取侧 `AppConfig.update_from_db` 按 A 根规范化路径调用 `ABMapping.generate_mapping_id` 自动补齐；显式写入的 `mapping_id` 不会被覆盖 |
 | `openlist` | `strm_engines` | 引擎配置（从 WebUI 写入，派生 `a_folders` 和 `strm_engine_paths`） |
 | `openlist` | `engines_initialized` | 引擎初始化标志（迁移时设为 `true`） |
 | `openlist` | `refresh_paths` | 刷新路径 |
 | `openlist` | `refresh_enabled` | 刷新开关 |
 | `openlist` | `refresh_interval_minutes` | 刷新间隔（分钟，内部转秒） |
 | `openlist` | `refresh_depth` | WebDAV PROPFIND 扫描深度 |
-| `openlist` | `refresh_log_level` | 刷新日志级别 |
+| `openlist` | `refresh_full_audit_interval_days` | 全量审计周期（天）；0 关闭。**注意：TOML 中对应键名为 `full_audit_interval_days`（无 `refresh_` 前缀），两者不同** |
 | `openlist` | `behavior_action` | 删除行为（MOVE/DELETE） |
 | `openlist` | `behavior_trash_dir_name` | 云端回收站目录名 |
 | `openlist` | `behavior_ghost_protect_seconds` | 幽灵保护时长（秒） |
@@ -205,7 +203,9 @@ OpenList 后台配置                    程序内部映射
 
 ## JWT Token 缓存
 
-`OpenListAdminClient` 将 JWT Token 缓存到 `~/.openlist_admin_token.json`，避免重复登录。Token 过期前 60 秒自动刷新。401 时清除缓存并重新登录。
+`OpenListAdminClient` 将 JWT Token 缓存到 `src/.admin_token.json`（`OpenListAdminClient` 所在目录），避免重复登录。缓存文件 TTL 为 24 小时（`_TOKEN_CACHE_TTL`），本身不解析 JWT 过期时间、也不做预置性自动刷新；请求返回 401 时清除缓存并重新登录。
+
+> **注意：** 这里的缓存文件 TTL（24 小时）与 JWT Token 自身的过期机制无关，且与 `refresh.interval_minutes`（默认 10 分钟）控制的周期性 WebDAV/主动刷新间隔是两套独立机制，勿混淆。
 
 ## 多存储分组
 

@@ -31,6 +31,34 @@ export function _formatTimeAgo(ts) {
   return `${Math.floor(sec / 86400)} 天前`;
 }
 
+/** 相对时间（刚刚 / N分钟前 / N小时前 / N天前），超过 7 天回退为本地日期时间。 */
+export function formatTimestamp(timestamp) {
+  if (!timestamp || timestamp === 0) return '未知';
+  try {
+    const date = new Date(timestamp * 1000);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return '刚刚';
+    if (diffMins < 60) return `${diffMins}分钟前`;
+    if (diffHours < 24) return `${diffHours}小时前`;
+    if (diffDays < 7) return `${diffDays}天前`;
+
+    return date.toLocaleDateString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch (e) {
+    return '未知';
+  }
+}
+
 export function createSortLink(area, sort, order, colName, colKey, params = {}) {
   const newOrder = (sort === colKey && order === 'asc') ? 'desc' : 'asc';
   const arrow = sort === colKey ? (order === 'asc' ? icon('arrow_up') : icon('arrow_down')) : '';
@@ -38,6 +66,8 @@ export function createSortLink(area, sort, order, colName, colKey, params = {}) 
   if (params.kind) href += '&kind=' + encodeURIComponent(params.kind);
   if (params.q) href += '&q=' + encodeURIComponent(params.q);
   if (params.media) href += '&media=' + encodeURIComponent(params.media);
+  const pageSize = Number(params.page_size);
+  if (Number.isInteger(pageSize) && pageSize > 0) href += '&page_size=' + encodeURIComponent(pageSize);
   return `<a href="${href}" class="sort-btn">${colName}${arrow}</a>`;
 }
 
@@ -48,7 +78,12 @@ export function createField(id, label, value, options = {}) {
     persistLabel = false,
     readOnly = false,
     helpIcon = '',
-    htmlLabel = ''  // 可选：不经过 esc() 转义，直接渲染的 HTML（如配置状态徽章）
+    htmlLabel = '',  // 可选：不经过 esc() 转义，直接渲染的 HTML（如配置状态徽章）
+    helperText = '',  // 可选：字段下方的帮助说明文字
+    min = '',         // 数字输入约束（原生 number 校验，与后端契约一致）
+    max = '',
+    step = '',
+    inputMode = ''
   } = options;
   const hasValue = value !== null && value !== undefined && String(value).trim() !== '';
   const inputClass = hasValue ? 'has-value' : '';
@@ -60,12 +95,14 @@ export function createField(id, label, value, options = {}) {
   const persistAttr = persistLabel ? ' data-persist-label="1"' : '';
   const disabledAttr = readOnly ? ' disabled' : '';
   const roClass = readOnly ? ' readonly-field' : '';
+  // 数字输入约束属性：仅在有值时输出，避免空字符串属性
+  const numAttrs = [min && `min="${esc(min)}"`, max && `max="${esc(max)}"`, step && `step="${esc(step)}"`, inputMode && `inputmode="${esc(inputMode)}"`].filter(Boolean).join(' ');
   return `
     <div class="floating-field" data-field="${id}">
       <div class="field-control">
         <label class="${labelCls}" data-role="label" for="${id}">${esc(label)}${htmlLabel}${helpIcon || ''}</label>
-        <input type="${type}" id="${id}" class="${inputClass}${roClass}"${persistAttr}${disabledAttr} placeholder="${esc(placeholder || label)}" value="${inputValue}">
-      </div>
+        <input type="${type}" id="${id}" class="${inputClass}${roClass}"${persistAttr}${disabledAttr} ${numAttrs} placeholder="${esc(placeholder || label)}" value="${inputValue}">
+      </div>${helperText ? `<div class="field-helper-text">${esc(helperText)}</div>` : ''}
     </div>`;
 }
 
@@ -127,7 +164,7 @@ export function renderTmdbResults(results, title, query = '', container) {
       <h3 class="tmdb-results-title" style="font-size:14px;font-weight:600;color:var(--text-main);margin:0 0 12px 0">${esc(title)}</h3>
       <div class="tmdb-results-list" style="display:flex;flex-direction:column;gap:8px">
         ${allResults.map(item => `
-          <a class="tmdb-result-item" href="https://www.themoviedb.org/${item.type}/${item.id}" target="_blank" rel="noopener" style="display:flex;align-items:center;gap:12px;padding:8px;background:var(--bg-elevated);border-radius:var(--radius-control);border:1px solid var(--border-color);text-decoration:none;color:inherit;cursor:pointer;transition:background .18s ease" onmouseover="this.style.background='var(--bg-control)'" onmouseout="this.style.background='var(--bg-elevated)'">
+          <a class="tmdb-result-item" href="https://www.themoviedb.org/${item.type}/${encodeURIComponent(String(item.id || ''))}" target="_blank" rel="noopener" style="display:flex;align-items:center;gap:12px;padding:8px;background:var(--bg-card);border-radius:var(--radius-control);border:1px solid var(--border-color);text-decoration:none;color:inherit;cursor:pointer;transition:background .18s ease">
             <span class="tmdb-result-type" style="font-size:11px;font-weight:600;color:var(--primary);background:color-mix(in srgb,var(--primary) 10%,transparent);padding:2px 8px;border-radius:var(--radius-pill);flex-shrink:0">${item.type === 'movie' ? '电影' : '电视剧'}</span>
             <span class="tmdb-result-name" style="flex:1;font-size:13px;font-weight:500;color:var(--text-main)">${esc(item.title || item.name)}</span>
             <span class="tmdb-result-date" style="font-size:12px;color:var(--text-muted);flex-shrink:0">${esc(item.release_date || item.first_air_date || '')}</span>
@@ -138,4 +175,15 @@ export function renderTmdbResults(results, title, query = '', container) {
   `;
   
   container.innerHTML = html;
+
+  // 内联 onmouseover/onmouseout 改为 addEventListener（CSP 已移除 'unsafe-inline'）。
+  // 使用事件委托绑定在容器上，避免重复绑定，且容器可能被重新渲染。
+  const delegateHover = (e) => {
+    const item = e.target.closest && e.target.closest('.tmdb-result-item');
+    if (!item) return;
+    const over = e.type === 'mouseover';
+    item.style.background = over ? 'var(--bg-control)' : 'var(--bg-card)';
+  };
+  container.addEventListener('mouseover', delegateHover);
+  container.addEventListener('mouseout', delegateHover);
 }

@@ -1,4 +1,3 @@
-# autopep8: off
 # isort: off
 
 from __future__ import annotations
@@ -6,7 +5,39 @@ from dataclasses import dataclass, field
 import logging
 import os
 import json
+import hashlib
 from pathlib import Path
+from typing import Any
+
+# 启动等待时间上限（秒），超出此值的配置不安全，WebUI 保存时拒绝，
+# TOML/DB 加载时将被记录警告并回退为 0。
+STARTUP_WAIT_MAX_SECONDS = 60
+
+def normalize_startup_wait(val: Any) -> int:
+    """校验并规范化启动等待时间（秒）。
+
+    合法范围为 [0, STARTUP_WAIT_MAX_SECONDS]。
+    非法类型或超范围值记录警告并安全回退为 0。
+    """
+    try:
+        num = int(val)
+        if 0 <= num <= STARTUP_WAIT_MAX_SECONDS:
+            return num
+        logging.warning(
+            "[Config] sync_on_startup_wait 超出安全范围 [0, %d]: %r，回退为 0",
+            STARTUP_WAIT_MAX_SECONDS, val)
+        return 0
+    except (TypeError, ValueError):
+        logging.warning(
+            "[Config] sync_on_startup_wait 非法整数值: %r，回退为 0", val)
+        return 0
+
+
+def normalize_local_root(path: str | Path) -> Path:
+    """返回用于 mapping 归属判断的规范化本地根路径。"""
+    # 保留 resolved 的实际大小写用于文件系统和 DB 路径；Windows 大小写
+    # 等价性由 Path/比较方处理，mapping_id 单独使用 normcase。
+    return Path(path).expanduser().resolve()
 
 try:
     import tomllib
@@ -21,6 +52,38 @@ from utils.bootstrap import ensure_base_dir_first
 
 ensure_base_dir_first()
 
+LINEAGE_VERSION = 1
+
+def mapping_version(a_b_mappings: list["ABMapping"], c_root: str | Path) -> str:
+    """根据规范化 mapping 集合和全局 C 根生成稳定版本摘要。"""
+    payload = [
+        {
+            "mapping_id": str(m.mapping_id).strip(),
+            "a_root": str(normalize_local_root(m.a_root)),
+            "b_root": str(normalize_local_root(m.b_root)),
+        }
+        for m in a_b_mappings
+    ]
+    payload.sort(key=lambda item: item["mapping_id"])
+    canonical = json.dumps(
+        {"mappings": payload, "c_root": str(normalize_local_root(c_root))},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+@dataclass(slots=True)
+class ABMapping:
+    """A 区根目录到 B 区根目录的映射关系"""
+    mapping_id: str       # 稳定短标识（A 根规范化路径 SHA1 前 8 位），B 根变更不改变 mapping_id
+    a_root: str           # A 根路径，只读，从引擎 API 自动获取
+    b_root: str           # B 根路径，用户在 UI 填写
+    label: str = ""       # 可读标签，用于 C 区子目录和 WebUI 显示
+
+    @staticmethod
+    def generate_mapping_id(a_root: str) -> str:
+        """由 A 根规范化路径生成稳定 mapping_id"""
+        normalized = str(normalize_local_root(a_root))
+        return hashlib.sha1(normalized.encode()).hexdigest()[:8]
 
 def read_line_list(
     file_path: str, base_dir: str | Path, is_webdav: bool = False
@@ -35,9 +98,9 @@ def read_line_list(
             if line.strip() and not line.strip().startswith("#")
         ]
     if is_webdav:
-        return [line.rstrip("/") for line in lines]
-    return lines
-
+        lines = [line.rstrip("/") for line in lines]
+    # 按原序去重，防止重复配置导致重复处理
+    return list(dict.fromkeys(lines))
 
 @dataclass(slots=True)
 class WebDAVConfig:
@@ -46,15 +109,14 @@ class WebDAVConfig:
     password: str
     totp_secret: str
 
-
 @dataclass(slots=True)
 class RefreshConfig:
     interval_seconds: int
     enabled: bool = True
     depth: int = 5
     timeout_seconds: int = 300  # 刷新操作超时时间（秒）
-    log_level: str = "INFO"  # 刷新日志级别：DEBUG/INFO/WARNING
-
+    log_level: str = "INFO"  # 本字段已被废除，刷新日志改用全局 log_level
+    full_audit_interval_days: int = 7  # A 区全量审计周期；0 表示关闭
 
 @dataclass(slots=True)
 class BehaviorConfig:
@@ -65,7 +127,6 @@ class BehaviorConfig:
     ghost_protect_seconds: int = 300
     a_to_b_restore_delay_seconds: int = 30
 
-
 @dataclass(slots=True)
 class LogConfig:
     level: str
@@ -73,13 +134,11 @@ class LogConfig:
     backup_count: int
     file: str = "strm_bridge.log"
 
-
 @dataclass(slots=True)
 class WebUIConfig:
-    enabled: bool = True
+    """WebUI 是主程序入口，不提供关闭自身的配置项。"""
     port: int = 8579
     bind: str = "0.0.0.0"
-
 
 @dataclass(slots=True)
 class TmdbProxyConfig:
@@ -87,7 +146,6 @@ class TmdbProxyConfig:
     enabled: bool = False
     http: str = ""
     https: str = ""
-
 
 @dataclass(slots=True)
 class TmdbConfig:
@@ -97,17 +155,20 @@ class TmdbConfig:
     host: str = ""
     api_key: str = ""
     csv_watchlist_file: str = ""
-    watchlist_db: str = ""
+    # watchlist_db 字段已移除，数据库路径固定在项目根 tmdb_watchlist.db
     watchlist_cache_ttl: float = 604800  # 默认 7 天
     fuzzy_threshold: float = 0.60
     anime_min_ep_ratio: float = 0.3
-    anime_max_season_diff: float = 0.3  # 新增：动漫最大季度差异阈值
-    anime_min_season_ratio: float = 0.3  # 新增：动漫最少季数比例阈值
+    anime_max_season_diff: float = 0.3  # 动漫最大季度差异阈值（运行时未读取，见下）
+    # 原匹配逻辑（本地季数与 TMDB 季数差 > total_seasons + 1）已随
+    # watchlist_match 重构移除，watchlist_match.py 未引用此字段。
+    # 已在 wiki/Configuration-Reference.md 注明运行时无效。为配置兼容保留。
+    # 除非同时移除 WebUI 字段与文档，否则勿当死代码删除。
+    anime_min_season_ratio: float = 0.3  # 保留但运行时未读取（watchlist_match.py 未引用）
     proxy: TmdbProxyConfig = field(default_factory=TmdbProxyConfig)
     # 扁平化代理字段（供前端/测试 WebUI 直接读写，与嵌套 proxy 双向同步）
     proxy_enabled: bool = False
     proxy_http: str = ""
-
 
 @dataclass(slots=True)
 class LocalConfig:
@@ -115,8 +176,7 @@ class LocalConfig:
     a_dir: str
     b_dir: str
     c_dir: str
-    db_file: str = "./bridge.db"
-
+    db_file: str = ""  # 固定项目根 bridge.db，from_file 强制填充
 
 @dataclass(slots=True)
 class PathsConfig:
@@ -124,7 +184,6 @@ class PathsConfig:
     refresh_paths: list[str]
     b_root: str = ""
     c_root: str = ""
-
 
 @dataclass
 class StrmStorageMapping:
@@ -172,7 +231,6 @@ class StrmStorageMapping:
             return os.path.join(base, sub_path.lstrip("/\\"))
         return base
 
-
 @dataclass(slots=True)
 class AppConfig:
     base_dir: str
@@ -185,6 +243,8 @@ class AppConfig:
     webui: WebUIConfig = field(default_factory=WebUIConfig)
     tmdb: TmdbConfig = field(default_factory=TmdbConfig)
     a_folders: list[str] = field(default_factory=list)
+    # 多 A↔多 B 根映射（每个 A 根绑定唯一 B 根）
+    a_b_mappings: list[ABMapping] = field(default_factory=list)
     # STRM 存储映射 mount_path -> StrmStorageMapping
     strm_storage_map: dict[str, StrmStorageMapping] = field(
         default_factory=dict)
@@ -192,6 +252,8 @@ class AppConfig:
     openlist_strm_engines: list[dict] = field(default_factory=list)
     openlist_refresh_paths: list[str] = field(default_factory=list)
     engines_initialized: bool = field(default=False)
+    # API 原始 STRM 存储配置快照（避免启动期多处重复请求）
+    raw_strm_storages: list[dict] = field(default_factory=list)
 
     def __getattr__(self, name: str):
         if name == "strm_engine_paths":
@@ -204,7 +266,7 @@ class AppConfig:
 
     def update_from_db(self, watchlist_db) -> None:
         """从 DB 的 webui_config 表加载 OpenList 配置覆盖。
-        
+
         优先级：DB > config.toml
         使用映射表简化重复代码，避免大量 if-statement。
         """
@@ -214,7 +276,7 @@ class AppConfig:
             db_cfg = watchlist_db.get_all_config("openlist")
             if not db_cfg:
                 return
-            
+
             # 配置映射：(DB key, 目标对象, 属性名, 转换函数)
             config_mappings = [
                 # WebDAV 配置
@@ -222,21 +284,18 @@ class AppConfig:
                 ("webdav_user", self.webdav, "user", str),
                 ("webdav_password", self.webdav, "password", str),
                 ("webdav_totp_secret", self.webdav, "totp_secret", str),
-                
+
                 # 路径配置
                 ("b_root", self.paths, "b_root", str),
                 ("c_root", self.paths, "c_root", str),
-                
+
                 # 行为配置
                 ("behavior_action", self.behavior, "action", str),
                 ("behavior_trash_dir_name", self.behavior, "trash_dir_name", str),
                 ("behavior_ghost_protect_seconds", self.behavior, "ghost_protect_seconds", int),
                 ("behavior_a_to_b_restore_delay_seconds", self.behavior, "a_to_b_restore_delay_seconds", int),
                 ("behavior_sync_on_startup", self.behavior, "sync_on_startup", self._to_bool),
-                ("behavior_sync_on_startup_wait", self.behavior, "sync_on_startup_wait", int),
-
-                # 刷新配置
-                ("refresh_log_level", self.refresh, "log_level", str),
+                ("behavior_sync_on_startup_wait", self.behavior, "sync_on_startup_wait", normalize_startup_wait),
 
                 # 日志配置
                 ("log_level", self.log, "level", str),
@@ -245,7 +304,7 @@ class AppConfig:
                 # 日志保存路径（DB 往返的关键键，勿删；留空时回退 strm_bridge.log）
                 ("log_file", self.log, "file", str),
             ]
-            
+
             # 应用简单配置
             for db_key, target, attr, converter in config_mappings:
                 if db_key in db_cfg:
@@ -268,7 +327,7 @@ class AppConfig:
                 self.local.b_dir = db_cfg["b_root"]
             if "c_root" in db_cfg:
                 self.local.c_dir = db_cfg["c_root"]
-            
+
             # 刷新配置（需要特殊处理：分钟转秒）
             refresh_cfg = self.refresh
             if "refresh_enabled" in db_cfg:
@@ -283,7 +342,13 @@ class AppConfig:
                     refresh_cfg.depth = int(db_cfg["refresh_depth"])
                 except (ValueError, TypeError) as e:
                     logging.warning("[Config] 转换 refresh_depth 失败: %s", e)
-            
+            if "refresh_full_audit_interval_days" in db_cfg:
+                try:
+                    refresh_cfg.full_audit_interval_days = max(
+                        0, int(db_cfg["refresh_full_audit_interval_days"]))
+                except (ValueError, TypeError) as e:
+                    logging.warning("[Config] 转换 refresh_full_audit_interval_days 失败: %s", e)
+
             # OpenList 初始化标志
             if "engines_initialized" in db_cfg:
                 self.engines_initialized = self._to_bool(db_cfg["engines_initialized"])
@@ -302,7 +367,7 @@ class AppConfig:
                 except (json.JSONDecodeError, TypeError) as e:
                     logging.warning("[Config] 解析 strm_engines 失败: %s", e)
                     self.openlist_strm_engines = []
-            
+
             if "refresh_paths" in db_cfg:
                 try:
                     self.openlist_refresh_paths = json.loads(db_cfg["refresh_paths"])
@@ -310,7 +375,7 @@ class AppConfig:
                 except (json.JSONDecodeError, TypeError) as e:
                     logging.warning("[Config] 解析 refresh_paths 失败: %s", e)
                     self.openlist_refresh_paths = []
-            
+
             # 从 strm_storage_map 派生 a_folders（仅限用户配置的引擎，
             # 与 load_strm_storage_from_api 的派生逻辑保持一致）
             configured_engines = set(
@@ -326,10 +391,45 @@ class AppConfig:
                     a_folders.append(mapping.local_path)
             self.a_folders = a_folders
 
+            # 读取 a_b_mappings（新配置）
+            if "a_b_mappings" in db_cfg:
+                try:
+                    mappings_data = json.loads(db_cfg["a_b_mappings"])
+                    parsed: list[ABMapping] = []
+                    for m in mappings_data:
+                        # 纵深防御——写入侧 _validate_a_b_mappings 已挡非 dict，
+                        # 此处仍跳过并记 warning，避免 AttributeError 中止全部 DB 覆盖
+                        if not isinstance(m, dict):
+                            logging.warning(
+                                "[Config] a_b_mappings 含非 dict 元素，跳过: %r", m)
+                            continue
+                        a_root = m.get("a_root")
+                        b_root = m.get("b_root")
+                        if not a_root or not b_root:
+                            continue
+                        # WebUI 保存体不含 mapping_id：按 A 根规范化路径补齐稳定 ID。
+                        # 缺 ID 会让 get_config_status() 判 fail_safe_active，引擎静默不同步。
+                        mapping_id = str(m.get("mapping_id", "") or "").strip()
+                        if not mapping_id:
+                            mapping_id = ABMapping.generate_mapping_id(a_root)
+                        parsed.append(ABMapping(
+                            mapping_id=mapping_id,
+                            a_root=a_root,
+                            b_root=b_root,
+                            label=m.get("label", "")
+                        ))
+                    self.a_b_mappings = parsed
+                except (json.JSONDecodeError, TypeError) as e:
+                    logging.warning("[Config] 解析 a_b_mappings 失败: %s", e)
+                    self.a_b_mappings = []
+
             logging.info("[Config] 已从 DB 加载 OpenList 配置 (%d 项)", len(db_cfg))
+        # 已知取舍: 特殊块（refresh_interval/log_file/strm_engines/a_b_mappings/strm_storage_map）
+        # 被外层单个 except 整体吞掉并提前 return，一个非 (ValueError,TypeError) 异常会丢弃其后
+        # 所有 DB 覆盖。DB 值均由应用自身写入，单值畸形概率低，接受。
         except Exception as e:
             logging.warning("[Config] 从 DB 加载 OpenList 配置失败: %s", e)
-    
+
     def _to_bool(self, value) -> bool:
         """转换为布尔值（支持字符串和布尔类型）"""
         if isinstance(value, bool):
@@ -341,7 +441,7 @@ class AppConfig:
     @classmethod
     def from_file(cls, toml_path: str) -> "AppConfig":
         """从 config.toml 文件加载配置（纯文件解析，无网络调用）。
-        
+
         STRM 存储映射需要后续调用 load_strm_storage_from_api() 显式加载。
         """
         with open(toml_path, "rb") as f:
@@ -362,14 +462,14 @@ class AppConfig:
         if c_root and not Path(c_root).is_absolute():
             logging.warning("[Config] c_root 不是绝对路径: %s", c_root)
 
+        # bridge.db 固定在项目根，[local].db_file 不再从 config.toml 读取
+        # 仅测试注入，生产固定项目根
         local = LocalConfig(
             base_dir=base_dir,
             a_dir="",  # 默认为空，需在 WebUI 配置
             b_dir=b_root,
             c_dir=c_root,
-            db_file=os.path.normpath(os.path.join(
-                base_dir, local_data.get(
-                    "db_file", "bridge.db"))),
+            db_file=os.path.normpath(os.path.join(base_dir, "bridge.db")),
         )
 
         webdav_data = data.get("webdav", {})
@@ -387,12 +487,14 @@ class AppConfig:
             depth=refresh_data.get("depth", 5),
             timeout_seconds=refresh_data.get("timeout_seconds", 300),
             log_level=refresh_data.get("log_level", "INFO"),
+            full_audit_interval_days=refresh_data.get("full_audit_interval_days", 7),
         )
 
         behavior_data = data.get("behavior", {})
         behavior = BehaviorConfig(
             sync_on_startup=behavior_data.get("sync_on_startup", True),
-            sync_on_startup_wait=behavior_data.get("sync_on_startup_wait", 0),
+            sync_on_startup_wait=normalize_startup_wait(
+                behavior_data.get("sync_on_startup_wait", 0)),
             trash_dir_name=behavior_data.get("trash_dir_name", "trash"),
             action=behavior_data.get("action", "MOVE"),
             ghost_protect_seconds=behavior_data.get(
@@ -420,7 +522,6 @@ class AppConfig:
         # 解析 [webui] 配置
         webui_data = data.get("webui", {})
         webui = WebUIConfig(
-            enabled=webui_data.get("enabled", True),
             port=int(webui_data.get("port", 8579)),
             bind=webui_data.get("bind", "0.0.0.0"),
         )
@@ -439,13 +540,18 @@ class AppConfig:
         instance.paths = paths
         instance.webui = webui
         instance.tmdb = tmdb
-        
+
         # 初始化为空，后续由 load_strm_storage_from_api() 填充
         instance.a_folders = []
         instance.strm_storage_map = {}
         instance.openlist_strm_engines = []
         instance.openlist_refresh_paths = []
-        
+        # 与 dataclass 默认值对齐：DB 未写入时也必须可安全读取，
+        # 否则 routes.handle_config_api 在全新安装时整页 AttributeError。
+        instance.a_b_mappings = []
+        instance.engines_initialized = False
+        instance.raw_strm_storages = []
+
         return instance
 
     def load_strm_storage_from_api(self, admin_client=None) -> None:
@@ -477,7 +583,7 @@ class AppConfig:
                     totp_secret=self.webdav.totp_secret,
                 )
                 # 强制重新登录，不使用缓存 token，确保真实验证连接
-                if not admin_client.login(force=True):
+                if not admin_client.login(force=True, source="strm_storage"):
                     logging.warning("[STRM存储API] 登录失败，跳过 STRM 存储映射加载")
                     return
 
@@ -490,6 +596,12 @@ class AppConfig:
                     err,
                 )
                 return
+
+            # 缓存原始 API payload 快照：update_engine_configs / engine_configs
+            # 消费方直接复用，避免启动链路对同一 API 重复拉取。
+            # strm_storage_map 丢失原始 addition（SaveStrmLocalPath 等），
+            # 无法反向解析，因此必须保留这份原始不可变结构。
+            self.raw_strm_storages = content
 
             # strm_storage_map 加载全部引擎（供 UI 下拉框发现）；
             # a_folders / 扫描范围则严格只从用户配置的引擎派生（见下方）
@@ -512,12 +624,17 @@ class AppConfig:
                         storage_paths = [
                             str(p).strip() for p in paths_val if str(p).strip()
                         ]
-                    else:
+                    elif isinstance(paths_val, str):
                         storage_paths = [
                             p.strip()
                             for p in paths_val.split("\n")
                             if p.strip()
                         ]
+                    else:
+                        # paths 为 dict/null 等非字符串时不再调用 .split("\n")，
+                        # 避免 AttributeError 冒泡到外层 except Exception (line 647)
+                        # 中断整个 STRM 存储加载。此分支安全降级为空列表。
+                        storage_paths = []
 
                     local_path = addition.get("SaveStrmLocalPath", "")
 
@@ -537,10 +654,12 @@ class AppConfig:
                             paths=group_paths,
                             local_path=local_path,
                         )
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, TypeError):
+                    # addition 为 None/dict 等非字符串时 json.loads 抛 TypeError，
+                    # 一并捕获并 str() 化日志入参，单条失败只跳过该条目，不中断整个加载
                     logging.warning(
                         "[STRM存储解析] 解析 addition 失败：%s",
-                        addition_str[:200],
+                        str(addition_str)[:200],
                     )
 
             # a_folders / 扫描范围严格只从用户配置的引擎派生；
@@ -569,102 +688,66 @@ class AppConfig:
         except Exception as exc:
             logging.warning("[STRM存储API] 获取 STRM 存储信息失败: %s", exc)
 
-
 def migrate_config_to_db(config: "AppConfig", watchlist_db) -> bool:
     """将 config.toml 和 txt 文件中的配置迁移到 DB。
-    
+
     检查 migration scope 的 config_toml_migrated key：
     - 如果已迁移，返回 False
     - 如果未迁移，从 config 读取旧配置写入 DB openlist scope，返回 True
     """
     if not watchlist_db:
         return False
-    
+
     # 检查是否已迁移
     migrated = watchlist_db.get_config("migration", "config_toml_migrated", "")
     if migrated == "true":
         logging.debug("[Migration] OpenList 配置已迁移，跳过")
         return False
-    
+
     logging.info("[Migration] 首次启动，正在将 config.toml 配置迁移到 DB...")
-    
+
     try:
-        # WebDAV 配置
-        watchlist_db.set_config("openlist", "webdav_host", config.webdav.host)
-        watchlist_db.set_config("openlist", "webdav_user", config.webdav.user)
-        watchlist_db.set_config("openlist", "webdav_password", config.webdav.password)
-        watchlist_db.set_config("openlist", "webdav_totp_secret", config.webdav.totp_secret)
-        
-        # 路径配置
-        watchlist_db.set_config("openlist", "b_root", config.paths.b_root)
-        watchlist_db.set_config("openlist", "c_root", config.paths.c_root)
-        
-        # 刷新路径（JSON 数组）
-        # 运行时 refresh_paths 已不再从 txt 文件加载（改为 WebUI/DB 配置）。
-        # 但为兼容首次升级、尚未迁移的旧用户，迁移阶段仍尝试读取遗留的
-        # refresh_paths.txt 作为一次性数据源写入 DB；文件不存在或为空则写 []。
+        # 刷新路径（JSON 数组）：兼容首次升级时的遗留 txt 数据源。
         legacy_refresh_paths = config.paths.refresh_paths
         if not legacy_refresh_paths:
-            legacy_file = os.path.join(
-                config.local.base_dir, "refresh_paths.txt"
-            )
+            legacy_file = os.path.join(config.local.base_dir, "refresh_paths.txt")
             legacy_refresh_paths = read_line_list(
                 os.path.basename(legacy_file),
                 os.path.dirname(legacy_file),
                 is_webdav=True,
             )
-        watchlist_db.set_config("openlist", "refresh_paths",
-                                json.dumps(legacy_refresh_paths, ensure_ascii=False))
-        
-        # STRM 引擎配置
-        # ⚠️ a 区来源仅以 "用户在 WebUI 手动添加并保存的引擎" 为唯一真相来源
-        # （DB 键 openlist.strm_engines，由 WebUI POST 写入）。
-        # 迁移时【绝不】把 OpenList 端自动发现的引擎注入为"用户已配置"：
-        # 即使 OpenList 存在 strm 引擎而用户没显式添加，也不进入 a_folders / b 区
-        # / protected_roots。因此迁移阶段写入空数组 []，仅标记 engines_initialized
-        # 表示"迁移已完成、等待用户在 WebUI 配置"。
-        # 关联：load_strm_storage_from_api() 仅对 openlist_strm_engines 中的引擎
-        # 派生 a_folders（configured_engines 过滤），本函数不应改写它。
-        watchlist_db.set_config("openlist", "strm_engines",
-                                json.dumps([], ensure_ascii=False))
-        # 迁移时即标记 engines_initialized=true：表示配置迁移已完成，
-        # 让 load_strm_storage_from_api 走"用户已保存（可能为空）"分支而非"首次运行"
-        # 分支，避免后续误注入全部 OpenList 引擎。
-        watchlist_db.set_config("openlist", "engines_initialized", "true")
-        
-        # 刷新配置
-        watchlist_db.set_config("openlist", "refresh_enabled",
-                                str(config.refresh.enabled).lower())
-        watchlist_db.set_config("openlist", "refresh_interval_minutes",
-                                str(config.refresh.interval_seconds // 60))
-        watchlist_db.set_config("openlist", "refresh_depth",
-                                str(config.refresh.depth))
-        watchlist_db.set_config("openlist", "refresh_log_level",
-                                config.refresh.log_level)
-        
-        # 行为配置
-        watchlist_db.set_config("openlist", "behavior_action", config.behavior.action)
-        watchlist_db.set_config("openlist", "behavior_trash_dir_name", config.behavior.trash_dir_name)
-        watchlist_db.set_config("openlist", "behavior_ghost_protect_seconds",
-                                str(config.behavior.ghost_protect_seconds))
-        watchlist_db.set_config("openlist", "behavior_a_to_b_restore_delay_seconds",
-                                str(config.behavior.a_to_b_restore_delay_seconds))
-        watchlist_db.set_config("openlist", "behavior_sync_on_startup",
-                                str(config.behavior.sync_on_startup).lower())
-        watchlist_db.set_config("openlist", "behavior_sync_on_startup_wait",
-                                str(config.behavior.sync_on_startup_wait))
-        
-        # 日志配置
-        watchlist_db.set_config("openlist", "log_level", config.log.level)
-        watchlist_db.set_config("openlist", "log_max_size_mb", str(config.log.max_size_mb))
-        watchlist_db.set_config("openlist", "log_backup_count", str(config.log.backup_count))
-        # 日志保存路径：迁移写入 DB，保证后续 update_from_db 能读回（勿删此键）
-        watchlist_db.set_config("openlist", "log_file", config.log.file)
-        
-        # 标记已迁移
-        watchlist_db.set_config("migration", "config_toml_migrated", "true")
-        
-        logging.info("[Migration] OpenList 配置已迁移到 DB (20 个键 + 1 个迁移标记)")
+
+        items = [
+            ("openlist", "webdav_host", config.webdav.host),
+            ("openlist", "webdav_user", config.webdav.user),
+            ("openlist", "webdav_password", config.webdav.password),
+            ("openlist", "webdav_totp_secret", config.webdav.totp_secret),
+            ("openlist", "c_root", config.paths.c_root),
+            ("openlist", "refresh_paths", json.dumps(legacy_refresh_paths, ensure_ascii=False)),
+            ("openlist", "strm_engines", json.dumps([], ensure_ascii=False)),
+            ("openlist", "engines_initialized", "true"),
+            ("openlist", "refresh_enabled", str(config.refresh.enabled).lower()),
+            ("openlist", "refresh_interval_minutes", str(config.refresh.interval_seconds // 60)),
+            ("openlist", "refresh_depth", str(config.refresh.depth)),
+            ("openlist", "refresh_full_audit_interval_days", str(config.refresh.full_audit_interval_days)),
+            ("openlist", "behavior_action", config.behavior.action),
+            ("openlist", "behavior_trash_dir_name", config.behavior.trash_dir_name),
+            ("openlist", "behavior_ghost_protect_seconds", str(config.behavior.ghost_protect_seconds)),
+            ("openlist", "behavior_a_to_b_restore_delay_seconds", str(config.behavior.a_to_b_restore_delay_seconds)),
+            ("openlist", "behavior_sync_on_startup", str(config.behavior.sync_on_startup).lower()),
+            ("openlist", "behavior_sync_on_startup_wait", str(config.behavior.sync_on_startup_wait)),
+            ("openlist", "log_level", config.log.level),
+            ("openlist", "log_max_size_mb", str(config.log.max_size_mb)),
+            ("openlist", "log_backup_count", str(config.log.backup_count)),
+            ("openlist", "log_file", config.log.file),
+            ("migration", "config_toml_migrated", "true"),
+        ]
+        if hasattr(watchlist_db, "set_config_batch"):
+            watchlist_db.set_config_batch(items)
+        else:
+            for scope, key, val in items:
+                watchlist_db.set_config(scope, key, val)
+        logging.info("[Migration] OpenList 配置已迁移到 DB (%d 个键)", len(items))
         return True
     except Exception as e:
         logging.error("[Migration] 配置迁移失败: %s", e, exc_info=True)

@@ -6,11 +6,12 @@ TMDB 待看列表收录状态匹配逻辑（共享模块）。
   - 将 TMDB 待看条目与 B 区候选进行匹配评分
   - 执行收录状态刷新并回写 tmdb_watchlist.db
 
-被 webui.py 和 standalone_webui.py 共同引用，避免循环依赖。  
+被 webui.py 和 standalone_webui.py 共同引用，避免循环依赖。
 """
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from difflib import SequenceMatcher
@@ -33,29 +34,8 @@ class _MatchHost(Protocol):
     _db: Database
 
 
-# ============================================================
-# 中文数字
-# ============================================================
-
-_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
-           "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15}
-
-
-def _cn_to_int(s: str) -> int | None:
-    s = s.strip()
-    if s.isdigit():
-        return int(s)
-    if s.startswith("十"):
-        if len(s) == 1:
-            return 10
-        return 10 + (_cn_to_int(s[1:]) or 0)
-    if "十" in s:
-        parts = s.split("十")
-        if len(parts) == 2:
-            return (_cn_to_int(parts[0]) or 0) * \
-                10 + (_cn_to_int(parts[1]) or 0)
-    return _CN_NUM.get(s)
+# 移至 utils.file_utils 共享模块
+from utils.file_utils import cn_to_int as _cn_to_int
 
 
 def _extract_season_int(part: str) -> int | None:
@@ -158,24 +138,38 @@ def _media_info(record: dict) -> tuple[str, str]:
     return kind, media_name or (Path(parts[-1]).stem if parts else "未分类")
 
 
-def _extract_season_from_local_path(local_path: str) -> str:
-    """从本地路径中提取季信息，返回如 'S01' 或 '第一季' 的字符串"""
+def _extract_season_from_local_path(local_path: str, allow_filename_fallback: bool = True,
+                                    is_anime: bool = True) -> str:
+    """从本地路径中提取季信息，返回如 'S01' 或 '第一季' 的字符串
+
+    Args:
+        local_path: 本地文件路径
+        allow_filename_fallback: 是否允许从文件名提取季信息（SxxExx 格式）。
+            - True (默认): 保持原有行为，允许从文件名提取
+            - False: 仅从目录名提取，不从文件名提取（用于 movie/other/all kind）
+        is_anime: 是否为番剧类型。
+            - True (默认): 允许从目录名提取季节（S01/Season 1 等）
+            - False: 跳过目录级季节提取（电影路径中的 S01 目录不应产生分组）
+    """
     parts = _path_parts(local_path)
-    for part in reversed(parts[:-1]):  # 不看文件名本身
-        sn = _extract_season_int(part)
-        if sn is not None:
-            return f"S{sn:02d}"
-        # 也检查中文季名
-        m = re.match(r"^第([一二三四五六七八九十\d]+)季$", part.strip())
+    # 目录级季节提取：仅番剧（is_anime=True）时执行
+    if is_anime:
+        for part in reversed(parts[:-1]):  # 不看文件名本身
+            sn = _extract_season_int(part)
+            if sn is not None:
+                return f"S{sn:02d}"
+            # 也检查中文季名
+            m = re.match(r"^第([一二三四五六七八九十\d]+)季$", part.strip())
+            if m:
+                num = _cn_to_int(m.group(1))
+                if num:
+                    return f"S{num:02d}"
+    # 从文件名提取（仅当 allow_filename_fallback=True 时）
+    if allow_filename_fallback:
+        stem = Path(parts[-1]).stem if parts else ""
+        m = re.search(r"S(\d{1,2})E", stem, re.I)
         if m:
-            num = _cn_to_int(m.group(1))
-            if num:
-                return f"S{num:02d}"
-    # 从文件名提取
-    stem = Path(parts[-1]).stem if parts else ""
-    m = re.search(r"S(\d{1,2})E", stem, re.I)
-    if m:
-        return f"S{int(m.group(1)):02d}"
+            return f"S{int(m.group(1)):02d}"
     return ""
 
 
@@ -272,14 +266,17 @@ def _split_aliases(*values: object) -> list[str]:
 def collect_b_media_snapshot(db: Database) -> dict[str, list[dict]]:
     """收集 B 区媒体快照，按 movie / tv 分组，同一媒体名聚合为一条候选。
 
-    聚合规则：同 (kind, name) 的多条记录合并为一条候选，
+    聚合规则：同 (mapping_id, kind, name) 的多条记录合并为一条候选，
     season_num 取最大值，episode_hint 取 OR。
+
+    聚合键加入 mapping_id，避免不同映射根下同名媒体被跨根合并，
+    从而误判"已收录"状态与季数统计。
     """
-    # 聚合字典: (kind, name) -> aggregated item
-    agg: dict[tuple[str, str], dict] = {}
+    # 聚合字典: (mapping_id, kind, name) -> aggregated item
+    agg: dict[tuple[str, str, str], dict] = {}
     with db.read_connection() as conn:
         rows = conn.execute(
-            "SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at FROM b_strm_files"
+            "SELECT local_path, webdav_path, parent_webdav_path, source_a_path, fingerprint, status, updated_at, mapping_id FROM b_strm_files"
         ).fetchall()
     for row in rows:
         record = {
@@ -291,6 +288,7 @@ def collect_b_media_snapshot(db: Database) -> dict[str, list[dict]]:
             "status": row[5],
             "updated_at": row[6],
         }
+        mapping_id = row[7] or ""
         kind, name = _media_info(record)
         if not _is_top_level_category(kind):
             continue
@@ -316,7 +314,7 @@ def collect_b_media_snapshot(db: Database) -> dict[str, list[dict]]:
                 r"\b(?:s\d{1,2}e\d{1,3}|ep\d{1,3}|e\d{1,3}|第\d+集|第\d+话)\b", joined):
             episode_hint = True
 
-        key = (kind, name)
+        key = (mapping_id, kind, name)
         if key not in agg:
             agg[key] = {
                 "kind": kind,
@@ -508,34 +506,86 @@ def refresh_watchlist_match_state(
     fuzzy_threshold: float = 0.60,
     min_ep_ratio: float = 0.3,
 ) -> dict[str, int]:
-    """刷新 TMDB 待看列表的 B 区收录状态，回写到 tmdb_watchlist.db。"""
+    """刷新 TMDB 待看列表的 B 区收录状态，回写到 tmdb_watchlist.db。
+
+    统计返回 {matched, fuzzy, unmatched, uncomputed, skipped_manual, total}。
+    四个状态桶按写回完成后的数据库最终状态统计，
+    且 matched+fuzzy+unmatched+uncomputed == total。
+    skipped_manual 是附加计数，不参与四桶求和。
+    """
     if not webui._watchlist_db or not webui._db:
-        return {"matched": 0, "fuzzy": 0, "unmatched": 0, "total": 0}
+        return {"matched": 0, "fuzzy": 0, "unmatched": 0,
+                "uncomputed": 0, "skipped_manual": 0, "total": 0}
     all_items = webui._watchlist_db.get_all()
+    if not all_items:
+        return {"matched": 0, "fuzzy": 0, "unmatched": 0,
+                "uncomputed": 0, "skipped_manual": 0, "total": 0}
     snapshot = collect_b_media_snapshot(webui._db)
     now = time.time()
-    counts: dict[str, int] = {
-        "matched": 0,
-        "fuzzy": 0,
-        "unmatched": 0,
-        "total": len(all_items)}
     movie_states: list[tuple] = []
     tv_states: list[tuple] = []
+    movie_ids: list[int] = []
+    tv_ids: list[int] = []
     for item in all_items:
         media_type = item.get("_media_type") or "movie"
         candidates = snapshot.get(media_type, [])
         status, reason = score_watchlist_item(
             item, candidates, media_type, fuzzy_threshold, min_ep_ratio)
-        counts[status] += 1
         item_id = int(item.get("id") or 0)
         if not item_id:
+            # 无效 ID 计入 uncomputed，保持四桶之和 == total
             continue
         if media_type == "movie":
             movie_states.append((item_id, status, reason, now, 0.0, ""))
+            movie_ids.append(item_id)
         else:
             tv_states.append((item_id, status, reason, now, 0.0, ""))
+            tv_ids.append(item_id)
+    # 写回到数据库（replace_match_state 保留人工覆盖行）
     if movie_states:
         webui._watchlist_db.replace_match_state("movie", movie_states)
     if tv_states:
         webui._watchlist_db.replace_match_state("tv", tv_states)
+
+    # ---- 写回完成后，按 DB 最终状态统计四桶 ----
+    all_ids = movie_ids + tv_ids
+    counts: dict[str, int] = {
+        "matched": 0, "fuzzy": 0, "unmatched": 0,
+        "uncomputed": 0, "skipped_manual": 0,
+        "total": len(all_items),
+    }
+    _VALID_BUCKETS = {"matched", "fuzzy", "unmatched", "uncomputed"}
+    if all_ids:
+        # 分 media_type 批量读取最终状态
+        movie_final: dict[int, dict] = {}
+        tv_final: dict[int, dict] = {}
+        if movie_ids:
+            movie_final = webui._watchlist_db.get_match_states("movie", movie_ids)
+        if tv_ids:
+            tv_final = webui._watchlist_db.get_match_states("tv", tv_ids)
+
+        for item in all_items:
+            media_type = item.get("_media_type") or "movie"
+            item_id = int(item.get("id") or 0)
+            if not item_id:
+                # 无效 ID 归入 uncomputed，保持四桶之和 == total
+                counts["uncomputed"] += 1
+                continue
+            final = (movie_final if media_type == "movie" else tv_final).get(item_id)
+            if final is None:
+                # 缺失 ID 归入 uncomputed
+                counts["uncomputed"] += 1
+                continue
+            ms = final.get("match_status", "uncomputed")
+            moa = final.get("manual_override_at", 0) or 0
+            # 人工覆盖行计入 skipped_manual
+            if moa > 0:
+                counts["skipped_manual"] += 1
+            # 按最终 match_status 归入对应桶（显式白名单，防止 total/skipped_manual 被污染）
+            if ms in _VALID_BUCKETS:
+                counts[ms] += 1
+            else:
+                # 未知/非法状态统一按 uncomputed 计数
+                logging.warning("[TMDB] 未知 match_status: %s (id=%d), 按 uncomputed 计", ms, item_id)
+                counts["uncomputed"] += 1
     return counts

@@ -4,7 +4,7 @@ TMDB 待看列表独立 SQLite 数据库模块。
 职责：
   - 管理 tmdb_watchlist.db 的建表、CRUD、全量同步
   - 不持有持久连接（每次操作新建 sqlite3.connect，WAL 模式）
-- 不依赖 webui.py / standalone_webui.py 内部状态    
+- 不依赖 webui.py / standalone_webui.py 内部状态
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
 import secret_manager
+from utils.file_utils import chunk_list
 
 if TYPE_CHECKING:
     from tmdb_client import TmdbClient
@@ -31,7 +32,8 @@ if TYPE_CHECKING:
 # 加载失败时各调用点会软降级到 SQLite 默认的 unicode61 分词器。
 _SIMPLE_DLL_PATH = Path(__file__).parent / "tokenizers" / "simple" / "simple.dll"
 _SIMPLE_VERSION_PATH = Path(__file__).parent / "tokenizers" / "simple" / "VERSION"
-
+# simple 分词器加载日志去重：每连接需调用 load_extension，但仅首次记录日志
+_simple_loaded_logged = False
 
 def _load_simple_into(conn: sqlite3.Connection) -> str | None:
     """向连接加载 simple 分词器扩展。成功返回已加载的 simple 版本号字符串，失败返回 None。
@@ -55,7 +57,10 @@ def _load_simple_into(conn: sqlite3.Connection) -> str | None:
         except Exception:
             pass
         if version:
-            logging.debug("[TMDB-DB] Simple tokenizer loaded, version=%s", version)
+            global _simple_loaded_logged
+            if not _simple_loaded_logged:
+                _simple_loaded_logged = True
+                logging.debug("[TMDB-DB] Simple tokenizer loaded, version=%s", version)
         return version
     except Exception:
         return None
@@ -69,8 +74,8 @@ _SENSITIVE_KEYS: frozenset[tuple[str, str]] = frozenset({
     ("openlist", "webdav_totp_secret"),
     ("tmdb", "access_token"),
     ("tmdb", "api_key"),
+    ("tmdb", "proxy_http"),
 })
-
 
 # ============================================================
 # Schema SQL
@@ -142,11 +147,10 @@ CREATE TABLE IF NOT EXISTS webui_config (
 );
 """
 
-
 class TmdbWatchlistDb:
     """TMDB 待看列表 SQLite 数据库管理器。"""
 
-    def __init__(self, db_path: str | Path, ttl: float = 604800, tmdb_log_max_rows: int = 1000) -> None:
+    def __init__(self, db_path: str | Path, ttl: float = 604800, tmdb_log_max_rows: int = 1000) -> None:  # 路径参数仅测试注入与内部隔离，生产固定项目根 tmdb_watchlist.db
         self._db_path = str(db_path)
         self._ttl = ttl
         self._tmdb_log_max_rows = tmdb_log_max_rows
@@ -161,7 +165,7 @@ class TmdbWatchlistDb:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
-        
+
         # 尝试加载 simple 分词器（与 database.py 保持一致）
         # 静默失败 → 后续 FTS5 建表统一降级到 unicode61
         self._simple_version = _load_simple_into(conn) or ""
@@ -228,7 +232,12 @@ class TmdbWatchlistDb:
                 "tv",
                 "_last_ep_episode",
                 "INTEGER DEFAULT 0")
-            # TMDB 操作日志表
+            # FTS 回填依赖列（旧 schema 可能缺失，迁移时补齐）
+            self._ensure_column(conn, "movies", "original_title", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "movies", "overview", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "tv", "original_name", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "tv", "overview", "TEXT DEFAULT ''")
+            # WebUI 操作日志表
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS tmdb_operation_log (
                     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -242,7 +251,7 @@ class TmdbWatchlistDb:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_tmdb_log_ts ON tmdb_operation_log(ts DESC)
             """)
-            
+
             # FTS5 全文搜索表（用于 TMDB 待看列表搜索）
             # 尝试使用 simple 分词器，失败则降级到 unicode61
             # _conn() 已尝试加载 simple；这里仅在尚未加载时再尝试一次（例如复用旧连接的情况）
@@ -252,16 +261,35 @@ class TmdbWatchlistDb:
                 if loaded:
                     tokenizer = 'simple'
                     self._simple_version = loaded
-            
-            conn.execute(f"""
-                CREATE VIRTUAL TABLE IF NOT EXISTS tmdb_watchlist_fts USING fts5(
-                    title,
-                    original_title,
-                    overview,
-                    tokenize='{tokenizer}'
-                )
-            """)
-            
+
+            # 拆分电影/剧集独立 FTS 表，修复 movies/tv 共用单表时的 rowid 冲突
+            # （movies/tv 均 id INTEGER PRIMARY KEY，rowid==id，同 id 会互相覆盖索引，
+            # 导致电影标题永远搜不到、同 id TV 写入抛 IntegrityError）。
+            # 先移除旧单表（仅首次迁移有效），再按类型幂等回填。
+            conn.execute("DROP TABLE IF EXISTS tmdb_watchlist_fts")
+            for table, fts, title_col, orig_col in (
+                ("movies", "movies_fts", "title", "original_title"),
+                ("tv", "tv_fts", "name", "original_name"),
+            ):
+                conn.execute(f"""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS {fts} USING fts5(
+                        title,
+                        original_title,
+                        overview,
+                        tokenize='{tokenizer}'
+                    )
+                """)
+                # 幂等回填：仅当目标 fts 为空且业务表非空时，一次性从业务表重建索引，
+                # 避免 TTL 未到时搜索出现空窗
+                fts_count = conn.execute(f"SELECT COUNT(*) FROM {fts}").fetchone()[0]
+                if fts_count == 0:
+                    table_count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    if table_count > 0:
+                        conn.execute(f"""
+                            INSERT INTO {fts}(rowid, title, original_title, overview)
+                            SELECT id, {title_col}, {orig_col}, overview FROM {table}
+                        """)
+
             conn.commit()
         logging.debug("[TMDB-DB] 数据库初始化完成: %s", self._db_path)
 
@@ -315,15 +343,17 @@ class TmdbWatchlistDb:
             logging.warning("[TMDB] 获取匹配统计失败: %s", e)
         return result
 
-
     def _get_meta(self, key: str, default: str = "") -> str:
+        # meta 回退 default 是有意设计（损坏不阻塞启动）
         try:
             with self._conn() as conn:
                 row = conn.execute(
                     "SELECT value FROM meta WHERE key=?", (key,)
                 ).fetchone()
                 return row[0] if row else default
-        except Exception:
+        except Exception as e:
+            # 下方已加 logging.debug。勿改为 re-raise。
+            logging.debug("[meta] 读取 %s 失败，回退默认: %s", key, e)
             return default
 
     def _set_meta(self, key: str, value: str) -> None:
@@ -346,7 +376,9 @@ class TmdbWatchlistDb:
         if column_name not in columns:
             conn.execute(
                 f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
-            conn.commit()
+            # 不在此处 commit：调用方应处于更大的事务块（如 _init_schema 的
+            # `with self._conn() as conn:`），退出时统一提交，避免中途提交
+            # 破坏调用方的事务边界。
 
     # ----------------------------------------------------------
     # 查询
@@ -469,6 +501,50 @@ class TmdbWatchlistDb:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_match_states(self, media_type: str, item_ids: Iterable[int]) -> dict[int, dict]:
+        """批量读取指定条目的 match_status / manual_override_at / manual_override_by。
+
+        返回 {item_id: {match_status, manual_override_at, manual_override_by}} 字典。
+        不存在的 ID 不包含在结果中，调用方需自行判断缺失 ID。
+        """
+        table = "movies" if media_type == "movie" else "tv"
+        ids_list = list(item_ids)
+        if not ids_list:
+            return {}
+        result: dict[int, dict] = {}
+        with self._conn() as conn:
+            # SQLite 参数上限约 999，分批处理
+            BATCH = 500
+            for i in range(0, len(ids_list), BATCH):
+                batch = ids_list[i:i + BATCH]
+                placeholders = ",".join("?" * len(batch))
+                rows = conn.execute(
+                    f"SELECT id, match_status, manual_override_at, manual_override_by FROM {table} WHERE id IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    result[row[0]] = {
+                        "match_status": row[1],
+                        "manual_override_at": row[2],
+                        "manual_override_by": row[3],
+                    }
+        return result
+
+    def clear_match_override(self, media_type: str, item_id: int) -> None:
+        """清除人工覆盖，恢复为 uncomputed 等待下次刷新重新计算。
+
+        复用 set_match_state 显式传 manual_override_at=0.0 / manual_override_by=''。
+        不在清除请求内同步调 TMDB 或扫 B 区。
+        """
+        self.set_match_state(
+            media_type,
+            item_id,
+            "uncomputed",
+            "",
+            manual_override_at=0.0,
+            manual_override_by="",
+        )
+
     def get_season_count(self, tmdb_id: int) -> int:
         """获取指定 TV 剧集的季数缓存。返回 int，0 表示未找到或无效。"""
         try:
@@ -511,7 +587,12 @@ class TmdbWatchlistDb:
 
         # ---- Movies ----
         movie_ids: set[int] = set()
+        movie_items: list[dict] = []
         movie_sync_ok = False
+        # "本段取回可信"标志——仅在收到合法响应（含合法空清单）后置 True；
+        # 格式异常/接口失败时保持 False，删除动作以该标志为前置，避免误清本地表
+        movie_retrieval_trusted = False
+        all_pages_ok = True
         try:
             page = 1
             while True:
@@ -519,6 +600,7 @@ class TmdbWatchlistDb:
                 if not result or not isinstance(
                         result, tuple) or len(result) != 2:
                     logging.warning("[TMDB] 电影 API 返回格式异常: %s", result)
+                    all_pages_ok = False
                     break
                 items, has_next = result
                 if not items:
@@ -527,14 +609,27 @@ class TmdbWatchlistDb:
                     if not isinstance(item, dict) or "id" not in item:
                         continue
                     movie_ids.add(item["id"])
-                    self._upsert_movie(item, now)
+                    movie_items.append(item)
                 if not has_next:
                     break
                 page += 1
                 time.sleep(0.3)
 
-            # 删除已移除的电影（使用临时表避免 SQLite 参数上限 P2-3）
-            if movie_ids:
+            movie_retrieval_trusted = all_pages_ok
+
+            # 批量 upsert —— 单连接 + 单事务 + FTS 同事务写入
+            if movie_items:
+                with self._conn() as conn:
+                    self._upsert_movies_batch(conn, movie_items, now)
+                    conn.commit()
+
+            if not movie_retrieval_trusted:
+                # 取回不可信（格式异常/接口失败），跳过删除并记 ERROR
+                logging.error("[TMDB] 电影 watchlist 取回不可信，跳过删除，保留本地数据")
+                self.log_tmdb_operation(
+                    "sync_movies_error", "error",
+                    "电影 watchlist 取回不可信，跳过删除，保留本地数据")
+            elif movie_ids:
                 with self._conn() as conn:
                     conn.execute("CREATE TEMP TABLE IF NOT EXISTS _keep_movie_ids (id INTEGER)")
                     conn.execute("DELETE FROM _keep_movie_ids")
@@ -544,27 +639,30 @@ class TmdbWatchlistDb:
                     )
                     conn.execute(
                         "DELETE FROM movies WHERE id NOT IN (SELECT id FROM _keep_movie_ids)")
-                    # 同步清理 FTS 表中的孤儿记录
-                    conn.execute(
-                        "DELETE FROM tmdb_watchlist_fts WHERE rowid NOT IN (SELECT rowid FROM movies)")
                     conn.commit()
             else:
+                # 取回可信且清单为空：允许清空
                 with self._conn() as conn:
                     conn.execute("DELETE FROM movies")
-                    # 同步清理 FTS 表
-                    conn.execute("DELETE FROM tmdb_watchlist_fts")
                     conn.commit()
 
             logging.info("[TMDB] 电影同步完成 (%d 项)", len(movie_ids))
             self.log_tmdb_operation("sync_movies_done", "info", f"电影同步完成 ({len(movie_ids)} 项)")
-            movie_sync_ok = True
+            # 仅当取回可信时才标记成功。不可信取回（API 返回畸形数据）
+            # 时跳过删除，但若仍置 movie_sync_ok=True，下方会更新 last_sync 时间戳，
+            # 导致 7 天内不重试。保持 False 以便下次同步重试。
+            if movie_retrieval_trusted:
+                movie_sync_ok = True
         except Exception as e:
             logging.warning("[TMDB] 电影同步失败: %s", e)
             self.log_tmdb_operation("sync_movies_error", "error", f"电影同步失败: {e}")
 
         # ---- TV ----
         tv_ids: set[int] = set()
+        tv_items: list[dict] = []
         tv_sync_ok = False
+        tv_retrieval_trusted = False
+        all_tv_pages_ok = True
         try:
             page = 1
             while True:
@@ -572,6 +670,7 @@ class TmdbWatchlistDb:
                 if not result or not isinstance(
                         result, tuple) or len(result) != 2:
                     logging.warning("[TMDB] 剧集 API 返回格式异常: %s", result)
+                    all_tv_pages_ok = False
                     break
                 items, has_next = result
                 if not items:
@@ -580,13 +679,27 @@ class TmdbWatchlistDb:
                     if not isinstance(item, dict) or "id" not in item:
                         continue
                     tv_ids.add(item["id"])
-                    self._upsert_tv(item, now)
+                    tv_items.append(item)
                 if not has_next:
                     break
                 page += 1
                 time.sleep(0.3)
 
-            if tv_ids:
+            tv_retrieval_trusted = all_tv_pages_ok
+
+            # 批量 upsert —— 单连接 + 单事务 + FTS 同事务写入
+            if tv_items:
+                with self._conn() as conn:
+                    self._upsert_tvs_batch(conn, tv_items, now)
+                    conn.commit()
+
+            if not tv_retrieval_trusted:
+                # 取回不可信，跳过删除
+                logging.error("[TMDB] 剧集 watchlist 取回不可信，跳过删除，保留本地数据")
+                self.log_tmdb_operation(
+                    "sync_tv_error", "error",
+                    "剧集 watchlist 取回不可信，跳过删除，保留本地数据")
+            elif tv_ids:
                 with self._conn() as conn:
                     conn.execute("CREATE TEMP TABLE IF NOT EXISTS _keep_tv_ids (id INTEGER)")
                     conn.execute("DELETE FROM _keep_tv_ids")
@@ -596,23 +709,30 @@ class TmdbWatchlistDb:
                     )
                     conn.execute(
                         "DELETE FROM tv WHERE id NOT IN (SELECT id FROM _keep_tv_ids)")
-                    # 同步清理 FTS 表中的孤儿记录
-                    conn.execute(
-                        "DELETE FROM tmdb_watchlist_fts WHERE rowid NOT IN (SELECT rowid FROM tv)")
                     conn.commit()
             else:
+                # 取回可信且为空：清空
                 with self._conn() as conn:
                     conn.execute("DELETE FROM tv")
-                    # 同步清理 FTS 表
-                    conn.execute("DELETE FROM tmdb_watchlist_fts")
                     conn.commit()
 
             logging.info("[TMDB] 剧集同步完成 (%d 项)", len(tv_ids))
             self.log_tmdb_operation("sync_tv_done", "info", f"剧集同步完成 ({len(tv_ids)} 项)")
-            tv_sync_ok = True
+            # 仅当取回可信时才标记成功，避免不可信取回仍推进 last_sync。
+            if tv_retrieval_trusted:
+                tv_sync_ok = True
         except Exception as e:
             logging.warning("[TMDB] 剧集同步失败: %s", e)
             self.log_tmdb_operation("sync_tv_error", "error", f"剧集同步失败: {e}")
+
+        # ---- 清理 FTS 孤儿记录（分表独立执行） ----
+        # 拆分后每张 FTS 表只关联对应的业务表，删除各自业务表中不存在的孤儿行
+        with self._conn() as conn:
+            for fts, table in (("movies_fts", "movies"), ("tv_fts", "tv")):
+                conn.execute(
+                    f"DELETE FROM {fts} "
+                    f"WHERE rowid NOT IN (SELECT rowid FROM {table})")
+            conn.commit()
 
         # ---- 批量补齐季数 ----
         if tv_sync_ok:
@@ -651,6 +771,7 @@ class TmdbWatchlistDb:
         v = d.get(key)
         return v if v is not None else default
 
+    # 有意保留: 单元测试 helper 方法
     def _upsert_movie(self, item: dict, synced_at: float) -> None:
         with self._conn() as conn:
             existing = conn.execute(
@@ -662,13 +783,13 @@ class TmdbWatchlistDb:
             match_updated_at = existing[2] if existing else 0.0
             manual_override_at = existing[3] if existing else 0.0
             manual_override_by = existing[4] if existing else ""
-            
+
             # 删除旧的 FTS 记录
             conn.execute(
-                "DELETE FROM tmdb_watchlist_fts WHERE rowid = (SELECT rowid FROM movies WHERE id=?)",
+                "DELETE FROM movies_fts WHERE rowid = (SELECT rowid FROM movies WHERE id=?)",
                 (item["id"],),
             )
-            
+
             conn.execute(
                 """INSERT OR REPLACE INTO movies
                 (id, title, original_title, overview, poster_path, backdrop_path,
@@ -705,10 +826,10 @@ class TmdbWatchlistDb:
                     manual_override_by,
                 ),
             )
-            
+
             # 插入新的 FTS 记录
             conn.execute(
-                """INSERT INTO tmdb_watchlist_fts(rowid, title, original_title, overview)
+                """INSERT INTO movies_fts(rowid, title, original_title, overview)
                 VALUES((SELECT rowid FROM movies WHERE id=?), ?, ?, ?)""",
                 (
                     item["id"],
@@ -717,25 +838,105 @@ class TmdbWatchlistDb:
                     self._val(item, "overview"),
                 ),
             )
-            
+
             conn.commit()
 
+    def _upsert_movies_batch(self, conn, items: list[dict], synced_at: float) -> None:
+        """批量 upsert 电影：单连接 + 单事务，FTS 同事务写入。
+
+        取代逐条 _upsert_movie（每条都开新连接 + commit），
+        批量版只开一次连接，一次 commit，显著降低同步开销。
+        外层按 900 条分批处理，确保预读 IN 条件与批量写入不触发 SQL 变量越界。
+        """
+        if not items:
+            return
+        for item_chunk in chunk_list(items, 900):
+            ids = [item["id"] for item in item_chunk]
+            placeholders = ",".join("?" * len(ids))
+            # 一次性预取已有匹配状态，避免逐条 SELECT
+            existing: dict[int, tuple] = {}
+            for row in conn.execute(
+                    f"SELECT id, match_status, match_reason, match_updated_at, "
+                    f"manual_override_at, manual_override_by FROM movies WHERE id IN ({placeholders})",
+                    ids):
+                existing[row[0]] = row
+            movie_rows = []
+            fts_rows = []
+            for item in item_chunk:
+                e = existing.get(item["id"])
+                match_status = e[1] if e else "uncomputed"
+                match_reason = e[2] if e else ""
+                match_updated_at = e[3] if e else 0.0
+                manual_override_at = e[4] if e else 0.0
+                manual_override_by = e[5] if e else ""
+                movie_rows.append((
+                    item["id"],
+                    self._val(item, "title"),
+                    self._val(item, "original_title"),
+                    self._val(item, "overview"),
+                    self._val(item, "poster_path"),
+                    self._val(item, "backdrop_path"),
+                    self._val(item, "release_date"),
+                    float(self._val(item, "vote_average", 0)),
+                    int(self._val(item, "vote_count", 0)),
+                    json.dumps(self._val(item, "genre_ids", []), ensure_ascii=False),
+                    float(self._val(item, "popularity", 0)),
+                    self._val(item, "original_language"),
+                    1 if item.get("video") else 0,
+                    1 if item.get("adult") else 0,
+                    "movie",
+                    synced_at,
+                    match_status,
+                    match_reason,
+                    match_updated_at,
+                    manual_override_at,
+                    manual_override_by,
+                ))
+                fts_rows.append((
+                    item["id"],
+                    self._val(item, "title"),
+                    self._val(item, "original_title"),
+                    self._val(item, "overview"),
+                ))
+            # 删除旧 FTS 记录
+            conn.executemany(
+                "DELETE FROM movies_fts WHERE rowid = (SELECT rowid FROM movies WHERE id=?)",
+                [(i,) for i in ids],
+            )
+            conn.executemany(
+                """INSERT OR REPLACE INTO movies
+                (id, title, original_title, overview, poster_path, backdrop_path,
+                 release_date, vote_average, vote_count, genre_ids, popularity,
+                 original_language, video, adult, _media_type, _synced_at,
+                 match_status, match_reason, match_updated_at, manual_override_at, manual_override_by)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                movie_rows,
+            )
+            conn.executemany(
+                """INSERT OR REPLACE INTO movies_fts(rowid, title, original_title, overview)
+                VALUES((SELECT rowid FROM movies WHERE id=?), ?, ?, ?)""",
+                fts_rows,
+            )
+
+    # 有意保留: 单元测试 helper 方法
     def _upsert_tv(self, item: dict, synced_at: float) -> None:
         with self._conn() as conn:
-            # 先查已有 _season_count, _episode_count 和匹配状态，保留旧值
+            # 先查已有 _season_count, _episode_count, _last_ep_* 和匹配状态，保留旧值
             existing = conn.execute(
-                "SELECT _season_count, _episode_count, match_status, match_reason, match_updated_at, manual_override_at, manual_override_by FROM tv WHERE id=?",
+                "SELECT _season_count, _episode_count, _last_ep_season, _last_ep_episode, match_status, match_reason, match_updated_at, manual_override_at, manual_override_by FROM tv WHERE id=?",
                 (item["id"],),
             ).fetchone()
             season_count = existing[0] if existing else 0
             episode_count = existing[1] if existing else 0
-            match_status = existing[2] if existing else "uncomputed"
-            match_reason = existing[3] if existing else ""
-            match_updated_at = existing[4] if existing else 0.0
-            manual_override_at = existing[5] if existing else 0.0
-            manual_override_by = existing[6] if existing else ""
+            last_ep_season = existing[2] if existing else 0
+            last_ep_episode = existing[3] if existing else 0
+            match_status = existing[4] if existing else "uncomputed"
+            match_reason = existing[5] if existing else ""
+            match_updated_at = existing[6] if existing else 0.0
+            manual_override_at = existing[7] if existing else 0.0
+            manual_override_by = existing[8] if existing else ""
 
-            # 如果 item 有 number_of_seasons/number_of_episodes（watchlist API），始终更新计数（P2-2）
+            # 如果 item 有 number_of_seasons/number_of_episodes（watchlist API），始终更新计数
             if item.get("number_of_seasons") is not None:
                 season_count = int(item["number_of_seasons"])
             if item.get("number_of_episodes") is not None:
@@ -743,7 +944,7 @@ class TmdbWatchlistDb:
 
             # 删除旧的 FTS 记录
             conn.execute(
-                "DELETE FROM tmdb_watchlist_fts WHERE rowid = (SELECT rowid FROM tv WHERE id=?)",
+                "DELETE FROM tv_fts WHERE rowid = (SELECT rowid FROM tv WHERE id=?)",
                 (item["id"],),
             )
 
@@ -781,8 +982,8 @@ class TmdbWatchlistDb:
                     self._val(item, "original_language"),
                     season_count,
                     episode_count,
-                    0,  # _last_ep_season — 由 _populate_tv_details 填充
-                    0,  # _last_ep_episode — 由 _populate_tv_details 填充
+                    last_ep_season,  # _last_ep_season — 保留已有值，避免覆盖 _populate_tv_details 结果
+                    last_ep_episode,  # _last_ep_episode — 同上
                     "tv",
                     synced_at,
                     match_status,
@@ -792,10 +993,10 @@ class TmdbWatchlistDb:
                     manual_override_by,
                 ),
             )
-            
+
             # 插入新的 FTS 记录（使用 name 作为 title）
             conn.execute(
-                """INSERT INTO tmdb_watchlist_fts(rowid, title, original_title, overview)
+                """INSERT INTO tv_fts(rowid, title, original_title, overview)
                 VALUES((SELECT rowid FROM tv WHERE id=?), ?, ?, ?)""",
                 (
                     item["id"],
@@ -804,8 +1005,99 @@ class TmdbWatchlistDb:
                     self._val(item, "overview"),
                 ),
             )
-            
+
             conn.commit()
+
+    def _upsert_tvs_batch(self, conn, items: list[dict], synced_at: float) -> None:
+        """批量 upsert 剧集：单连接 + 单事务，FTS 同事务写入。
+
+        取代逐条 _upsert_tv（每条都开新连接 + commit），
+        批量版只开一次连接，一次 commit，显著降低同步开销。
+        外层按 900 条分批处理，确保预读 IN 条件与批量写入不触发 SQL 变量越界。
+        """
+        if not items:
+            return
+        for item_chunk in chunk_list(items, 900):
+            ids = [item["id"] for item in item_chunk]
+            placeholders = ",".join("?" * len(ids))
+            # 一次性预取已有匹配状态及季数/集数计数
+            existing: dict[int, tuple] = {}
+            for row in conn.execute(
+                    f"SELECT id, _season_count, _episode_count, _last_ep_season, _last_ep_episode, "
+                    f"match_status, match_reason, match_updated_at, manual_override_at, manual_override_by "
+                    f"FROM tv WHERE id IN ({placeholders})",
+                    ids):
+                existing[row[0]] = row
+            tv_rows = []
+            fts_rows = []
+            for item in item_chunk:
+                e = existing.get(item["id"])
+                season_count = e[1] if e else 0
+                episode_count = e[2] if e else 0
+                last_ep_season = e[3] if e else 0
+                last_ep_episode = e[4] if e else 0
+                match_status = e[5] if e else "uncomputed"
+                match_reason = e[6] if e else ""
+                match_updated_at = e[7] if e else 0.0
+                manual_override_at = e[8] if e else 0.0
+                manual_override_by = e[9] if e else ""
+                # 如果 item 有 number_of_seasons/number_of_episodes，始终更新计数
+                if item.get("number_of_seasons") is not None:
+                    season_count = int(item["number_of_seasons"])
+                if item.get("number_of_episodes") is not None:
+                    episode_count = int(item["number_of_episodes"])
+                tv_rows.append((
+                    item["id"],
+                    self._val(item, "name"),
+                    self._val(item, "original_name"),
+                    self._val(item, "overview"),
+                    self._val(item, "poster_path"),
+                    self._val(item, "backdrop_path"),
+                    self._val(item, "first_air_date"),
+                    float(self._val(item, "vote_average", 0)),
+                    int(self._val(item, "vote_count", 0)),
+                    json.dumps(self._val(item, "genre_ids", []), ensure_ascii=False),
+                    float(self._val(item, "popularity", 0)),
+                    json.dumps(self._val(item, "origin_country", []), ensure_ascii=False),
+                    self._val(item, "original_language"),
+                    season_count,
+                    episode_count,
+                    last_ep_season,
+                    last_ep_episode,
+                    "tv",
+                    synced_at,
+                    match_status,
+                    match_reason,
+                    match_updated_at,
+                    manual_override_at,
+                    manual_override_by,
+                ))
+                fts_rows.append((
+                    item["id"],
+                    self._val(item, "name"),
+                    self._val(item, "original_name"),
+                    self._val(item, "overview"),
+                ))
+            # 删除旧 FTS 记录
+            conn.executemany(
+                "DELETE FROM tv_fts WHERE rowid = (SELECT rowid FROM tv WHERE id=?)",
+                [(i,) for i in ids],
+            )
+            conn.executemany(
+                """INSERT OR REPLACE INTO tv
+                (id, name, original_name, overview, poster_path, backdrop_path,
+                 first_air_date, vote_average, vote_count, genre_ids, popularity,
+                 origin_country, original_language, _season_count, _episode_count,
+                 _last_ep_season, _last_ep_episode, _media_type, _synced_at,
+                 match_status, match_reason, match_updated_at, manual_override_at, manual_override_by)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                tv_rows,
+            )
+            conn.executemany(
+                """INSERT OR REPLACE INTO tv_fts(rowid, title, original_title, overview)
+                VALUES((SELECT rowid FROM tv WHERE id=?), ?, ?, ?)""",
+                fts_rows,
+            )
 
     # ----------------------------------------------------------
     # 批量获取季数（并发 + 限速）
@@ -838,13 +1130,16 @@ class TmdbWatchlistDb:
                 if details and isinstance(details, dict):
                     return details
                 return None
-            except Exception:
+            except Exception as e:
+                # 详情写失败已记录日志
+                logging.warning("[TMDB-DB] 获取剧集详情失败 tv_id=%s: %s", tid, e)
                 return None
 
         fetched = 0
-        for start in range(0, len(ids_to_fetch), BATCH_SIZE):
-            batch = ids_to_fetch[start:start + BATCH_SIZE]
-            with ThreadPoolExecutor(max_workers=10) as pool:
+        # 线程池在批次循环外创建一次，跨批次复用，避免每批新建线程池的开销
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            for start in range(0, len(ids_to_fetch), BATCH_SIZE):
+                batch = ids_to_fetch[start:start + BATCH_SIZE]
                 futures = {pool.submit(_fetch, tid): tid for tid in batch}
                 for future in as_completed(futures):
                     details = future.result()
@@ -877,10 +1172,11 @@ class TmdbWatchlistDb:
                                      last_ep_season, last_ep_episode, tid))
                                 conn.commit()
                             fetched += 1
-                        except Exception:
-                            pass
-            if start + BATCH_SIZE < len(ids_to_fetch):
-                time.sleep(BATCH_SLEEP)
+                        except Exception as exc:
+                            # 记录 DB 写失败日志，便于诊断 SQLite 锁/磁盘满等问题
+                            logging.warning("[TMDB-DB] 详情更新失败 (tid=%d): %s", tid, exc)
+                if start + BATCH_SIZE < len(ids_to_fetch):
+                    time.sleep(BATCH_SLEEP)
 
         if fetched:
             logging.info(
@@ -889,37 +1185,55 @@ class TmdbWatchlistDb:
                 len(ids_to_fetch))
 
     # ----------------------------------------------------------
-    # TMDB 操作日志
+    # WebUI 操作日志
     # ----------------------------------------------------------
 
     def log_tmdb_operation(self, op: str, level: str,
                            msg: str, detail: str | None = None) -> None:
-        """写入一条 TMDB 操作日志"""
+        """写入一条 WebUI 操作日志"""
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO tmdb_operation_log (ts, op, level, msg, detail) VALUES (?, ?, ?, ?, ?)",
                 (time.time(), op, level, msg, detail),
             )
             conn.commit()
+        # 在写侧清理过期日志，避免读侧 DELETE 锁竞争
+        self._prune_tmdb_logs()
 
-    def get_tmdb_logs(self, limit: int = 100) -> list[dict]:
-        """获取最近的 TMDB 操作日志（按时间倒序），超过 7 天或超过行数限制的自动清理"""
+    def _prune_tmdb_logs(self) -> None:
+        """清理过期 WebUI 操作日志。
+        
+        写侧清理：在 log_tmdb_operation 写入新日志前清理，
+        避免 SELECT 侧（get_tmdb_logs）引入锁竞争。
+        （log_tmdb_operation 调用），读方法仅执行 SELECT。
+        """
         seven_days_ago = time.time() - 7 * 86400
         with self._conn() as conn:
             # 清理 7 天前的日志
             conn.execute(
                 "DELETE FROM tmdb_operation_log WHERE ts < ?", (seven_days_ago,))
-            
+
             # 清理超过行数限制的日志（保留最新的 N 条）
+            # 注意：LIMIT 0 会导致 NOT IN (empty) 为 vacuously true，清空全表。
+            # 使用 max(1, rows) 确保至少保留 1 行，防止误清空。
+            rows = max(1, self._tmdb_log_max_rows)
             conn.execute("""
-                DELETE FROM tmdb_operation_log 
+                DELETE FROM tmdb_operation_log
                 WHERE id NOT IN (
-                    SELECT id FROM tmdb_operation_log 
-                    ORDER BY ts DESC 
+                    SELECT id FROM tmdb_operation_log
+                    ORDER BY ts DESC
                     LIMIT ?
                 )
-            """, (self._tmdb_log_max_rows,))
-            
+            """, (rows,))
+            conn.commit()
+
+    def get_tmdb_logs(self, limit: int = 100) -> list[dict]:
+        """获取最近的 WebUI 操作日志（按时间倒序）。
+
+        仅执行 SELECT，不再在读方法内执行 DELETE。
+        过期日志清理由 _prune_tmdb_logs() 在写侧完成。
+        """
+        with self._conn() as conn:
             cur = conn.execute(
                 "SELECT id, ts, op, level, msg, detail FROM tmdb_operation_log ORDER BY ts DESC LIMIT ?",
                 (limit,),
@@ -963,6 +1277,23 @@ class TmdbWatchlistDb:
                    ON CONFLICT(scope, key) DO UPDATE SET
                        value=excluded.value, updated_at=excluded.updated_at""",
                 (scope, key, value, time.time()),
+            )
+            conn.commit()
+
+    def set_config_batch(self, items: list[tuple[str, str, str]]) -> None:
+        """在单个事务中批量写入配置，任一失败整体回滚。"""
+        encrypted_items = []
+        for scope, key, value in items:
+            if (scope, key) in _SENSITIVE_KEYS and value:
+                value = secret_manager.encrypt(value)
+            encrypted_items.append((scope, key, value, time.time()))
+        with self._conn() as conn:
+            conn.executemany(
+                """INSERT INTO webui_config (scope, key, value, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(scope, key) DO UPDATE SET
+                       value=excluded.value, updated_at=excluded.updated_at""",
+                encrypted_items,
             )
             conn.commit()
 

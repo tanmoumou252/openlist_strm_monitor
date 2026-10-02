@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -21,7 +23,7 @@ import pytest
 # 确保 src/ 在 sys.path 中（conftest.py 也会处理，此处冗余保护）
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from refresh_service import RefreshService
+from refresh_service import RefreshService, PartialRefreshError
 from _test_helpers import build_mock_app
 
 
@@ -36,6 +38,7 @@ def _make_app(
     refresh_paths: list[str] | None = None,
     interval_seconds: int = 300,
     strm_engine_paths: list[str] | None = None,
+    full_audit_interval_days: int = 0,
 ) -> MagicMock:
     """构建最小化 mock AppService，供 RefreshService 使用。
 
@@ -47,6 +50,7 @@ def _make_app(
         refresh_paths=refresh_paths,
         interval_seconds=interval_seconds,
         strm_engine_paths=strm_engine_paths,
+        full_audit_interval_days=full_audit_interval_days,
     )
 
 
@@ -97,7 +101,7 @@ class TestRefreshServiceStartStop:
 
         svc.stop()
         assert svc._running is False
-        mock_thread.join.assert_called_once_with(timeout=2)
+        mock_thread.join.assert_called_once_with(timeout=5)
 
     def test_stop_no_thread_is_safe(self):
         """stop 在没有线程时不抛异常"""
@@ -301,8 +305,48 @@ class TestCalculateSafeRefreshPaths:
 class TestExecuteRefreshCycle:
     """测试 execute_refresh_cycle 的编排逻辑（验证方法调用序列）"""
 
-    def test_calls_all_orchestration_steps(self):
-        """execute_refresh_cycle 应该按序调用所有步骤"""
+    def test_scan_and_sync_passes_explicit_root_filter(self):
+        app = _make_app(refresh_paths=["/strm"], strm_engine_paths=["/strm"])
+        app.get_a_roots_for_refresh_paths.return_value = [Path("C:/a1")]
+        svc = RefreshService(app)
+        with patch.object(svc, "_wait_for_sync"), patch.object(svc, "_scan_and_sync") as scan:
+            svc.execute_refresh_cycle()
+        scan.assert_called_once()
+        assert scan.call_args.kwargs["a_roots"] == [Path("C:/a1")]
+
+    def test_empty_refresh_paths_does_not_scan_a_roots(self):
+        app = _make_app(refresh_paths=[], strm_engine_paths=["/strm"])
+        app.get_a_roots_for_refresh_paths.return_value = []
+        svc = RefreshService(app)
+        with patch.object(svc, "_sync_and_scan_protected_roots") as sync_roots, \
+             patch.object(svc, "_scan_and_sync") as scan:
+            svc.execute_refresh_cycle()
+        sync_roots.assert_not_called()
+        scan.assert_not_called()
+
+    def test_full_audit_runs_after_interval(self):
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        svc = RefreshService(app)
+        with patch("refresh_service.time.time", return_value=8 * 86400), \
+             patch.object(app, "initial_scan_a") as scan_a, \
+             patch.object(app, "scan_a_to_b_full_sync") as sync:
+            svc._maybe_run_full_audit()
+        scan_a.assert_called_once_with(use_bulk=False, a_roots=None)
+        sync.assert_called_once_with(valid_engine_paths=None, use_bulk=False)
+        app.db.set_control.assert_called_once()
+
+    def test_full_audit_zero_disables_scan(self):
+        app = _make_app(refresh_paths=[], full_audit_interval_days=0)
+        svc = RefreshService(app)
+        with patch.object(app, "initial_scan_a") as scan_a, \
+             patch.object(app, "scan_a_to_b_full_sync") as sync:
+            svc._maybe_run_full_audit()
+        scan_a.assert_not_called()
+        sync.assert_not_called()
+
+    def test_execute_refresh_cycle_calls_all_steps(self):
+        """execute_refresh_cycle 应该按序调用所有步骤（不再调用 _cleanup_a_for_update_mode）"""
         app = _make_app(refresh_paths=["/strm"], strm_engine_paths=["/strm"])
         svc = RefreshService(app)
 
@@ -311,7 +355,7 @@ class TestExecuteRefreshCycle:
              patch.object(svc, "_check_engine_accessibility", return_value={"/strm"}) as m_check, \
              patch.object(svc, "_cleanup_a_for_update_mode") as m_cleanup, \
              patch.object(svc, "_calculate_safe_refresh_paths", return_value=["/strm"]) as m_calc, \
-             patch.object(svc, "_execute_webdav_refreshes") as m_exec, \
+             patch.object(svc, "_execute_webdav_refreshes", return_value=[]) as m_exec, \
              patch.object(svc, "_wait_for_sync") as m_wait, \
              patch.object(svc, "_scan_and_sync") as m_scan, \
              patch.object(svc, "_persist_snapshot") as m_persist:
@@ -321,29 +365,13 @@ class TestExecuteRefreshCycle:
             # 验证所有步骤都被调用
             m_sync.assert_called_once()
             m_check.assert_called_once()
-            m_cleanup.assert_called_once()
+            # 冗余清理已改为局部触发，不再在定期刷新时调用
+            m_cleanup.assert_not_called()
             m_calc.assert_called_once()
             m_exec.assert_called_once()
             m_wait.assert_called_once()
             m_scan.assert_called_once()
             m_persist.assert_called_once()
-
-    def test_cleanup_receives_accessible_engines(self):
-        """_cleanup_a_for_update_mode 接收可访问的引擎路径"""
-        app = _make_app(refresh_paths=["/strm"], strm_engine_paths=["/strm"])
-        svc = RefreshService(app)
-
-        with patch.object(svc, "_sync_and_scan_protected_roots"), \
-             patch.object(svc, "_check_engine_accessibility", return_value={"/strm", "/data"}), \
-             patch.object(svc, "_cleanup_a_for_update_mode") as m_cleanup, \
-             patch.object(svc, "_calculate_safe_refresh_paths", return_value=[]), \
-             patch.object(svc, "_execute_webdav_refreshes"), \
-             patch.object(svc, "_wait_for_sync"), \
-             patch.object(svc, "_scan_and_sync"), \
-             patch.object(svc, "_persist_snapshot"):
-
-            svc.execute_refresh_cycle()
-            m_cleanup.assert_called_once_with({"/strm", "/data"})
 
     def test_empty_engine_set_completes_without_error(self):
         """可访问引擎为空集合时，完整编排流程仍正常完成不抛异常"""
@@ -352,14 +380,16 @@ class TestExecuteRefreshCycle:
 
         with patch.object(svc, "_sync_and_scan_protected_roots"), \
              patch.object(svc, "_check_engine_accessibility", return_value=set()), \
-             patch.object(svc, "_cleanup_a_for_update_mode"), \
+             patch.object(svc, "_cleanup_a_for_update_mode") as m_cleanup, \
              patch.object(svc, "_calculate_safe_refresh_paths", return_value=[]), \
-             patch.object(svc, "_execute_webdav_refreshes"), \
+             patch.object(svc, "_execute_webdav_refreshes", return_value=[]), \
              patch.object(svc, "_wait_for_sync"), \
              patch.object(svc, "_scan_and_sync"), \
              patch.object(svc, "_persist_snapshot"):
             # 空引擎路径应该正常完成
             svc.execute_refresh_cycle()
+            # 冗余清理已改为局部触发，不再在定期刷新时调用
+            m_cleanup.assert_not_called()
 
 
 # ============================================================
@@ -396,8 +426,249 @@ class TestCheckEngineAccessibility:
             assert result == set()
 
 
+class TestRefreshServiceHotReloadContract:
+    def test_interval_change_wakes_waiting_worker(self):
+        app = _make_app(refresh_paths=["/strm"], interval_seconds=3600)
+        svc = RefreshService(app)
+        svc._run_cycle_with_breaker = MagicMock()
+        svc._running = True
+        worker = threading.Thread(target=svc._worker, daemon=True)
+        svc._thread = worker
+        worker.start()
+        time.sleep(0.05)
+        app.config.refresh.interval_seconds = 1
+        svc.notify_config_changed()
+        time.sleep(0.05)
+        svc.stop()
+        assert svc._run_cycle_with_breaker.call_count >= 2
+
+    def test_disabled_worker_returns_without_running_cycles(self):
+        app = _make_app(refresh_paths=["/strm"], refresh_enabled=False)
+        svc = RefreshService(app)
+        svc._run_cycle_with_breaker = MagicMock()
+        svc._running = True
+        worker = threading.Thread(target=svc._worker, daemon=True)
+        svc._thread = worker
+        worker.start()
+        time.sleep(0.05)
+        # 首轮 enabled 检查使禁用状态下 worker 直接返回，不执行任何周期。
+        # 见 refresh_service.py._worker 头部注释。
+        assert svc._run_cycle_with_breaker.call_count == 0
+        assert not worker.is_alive()
+
+    def test_reconfigure_does_not_create_duplicate_worker(self):
+        app = _make_app(refresh_paths=["/strm"])
+        svc = RefreshService(app)
+        with patch("refresh_service.threading.Thread") as thread_cls:
+            svc.start()
+            svc.reconfigure()
+        assert thread_cls.call_count == 1
+
+    def test_audit_completion_advances_generation(self):
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        app._current_mapping_ids.return_value = ["m1"]
+        with patch.object(app, "initial_scan_a"), patch.object(app, "scan_a_to_b_full_sync"):
+            svc = RefreshService(app)
+            with patch("refresh_service.time.time", return_value=8 * 86400):
+                svc._maybe_run_full_audit()
+        app.db.complete_index_generation.assert_called_once_with(["m1"])
+
+    def test_audit_with_empty_mappings_does_not_complete_generation(self):
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        app._current_mapping_ids.return_value = []
+        with patch.object(app, "initial_scan_a"), patch.object(app, "scan_a_to_b_full_sync"):
+            svc = RefreshService(app)
+            with patch("refresh_service.time.time", return_value=8 * 86400):
+                svc._maybe_run_full_audit()
+        app.db.complete_index_generation.assert_not_called()
+
+
+class TestWorkerDeferFirstCycle:
+    """R-新6（c.9.2 Task 11）：首轮刷新周期去「立即」特化。
+
+    start(defer_first_cycle=True) 首轮先等 interval（期间 notify_config_changed
+    仍立即唤醒）；defer=False 行为不变；stop→start 复用同一实例时 stop()
+    预置 set 的 _config_changed 必须 clear-before-wait，否则 defer 静默失效
+    （第 4 例竞态红测；WebUI 重启链路复用同一 RefreshService 实例）。
+    """
+
+    def _make_svc(self, interval_seconds=1):
+        app = _make_app(refresh_paths=["/strm"], interval_seconds=interval_seconds)
+        svc = RefreshService(app)
+        svc._run_cycle_with_breaker = MagicMock()
+        return svc, app
+
+    def test_defer_first_cycle_zero_calls_within_interval_and_notify_wakes(self):
+        svc, app = self._make_svc()
+        svc.start(defer_first_cycle=True)
+        assert svc._running is True
+        time.sleep(0.3)
+        assert svc._run_cycle_with_breaker.call_count == 0, \
+            "defer=True 首轮在 interval 内不得立即执行"
+        svc.notify_config_changed()
+        deadline = time.time() + 2.0
+        while svc._run_cycle_with_breaker.call_count == 0 and time.time() < deadline:
+            time.sleep(0.02)
+        assert svc._run_cycle_with_breaker.call_count >= 1, \
+            "notify_config_changed 应立即唤醒被 defer 的首轮"
+        svc.stop()
+
+    def test_no_defer_first_run_immediate(self):
+        """defer=False（默认）行为不变：首轮立即执行"""
+        svc, app = self._make_svc()
+        svc.start()
+        deadline = time.time() + 2.0
+        while svc._run_cycle_with_breaker.call_count == 0 and time.time() < deadline:
+            time.sleep(0.02)
+        assert svc._run_cycle_with_breaker.call_count >= 1, \
+            "defer=False 首轮应立即执行"
+        svc.stop()
+
+    def test_start_defer_thread_kwargs_passthrough(self):
+        """start(defer_first_cycle=True) 以 kwargs 形态传入 worker，daemon 形态保持"""
+        app = _make_app(refresh_paths=["/strm"])
+        svc = RefreshService(app)
+        with patch("refresh_service.threading.Thread") as thread_cls:
+            svc.start(defer_first_cycle=True)
+        assert thread_cls.call_args[1]["daemon"] is True
+        assert thread_cls.call_args[1]["kwargs"] == {"defer_first_cycle": True}
+
+    def test_restart_after_stop_still_defers(self):
+        """竞态复现红测：stop() 预置 set 事件 + start(defer=True) 复用同一
+        实例——不 clear 则 wait 立即返回、defer 静默失效（新实例红测测不出）"""
+        svc, app = self._make_svc()
+        svc.start()
+        deadline = time.time() + 2.0
+        while svc._run_cycle_with_breaker.call_count == 0 and time.time() < deadline:
+            time.sleep(0.02)
+        svc.stop()
+        svc._run_cycle_with_breaker.call_count = 0
+        svc.start(defer_first_cycle=True)
+        time.sleep(0.3)
+        assert svc._run_cycle_with_breaker.call_count == 0, \
+            "stop→start(defer=True) 后预置事件未 clear，defer 静默失效"
+        svc.notify_config_changed()
+        deadline = time.time() + 2.0
+        while svc._run_cycle_with_breaker.call_count == 0 and time.time() < deadline:
+            time.sleep(0.02)
+        assert svc._run_cycle_with_breaker.call_count >= 1
+        svc.stop()
+
+    def test_defer_disabled_wake_keeps_worker_alive(self):
+        """c.9.3 Task C（复查② R1 红测）：defer 等待期被禁用 → 唤醒后线程
+        必须存活（挂起主循环 disabled 分支等 notify）而非死亡——旧行为
+        return 会把既有微秒竞态窗放大为整个 interval 的「worker 永久静默」
+        （线程死亡而 _running 恒 True，reconfigure 仅 notify 无线程消费）"""
+        svc, app = self._make_svc()
+        svc.start(defer_first_cycle=True)
+        time.sleep(0.2)
+        app.config.refresh.enabled = False
+        svc.notify_config_changed()
+        time.sleep(0.3)
+        assert svc._thread is not None and svc._thread.is_alive(), \
+            "defer 窗口禁用唤醒后 worker 线程死亡（R1：_running 恒 True 的永久静默）"
+        assert svc._run_cycle_with_breaker.call_count == 0, \
+            "禁用态唤醒后不得执行周期"
+        # 重开 → notify → 从主循环 disabled 分支唤醒恢复
+        app.config.refresh.enabled = True
+        svc.notify_config_changed()
+        deadline = time.time() + 2.0
+        while svc._run_cycle_with_breaker.call_count == 0 and time.time() < deadline:
+            time.sleep(0.02)
+        assert svc._run_cycle_with_breaker.call_count >= 1, \
+            "enable 重开后 notify 应恢复周期执行"
+        svc.stop()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ============================================================
+# 缺口测试：7 天全量审计与 B 区删除独立性
+# ============================================================
+
+class TestFullAuditGap:
+    """补齐 7 天全量审计的缺口场景。"""
+
+    def test_full_audit_not_due_skips(self):
+        """未到期时不重复执行全量审计。"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        # 设置 last_full_audit_at 为 1 天前
+        app.db.get_control.return_value = str(int(time.time()) - 86400)
+        svc = RefreshService(app)
+
+        with patch.object(app, "initial_scan_a") as scan_a, \
+             patch.object(app, "scan_a_to_b_full_sync") as sync:
+            svc._maybe_run_full_audit()
+
+        scan_a.assert_not_called()
+        sync.assert_not_called()
+        app.db.set_control.assert_not_called()
+
+    def test_full_audit_persists_timestamp_after_run(self):
+        """全量审计执行后必须重新记录 last_full_audit_at。"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        svc = RefreshService(app)
+
+        with patch("refresh_service.time.time", return_value=8 * 86400), \
+             patch.object(app, "initial_scan_a") as scan_a, \
+             patch.object(app, "scan_a_to_b_full_sync") as sync:
+            svc._maybe_run_full_audit()
+
+        # 验证 set_control 被调用且值为当前时间
+        app.db.set_control.assert_called_once()
+        call_args = app.db.set_control.call_args
+        assert call_args[0][0] == "last_full_audit_at"
+        assert int(call_args[0][1]) == 8 * 86400
+
+
+class TestBDeleteIndependence:
+    """验证 B 区删除不受 refresh_paths 影响。
+
+    B 区删除由 BAreaEventHandler 处理，使用 BRecord.webdav_path 执行云端删除，
+    与 RefreshService 的 refresh_paths 配置完全解耦。
+    """
+
+    def test_refresh_cycle_with_empty_paths_does_not_call_b_delete(self):
+        """refresh_paths=[] 时，刷新周期不应调用任何 B 区删除相关方法。"""
+        app = _make_app(refresh_paths=[], strm_engine_paths=["/strm"])
+        svc = RefreshService(app)
+
+        with patch.object(svc, "_maybe_run_full_audit"), \
+             patch.object(svc, "_sync_and_scan_protected_roots") as m_sync, \
+             patch.object(svc, "_scan_and_sync") as m_scan, \
+             patch.object(app, "cleanup_b_redundant") as m_cleanup_b, \
+             patch.object(app, "cleanup_b_zombies_under_folder") as m_cleanup_zombies:
+            svc.execute_refresh_cycle()
+
+        # 刷新周期不应触发 B 区冗余清理（那是局部触发的）
+        m_cleanup_b.assert_not_called()
+        m_cleanup_zombies.assert_not_called()
+        # 但也不会阻止 watchdog 的 handle_b_deleted（那是异步事件驱动的）
+
+    def test_refresh_cycle_with_paths_does_not_call_b_delete(self):
+        """refresh_paths 非空时，刷新周期也不应调用 B 区删除相关方法。"""
+        app = _make_app(refresh_paths=["/strm"], strm_engine_paths=["/strm"])
+        svc = RefreshService(app)
+
+        with patch.object(svc, "_maybe_run_full_audit"), \
+             patch.object(svc, "_sync_and_scan_protected_roots"), \
+             patch.object(svc, "_check_engine_accessibility", return_value={"/strm"}), \
+             patch.object(svc, "_calculate_safe_refresh_paths", return_value=["/strm"]), \
+             patch.object(svc, "_execute_webdav_refreshes", return_value=[]), \
+             patch.object(svc, "_wait_for_sync"), \
+             patch.object(svc, "_scan_and_sync"), \
+             patch.object(svc, "_persist_snapshot"), \
+             patch.object(app, "cleanup_b_redundant") as m_cleanup_b, \
+             patch.object(app, "cleanup_b_zombies_under_folder") as m_cleanup_zombies:
+            svc.execute_refresh_cycle()
+
+        m_cleanup_b.assert_not_called()
+        m_cleanup_zombies.assert_not_called()
 
 
 # ============================================================
@@ -486,3 +757,348 @@ class TestCircuitBreaker:
     def test_threshold_is_three(self):
         """熔断阈值为 3。"""
         assert RefreshService._CIRCUIT_BREAKER_THRESHOLD == 3
+
+
+# ============================================================
+# Admin API 不可信时保护根快照
+# ============================================================
+
+
+class TestPersistSnapshotFailClosed:
+    """验证 _persist_snapshot 在 Admin API 不可用时不覆盖已有快照。"""
+
+    def test_empty_accessible_engines_preserves_snapshot(self):
+        """engine_set 非空但 accessible_engines 为空时，不调用 persist。"""
+        app = _make_app(refresh_paths=["/strm"])
+        svc = RefreshService(app)
+
+        svc._persist_snapshot(
+            accessible_engines=set(),
+            engine_set={"/strm_m1", "/strm_m2"},
+        )
+        # 不应调用 persist_current_roots_snapshot
+        app.persist_current_roots_snapshot.assert_not_called()
+
+    def test_empty_engine_set_clears_snapshot(self):
+        """engine_set 为空时，传递 None（清除快照）。"""
+        app = _make_app(refresh_paths=["/strm"])
+        svc = RefreshService(app)
+
+        svc._persist_snapshot(
+            accessible_engines=set(),
+            engine_set=set(),
+        )
+        app.persist_current_roots_snapshot.assert_called_once_with(
+            valid_engine_paths=None)
+
+    def test_accessible_engines_saves_snapshot(self):
+        """有可访问引擎时，正常保存快照。"""
+        app = _make_app(refresh_paths=["/strm"])
+        svc = RefreshService(app)
+
+        svc._persist_snapshot(
+            accessible_engines={"/strm_m1"},
+            engine_set={"/strm_m1", "/strm_m2"},
+        )
+        app.persist_current_roots_snapshot.assert_called_once_with(
+            valid_engine_paths=["/strm_m1"])
+
+
+class TestFullAuditTouchVerified:
+    """D'.1: 测试 _maybe_run_full_audit 成功后 touch_verified_by_mapping 被调用"""
+
+    def test_full_audit_calls_touch_verified_by_mapping(self):
+        """全量审计完成后，每个 mapping 应调用 touch_verified_by_mapping"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        app._current_mapping_ids.return_value = ["m1", "m2"]
+        # 提供 mock mapping 对象（需有 mapping_id 和 a_root 属性）
+        mock_m1 = MagicMock()
+        mock_m1.mapping_id = "m1"
+        mock_m1.a_root = "/a_root_m1"
+        mock_m2 = MagicMock()
+        mock_m2.mapping_id = "m2"
+        mock_m2.a_root = "/a_root_m2"
+        app.a_b_mappings = [mock_m1, mock_m2]
+        svc = RefreshService(app)
+
+        with patch("refresh_service.time.time", return_value=8 * 86400), \
+             patch.object(app, "initial_scan_a"), \
+             patch.object(app, "scan_a_to_b_full_sync"), \
+             patch.object(app.db, "touch_verified_by_mapping") as m_touch:
+            svc._maybe_run_full_audit()
+
+        # 应对每个 mapping 调用一次 touch_verified_by_mapping
+        assert m_touch.call_count == 2
+        calls = {c.args[0] for c in m_touch.call_args_list}
+        assert calls == {"m1", "m2"}
+
+    def test_full_audit_touch_uses_current_timestamp(self):
+        """touch_verified_by_mapping 应使用当前时间戳"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        app._current_mapping_ids.return_value = ["m1"]
+        mock_m1 = MagicMock()
+        mock_m1.mapping_id = "m1"
+        mock_m1.a_root = "/a_root_m1"
+        app.a_b_mappings = [mock_m1]
+        svc = RefreshService(app)
+
+        with patch("refresh_service.time.time", return_value=8 * 86400), \
+             patch.object(app, "initial_scan_a"), \
+             patch.object(app, "scan_a_to_b_full_sync"), \
+             patch.object(app.db, "touch_verified_by_mapping") as m_touch:
+            svc._maybe_run_full_audit()
+
+        call_args = m_touch.call_args
+        # 第三个参数应该是当前时间戳（8 * 86400）
+        assert call_args.args[2] == 8 * 86400
+
+
+class TestRunFullAuditNow:
+    """测试 RefreshService.run_full_audit_now() 薄封装"""
+
+    def test_run_full_audit_now_calls_correct_sequence(self):
+        """run_full_audit_now 应按序调用 initial_scan_a → scan_a_to_b_full_sync → complete_index_generation"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        app._current_mapping_ids.return_value = ["m1"]
+        app.db.get_index_metadata.return_value = {"index_generation": 2, "index_generation_at": 999.0}
+        svc = RefreshService(app)
+
+        with patch("refresh_service.time.time", return_value=8 * 86400), \
+             patch.object(app, "initial_scan_a") as m_scan, \
+             patch.object(app, "scan_a_to_b_full_sync") as m_sync:
+            result = svc.run_full_audit_now()
+
+        m_scan.assert_called_once_with(use_bulk=False, a_roots=None)
+        m_sync.assert_called_once_with(valid_engine_paths=None, use_bulk=False)
+        app.db.complete_index_generation.assert_called_once()
+        app.db.set_control.assert_called_once_with("last_full_audit_at", str(8 * 86400))
+        assert result["ok"] is True
+        assert result["status"] == "completed"
+        assert result["index_generation"] == 2
+
+    def test_run_full_audit_now_resets_last_full_audit_at(self):
+        """run_full_audit_now 必须重置 _last_full_audit_at 以对齐周期审计"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        app._current_mapping_ids.return_value = []
+        app.db.get_index_metadata.return_value = {}
+        svc = RefreshService(app)
+
+        assert svc._last_full_audit_at == 0.0
+
+        with patch("refresh_service.time.time", return_value=8 * 86400), \
+             patch.object(app, "initial_scan_a"), \
+             patch.object(app, "scan_a_to_b_full_sync"):
+            svc.run_full_audit_now()
+
+        assert svc._last_full_audit_at == 8 * 86400
+
+    def test_run_full_audit_now_returns_already_running_if_periodic_in_progress(self):
+        """如果周期审计正在进行，run_full_audit_now 应返回 already_running"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        svc = RefreshService(app)
+        svc._full_audit_in_progress = True  # 模拟周期审计正在进行
+
+        result = svc.run_full_audit_now()
+        assert result["status"] == "already_running"
+        assert result["ok"] is False
+
+    def test_periodic_skips_if_manual_in_progress(self):
+        """如果手动审计正在进行，_maybe_run_full_audit 应跳过（返回 False）"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        svc = RefreshService(app)
+        svc._full_audit_in_progress = True  # 模拟手动审计正在进行
+
+        with patch.object(app, "initial_scan_a") as m_scan:
+            result = svc._maybe_run_full_audit()
+
+        assert result is False
+        m_scan.assert_not_called()
+
+
+# ============================================================
+# P0 Step 4: _scan_and_sync 双变量拆分接线（mount 闸门 × 云前缀过滤）
+# ============================================================
+
+
+class TestScanAndSyncEngineFilterWiring:
+    """v6 P0 接线：mount 交集闸门与云资源前缀过滤变量严格分离。
+
+    红线：严禁把 helper 展开值直接喂进 mount∩mount 交集（全失配 → no-op）。
+    """
+
+    def test_positive_passes_cloud_prefixes_to_sync(self):
+        """闸门命中时，传给同步的是 get_engine_filter_paths 的云前缀而非挂载值。"""
+        app = _make_app(refresh_paths=["/strm"], strm_engine_paths=["/strm"])
+        app.get_engine_paths_for_a_roots.return_value = ["/strm"]
+        app.get_engine_filter_paths.return_value = ["/云盘X/番剧"]
+        svc = RefreshService(app)
+        root = Path("C:/a1")
+        with patch.object(app, "initial_scan_a") as m_scan_a, \
+             patch.object(app, "scan_a_to_b_full_sync") as m_sync, \
+             patch.object(app, "cleanup_local_empty_dirs"):
+            svc._scan_and_sync({"/strm"}, a_roots=[root])
+        m_scan_a.assert_called_once_with(use_bulk=False, a_roots=[root])
+        # 关键断言：同步收到的是 helper 的云前缀输出
+        assert m_sync.call_args.kwargs["valid_engine_paths"] == ["/云盘X/番剧"]
+        assert m_sync.call_args.kwargs["use_bulk"] is False
+        # helper 以 mount 交集作闸门入参
+        assert app.get_engine_filter_paths.call_args.kwargs["allowed_mounts"] == {"/strm"}
+
+    def test_root_mount_gate_comparable_with_helper_engine_set(self):
+        """F-A 接线钉：闸门侧根挂载 '/' 与 helper 引擎集合可比（不被交集吞掉）。"""
+        app = _make_app(refresh_paths=["/strm"], strm_engine_paths=["/"])
+        app.get_engine_paths_for_a_roots.return_value = ["/"]
+        app.get_engine_filter_paths.return_value = ["/云盘X/番剧"]
+        svc = RefreshService(app)
+        with patch.object(app, "initial_scan_a"), \
+             patch.object(app, "scan_a_to_b_full_sync") as m_sync, \
+             patch.object(app, "cleanup_local_empty_dirs"):
+            svc._scan_and_sync({"/"}, a_roots=[Path("C:/a1")])
+        # 根挂载 '/' 在 mount∩mount 中存活 → 同步执行且 helper 收到 {"/"}
+        m_sync.assert_called_once()
+        assert app.get_engine_filter_paths.call_args.kwargs["allowed_mounts"] == {"/"}
+
+    def test_empty_accessible_engines_skips_sync(self):
+        """accessible_engines 为空 → 跳过 A→B（现行告警保持），helper 不被调用。"""
+        app = _make_app(refresh_paths=["/strm"], strm_engine_paths=["/strm"])
+        app.get_engine_paths_for_a_roots.return_value = ["/strm"]
+        svc = RefreshService(app)
+        with patch.object(app, "initial_scan_a"), \
+             patch.object(app, "scan_a_to_b_full_sync") as m_sync, \
+             patch.object(app, "get_engine_filter_paths") as m_helper:
+            svc._scan_and_sync(set(), a_roots=[Path("C:/a1")])
+        m_sync.assert_not_called()
+        m_helper.assert_not_called()
+
+    def test_mount_intersection_empty_skips_sync(self):
+        """A 根映射的 mount 与可访问引擎交集为空 → 跳过，helper 不被调用。"""
+        app = _make_app(refresh_paths=["/strm"], strm_engine_paths=["/strm"])
+        app.get_engine_paths_for_a_roots.return_value = ["/other"]
+        svc = RefreshService(app)
+        with patch.object(app, "initial_scan_a"), \
+             patch.object(app, "scan_a_to_b_full_sync") as m_sync, \
+             patch.object(app, "get_engine_filter_paths") as m_helper:
+            svc._scan_and_sync({"/strm"}, a_roots=[Path("C:/a1")])
+        m_sync.assert_not_called()
+        m_helper.assert_not_called()
+
+    def test_no_roots_skips_before_any_engine_logic(self):
+        """无匹配 A 根 → 早退，initial_scan_a 与同步都不执行。"""
+        app = _make_app(refresh_paths=["/strm"], strm_engine_paths=["/strm"])
+        svc = RefreshService(app)
+        with patch.object(app, "initial_scan_a") as m_scan_a, \
+             patch.object(app, "scan_a_to_b_full_sync") as m_sync:
+            svc._scan_and_sync({"/strm"}, a_roots=[])
+        m_scan_a.assert_not_called()
+        m_sync.assert_not_called()
+
+
+# ============================================================
+# 缺陷 A：readonly per-root 隔离 + 聚合 raise（c7 §一，红测先行）
+# ============================================================
+
+class TestPartialRefreshIsolation:
+    """单 root 失败不中断整周期；聚合为 PartialRefreshError 在末尾抛出。
+
+    桩定前提（v7/v8-F1 防陷阱）：build_mock_app 默认 full_audit_interval_days=0
+    ——execute_refresh_cycle 开头的全量审计分支既不预增 _consecutive_failures，
+    也不因 full_audit_ran=True 跳过 _scan_and_sync。
+    """
+
+    def _make_svc(self, refresh_paths):
+        app = _make_app(refresh_paths=refresh_paths, strm_engine_paths=["/e"])
+        return app, RefreshService(app)
+
+    def test_second_root_readonly_still_refreshes_all_and_raises(self):
+        """3 root 第 2 个抛 readonly → 仍刷 3 root、三段均执行、末尾 raise"""
+        app, svc = self._make_svc(["/e/a", "/e/b", "/e/c"])
+        calls = []
+
+        def _fake_refresh(root, depth):
+            calls.append(root)
+            if root == "/e/b":
+                raise sqlite3.OperationalError("attempt to write a readonly database")
+
+        with patch.object(svc, "_sync_and_scan_protected_roots"), \
+             patch.object(svc, "_check_engine_accessibility", return_value={"/e"}), \
+             patch.object(app, "refresh_webdav_root", side_effect=_fake_refresh) as m_refresh, \
+             patch.object(svc, "_wait_for_sync") as m_wait, \
+             patch.object(svc, "_scan_and_sync") as m_scan, \
+             patch.object(svc, "_persist_snapshot") as m_persist:
+            with pytest.raises(PartialRefreshError) as ei:
+                svc.execute_refresh_cycle()
+        assert m_refresh.call_count == 3
+        assert calls == ["/e/a", "/e/b", "/e/c"]
+        m_wait.assert_called_once()
+        m_scan.assert_called_once()
+        m_persist.assert_called_once()
+        msg = str(ei.value)
+        # c.9.2 Task 1：%-style 多参对 RuntimeError 永不插值（str(exc) 为元组
+        # repr），"1"/"3" 在元组字面量中平凡成立属自证断言——收紧为前缀匹配。
+        assert msg.startswith("刷新周期部分失败: 1/3"), msg  # 失败计数 1 / 总 root 数 3
+        assert "readonly" in msg          # 摘要含失败类型
+
+    def test_only_refresh_section_isolated_too(self):
+        """only_refresh 段 readonly 同样隔离并聚合 raise"""
+        app, svc = self._make_svc(["/solo"])  # 不属于 /e 引擎 → only_refresh
+        with patch.object(svc, "_sync_and_scan_protected_roots"), \
+             patch.object(svc, "_check_engine_accessibility", return_value={"/e"}), \
+             patch.object(app, "refresh_webdav_root_readonly",
+                          side_effect=sqlite3.OperationalError("attempt to write a readonly database")) as m_ro, \
+             patch.object(svc, "_wait_for_sync") as m_wait, \
+             patch.object(svc, "_scan_and_sync") as m_scan, \
+             patch.object(svc, "_persist_snapshot") as m_persist:
+            with pytest.raises(PartialRefreshError):
+                svc.execute_refresh_cycle()
+        m_ro.assert_called_once()
+        m_wait.assert_called_once()
+        m_scan.assert_called_once()
+        m_persist.assert_called_once()
+
+    def test_all_success_no_raise_no_warning(self, caplog):
+        """全成功 → 不 raise、零新 WARNING"""
+        import logging as _logging
+        app, svc = self._make_svc(["/e/a"])
+        with caplog.at_level(_logging.WARNING):
+            with patch.object(svc, "_sync_and_scan_protected_roots"), \
+                 patch.object(svc, "_check_engine_accessibility", return_value={"/e"}), \
+                 patch.object(app, "refresh_webdav_root"), \
+                 patch.object(svc, "_wait_for_sync"), \
+                 patch.object(svc, "_scan_and_sync"), \
+                 patch.object(svc, "_persist_snapshot"):
+                svc.execute_refresh_cycle()  # 不 raise
+        warnings = [r for r in caplog.records if r.levelno >= _logging.WARNING]
+        assert warnings == []
+
+    def test_breaker_counts_partial_refresh_error(self):
+        """breaker 集成：PartialRefreshError → _consecutive_failures==1、summary 含类型"""
+        app, svc = self._make_svc(["/e/a"])
+        with patch.object(svc, "_sync_and_scan_protected_roots"), \
+             patch.object(svc, "_check_engine_accessibility", return_value={"/e"}), \
+             patch.object(app, "refresh_webdav_root",
+                          side_effect=sqlite3.OperationalError("attempt to write a readonly database")), \
+             patch.object(svc, "_wait_for_sync"), \
+             patch.object(svc, "_scan_and_sync"), \
+             patch.object(svc, "_persist_snapshot"):
+            svc._run_cycle_with_breaker()
+        assert svc._consecutive_failures == 1
+        assert "PartialRefreshError" in svc._last_error_summary
+
+    def test_no_failure_keeps_breaker_clean(self):
+        """全成功周期 → _consecutive_failures 归零路径不受影响"""
+        app, svc = self._make_svc(["/e/a"])
+        svc._consecutive_failures = 2  # 预置历史失败
+        with patch.object(svc, "_sync_and_scan_protected_roots"), \
+             patch.object(svc, "_check_engine_accessibility", return_value={"/e"}), \
+             patch.object(app, "refresh_webdav_root"), \
+             patch.object(svc, "_wait_for_sync"), \
+             patch.object(svc, "_scan_and_sync"), \
+             patch.object(svc, "_persist_snapshot"):
+            svc._run_cycle_with_breaker()
+        assert svc._consecutive_failures == 0
+        assert svc._last_error_summary == ""

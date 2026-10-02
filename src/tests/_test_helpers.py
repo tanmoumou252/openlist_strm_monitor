@@ -10,6 +10,8 @@ from pathlib import Path
 from threading import Lock
 from unittest.mock import MagicMock, Mock
 
+from database import ReadWriteLock  # noqa: E402
+
 
 def build_mock_app(
     tmp_path: Path | None = None,
@@ -19,6 +21,7 @@ def build_mock_app(
     refresh_paths: list[str] | None = None,
     interval_seconds: int = 300,
     strm_engine_paths: list[str] | None = None,
+    full_audit_interval_days: int = 7,
     # SubtitleHandler 配置
     setup_b_root: bool = False,
     # SyncService 配置
@@ -41,15 +44,15 @@ def build_mock_app(
     # RefreshService 配置
     app.config.refresh.enabled = refresh_enabled
     app.config.refresh.interval_seconds = interval_seconds
+    app.config.refresh.full_audit_interval_days = full_audit_interval_days
     app.config.refresh_paths = refresh_paths or []
     app.config.strm_engine_paths = strm_engine_paths or []
 
-    # SubtitleHandler 配置
+    # SubtitleHandler 配置（仅准备目录；mapping mock 放在函数末尾，避免被后续覆盖）
     if setup_b_root and tmp_path is not None:
         b_root = tmp_path / "b_root"
         b_root.mkdir(parents=True, exist_ok=True)
         app.b_root = b_root
-        app.db.get_subtitle_by_local.return_value = None
 
     # SyncService 配置
     if tmp_path is not None:
@@ -64,14 +67,69 @@ def build_mock_app(
     app.config.behavior.ghost_protect_seconds = ghost_protect_seconds
     app.admin_api = app_cls()
     app.db = app_cls()
+    app.db.rw_lock = ReadWriteLock()  # 提供真实 ReadWriteLock 供 use_bulk=False 上下文管理器
+    # connection/read_connection 需支持上下文管理器协议
+    _conn_mock = MagicMock()
+    _conn_mock.__enter__ = Mock(return_value=_conn_mock)
+    _conn_mock.__exit__ = Mock(return_value=False)
+    app.db.connection = Mock(return_value=_conn_mock)
+    app.db.read_connection = Mock(return_value=_conn_mock)
+
+    # 默认 DB 查询返回空列表(防止后台线程对 Mock 对象迭代导致 TypeError)
+    app.db.get_b_under_root.return_value = []
+    app.db.get_all_b_by_fingerprint.return_value = []
 
     # SyncService 特定方法
     app.build_b_path_from_a = app_cls()
     app._verify_b_path_lineage = app_cls(return_value=True)
     app.ensure_single_visible_instance = app_cls()
     app.handle_a_created_or_modified = app_cls()
-    # get_fingerprint_lock 必须返回真正的 Lock 对象，支持上下文管理器协议（P1-4）
+    # get_fingerprint_lock 必须返回真正的 Lock 对象，支持上下文管理器协议
     app.get_fingerprint_lock = lambda _fp: Lock()
     app.get_a_root_for_path = app_cls()
 
+    # 默认映射相关方法返回 None（fail-closed 行为）
+    app.get_mapping_for_a = app_cls(return_value=None)
+    app.get_mapping_for_b = app_cls(return_value=None)
+    # fast mapping 委托给基础 mapping（保持 mock 行为一致）
+    app._get_mapping_for_a_fast = lambda p, **kw: app.get_mapping_for_a(p)
+    app._get_mapping_for_b_fast = lambda p, **kw: app.get_mapping_for_b(p)
+    app._get_scan_roots_for_mapping = lambda _mid: (None, None)
+    app.ensure_scan_mapping_roots = app_cls()
+    app.clear_scan_mapping_roots = app_cls()
+    app.a_b_mappings = []
+
+    # setup_b_root 使用 canonical mapping tuple；放在默认 fail-closed 设置之后，避免被覆盖。
+    if setup_b_root and tmp_path is not None:
+        b_root = tmp_path / "b_root"
+        a_root = tmp_path / "a"
+        app.get_mapping_for_a = lambda _p, _ar=a_root, _br=b_root: ("test-mapping", _ar, _br)
+        app.get_mapping_for_b = lambda _p, _ar=a_root, _br=b_root: ("test-mapping", _br, _ar)
+
     return app
+
+
+class FakeConfigDb:
+    """最小 webui_config 替身：只实现 AppConfig.update_from_db 所需的接口。
+
+    与 TmdbWatchlistDb 的 scope/key 语义一致，不落任何磁盘文件。
+    """
+
+    def __init__(self, store: dict[str, dict[str, str]] | None = None) -> None:
+        self.store: dict[str, dict[str, str]] = {
+            scope: dict(kv) for scope, kv in (store or {}).items()
+        }
+
+    def get_config(self, scope: str, key: str, default: str = "") -> str:
+        return self.store.get(scope, {}).get(key, default)
+
+    def set_config(self, scope: str, key: str, value: str) -> None:
+        self.store.setdefault(scope, {})[key] = value
+
+    def set_config_batch(self, items: list[tuple[str, str, str]]) -> None:
+        for scope, key, value in items:
+            self.set_config(scope, key, value)
+
+    def get_all_config(self, scope: str) -> dict[str, str]:
+        return dict(self.store.get(scope, {}))
+

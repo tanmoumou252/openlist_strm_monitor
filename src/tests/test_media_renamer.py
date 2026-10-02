@@ -97,6 +97,7 @@ class TestExtractSeasonFromPath:
 
 
 # ============================================================
+
 # _extract_season_episode
 # ============================================================
 
@@ -107,6 +108,22 @@ class TestExtractSeasonEpisode:
         assert _extract_season_episode("S01E01.mkv") == (1, 1)
         assert _extract_season_episode("s02e13.mkv") == (2, 13)
         assert _extract_season_episode("S1E1.mkv") == (1, 1)
+
+    def test_large_episode_numbers_and_terminal_boundary(self):
+        assert _extract_season_episode("S02E043.mkv") == (2, 43)
+        assert _extract_season_episode("S02E049.mkv") == (2, 49)
+        assert _extract_season_episode("S18E760.mkv") == (18, 760)
+        assert _extract_season_episode("S21E1088.mp4") == (21, 1088)
+        assert _extract_season_episode("S01E9999.mkv") == (1, 9999)
+        assert _extract_season_episode("S01E10000.mkv") == (None, None)
+
+    def test_large_episode_numbers_in_x_format(self):
+        assert _extract_season_episode("02x43.mkv") == (2, 43)
+        assert _extract_season_episode("21x1088.mp4") == (21, 1088)
+
+    def test_large_episode_numbers_in_fallback_formats(self):
+        assert _extract_season_episode("Show S01 [9999].mkv") == (1, 9999)
+        assert _extract_season_episode("Show Season 01 第9999集.mkv") == (1, 9999)
 
     def test_x_format(self):
         assert _extract_season_episode("1x01.mkv") == (1, 1)
@@ -162,6 +179,32 @@ class TestExtractSeasonEpisode:
         assert e is None
 
 
+class TestNoiseTagStripping:
+    """噪音标签剥离测试（验证 suggest_rename 的预处理）"""
+
+    def test_suggest_rename_with_noise_tags(self):
+        """含噪音标签的文件名应返回 None（无法提取）而非错误解析"""
+        # 1920x1080 噪音导致无法提取 → 返回 None
+        assert suggest_rename("Penguin Drum - 01 (BD 1920x1080 x.264 FLACx2).strm") is None
+        assert suggest_rename("Dynamis_One_..._01_Baha_1920x1080_AVC.strm") is None
+        # 合法命名不受影响
+        assert suggest_rename("ShowName S01E01.mkv") == "S01E01.mkv"
+        assert suggest_rename("ShowName S18E760.mkv") == "S18E760.mkv"
+        assert suggest_rename("ShowName 21x1088.mp4") == "S21E1088.mp4"
+
+    def test_strip_noise_tags_function(self):
+        """直接测试 _strip_noise_tags 函数"""
+        from media_renamer import _strip_noise_tags
+        # 分辨率应被剥离
+        assert "1920x1080" not in _strip_noise_tags("Penguin Drum - 01 (BD 1920x1080 x.264 FLACx2)")
+        assert "1080p" not in _strip_noise_tags("Show.Name.1080p.BluRay.x264")
+        # 编码标签应被剥离
+        assert "x264" not in _strip_noise_tags("Show.Name.1080p.BluRay.x264")
+        assert "FLAC" not in _strip_noise_tags("Show.Name.FLAC.1080p")
+        # 年份应被剥离
+        assert "2020" not in _strip_noise_tags("Show.Name.2020.1080p")
+
+
 # ============================================================
 # detect_media_type_from_path
 # ============================================================
@@ -213,6 +256,13 @@ class TestSuggestRename:
 
     def test_from_sxxexx_stem(self):
         assert suggest_rename("/path/S1E1.mkv") == "S01E01.mkv"
+
+    def test_preserves_standard_large_episode_names_and_boundaries(self):
+        assert suggest_rename("/path/S01E01.mkv") == "S01E01.mkv"
+        assert suggest_rename("/path/S02E043.mp4") == "S02E043.mp4"
+        assert suggest_rename("/path/S21E1088.mkv") == "S21E1088.mkv"
+        assert suggest_rename("/path/S01E0001.mkv") == "S01E0001.mkv"
+        assert suggest_rename("/path/S01E10000.mkv") is None
 
     def test_from_x_format(self):
         assert suggest_rename("/path/1x01.mkv") == "S01E01.mkv"
@@ -391,7 +441,7 @@ class TestProcessSubtitleGroup:
         """单语种字幕自动加 forced"""
         sub_file = tmp_path / "show.sc.srt"
         sub_file.write_text("subtitle content", encoding="utf-8")
-        
+
         result = process_subtitle_group([sub_file], (1, 1), "Show")
         assert len(result) == 1
         path, new_name = result[0]
@@ -405,7 +455,7 @@ class TestProcessSubtitleGroup:
         sub1.write_text("english", encoding="utf-8")
         sub2 = tmp_path / "show.sc.srt"
         sub2.write_text("chinese", encoding="utf-8")
-        
+
         result = process_subtitle_group([sub1, sub2], (2, 5), "Series")
         assert len(result) == 2
         # 简体中文应该排在前面（优先级高）
@@ -416,7 +466,7 @@ class TestProcessSubtitleGroup:
         """无法识别语言的字幕保持原名"""
         sub_file = tmp_path / "show.unknown.srt"
         sub_file.write_text("content", encoding="utf-8")
-        
+
         result = process_subtitle_group([sub_file], (1, 3), "Show")
         assert len(result) == 1
         path, new_name = result[0]
@@ -435,7 +485,7 @@ class TestProcessMediaFile:
         """标准 STRM 文件（含季集信息）"""
         strm_file = tmp_path / "Show.S01E05.strm"
         strm_file.write_text("content", encoding="utf-8")
-        
+
         result = process_media_file(strm_file)
         assert result is not None
         assert result["season"] == 1
@@ -447,7 +497,7 @@ class TestProcessMediaFile:
         """字幕文件"""
         sub_file = tmp_path / "Show.S02E10.sc.srt"
         sub_file.write_text("subtitle", encoding="utf-8")
-        
+
         result = process_media_file(sub_file)
         assert result is not None
         assert result["season"] == 2
@@ -483,7 +533,7 @@ class TestProcessMediaFile:
         season_dir.mkdir()
         ep_file = season_dir / "episode.05.strm"
         ep_file.write_text("content", encoding="utf-8")
-        
+
         result = process_media_file(ep_file)
         assert result is not None
         assert result["season"] == 3

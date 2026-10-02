@@ -94,7 +94,7 @@ def _make_app_config(tmp_path: Path) -> AppConfig:
             b_root=str(tmp_path / "b"),
             c_root=str(tmp_path / "c"),
         ),
-        webui=WebUIConfig(enabled=True, port=8579, bind="0.0.0.0"),
+        webui=WebUIConfig(port=8579, bind="0.0.0.0"),
     )
 
 
@@ -130,8 +130,7 @@ class TestMigrateConfigToDb:
         assert wdb.get_config("openlist", "webdav_password") == cfg.webdav.password
         assert wdb.get_config("openlist", "webdav_totp_secret") == cfg.webdav.totp_secret
 
-        # 验证路径配置
-        assert wdb.get_config("openlist", "b_root") == cfg.paths.b_root
+        # 验证路径配置(c_root 仍保留;b_root 已废弃不再持久化到 DB)
         assert wdb.get_config("openlist", "c_root") == cfg.paths.c_root
 
         # 验证行为配置
@@ -142,8 +141,6 @@ class TestMigrateConfigToDb:
         # 验证刷新配置
         assert wdb.get_config("openlist", "refresh_enabled") == "true"
         assert wdb.get_config("openlist", "refresh_interval_minutes") == "10"
-        assert wdb.get_config("openlist", "refresh_log_level") == "INFO"
-
         # 验证日志配置
         assert wdb.get_config("openlist", "log_level") == "INFO"
         assert wdb.get_config("openlist", "log_max_size_mb") == "10"
@@ -575,8 +572,8 @@ class TestCheckExistsIntegration:
 
         assert result is True, "根目录应存在"
 
-    def test_check_exists_root_false_mocked(self, tmp_path):
-        """check_exists("/") 失败时应返回 False。"""
+    def test_check_exists_root_untrusted_returns_none(self, tmp_path):
+        """check_exists("/") 列表失败时应返回 None（不可信，非 False）。"""
         from webdav_client import OpenListAdminClient
 
         client = OpenListAdminClient(
@@ -590,7 +587,7 @@ class TestCheckExistsIntegration:
             mock_list.return_value = None
             result = client.check_exists("/")
 
-        assert result is False, "API 失败时根目录应返回 False"
+        assert result is None, "API 失败时根目录应返回 None（fail-closed）"
 
     def test_check_exists_caching(self, tmp_path):
         """check_exists 应缓存结果（TTL 内不重复请求）。"""

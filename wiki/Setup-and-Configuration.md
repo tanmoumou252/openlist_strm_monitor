@@ -1,4 +1,5 @@
 # 三、安装与配置
+> 最后更新：2026-08-06
 
 ## 系统要求
 
@@ -26,24 +27,33 @@ pip install -r requirements.txt
 
 ### 启动方式
 
-1. **系统 Python** — 双击批处理脚本或运行 `python src/webui/server.py`
-2. **启动选择** — 批处理脚本提供选择菜单：
-   - 选项 1：自动启动主程序（AppService）
-   - 选项 2：仅启动 WebUI（默认）
+1. **嵌入式 Python** — 双击 `嵌入式启动.bat`（推荐，自带 Python 环境，自动检测 pip 与依赖后直接启动 WebUI）
+2. **系统 Python** — 双击 `环境变量启动.bat`，或直接运行 `python src/webui/server.py`
 
-## 配置文件
+两种批处理脚本均**直接启动 WebUI**（`src/webui/server.py`），启动后通过 WebUI 内的交互菜单选择是否同时拉起同步引擎（AppService）；批处理本身不提供选项菜单。
+
+### 启动索引与运行时审计
+
+启动期会优先完成本地 A 区 STRM 高速索引，再完成 B 区历史投影核对和必要的同步；这些步骤是真实就绪条件，不会通过提前标记运行状态来伪造快速启动。字幕补偿扫描在 Watcher 启动后由受控后台线程执行。
+
+运行时手动或周期性的全量 API 冗余审计是独立的维护操作，可能访问全部订阅根目录，不等同于启动期本地秒级快速索引。
+
+
 
 ### `config.toml`
+
+生产同步依赖显式 A/B mapping。空 mapping_id、重复 mapping 根、零命中或多命中均进入 fail-safe；C 区按 mapping_id 隔离保存，格式为 `C/<mapping_id>/<relative>`。
 
 主配置文件位于项目根目录，包含以下段：
 
 ```toml
-[local]
-db_file = "./bridge.db"          # 核心数据库路径
-
 [paths]
-b_root = "./测试b"               # B 区根目录
-c_root = "./测试c"               # C 区幽灵目录
+b_root = ""                      # 运行时仍消费，作为单 mapping 兼容路径（b_root→local.b_dir）
+c_root = "./测试c"               # 全局 C 区幽灵目录（c_root→local.c_dir）
+
+# 生产映射在 WebUI/DB 中显式配置：
+# [{a_root="./测试a1", b_root="./测试b1"}]   # mapping_id 自动生成，无需手写
+
 
 [webdav]
 host = "http://192.168.x.x:5243" # OpenList WebDAV 地址
@@ -54,13 +64,13 @@ totp_secret = ""                  # TOTP 二步验证密钥
 [refresh]
 enabled = true                    # 是否启用主动刷新
 interval_minutes = 20             # 刷新间隔（分钟）
-depth = 5                         # 目录扫描深度
+depth = 5                         # WebDAV 刷新递归深度
 timeout_seconds = 300             # 刷新操作超时时间（秒）
-log_level = "INFO"                # 刷新日志级别
+full_audit_interval_days = 7      # A 区全量审计周期；0 关闭（可能访问所有 A 根）
 
 [behavior]
 sync_on_startup = true            # 启动时是否全量同步（默认 true，示例可改为 false 跳过）
-sync_on_startup_wait = 0          # 同步前等待秒数
+sync_on_startup_wait = 0          # 同步前等待秒数（0-60，可被停止操作中断）
 trash_dir_name = "trash"          # 云端回收站目录名
 action = "MOVE"                   # 删除动作：MOVE 或 DELETE
 ghost_protect_seconds = 300       # 幽灵保护冷却（秒）
@@ -73,12 +83,11 @@ max_size_mb = 2                   # 日志文件最大 MB
 backup_count = 5                  # 轮转备份数
 
 [webui]
-enabled = true                    # 启用 WebUI
-port = 8579                       # HTTP 端口
+port = 8579  # 默认端口,实际值可自定义                       # HTTP 端口
 bind = "0.0.0.0"                  # 监听地址
 
 [tmdb]
-# 注意：[tmdb] TOML 段已废弃，TMDB 配置仅从数据库加载
+# 注意：[tmdb] TOML 段已废弃，勿恢复 enabled 等开关；TMDB 配置仅从数据库加载
 # 以下仅供参考，用于首次迁移
 access_token = ""                 # TMDB API 访问令牌
 api_key = ""                      # TMDB API 密钥
@@ -93,6 +102,8 @@ fuzzy_threshold = 0.60            # 标题匹配阈值
 1. 创建 `TmdbWatchlistDb` 实例指向 `tmdb_watchlist.db`
 2. 调用 `migrate_config_to_db(config, wdb)` — 一次性迁移 config.toml 内容
 3. 调用 `config.update_from_db(wdb)` — 加载 DB 覆盖（DB > TOML）
+
+> **注意**：迁移仅在 `main.py` 入口执行。如果通过 `python src/webui/server.py` 直接启动 WebUI，config.toml 中的 WebDAV 凭据不会自动迁移到 DB。建议首次运行 `python src/main.py` 完成迁移，之后通过 WebUI 管理配置。
 
 迁移后，许多配置项可通过 WebUI 管理，无需直接编辑 config.toml：
 - OpenList 连接（host、user、password、TOTP）
@@ -122,8 +133,9 @@ fuzzy_threshold = 0.60            # 标题匹配阈值
 5. 配置 STRM 引擎：
    - API 验证通过后从下拉列表选择引擎
    - 监控目录从 API 数据自动填充
-6. 设置 B 区和 C 区根目录
-7. 配置刷新路径和行为设置
+6. 配置 A↔B 映射（`a_b_mappings`）：每个 A 区根目录必须绑定唯一的 B 区根目录，否则启动失败
+7. 设置 C 区根目录
+7. 配置刷新路径和行为设置：`refresh_paths` 为空时不执行周期主动扫描，仅依赖 watchdog 和 B 区删除联动；非空时只扫描命中这些 WebDAV 引擎路径的 A↔B mapping。`full_audit_interval_days` 默认每 7 天执行一次全量 A 区审计，可能访问未订阅的 A 根，设为 0 可关闭。
 8. 进入 **配置 → WebUI/TMDB** 设置：
    - TMDB access_token 或 api_key
    - 语言偏好和缓存 TTL
@@ -148,7 +160,7 @@ WebUI 和核心同步引擎同时启动。主程序状态显示在 WebUI 仪表�
 
 | 文件 | 用途 | 表数量 | 位置 |
 |------|------|--------|------|
-| `bridge.db` | 核心同步状态 | 14 张表 | `[local] db_file` 配置 |
-| `tmdb_watchlist.db` | TMDB 缓存 + WebUI 配置 | 6 张表 | 项目根目录（`main.py` 硬编码） |
+| `bridge.db` | 核心同步状态 | 13 常规表 + 3 FTS5 | 项目根目录（固定） |
+| `tmdb_watchlist.db` | TMDB 缓存 + WebUI 配置 | 7 张表 | 项目根目录（固定） |
 
 两个数据库均使用 **WAL 模式** 以获得并发读取性能。

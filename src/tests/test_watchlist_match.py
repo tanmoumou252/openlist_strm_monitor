@@ -20,6 +20,7 @@ from watchlist_match import (
     _strip_noise_tokens,
     _split_aliases,
     _normalize_text,
+    _extract_season_from_local_path,
 )
 
 
@@ -447,3 +448,160 @@ class TestEdgeStructural:
         # last_ep_season=1 < season_num=2 → future_season（先检查）
         assert status == "fuzzy"
         assert "tv_future_season" in reason
+
+
+# ============================================================
+# _extract_season_from_local_path with allow_filename_fallback
+# ============================================================
+
+class TestExtractSeasonFromLocalPath:
+    """测试 _extract_season_from_local_path 的 allow_filename_fallback 参数。"""
+
+    def test_movie_kind_no_filename_fallback(self):
+        """movie kind 下文件名 SxxExx 不产生季，落入默认"""
+        # 文件名包含 S01E01，但没有显式季目录
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        # allow_filename_fallback=False (movie kind)
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"movie kind 应不从文件名提取季，实际得到: {season}"
+
+    def test_anime_kind_filename_fallback_works(self):
+        """anime kind 下文件名 SxxExx 仍产生季"""
+        path = "/b/番剧/某番剧/Show.S01E01.strm"
+        # allow_filename_fallback=True (anime kind)
+        season = _extract_season_from_local_path(path, allow_filename_fallback=True)
+        assert season == "S01", f"anime kind 应从文件名提取季，实际得到: {season}"
+
+    def test_explicit_season_dir_recognized_when_is_anime_true(self):
+        """显式 Season 2 / 第二季 目录在 is_anime=True 时被识别"""
+        # Season 2 目录
+        path1 = "/b/电影/某电影/Season 2/Movie.S02E01.strm"
+        season1 = _extract_season_from_local_path(path1, allow_filename_fallback=False)
+        assert season1 == "S02", f"显式 Season 2 目录应被识别，实际得到: {season1}"
+
+        # 第二季 目录
+        path2 = "/b/番剧/某番剧/第二季/Show.S02E01.strm"
+        season2 = _extract_season_from_local_path(path2, allow_filename_fallback=False)
+        assert season2 == "S02", f"显式 第二季 目录应被识别，实际得到: {season2}"
+
+        # S02 目录
+        path3 = "/b/电影/某电影/S02/Movie.S02E01.strm"
+        season3 = _extract_season_from_local_path(path3, allow_filename_fallback=False)
+        assert season3 == "S02", f"显式 S02 目录应被识别，实际得到: {season3}"
+
+    def test_default_allow_filename_fallback_true(self):
+        """默认参数保持向后兼容（allow_filename_fallback=True）"""
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        # 不传参数时默认 True，保持原有行为
+        season = _extract_season_from_local_path(path)
+        assert season == "S01", f"默认参数应允许文件名 fallback，实际得到: {season}"
+
+    def test_other_kind_no_filename_fallback(self):
+        """other kind 下文件名 SxxExx 不产生季"""
+        path = "/b/其他/某内容/Content.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"other kind 应不从文件名提取季，实际得到: {season}"
+
+    def test_all_kind_no_filename_fallback(self):
+        """all kind 下文件名 SxxExx 不产生季（安全行为）"""
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"all kind 应不从文件名提取季，实际得到: {season}"
+
+
+# ============================================================
+# 电影误分季测试
+# ============================================================
+
+class TestMovieSeasonMisclassification:
+    """测试电影不应因文件名包含 SxxExx 而被错误分类为番剧/季。"""
+
+    def test_movie_with_s01e01_in_name_does_not_get_season_classification(self):
+        """电影文件名包含 S01E01 时，movie kind 下不应提取季"""
+        # 模拟电影文件路径：/b/电影/某电影/Movie.S01E01.strm
+        # 在 movie kind 下，allow_filename_fallback=False
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"电影 kind 下文件名 S01E01 不应产生季，实际得到: {season}"
+
+    def test_movie_with_s02e05_in_name_does_not_get_season_classification(self):
+        """电影文件名包含 S02E05 时，movie kind 下不应提取季"""
+        path = "/b/电影/某电影/Movie.S02E05.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"电影 kind 下文件名 S02E05 不应产生季，实际得到: {season}"
+
+    def test_movie_kind_filter_excludes_season_structure(self):
+        """movie kind 过滤器应正确排除有 Season 结构的条目"""
+        # 这是对 score_watchlist_item 的集成测试
+        # 电影条目不应匹配到有季结构的 B 区候选
+        item = _item(title="盗梦空间")
+        # 候选包含季结构（如番剧）
+        candidates = [_c("盗梦空间", season_num=1, episode_hint=True, season="第1季")]
+        status, reason = score_watchlist_item(item, candidates, "movie")
+        # 电影匹配不应考虑季结构，应基于名字匹配
+        # 如果名字匹配，应返回 matched（电影不关心季）
+        assert status in ("matched", "unmatched"), f"电影匹配不应返回 fuzzy，实际: {status}"
+        if status == "matched":
+            assert "movie_" in reason, f"电影匹配原因应以 movie_ 开头，实际: {reason}"
+
+    def test_movie_with_explicit_season_dir_recognized(self):
+        """电影路径包含显式 Season 目录时，is_anime=True 仍识别季（默认行为）"""
+        path = "/b/电影/某电影/Season 2/Movie.S02E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "S02", f"显式 Season 2 目录应被识别，实际得到: {season}"
+
+    def test_other_kind_with_s01e01_no_season(self):
+        """other kind 下文件名 S01E01 不产生季"""
+        path = "/b/其他/某内容/Content.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"other kind 下文件名 S01E01 不应产生季，实际得到: {season}"
+
+    def test_all_kind_with_s01e01_no_season(self):
+        """all kind 下文件名 S01E01 不产生季（安全行为）"""
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False)
+        assert season == "", f"all kind 下文件名 S01E01 不应产生季，实际得到: {season}"
+
+
+# ============================================================
+# is_anime=False 目录级季节提取跳过
+# ============================================================
+
+class TestIsAnimeFalseDirectorySeasonSkip:
+    """测试 is_anime=False 时跳过目录级季节提取（电影路径含 S01 目录不产生分组）。"""
+
+    def test_movie_s01_dir_no_season(self):
+        """电影路径含 S01 目录 + is_anime=False → 无季节提取"""
+        path = "/b/电影/合集/S01/电影.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False, is_anime=False)
+        assert season == "", f"电影 is_anime=False 时 S01 目录不应产生季节，实际得到: {season}"
+
+    def test_movie_season2_dir_no_season(self):
+        """电影路径含 Season 2 目录 + is_anime=False → 无季节提取"""
+        path = "/b/电影/合集/Season 2/电影.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False, is_anime=False)
+        assert season == "", f"电影 is_anime=False 时 Season 2 目录不应产生季节，实际得到: {season}"
+
+    def test_movie_cn_season_dir_no_season(self):
+        """电影路径含 第二季 目录 + is_anime=False → 无季节提取"""
+        path = "/b/电影/合集/第二季/电影.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False, is_anime=False)
+        assert season == "", f"电影 is_anime=False 时 第二季 目录不应产生季节，实际得到: {season}"
+
+    def test_anime_s01_dir_with_is_anime_true(self):
+        """番剧路径含 S01 目录 + is_anime=True → 正常提取季节"""
+        path = "/b/番剧/某番剧/S01/Show.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=True, is_anime=True)
+        assert season == "S01", f"番剧 is_anime=True 时 S01 目录应提取季节，实际得到: {season}"
+
+    def test_movie_no_dir_season_only_filename(self):
+        """电影路径无目录级季节 + is_anime=False + allow_filename_fallback=False → 空"""
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False, is_anime=False)
+        assert season == "", f"电影 is_anime=False 时不应提取任何季节，实际得到: {season}"
+
+    def test_movie_list_card_filename_s01_no_season(self):
+        """列表卡片路径：movie + Movie.S01E01.strm → allow_filename_fallback=False, is_anime=False → 空（不显示 S01）"""
+        path = "/b/电影/某电影/Movie.S01E01.strm"
+        season = _extract_season_from_local_path(path, allow_filename_fallback=False, is_anime=False)
+        assert season == "", f"电影列表卡片不应从文件名 S01E01 提取季节（is_anime=False, allow_filename_fallback=False），实际得到: {season}"

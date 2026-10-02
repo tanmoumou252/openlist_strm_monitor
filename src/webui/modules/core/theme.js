@@ -1,8 +1,4 @@
 // Theme module: syncTheme and initDropdowns
-// Router is injected via setRouterFn to avoid circular dependency
-
-let _routerFn = null;
-export function setRouterFn(fn) { _routerFn = fn; }
 
 export function syncTheme() {
   const root = document.documentElement;
@@ -70,8 +66,9 @@ export function initDropdowns() {
           root.dataset.font = val;
         }
         wrap.classList.remove('open');
+        // 主题变量挂在 :root（documentElement），CSS 变量生效即完成整体换肤，
+        // 无需整页重渲染；syncTheme() 内部已处理壁纸尺寸自适应。
         syncTheme();
-        if (_routerFn) _routerFn();
       });
     });
   });

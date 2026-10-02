@@ -6,33 +6,81 @@
 import { api } from '../core/api.js';
 import { icon } from '../core/icons.js';
 import { esc } from '../core/utils.js';
-import { navigate } from '../core/router.js';
+import { navigate, captureRenderGuard } from '../core/router.js';
+import { setToken } from '../core/state.js';
 
 export async function renderLogin(el) {
+  const isStale = captureRenderGuard();
   // 始终从服务器获取密码状态，避免与 main.js 的异步初始化产生时序竞争
+  // 裸 fetch 不带 token——/api/admin/status 双语义：无 token 即返回 has_password，
+  // 避免过期 token 触发 401 → ApiAuthError → 误显连接错误
   let hasPassword = false;
   let fetchSucceeded = false;
   try {
-    const status = await api('/api/admin/status');
-    hasPassword = status.has_password;
-    fetchSucceeded = true;
+    // 增加 10 秒 AbortController 超时；分离 fetch 网络异常与 JSON 解析异常
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    let resp;
+    try {
+      resp = await fetch('/api/admin/status', { signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    if (!resp.ok) {
+      // 非 2xx 状态码视为获取失败，不误显错误
+      fetchSucceeded = false;
+    } else {
+      const status = await resp.json();
+      hasPassword = !!status.has_password;
+      fetchSucceeded = true;
+    }
   } catch (e) {
-    // 服务器不可达，显示连接错误
+    // 服务器不可达或超时，显示连接错误
+    // 超时与网络异常均显示连接错误，不误显"未设置密码"
   }
 
   // 如果已登录，直接跳转
   const token = localStorage.getItem('session_token');
-  if (token && hasPassword) {
+  if (token && hasPassword && fetchSucceeded) {
     navigate('#dashboard');
     return;
   }
-  // 仅当明确获知无密码时才删除 token（网络错误时不删除 P3-7）
+  // 仅当明确获知无密码时才删除 token（网络错误时不删除）
   if (token && !hasPassword && fetchSucceeded) {
     localStorage.removeItem('session_token');
   }
 
+  // 网络错误误显"未设置管理员密码"
+  if (!fetchSucceeded) {
+    if (isStale()) return;
+    const isExpired = localStorage.getItem('session_token_expired') === '1';
+    localStorage.removeItem('session_token_expired');
+    el.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:center;min-height:60vh">
+        <div class="page-card" style="max-width:420px;width:100%;text-align:center;padding:40px 32px">
+          <div style="font-size:48px;margin-bottom:16px;color:var(--text-error)">${icon('warn')}</div>
+          <h2 style="margin:0 0 12px;font-size:20px;color:var(--text-main)">${isExpired ? '登录已过期' : '无法连接服务器'}</h2>
+          <p style="color:var(--text-muted);font-size:var(--font-base);line-height:1.6">
+            ${isExpired ? '你的登录会话已过期，请重新连接服务器并登录。' : '无法连接到 STRM Bridge 后端服务，请检查服务是否已启动。'}<br>
+            默认端口为 <code style="background:var(--bg-control);padding:2px 6px;border-radius:4px">8579</code>。
+          </p>
+          <button class="toolbar-btn primary" style="margin-top:12px" id="login-retry-btn">
+            ${icon('refresh')} ${isExpired ? '重新连接' : '重试连接'}
+          </button>
+        </div>
+      </div>`;
+    document.getElementById('login-retry-btn')?.addEventListener('click', () => {
+      const cur = window.location.hash;
+      window.location.hash = '#login';
+      if (cur !== '#login') window.location.hash = cur;
+      else window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    return;
+  }
+
   // 检查是否已配置密码
   if (!hasPassword) {
+    if (isStale()) return;
     el.innerHTML = `
       <div style="display:flex;align-items:center;justify-content:center;min-height:60vh">
         <div class="page-card" style="max-width:420px;width:100%;text-align:center;padding:40px 32px">
@@ -52,6 +100,7 @@ export async function renderLogin(el) {
     return;
   }
 
+  if (isStale()) return;
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:center;min-height:70vh">
       <div class="page-card" id="login-card" style="max-width:400px;width:100%;padding:36px 28px 28px">
@@ -90,24 +139,35 @@ export async function renderLogin(el) {
   }
 
   async function doLogin() {
-    const password = input.value.trim();
-    if (!password) {
+    // 不 trim 密码（含首尾空格的密码应原样发送），仅判空
+    const password = input.value;
+    if (!password || !password.trim()) {
       showError('请输入管理员密码');
       return;
     }
+    // 注意：不使用 password.trim()，让含首尾空格的密码原样发送给后端验证
     btn.disabled = true;
     btn.textContent = '登录中...';
     errorEl.style.display = 'none';
 
     try {
-      const resp = await fetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password })
-      });
+      // 裸 fetch 不带 token（登录前尚无会话令牌，不附加 X-Session-Token）
+      const loginController = new AbortController();
+      const loginTimeoutId = setTimeout(() => loginController.abort(), 10000);
+      let resp;
+      try {
+        resp = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password }),
+          signal: loginController.signal
+        });
+      } finally {
+        clearTimeout(loginTimeoutId);
+      }
       const data = await resp.json();
       if (resp.ok && data.token) {
-        localStorage.setItem('session_token', data.token);
+        setToken(data.token);
         navigate('#dashboard');
       } else {
         showError(data.error || '密码错误');

@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import sys
 import time
+import urllib.error
+from email.message import Message
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -40,6 +42,14 @@ def _patch_opener(response_data: dict):
     opener = MagicMock()
     opener.open.return_value = resp
     return patch("urllib.request.build_opener", return_value=opener)
+
+
+def _http_error_429(retry_after_value: str) -> urllib.error.HTTPError:
+    """构造带 Retry-After 头的 429 HTTPError。"""
+    hdrs = Message()
+    hdrs["Retry-After"] = retry_after_value
+    return urllib.error.HTTPError(
+        "http://example.invalid", 429, "Too Many Requests", hdrs, None)
 
 
 # ===========================================================================
@@ -229,6 +239,49 @@ class TestTmdbClientRequest:
 
         assert len(proxy_handler_calls) == 1
         assert "http" in proxy_handler_calls[0]
+
+    def test_request_retry_after_http_date_falls_back(self, tmp_path):
+        """T14: Retry-After 为 HTTP-date 时 float() 抛 ValueError，应回退默认退避而非逃逸。"""
+        client = self._client(tmp_path, access_token="tok")
+        opener = MagicMock()
+        opener.open.side_effect = [
+            _http_error_429("Wed, 21 Oct 2015 07:28:00 GMT"),
+            _make_response({"success": True}),
+        ]
+        with patch("urllib.request.build_opener", return_value=opener), \
+             patch("time.sleep") as m_sleep:
+            result = client.request("/3/authentication")
+        assert result == {"success": True}
+        assert m_sleep.call_count >= 1, "HTTP-date Retry-After 应回退默认退避并等待"
+
+    def test_request_retry_after_capped(self, tmp_path):
+        """T14: Retry-After 过大值应被截断到上限，不无限挂起线程。"""
+        client = self._client(tmp_path, access_token="tok")
+        opener = MagicMock()
+        opener.open.side_effect = [
+            _http_error_429("999999"),
+            _make_response({"success": True}),
+        ]
+        with patch("urllib.request.build_opener", return_value=opener), \
+             patch("time.sleep") as m_sleep:
+            result = client.request("/3/authentication")
+        assert result == {"success": True}
+        assert m_sleep.call_args[0][0] == 60.0, \
+            f"等待秒数应截断到 60，实际 {m_sleep.call_args[0][0]}"
+
+    def test_request_retry_after_negative_falls_back(self, tmp_path):
+        """T14: Retry-After 为负值时回退默认退避，避免 time.sleep(负数) 异常。"""
+        client = self._client(tmp_path, access_token="tok")
+        opener = MagicMock()
+        opener.open.side_effect = [
+            _http_error_429("-5"),
+            _make_response({"success": True}),
+        ]
+        with patch("urllib.request.build_opener", return_value=opener), \
+             patch("time.sleep") as m_sleep:
+            result = client.request("/3/authentication")
+        assert result == {"success": True}
+        assert m_sleep.call_count >= 1
 
 
 # ===========================================================================
@@ -438,19 +491,19 @@ class TestTmdbClientWatchlist:
         assert len(items) == 1
 
     def test_watchlist_api_key_mode_skips(self, tmp_path):
+        """T5: api_key 模式不支持 watchlist，应 raise 而非返回空清单（防误清本地表）"""
         client = self._client(tmp_path, api_key="k")
-        items, has_next = client.get_watchlist_movies()
-        assert items == []
-        assert has_next is False
+        with pytest.raises(RuntimeError):
+            client.get_watchlist_movies()
 
     def test_watchlist_no_account_id(self, tmp_path):
+        """T5: 无 account_id 时取回不可信，应 raise 而非返回空清单"""
         client = self._client(tmp_path, account_id="", access_token="tok")
         # no account_id — fetch_account_id is called by the property but returns ""
         # Mock fetch_account_id so it stays empty without making real HTTP requests
         with patch.object(client, "fetch_account_id", return_value=""):
-            items, has_next = client.get_watchlist_movies()
-        assert items == []
-        assert has_next is False
+            with pytest.raises(RuntimeError):
+                client.get_watchlist_movies()
 
     def test_fetch_all_watchlist_movies_single_page(self, tmp_path):
         movies = [{"id": i} for i in range(5)]

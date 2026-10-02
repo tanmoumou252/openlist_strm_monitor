@@ -1,4 +1,5 @@
 # 一、架构设计与关键类
+> 最后更新：2026-08-06
 
 ## 分层架构
 
@@ -56,7 +57,7 @@ class AppService:
 
 ### `Database`（`database.py`）
 SQLite 数据库管理器，WAL 模式。通过自定义 `ReadWriteLock` 类保证线程安全（非 `RLock`）。
-管理 bridge.db 中 14 张表（10 张普通表 + 3 张 FTS5 虚拟表 + `subtitles`），提供读写连接的上下文管理器。
+管理 bridge.db 中 16 张表（13 张普通表 + 3 张 FTS5 虚拟表），提供读写连接的上下文管理器。
 
 ### `OpenListAdminClient`（`webdav_client.py`）
 JWT 认证的 OpenList Admin API 客户端：
@@ -101,7 +102,7 @@ JWT 认证的 OpenList Admin API 客户端：
 3. **config.toml** — 静态文件配置
 4. **默认值** — dataclass 定义中的硬编码默认值
 
-首次启动时，`config.toml` 内容会被一次迁移到数据库（`config.py:migrate_config_to_db`），之后 DB 成为运行时配置的权威来源。
+首次启动时，`config.toml` 内容会被一次迁移到数据库（`config.py:migrate_config_to_db`），之后 DB 成为运行时配置的权威来源。注意：迁移仅在 `main.py` 入口执行；直接启动 `server.py` 不会触发迁移。
 
 ## 关键设计模式
 
@@ -109,10 +110,13 @@ JWT 认证的 OpenList Admin API 客户端：
 |------|------|------|
 | Dataclass 配置 | 所有配置段使用 `@dataclass(slots=True)`；`StrmStorageInfo` 等不可变快照使用 `frozen=True` | `config.py`、`app_service_core.py` |
 | 上下文管理器 DB 连接 | `with self.lock, self.connection() as conn:` | `database.py` |
+| `bulk_connection()` 长连接模式 | 启动时批量同步使用单一连接+单一事务，绕过 `rw_lock`（跨进程安全，同进程多线程不安全）。消费函数：`initial_scan_a(use_bulk=True)`、`scan_a_to_b_full_sync(use_bulk=True)` | `database.py` |
+| 并发分页模式 | 使用 `ThreadPoolExecutor` 并发请求多个 API 页面（5 并发 + 重试机制） | `app_service_core.py` |
 | 指纹去重 | `make_strm_fingerprint()` 对 WebDAV 路径做 SHA256 哈希 | `utils/strm_utils.py` |
 | 事件驱动文件监控 | watchdog `Observer` + 3 个事件处理器 | `area_watchers.py` |
 | 子服务委托 | AppService 创建 SyncService、SubtitleHandler、RefreshService | `app_service_core.py` |
 | 渲染过时检测 | 前端 router 根据计数器判定渲染结果是否过时 | `router.js` |
+| 三层防御模式 | 批量同步使用内存缓存 + 文件系统检查 + 去重清理，不使用指纹锁（避免性能灾难） | `sync_service.py` |
 
 ## 搜索架构（FTS5 / simple 分词器 / unicode61 降级）
 
@@ -120,7 +124,7 @@ JWT 认证的 OpenList Admin API 客户端：
 
 - **分词器**：中文使用 `simple` 分词器（cppjieba 封装，源于 wangfenjin/simple，内置版本见 `src/tokenizers/simple/VERSION`，约 v0.7.1）。`database.py` 的 `_load_simple_tokenizer` 与 `tmdb_watchlist_db.py` 的 `_load_simple_into` 在连接建立时通过 `conn.load_extension` 加载 `src/tokenizers/simple/simple.dll`；加载成功后切换为 `simple` 并记录版本，失败则**软降级**到内建 `unicode61`（仅 warning，不阻断启动）。
 - **降级风险**：`unicode61` 不会对中文切分出有效 token，因此 `simple.dll` 缺失时中文搜索实际完全失效。本项目的 FTS 查询转义会移除 `*` 等通配符，前缀 `黑*` 之类的侥幸命中也不成立——**`simple` 是中文搜索的硬依赖**。
-- **FTS 虚拟表**：bridge.db 的 `a_strm_files_fts` / `b_strm_files_fts` / `c_ghost_files_fts` 索引 STRM/幽灵文件的 `local_path`、`webdav_path`；tmdb_watchlist.db 的 `tmdb_watchlist_fts` 索引待看列表的 `title`、`original_title`、`overview`。
+- **FTS 虚拟表**：bridge.db 的 `a_strm_files_fts` / `b_strm_files_fts` / `c_ghost_files_fts` 索引 STRM/幽灵文件的 `local_path`、`webdav_path`；tmdb_watchlist.db 的 `movies_fts` / `tv_fts` 分别索引待看列表电影（`movies.title`/`original_title`/`overview`）与电视剧（`tv.name`/`tv.original_name`/`overview`）。
 - **一致性**：`Database._rebuild_fts_if_stale` / `_backfill_fts_if_empty` 以及 `tmdb_watchlist_db.py` 中的孤儿清理，负责在基表变更后清理 FTS 中悬空的孤儿行，保证索引与基表一致。
 
 ## 首次启动引导（Onboarding）

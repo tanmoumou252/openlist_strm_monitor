@@ -3,7 +3,7 @@
 连接到运行中的 WebUI (http://127.0.0.1:8579) 执行安全验证。
 输出 JSON 日志到 <项目根>/test_logs/real_server_test_*.json
 """
-import json, urllib.request, urllib.error, time, os
+import json, sys, urllib.request, urllib.error, time, os
 from datetime import datetime
 from pathlib import Path
 
@@ -205,7 +205,7 @@ log("login_wrong_password", "login", "/api/login", "POST",
     s, 401, s == 401, b, "错误密码应返回 401")
 
 # 7. 请求体大小限制
-print("\n[7] 请求体大小限制 (B-5)")
+print("\n[7] 请求体大小限制")
 # 构造一个超过 10MB 的请求
 # 注意：单线程服务器在发送 413 响应后会关闭连接，客户端可能无法读取响应
 # 因此连接重置（WinError 10053）也视为通过
@@ -270,3 +270,4 @@ print(f"  通过: {sum(1 for r in results if r['passed'])}")
 print(f"  失败: {sum(1 for r in results if not r['passed'])}")
 print(f"日志: {LOG_FILE}")
 print("=" * 60)
+sys.exit(1 if any(not r['passed'] for r in results) else 0)

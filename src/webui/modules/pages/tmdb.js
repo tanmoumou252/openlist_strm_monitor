@@ -3,11 +3,11 @@ import { icon } from '../core/icons.js';
 import { esc, renderTmdbResults } from '../core/utils.js';
 import { showToast } from '../components/toast.js';
 import { showCacheStaleModal } from '../components/dialog.js';
-import { navigate, isRenderStale } from '../core/router.js';
+import { navigate, captureRenderGuard } from '../core/router.js';
 import {
   CONFIG, _getCachedWatchlist, _setCachedWatchlist, _fetchPromises,
-  _tmdbWebBase, _getUiConfig, _flippedCard, setFlippedCard,
-  _getGenreCache, _setGenreCache
+  _getUiConfig, _flippedCard, setFlippedCard,
+  _getGenreCache, _setGenreCache, _tmdbCache
 } from '../core/state.js';
 
 const _POSTER_FALLBACK_SVG = '<svg class="tt-poster-fallback-svg" viewBox="0 0 60 90" fill="none"><rect x="2" y="2" width="56" height="86" rx="4" stroke="currentColor" stroke-width="1.5" opacity="0.35"/><path d="M22 32v26l18-13-18-13z" fill="currentColor" opacity="0.25"/></svg>';
@@ -29,8 +29,8 @@ async function _lazyLoadSeasonCount(wrapper) {
   wrapper.dataset.seasonLoaded = '1';
   if (wrapper.querySelector('.tmdb-season-bars')) return;
 try {
-	    const data = await api('/api/tmdb/season-count/' + type + '/' + id);
-	    const count = data.season_count || 0;
+      const data = await api('/api/tmdb/season-count/' + type + '/' + id);
+      const count = data.season_count || 0;
     if (count > 1) {
       const bars = document.createElement('div');
       bars.className = 'tmdb-season-bars';
@@ -80,8 +80,8 @@ async function _loadGenres(tmdbId, type) {
   const cachedGenres = _getGenreCache(cacheKey);
   if (cachedGenres) { _renderGenres(container, cachedGenres); return; }
 try {
-	    const data = await api('/api/tmdb/genres/' + type + '/' + tmdbId);
-	    const genres = data.genres || [];
+      const data = await api('/api/tmdb/genres/' + type + '/' + tmdbId);
+      const genres = data.genres || [];
     _setGenreCache(cacheKey, genres);
     _renderGenres(container, genres);
   } catch (e) {
@@ -127,10 +127,13 @@ function _initFlipCards() {
 }
 
 export async function renderTmdb(el, params) {
+  // 代际快照工厂——在首次 await 前捕获
+  const isStale = captureRenderGuard();
   const [status, config] = await Promise.all([
     api('/api/tmdb/status'),
     api('/api/config')
   ]);
+  if (isStale()) return;
 
   const watchlistEnabledRaw = config.tmdb_watchlist_enabled;
   const watchlistDisabled = watchlistEnabledRaw === false || watchlistEnabledRaw === 'false';
@@ -174,23 +177,33 @@ export async function renderTmdb(el, params) {
   } else if (_fetchPromises[apiType]) {
     try { data = await _fetchPromises[apiType]; }
     catch (e) {
-      _fetchPromises[apiType] = null;
+      // 共享重试：共享 promise 失败后仅由首个 catch 调用方发起重试并写回
+      // _fetchPromises[apiType]，其余并发等待者复用同一重试 promise，
+      // 避免 N 个并发调用各发一次冗余请求。
       const retryUrl = `/api/tmdb/watchlist/${apiType}?all=1`;
-      data = await api(retryUrl);
+      if (!_fetchPromises[apiType]) {
+        const retryPromise = api(retryUrl);
+        _fetchPromises[apiType] = retryPromise;
+        retryPromise.finally(() => {
+          if (_fetchPromises[apiType] === retryPromise) _fetchPromises[apiType] = null;
+        });
+      }
+      data = await _fetchPromises[apiType];
+      // 渲染前检查 stale（避免异步响应回填已切换的页面）
+      if (isStale()) return;
       _setCachedWatchlist(apiType, data);
     }
   } else {
     const url = `/api/tmdb/watchlist/${apiType}?all=1`;
     const promise = api(url);
     _fetchPromises[apiType] = promise;
-    try {
-      data = await promise;
-      _setCachedWatchlist(apiType, data);
-    } finally {
-      setTimeout(() => {
-        if (_fetchPromises[apiType] === promise) _fetchPromises[apiType] = null;
-      }, 1000);
-    }
+    // 用 promise.finally 替代 setTimeout，防止 Promise 挂起导致条目永驻
+    data = await promise.finally(() => {
+      if (_fetchPromises[apiType] === promise) _fetchPromises[apiType] = null;
+    });
+    // 渲染前检查 stale（避免异步响应回填已切换的页面）
+    if (isStale()) return;
+    _setCachedWatchlist(apiType, data);
   }
   let items = data.results || [];
 
@@ -199,8 +212,11 @@ export async function renderTmdb(el, params) {
   if (q) {
     try {
       const filtered = await api(`/api/tmdb/watchlist/${apiType}?all=1&q=${encodeURIComponent(q)}`);
+      // 渲染前检查 stale（避免异步响应回填已切换的页面）
+      if (isStale()) return;
       items = filtered.results || [];
     } catch (e) {
+      if (isStale()) return;  // stale fallback guard
       // 后端搜索失败时回退到完整列表（不再做前端内存过滤）
       items = data.results || [];
     }
@@ -223,16 +239,15 @@ export async function renderTmdb(el, params) {
   const avatarHash = status.avatar_path || '';
   const avatarUrl = avatarHash ? `/api/tmdb/avatar?hash=${encodeURIComponent(avatarHash)}` : '';
   const username = status.username || data.account_id || '';
-  const _TMDB_LOGO_HEADER_CDN = 'https://www.themoviedb.org/assets/2/v4/logos/v2/blue_square_2-d537fb228cf3ded904ef09b136fe3fec72548ebc1fea3fbbd1ad9e36364db38b.svg';
-  const _TMDB_LOGO_CARD_CDN = 'https://www.themoviedb.org/assets/2/v4/logos/v2/blue_square_1-5bdc75aaebeb75dc7ae79426ddd9be3b2be1e342510f8202baf6bffa71d7f5c4.svg';
-  const _TMDB_LOGO_FALLBACK = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="4" fill="#01B4E4"/><text x="50%" y="54%" dominant-baseline="central" text-anchor="middle" fill="white" font-family="Arial,sans-serif" font-weight="700" font-size="12">TMDB</text></svg>');
+  const _TMDB_LOGO_HEADER_FALLBACK = '/assets/tmdb-logo-header.svg';
+  const _TMDB_LOGO_CARD_FALLBACK = '/assets/tmdb-logo-card.svg';
 
   function _resolveTmdbLogoUrl(s, kind) {
-    const asset = kind === 'header' ? _TMDB_LOGO_HEADER_CDN : _TMDB_LOGO_CARD_CDN;
+    const local = kind === 'header' ? _TMDB_LOGO_HEADER_FALLBACK : _TMDB_LOGO_CARD_FALLBACK;
     if (s.host && !s.host.startsWith('https://api.themoviedb.org')) {
-      return s.host.replace(/\/+$/, '') + asset.replace('https://www.themoviedb.org', '');
+      return s.host.replace(/\/+$/, '') + local;
     }
-    return asset;
+    return local;
   }
 
   const tmdbLogoUrl = _resolveTmdbLogoUrl(status, 'header');
@@ -240,14 +255,14 @@ export async function renderTmdb(el, params) {
 
   let html = `<div class="status-legend" style="justify-content:flex-start;align-items:center;gap:8px;padding:10px 14px">
   <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-<h2 class="tmdb-header-title" style="font-size:17px;margin:0;color:var(--text-main);display:flex;align-items:center;gap:8px;white-space:nowrap"><span class="tmdb-header-logo-box"><img src="${esc(tmdbLogoUrl)}" alt="TMDB" class="tmdb-header-logo" onerror="this.src='${_TMDB_LOGO_FALLBACK}'" loading="lazy"></span><span>待看列表</span></h2>
+<h2 class="tmdb-header-title" style="font-size:17px;margin:0;color:var(--text-main);display:flex;align-items:center;gap:8px;white-space:nowrap"><span class="tmdb-header-logo-box"><img src="${esc(tmdbLogoUrl)}" alt="TMDB" class="tmdb-header-logo" loading="lazy"></span><span>待看列表</span></h2>
     ${avatarUrl ? `<a href="${esc(avatarLinkUrl)}" target="_blank" rel="noopener" title="查看待看列表" style="line-height:0;display:flex"><img class="tmdb-avatar" src="${avatarUrl}" alt="avatar" referrerpolicy="no-referrer"></a>` : ''}
   </div>
   <div style="flex:1;display:flex;justify-content:center;gap:6px;flex-wrap:wrap">`;
   const legendItems = [['in', '已收录', 'badge_in'], ['out', '未收录', 'badge_out'], ['que', '存疑', 'badge_que']];
   legendItems.forEach(([sv, sl, si]) => {
     const activeCls = statusFilter === sv ? ' active' : '';
-    const href = `#tmdb?type=${mediaType}&status=${sv}`;
+    const href = `#tmdb?type=${esc(mediaType)}&status=${sv}`;
     html += `<a class="legend-badge ${sv}${activeCls}" href="${href}">${icon(si)} ${sl} (${statusCounts[sv] || 0})</a>`;
   });
   html += '</div>';
@@ -259,9 +274,9 @@ export async function renderTmdb(el, params) {
   html += `<span class="tmdb-page-info" style="padding:4px 10px">第 ${curPage}/${totalPages} 页 · 共 ${total} 项</span>`;
   html += `<span style="width:1px;height:16px;background:color-mix(in srgb,var(--border-color) 30%,transparent);flex-shrink:0"></span>`;
 html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${icon('csv')}</button>`;
-	  html += `<button class="tmdb-export-btn" data-export="json-movie" title="电影 JSON">${icon('json')}</button>`;
-	  html += `<button class="tmdb-export-btn" data-export="json-tv" title="剧集 JSON">${icon('tv')}</button>`;
-	  html += '</div></div>';
+    html += `<button class="tmdb-export-btn" data-export="json-movie" title="电影 JSON">${icon('json')}</button>`;
+    html += `<button class="tmdb-export-btn" data-export="json-tv" title="剧集 JSON">${icon('tv')}</button>`;
+    html += '</div></div>';
 
   html += `<div class="toolbar"><div class="search-wrap">${icon('search', 'search-prefix')}<input type="text" id="tmdb-search" placeholder="搜索待看列表..." value="${esc(q)}"></div><button class="search-btn" id="tmdb-search-btn">${icon('search')} 搜索</button></div>`;
 
@@ -276,7 +291,8 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
     const title = item.title || item.name || 'N/A';
     const originalTitle = item.original_title || item.original_name || '';
     const date = item.release_date || item.first_air_date || '';
-    const rating = item.vote_average || 0;
+    // rating.toFixed(1) 假设数值
+    const rating = Number(item.vote_average) || 0;
     const overview = item.overview || '';
     const posterPath = item.poster_path || '';
     const tmdbId = item.id;
@@ -290,8 +306,8 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
     const posterUrl = posterPath ? `/api/tmdb/poster?path=${encodeURIComponent(posterPath)}&w=342` : '';
     const backdropUrl = backdropPath ? `/api/tmdb/poster?path=${encodeURIComponent(backdropPath)}&w=780` : '';
     const detailUrl = `${_tmdbOfficialBase}/${mediaType}/${tmdbId}`;
-    const manualBadge = isManual ? `<span class="tmdb-manual-badge" title="手动设置">${icon('edit')}</span>` : '';
-    html += `<div class="tmdb-flip-wrapper" data-tmdb-id="${tmdbId}" data-tmdb-type="${mediaType}" data-backdrop="${esc(backdropUrl || '')}">
+    const manualBadge = isManual ? `<span class="tmdb-manual-badge" title="点击卡片翻面可手动设置收录状态">${icon('edit')}</span>` : '';
+    html += `<div class="tmdb-flip-wrapper" data-tmdb-id="${esc(tmdbId)}" data-tmdb-type="${esc(mediaType)}" data-backdrop="${esc(backdropUrl || '')}">
   ${seasonBarsHtml}
   <!-- Front face -->
      <div class="tmdb-flip-front">
@@ -305,7 +321,7 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
          · ${esc(date)}
           <span class="tmdb-card-status-inline ${st}">${icon(stIcon)} ${esc(stLabel)}${manualBadge}</span>
           <a class="tmdb-jump-btn" href="${esc(detailUrl)}" target="_blank" rel="noopener" title="前往 TMDB 查看详情">
-            <img class="tmdb-jump-logo" src="${esc(_resolveTmdbLogoUrl(status, 'card'))}" alt="TMDB" onerror="this.src='${_TMDB_LOGO_FALLBACK}'" loading="lazy">
+            <img class="tmdb-jump-logo" src="${esc(_resolveTmdbLogoUrl(status, 'card'))}" alt="TMDB" loading="lazy">
            <svg class="tmdb-jump-icon" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
          </a>
        </div>
@@ -326,7 +342,7 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
           ${rating > 0 ? `<span class="tt-tag">\u2605 ${rating.toFixed(1)}</span>` : ''}
           ${date ? `<span class="tt-tag">${esc(date)}</span>` : ''}
         </div>
-        <div class="tt-genre-tags" id="genre-${tmdbId}">
+        <div class="tt-genre-tags" id="genre-${esc(tmdbId)}">
           <span class="tt-tag tt-loading">加载中…</span>
         </div>
       </div>
@@ -336,11 +352,12 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
     </div>
     <div class="tt-override-section">
       <div class="tt-override-label">手动设置收录状态：</div>
-      <div class="tt-override-segmented" data-tmdb-id="${tmdbId}" data-tmdb-type="${mediaType}">
+      <div class="tt-override-segmented" data-tmdb-id="${esc(tmdbId)}" data-tmdb-type="${esc(mediaType)}">
         <button class="seg-btn seg-in${st === 'in' ? ' active' : ''}" data-status="matched" title="标记为已收录">${icon('badge_in')} 已收录</button>
         <button class="seg-btn seg-que${st === 'que' ? ' active' : ''}" data-status="fuzzy" title="标记为存疑">${icon('badge_que')} 存疑</button>
         <button class="seg-btn seg-out${st === 'out' ? ' active' : ''}" data-status="unmatched" title="标记为未收录">${icon('badge_out')} 未收录</button>
       </div>
+      ${isManual ? `<button class="tt-restore-auto-btn tmdb-restore-auto-btn" data-tmdb-id="${esc(tmdbId)}" data-tmdb-type="${esc(mediaType)}" title="清除人工覆盖，恢复自动判断">恢复自动判断</button>` : ''}
     </div>
   </div>
 </div>`;
@@ -351,9 +368,9 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
   const sp = statusFilter ? '&status=' + statusFilter : '';
   const qp = q ? '&q=' + encodeURIComponent(q) : '';
   html += '<div class="pager">';
-  if (curPage > 1) html += `<a class="pager-btn" href="#tmdb?type=${mediaType}&page=${curPage - 1}${qp}${sp}">${icon('chevron_l')} 上一页</a>`;
+  if (curPage > 1) html += `<a class="pager-btn" href="#tmdb?type=${esc(mediaType)}&page=${curPage - 1}${qp}${sp}">${icon('chevron_l')} 上一页</a>`;
   html += `<span class="tmdb-page-info">第 ${curPage} / ${totalPages} 页</span>`;
-  if (curPage < totalPages) html += `<a class="pager-btn" href="#tmdb?type=${mediaType}&page=${curPage + 1}${qp}${sp}">下一页 ${icon('chevron_r')}</a>`;
+  if (curPage < totalPages) html += `<a class="pager-btn" href="#tmdb?type=${esc(mediaType)}&page=${curPage + 1}${qp}${sp}">下一页 ${icon('chevron_r')}</a>`;
   html += '</div>';
 
   // TMDB 在线搜索结果容器（位于分页器之后，匹配 area.js 的 DOM 顺序）
@@ -363,9 +380,26 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
 
   el.innerHTML = html;
 
+  // 内联 onerror 改为 addEventListener（CSP 已移除 'unsafe-inline'）。
+  // 头部 logo 与卡片跳转 logo 加载失败时回退到本地官方 SVG 文件。
+  el.querySelectorAll('img.tmdb-header-logo').forEach(img => {
+    img.addEventListener('error', () => {
+      if (img.src !== _TMDB_LOGO_HEADER_FALLBACK) {
+        img.src = _TMDB_LOGO_HEADER_FALLBACK;
+      }
+    });
+  });
+  el.querySelectorAll('img.tmdb-jump-logo').forEach(img => {
+    img.addEventListener('error', () => {
+      if (img.src !== _TMDB_LOGO_CARD_FALLBACK) {
+        img.src = _TMDB_LOGO_CARD_FALLBACK;
+      }
+    });
+  });
+
   document.getElementById('tmdb-search-btn').addEventListener('click', () => {
     const val = document.getElementById('tmdb-search').value.trim();
-    let h = `#tmdb?type=${mediaType}`;
+    let h = `#tmdb?type=${esc(mediaType)}`;
     if (val) h += '&q=' + encodeURIComponent(val);
     navigate(h);
   });
@@ -378,11 +412,11 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
     const searchContainer = document.getElementById('tmdb-search-results');
     api(`/api/tmdb/search?query=${encodeURIComponent(q)}`)
       .then(results => {
-        if (isRenderStale()) return;  // 双保险 1：页面代际校验
+        if (isStale()) return;  // 双保险 1：页面代际校验
         renderTmdbResults(results, "你可能还在找", q, searchContainer);  // 双保险 2：container.isConnected 在函数内校验
       })
       .catch(() => {
-        if (isRenderStale()) return;
+        if (isStale()) return;
         showToast('TMDB 在线搜索失败，请稍后重试', 'error');
       });
   }
@@ -418,13 +452,54 @@ html += `<button class="tmdb-export-btn" data-export="csv" title="导出 CSV">${
         
         if (response.success) {
           showToast('收录状态已更新', 'success');
-          // 刷新页面数据
-          setTimeout(() => window.location.reload(), 800);
+          // 手动覆盖/恢复自动不清缓存
+          if (_tmdbCache[apiType]) {
+            _tmdbCache[apiType] = null;
+          }
+          // B'.2: 局部刷新：通过 hash 跳转触发 SPA 重新渲染当前页（与 clear 分支一致）
+          const cur = window.location.hash;
+          window.location.hash = '#tmdb';
+          if (cur !== '#tmdb') window.location.hash = cur;
+          else window.dispatchEvent(new HashChangeEvent('hashchange'));
         } else {
           showToast('更新失败: ' + (response.message || '未知错误'), 'error');
         }
       } catch (err) {
         showToast('更新失败: ' + err.message, 'error');
+      }
+    });
+  });
+
+  // "恢复自动判断"按钮事件
+  document.querySelectorAll('.tt-restore-auto-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const tmdbId = btn.dataset.tmdbId;
+      const mediaType = btn.dataset.tmdbType;
+      try {
+        const response = await api('/api/tmdb/watchlist/match/clear', {
+          method: 'POST',
+          body: JSON.stringify({
+            media_type: mediaType,
+            id: parseInt(tmdbId)
+          })
+        });
+        if (response.success) {
+          showToast('人工覆盖已清除，将在下次刷新时重新计算', 'success');
+          // 手动覆盖/恢复自动不清缓存
+          if (_tmdbCache[apiType]) {
+            _tmdbCache[apiType] = null;
+          }
+          // 局部刷新：通过 hash 跳转触发 SPA 重新渲染当前页
+          const cur = window.location.hash;
+          window.location.hash = '#tmdb';
+          if (cur !== '#tmdb') window.location.hash = cur;
+          else window.dispatchEvent(new HashChangeEvent('hashchange'));
+        } else {
+          showToast('清除失败: ' + (response.message || '未知错误'), 'error');
+        }
+      } catch (err) {
+        showToast('清除失败: ' + err.message, 'error');
       }
     });
   });

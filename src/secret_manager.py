@@ -18,10 +18,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import os
+import platform
 import secrets
 import stat
+import sys
+import threading
 
 log = logging.getLogger(__name__)
 
@@ -37,9 +41,16 @@ _KEY_BYTE_LEN = 32
 # 模块级缓存，避免每次调用都读磁盘
 _cached_fernet = None
 
+# 保护 _cached_fernet 首次创建（_load_or_create_master_key 用
+# O_TRUNC 截断写文件），防止多线程并发首次调用生成多个互不兼容的 key 文件。
+_fernet_lock = threading.RLock()
+
 # cryptography 是否可用（首次调用时检测）
 _cryptography_available: bool | None = None
 
+# 解密失败标志（全局可观测，用于启动时检查）
+_decryption_failed = False
+_decryption_failure_count = 0
 
 def _check_cryptography_available() -> bool:
     """检测 cryptography 是否已安装，结果缓存。"""
@@ -51,19 +62,50 @@ def _check_cryptography_available() -> bool:
         _cryptography_available = True
     except ImportError:
         _cryptography_available = False
-        log.warning(
-            "[SecretManager] cryptography 未安装，凭据将以明文存储。"
-            "如需启用加密，请执行 `pip install cryptography>=42.0.0`"
-        )
+        # Windows 上降级明文的警告更显眼
+        if platform.system() == "Windows":
+            log.warning(
+                "[SecretManager] cryptography 未安装，凭据将以明文存储在内存中。"
+                "Windows 环境下请尽快执行 `pip install cryptography>=42.0.0` "
+                "以启用加密保护。"
+            )
+        else:
+            log.warning(
+                "[SecretManager] cryptography 未安装，凭据将以明文存储。"
+                "如需启用加密，请执行 `pip install cryptography>=42.0.0`"
+            )
     return _cryptography_available
 
-
+def check_decryption_health() -> dict:
+    """检查解密健康状态（供启动时调用）。
+    
+    Returns:
+        {
+            "healthy": bool,
+            "decryption_failed": bool,
+            "failure_count": int,
+            "message": str
+        }
+    """
+    return {
+        "healthy": not _decryption_failed,
+        "decryption_failed": _decryption_failed,
+        "failure_count": _decryption_failure_count,
+        "message": (
+            "解密功能正常"
+            if not _decryption_failed
+            else f"已检测到 {_decryption_failure_count} 次解密失败，"
+                 "部分凭据可能已失效。请检查主密钥文件 .secret_key 是否正确。"
+        ),
+    }
+# 损坏时经可观测的解密失败暴露（_decryption_failed + WARNING + check_decryption_health()）。
 def _load_or_create_master_key() -> bytes:
     """加载或创建主密钥。
 
     首次调用时生成 32 字节随机密钥并以 URL-safe base64 写入 ``.secret_key``；
     后续调用直接读取。Unix 下尝试 chmod 600；Windows 尽力而为。
     """
+    # 完整性 sidecar 不在范围内（解密失败暴露）
     if os.path.exists(_KEY_FILE):
         with open(_KEY_FILE, "rb") as f:
             key = f.read().strip()
@@ -75,8 +117,14 @@ def _load_or_create_master_key() -> bytes:
     raw = secrets.token_bytes(_KEY_BYTE_LEN)
     key = base64.urlsafe_b64encode(raw)
 
-    # 写入文件
-    fd = os.open(_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # 原子写入：O_EXCL 确保跨进程互斥——若另一进程同时首次启动并先创建了
+    # 密钥文件，则此处 EEXIST 失败，回退为读取对方的密钥，避免 O_TRUNC 互相覆盖。
+    try:
+        fd = os.open(_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        log.info("[SecretManager] 密钥文件已被另一进程创建，改用已有密钥: %s", _KEY_FILE)
+        with open(_KEY_FILE, "rb") as f:
+            return f.read().strip()
     try:
         os.write(fd, key)
     finally:
@@ -92,9 +140,14 @@ def _load_or_create_master_key() -> bytes:
     log.info("[SecretManager] 已生成新的主密钥文件: %s", _KEY_FILE)
     return key
 
-
 def _get_fernet():
-    """获取 Fernet 实例（带模块级缓存）。若 cryptography 不可用返回 None。"""
+    """获取 Fernet 实例（带模块级缓存）。若 cryptography 不可用返回 None。
+
+    首次创建受模块级锁保护。原实现无锁，多线程并发调用时，
+    _load_or_create_master_key 用 O_TRUNC 截断写文件，线程 A 写 key_A、
+    线程 B 截断写 key_B，线程 A 缓存 Fernet(key_A)，下次启动加载 key_B，
+    导致 key_A 加密的值无法解密。加锁后首次创建只生成一个 key 文件。
+    """
     global _cached_fernet
     if _cached_fernet is not None:
         return _cached_fernet
@@ -102,15 +155,28 @@ def _get_fernet():
         return None
     from cryptography.fernet import Fernet
 
-    key = _load_or_create_master_key()
-    _cached_fernet = Fernet(key)
-    return _cached_fernet
-
+    with _fernet_lock:
+        # 双重检查：等待锁期间可能已被其它线程创建
+        if _cached_fernet is not None:
+            return _cached_fernet
+        try:
+            key = _load_or_create_master_key()
+        except RuntimeError as e:
+            # 主密钥文件存在但为空 → _load_or_create_master_key 抛 RuntimeError。
+            # 与损坏密钥同语义：视为不可用，返回 None 走降级路径，
+            # 避免空文件把 encrypt()/decrypt() 的降级逻辑击穿。
+            log.warning("[SecretManager] 主密钥文件为空，无法创建 Fernet: %s", e)
+            return None
+        try:
+            _cached_fernet = Fernet(key)
+        except ValueError as e:
+            log.warning("[SecretManager] 主密钥文件损坏，无法创建 Fernet: %s", e)
+            return None
+        return _cached_fernet
 
 def is_encrypted(value: str) -> bool:
     """判断值是否已被本模块加密（以 ``ENC:`` 开头）。"""
     return isinstance(value, str) and value.startswith(_ENC_PREFIX)
-
 
 def encrypt(plaintext: str) -> str:
     """加密明文字符串。
@@ -131,7 +197,6 @@ def encrypt(plaintext: str) -> str:
     # Fernet 输出已是 URL-safe base64 bytes，直接拼接前缀
     return _ENC_PREFIX + ciphertext.decode("ascii")
 
-
 def decrypt(ciphertext: str) -> str:
     """解密密文字符串。
 
@@ -140,7 +205,11 @@ def decrypt(ciphertext: str) -> str:
       不抛异常，使系统降级为"凭据未配置"。
     - 空串返回 ``""``。
     - 若 cryptography 不可用且值是 ``ENC:`` 前缀 → 返回 ``""``（无法解密）。
+    
+    解密失败时更新全局失败标志，供启动健康检查使用。
     """
+    global _decryption_failed, _decryption_failure_count
+    
     if not isinstance(ciphertext, str):
         return ""
     if ciphertext == "":
@@ -161,12 +230,15 @@ def decrypt(ciphertext: str) -> str:
         plaintext = fernet.decrypt(payload.encode("ascii"))
         return plaintext.decode("utf-8")
     except Exception as e:
-        # 主密钥不匹配 / 密文损坏 / cryptography 异常 → 降级为空串
+        # 主密钥不匹配 / 密文损坏 → 记录失败并更新全局标志
+        _decryption_failed = True
+        _decryption_failure_count += 1
         log.warning(
-            "[SecretManager] 解密失败（凭据将视为未配置）: %s", e
+            "[SecretManager] 解密失败（凭据将视为未配置，失败次数: %d）: %s",
+            _decryption_failure_count,
+            e,
         )
         return ""
-
 
 def reset_master_key_for_testing() -> None:
     """测试用：清空模块级 Fernet 缓存，强制下次调用重新加载。

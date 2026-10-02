@@ -1,9 +1,15 @@
 import { api } from '../core/api.js';
 import { icon } from '../core/icons.js';
 import { esc, fmtTime } from '../core/utils.js';
+import { showToast } from '../components/toast.js';
+import { captureRenderGuard } from '../core/router.js';
 
-// 当前日志类型：'tmdb' = TMDB 操作日志（主日志，默认），'main' = 主程序日志
+// 当前日志类型：'tmdb' = WebUI 操作日志（主日志，默认），'main' = 主程序日志
 let currentLogType = 'tmdb';
+
+// 标签切换与刷新不经 router、不推进 _renderGen，代际护栏无法拦截
+// "切标签后旧响应回填"。模块级 _logsGeneration 在切换/刷新时自增，响应写入前比对。
+let _logsGeneration = 0;
 
 // TMDB 操作类型 → 中文标签映射（覆盖后端所有 op code）
 const opLabel = {
@@ -62,11 +68,21 @@ export async function renderLogs(el) {
 }
 
 async function _fetchAndRenderLogs(el) {
-  const url = currentLogType === 'tmdb' ? '/api/tmdb/logs' : '/api/logs';
+  // 代际快照工厂——在首次 await 前捕获
+  const isStale = captureRenderGuard();
+  // 快照起始时刻的类型与请求代际，全程使用；await 后若已变化则丢弃响应
+  const logType = currentLogType;
+  const url = logType === 'tmdb' ? '/api/tmdb/logs' : '/api/logs';
+  const gen = _logsGeneration;
   const data = await api(url);
 
+  // 导航期间在途请求返回后，若页面代际已变则丢弃，避免覆盖新页面
+  if (isStale()) return;
+  // 标签切换/刷新期间又发起新请求 -> 旧响应作废，避免回填错位
+  if (currentLogType !== logType || _logsGeneration !== gen) return;
+
   let logs, totalCount;
-  if (currentLogType === 'tmdb') {
+  if (logType === 'tmdb') {
     logs = data.logs || [];
     totalCount = data.count || logs.length;
   } else {
@@ -79,7 +95,7 @@ async function _fetchAndRenderLogs(el) {
   const levelLabel = { 'info': '信息', 'success': '成功', 'warn': '警告', 'error': '错误' };
 
   const rows = logs.map(log => {
-    if (currentLogType === 'main') {
+    if (logType === 'main') {
       return `<tr><td>${esc(log.msg)}</td></tr>`;
     } else {
       const lv = log.level || 'info';
@@ -97,19 +113,19 @@ async function _fetchAndRenderLogs(el) {
     }
   }).join('');
 
-  const mainActive = currentLogType === 'main' ? 'active' : '';
-  const tmdbActive = currentLogType === 'tmdb' ? 'active' : '';
+  const mainActive = logType === 'main' ? 'active' : '';
+  const tmdbActive = logType === 'tmdb' ? 'active' : '';
 
   // 下载按钮文案根据当前日志类型动态变化
-  const downloadLabel = currentLogType === 'tmdb'
-    ? '下载当前 TMDB 日志'
+  const downloadLabel = logType === 'tmdb'
+    ? '下载当前 WebUI 操作日志'
     : '下载当前主程序日志';
 
   // tab 按钮上直接显示条数
-  const tmdbTabLabel = currentLogType === 'tmdb'
-    ? `TMDB 操作日志 (${totalCount})`
-    : 'TMDB 操作日志';
-  const mainTabLabel = currentLogType === 'main'
+  const tmdbTabLabel = logType === 'tmdb'
+    ? `WebUI 操作日志 (${totalCount})`
+    : 'WebUI 操作日志';
+  const mainTabLabel = logType === 'main'
     ? `主程序日志 (${totalCount})`
     : '主程序日志';
 
@@ -126,7 +142,7 @@ async function _fetchAndRenderLogs(el) {
 </div>
 <table>
 <thead id="log-table-header"></thead>
-<tbody>${rows || '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">暂无日志</td></tr>'}</tbody>
+<tbody>${rows || '<tr><td colspan="1" style="text-align:center;color:var(--text-muted)">暂无日志</td></tr>'}</tbody>
 </table>`;
 
   _renderLogTableHeader();
@@ -139,8 +155,11 @@ async function _fetchAndRenderLogs(el) {
       if (!btn) return;
       const newType = btn.dataset.logType;
       if (newType && newType !== currentLogType) {
+        // 切换标签时自增请求代际，使在途旧响应作废
+        _logsGeneration++;
         currentLogType = newType;
-        _fetchAndRenderLogs(el);
+        // 标签切换未 catch
+        _fetchAndRenderLogs(el).catch(e => showToast('加载失败: ' + e.message, 'error'));
       }
     });
   }
@@ -153,46 +172,55 @@ async function _fetchAndRenderLogs(el) {
       refreshBtn.disabled = true;
       refreshBtn.innerHTML = '刷新中...';
       try {
+        // 手动刷新时自增请求代际，使在途旧响应作废
+        _logsGeneration++;
         await _fetchAndRenderLogs(el);
+      } catch (e) {
+        showToast('刷新失败: ' + e.message, 'error');
       } finally {
-        // _fetchAndRenderLogs 已经重建了 DOM，这里不需要恢复按钮状态
+        // 恢复按钮状态（_fetchAndRenderLogs 可能重建 DOM，需重新获取引用）
+        const btn = document.getElementById('logs-refresh');
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = originalHtml;
+        }
       }
     });
   }
 
-  // 下载按钮：通过 api() 获取数据后生成 Blob 下载（避免 401）
+  // 下载按钮：改用服务端流式下载端点（/api/logs/download、/api/tmdb/logs/download），
+  // 自动附加 X-Session-Token，避免 401，且能下载完整日志（不受分页上限截断）。
   const downloadBtn = document.getElementById('logs-download');
   if (downloadBtn) {
     downloadBtn.addEventListener('click', async () => {
       const originalHtml = downloadBtn.innerHTML;
       downloadBtn.disabled = true;
       downloadBtn.innerHTML = '准备下载...';
-      
+
       try {
-        let content, filename;
-        
-        if (currentLogType === 'tmdb') {
-          // TMDB 日志：请求最多 500 条
-          const data = await api('/api/tmdb/logs?limit=500');
-          const logs = data.logs || [];
-          const lines = logs.map(log => {
-            const ts = log.ts ? new Date(log.ts * 1000).toLocaleString('zh-CN') : '-';
-            const level = (log.level || 'info').toUpperCase();
-            const op = opLabel[log.op] || log.op || '-';
-            return `[${ts}] [${level}] [${op}] ${log.msg || ''}`;
-          });
-          content = lines.join('\n');
-          filename = 'tmdb_operations.log';
-        } else {
-          // 主程序日志：请求最多 1000 行
-          const data = await api('/api/logs?lines=1000');
-          const lines = data.lines || [];
-          content = lines.join('\n');
-          filename = 'strm_bridge.log';
+        const endpoint = currentLogType === 'tmdb'
+          ? '/api/tmdb/logs/download'
+          : '/api/logs/download';
+        const filename = currentLogType === 'tmdb'
+          ? 'webui_operations.log'
+          : 'strm_bridge.log';
+
+        const headers = {};
+        const token = localStorage.getItem('session_token');
+        if (token) headers['X-Session-Token'] = token;
+
+        const resp = await fetch(endpoint, { headers });
+        if (resp.status === 401) {
+          localStorage.removeItem('session_token');
+          showToast('登录已过期，请重新登录', 'error');
+          return;
         }
-        
-        // 创建 Blob 并触发下载
-        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+        if (!resp.ok) {
+          showToast('下载失败: HTTP ' + resp.status, 'error');
+          return;
+        }
+
+        const blob = await resp.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -203,7 +231,7 @@ async function _fetchAndRenderLogs(el) {
         URL.revokeObjectURL(url);
       } catch (err) {
         console.error('下载日志失败:', err);
-        alert('下载失败: ' + err.message);
+        showToast('下载失败: ' + err.message, 'error');
       } finally {
         downloadBtn.disabled = false;
         downloadBtn.innerHTML = originalHtml;

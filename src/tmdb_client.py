@@ -28,12 +28,12 @@ from pathlib import Path
 BASE_URL = "https://api.themoviedb.org"
 
 # 缓存文件路径：与 src/.admin_token.json 同级
+# 本地缓存 PII（account_id），通过 .gitignore + 0600 权限保护
 _CACHE_DIR = Path(__file__).parent
 _CACHE_FILE = _CACHE_DIR / ".tmdb_account.json"
 
 # 缓存有效期（秒）：7 天
 _CACHE_TTL = 7 * 24 * 3600
-
 
 # ============================================================
 # TMDB 客户端
@@ -73,7 +73,7 @@ class TmdbClient:
     # ----------------------------------------------------------
     # account_id 缓存
     # ----------------------------------------------------------
-
+    # 文件格式为简单 JSON，便于调试和手动检查；安全由 LAN 环境+文件权限保证。
     def _load_cached_account_id(self) -> None:
         """从本地缓存文件加载 account_id"""
         if not _CACHE_FILE.exists():
@@ -95,7 +95,6 @@ class TmdbClient:
                 )
         except Exception as e:
             logging.warning("[TMDB] 读取缓存文件失败: %s", e)
-
     def _save_cached_account_id(self) -> None:
         """保存 account_id 到本地缓存文件"""
         try:
@@ -207,7 +206,7 @@ class TmdbClient:
         1. access_token — Bearer Token
         2. api_key — 查询参数 ?api_key=xxx
         3. 两者都为空 — 返回 None
-        
+
         重试策略：
         - 429 速率限制：使用 Retry-After 头或指数退避
         - 网络错误：指数退避重试
@@ -265,8 +264,19 @@ class TmdbClient:
             except urllib.error.HTTPError as e:
                 # 429 速率限制：重试
                 if e.code == 429 and attempt < retries - 1:
-                    retry_after = float(e.headers.get("Retry-After", backoff * (2 ** attempt)))
-                    logging.warning("[TMDB] 速率限制，等待 %.1f 秒后重试 (%d/%d)", 
+                    default_wait = backoff * (2 ** attempt)
+                    try:
+                        retry_after = float(e.headers.get("Retry-After", default_wait))
+                    except (ValueError, TypeError):
+                        # RFC 允许 Retry-After 为 HTTP-date（如 "Wed, 21 Oct 2015 07:28:00 GMT"），
+                        # float() 会抛 ValueError 逃逸重试逻辑；回退默认指数退避
+                        retry_after = default_wait
+                    # 等待秒数设上限并拒绝负值，防止异常/恶意 Retry-After 无限挂起线程
+                    if retry_after < 0:
+                        retry_after = default_wait
+                    elif retry_after > 60.0:
+                        retry_after = 60.0
+                    logging.warning("[TMDB] 速率限制，等待 %.1f 秒后重试 (%d/%d)",
                                    retry_after, attempt + 1, retries)
                     time.sleep(retry_after)
                     continue
@@ -284,7 +294,7 @@ class TmdbClient:
                 # 最终失败
                 logging.error("[TMDB] 请求失败 %s: %s", endpoint, e)
                 return None
-        
+
         return None
 
     # ----------------------------------------------------------
@@ -377,58 +387,68 @@ class TmdbClient:
         获取待看电影列表（分页）。
         api_key-only 模式返回空列表。
         返回 (items, has_next_page)
+
+        取回失败（api_key 模式、无 account_id、响应缺 results、请求异常）
+        一律 raise，不再返回 ([], False) 与"清单真为空"同形——否则 sync() 会据此
+        全清本地表。
         """
         if self._use_api_key_auth:
-            logging.debug("[TMDB] api_key 模式不支持 watchlist")
-            return [], False
+            raise RuntimeError("api_key 模式不支持 watchlist")
         aid = self.account_id
         if not aid:
-            return [], False
+            raise RuntimeError("未配置 account_id，无法拉取 watchlist")
         try:
             data = self.request(
                 f"/3/account/{aid}/watchlist/movies",
                 {"page": str(page)},
             )
             if not data or "results" not in data:
-                return [], False
+                raise RuntimeError("watchlist 响应缺少 results")
             items = data["results"]
             has_next = data.get("page", 1) < data.get("total_pages", 1)
             return items, has_next
         except Exception as e:
             logging.error("[TMDB] 获取电影待看列表请求失败: %s", e)
-            return [], False
+            if isinstance(e, RuntimeError):
+                raise
+            raise RuntimeError(f"获取电影待看列表请求失败: {e}") from e
 
     def get_watchlist_tv(self, page: int = 1) -> tuple[list[dict], bool]:
         """
         获取待看剧集列表（分页）。
         api_key-only 模式返回空列表。
         返回 (items, has_next_page)
+
+        同 get_watchlist_movies，取回失败一律 raise。
         """
         if self._use_api_key_auth:
-            logging.debug("[TMDB] api_key 模式不支持 watchlist")
-            return [], False
+            raise RuntimeError("api_key 模式不支持 watchlist")
         aid = self.account_id
         if not aid:
-            return [], False
+            raise RuntimeError("未配置 account_id，无法拉取 watchlist")
         try:
             data = self.request(
                 f"/3/account/{aid}/watchlist/tv",
                 {"page": str(page)},
             )
             if not data or "results" not in data:
-                return [], False
+                raise RuntimeError("watchlist 响应缺少 results")
             items = data["results"]
             has_next = data.get("page", 1) < data.get("total_pages", 1)
             return items, has_next
         except Exception as e:
             logging.error("[TMDB] 获取剧集待看列表请求失败: %s", e)
-            return [], False
+            if isinstance(e, RuntimeError):
+                raise
+            raise RuntimeError(f"获取剧集待看列表请求失败: {e}") from e
 
     def fetch_all_watchlist_movies(self) -> list[dict]:
         """获取全部待看电影"""
+        # Max page 安全阀（与 list_storages 对齐），防止 has_next 恒真时无限循环
+        MAX_PAGES = 100
         all_items: list[dict] = []
         page = 1
-        while True:
+        while page <= MAX_PAGES:
             items, has_next = self.get_watchlist_movies(page)
             if not items:
                 break
@@ -437,13 +457,17 @@ class TmdbClient:
                 break
             page += 1
             time.sleep(0.3)
+        if page > MAX_PAGES:
+            logging.warning("[TMDB] 电影 watchlist 已达最大页数 %d，可能数据不完整", MAX_PAGES)
         return all_items
 
     def fetch_all_watchlist_tv(self) -> list[dict]:
         """获取全部待看剧集"""
+        # Max page 安全阀（与 list_storages 对齐），防止 has_next 恒真时无限循环
+        MAX_PAGES = 100
         all_items: list[dict] = []
         page = 1
-        while True:
+        while page <= MAX_PAGES:
             items, has_next = self.get_watchlist_tv(page)
             if not items:
                 break
@@ -452,8 +476,9 @@ class TmdbClient:
                 break
             page += 1
             time.sleep(0.3)
+        if page > MAX_PAGES:
+            logging.warning("[TMDB] 剧集 watchlist 已达最大页数 %d，可能数据不完整", MAX_PAGES)
         return all_items
-
 
 # ============================================================
 # 便捷工厂函数

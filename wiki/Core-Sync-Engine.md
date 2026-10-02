@@ -1,4 +1,5 @@
 # 四、核心同步引擎
+> 最后更新：2026-08-06
 
 ## AppService — 中央编排器
 
@@ -29,11 +30,12 @@ AppService.__init__()
 │   ├── _fingerprint_locks_lock (按指纹锁的字典锁)
 │   ├── _fingerprint_locks (按指纹串行化)
 │   ├── _webdav_scan_logged (WebDAV 扫描日志去重集合)
-│   └── _refresh_lock (WebUI 媒体刷新锁)
 ├── 解析 A/B/C 根路径
 ├── 创建 SyncService(self)
 └── 创建 SubtitleHandler(self)
 ```
+
+> `_refresh_lock`（WebUI 媒体刷新锁）**不在此锁树中**——已迁移为 `WebUIServer` 持有的锁（见 `server.py`），AppService 启动序列不再创建它。该锁用于序列化 WebUI 手动刷新与后台周期刷新，防止同一 A 区被并发全量扫描。
 
 > 注：`init_subtitle_table()` 在 `Database.__init__()` 中调用，不在 `AppService.__init__()`。`AppService.start()` 中调用的是 `cleanup_invalid_subtitles()`。
 
@@ -41,16 +43,16 @@ AppService.__init__()
 
 #### 启动序列（`start()`）
 
-9 步初始化过程：
+8 步初始化过程：
 
 1. **准备环境并初始化数据库** — 检查 A 区路径存在性（不存在则 warning），创建 B/C 目录（如需要），初始化 bridge.db 所有表
 
-2. **从 OpenList API 加载引擎配置** — 使用 `StrmStorageManager` 获取所有 `driver=strm` 的存储节点，解析 `addition` JSON 字段提取 `SaveStrmLocalPath`、`paths`、`SaveLocalMode`。仅过滤用户配置的引擎，构建映射：`引擎挂载点 → A 区本地路径 → 监控云端路径`
+2. **从 OpenList API 加载引擎配置** — `update_engine_configs()` 直接调用 OpenList Admin API（`get_strm_storages_full_info()`）获取所有 `driver=strm` 的存储节点（不走 `StrmStorageManager` 类，该类仅在 `refresh_service` 中实例化），解析 `addition` JSON 字段提取 `SaveStrmLocalPath`、`paths`、`SaveLocalMode`。仅过滤用户配置的引擎，构建映射：`引擎挂载点 → A 区本地路径 → 监控云端路径`
 
-3. **B 区物理磁盘逆向自同步**（`initial_scan_b()`，拆分为 4 个子函数）：
+3. **B 区物理磁盘逆向自同步**（`initial_scan_b()`，拆分为 4 个子函数）：默认扫描全部 B 根的文件元数据；只有 `b_lineage_snapshot` 的 mapping/version/lineage/state/size/mtime/fingerprint 全部匹配时才跳过完整血统校验，快照异常自动回退。`force_full=True` 只强制完整校验，不能绕过配置 fail-safe。
    - `_scan_b_disk()` — 遍历 B 区磁盘，计算每个 `.strm` 的指纹
    - `_load_b_db_records()` — 加载数据库 `b_strm_files` 表记录
-   - `_reconcile_b_historical_records()` — 对比历史 DB 记录与磁盘数据
+   - `_reconcile_b_historical_records()` — 对比历史 DB 记录与磁盘数据。核对前调用 `_build_reconcile_cache()` 一次性预载 A 区记录、边界映射表与 lineage 快照至内存缓存，`_resolve_a_source`、`_check_boundary_mappings`、`_snapshot_reuses_valid_lineage` 优先查缓存，减少逐条 DB 读；验证通过的新快照暂存至 `pending_snapshots` 缓冲，每满 `B_SNAPSHOT_BATCH_SIZE`（1000）或循环结束时批量写入（单事务），不改变逐行容错语义（单行失败仅告警并继续）。
      - **新文件**（磁盘有但 DB 无）：注册、检查血统、加入身份跟踪
      - **失效记录**（DB 有但磁盘无且无同义路径）：清理
      - **改名文件**（DB 有但磁盘无，同义路径存在）：自动 `move_b_record`
@@ -61,13 +63,13 @@ AppService.__init__()
 
 5. **持久化当前根目录快照** — 将当前引擎路径写入 `protected_roots_snapshot` 表
 
-6. **A 区全量扫描与索引建立** — 遍历所有 A 区目录，解析 `.strm` 文件内容，计算指纹，注册 `a_strm_files` 表。发现字幕文件（`.ass`/`.srt`/`.ssa`）路由到 `SubtitleHandler`
+6. **A 区全量扫描与索引建立** — 批量遍历所有 A 区目录，使用多线程并发读取 .strm 文件（4 个工作线程）。启动时使用 bulk_connection 长连接模式批量写入数据库（绕过 rw_lock，复用连接），扫描完成并提交后一次性重建 FTS 索引。定期刷新时使用 upsert_a_batch（保持线程安全，逐批维护 FTS）。每 100 条或每 2 秒输出进度日志（含 records/s 性能基准），解决日志冻结问题。字幕处理由启动时调用的后台受控线程 `_start_subtitle_scan_background()` 异步补偿。批量预读 `IN(...)` 按 900 条/批 `chunk_list` 分片，规避 SQLite 变量上限（<3.32 默认 999），区别于每 1000 条一次提交的提交语义。
 
-7. **A → B 全量同步**（可选，受 `sync_on_startup` 配置控制，方法 `scan_a_to_b_full_sync`） — 对每个 A 区记录，检查指纹是否已在 B 区。不在时复制 STRM 到 B 区并注册。已存在时跳过（防止劣质命名回灌）。当 `sync_on_startup = false` 时跳过此步骤（日志输出"跳过 A→B 全量同步"），但启动等待仍然执行。
+7. **A → B 全量同步**（可选，受 `sync_on_startup` 配置控制，方法 `scan_a_to_b_full_sync`） — 采用**两遍结构**：第一遍（索引阶段）遍历所有 A 记录，调用 `build_b_path_from_a()` 计算目标路径，建立 `target_path -> [source_info]` 索引并检测目标冲突（同目标 + 不同 WebDAV 身份）；第二遍（执行阶段）对非冲突目标调用 `_sync_one_record`，对冲突目标统一返回 `skip_target_conflict` 安全跳过（不复制、不覆盖、不自动改名）。启动时使用 `bulk_connection()` 长连接模式（1 个连接 + 1 次提交），跳过血统校验和 per-file `check_exists` HTTP。预加载 ghost 保护和 B 区指纹到内存缓存。`use_bulk` 参数控制模式选择：`use_bulk=True` 单事务提交（首次启动，无并发），`use_bulk=False` 分批提交（每 1000 条，主动刷新，有并发）。`valid_engine_paths` 参数用于限定本次同步覆盖的引擎路径子集（定期刷新时只传待刷新引擎，全量审计传 `None` 表示全部）。冲突汇总输出冲突数量、唯一目标数和最多 5 个示例。当 `sync_on_startup = false` 时跳过此步骤（日志输出"跳过 A→B 全量同步"），但启动等待仍然执行。
 
-8. **B 区冗余清理** — 删除状态为 `duplicate`、`quarantined`、`invalid` 的文件。清理空目录（保留含 `.nfo`、`.jpg`、`.png` 等刮削元数据的目录）
+8. **启动 Watchdog 监控与刷新定时器** — 创建 `watchdog.Observer` 及三个事件处理器，启动 `RefreshService` 定时器
 
-9. **启动 Watchdog 监控与刷新定时器** — 创建 `watchdog.Observer` 及三个事件处理器，启动 `RefreshService` 定时器
+> **设计原则：冗余清理永远只在局部触发，不做全盘扫描。** 启动时不再执行 `cleanup_a_redundant_using_api()` 和 `cleanup_b_redundant()`。冗余清理改为运行时按需触发：WebUI 手动刷新媒体时、watchdog 检测到 A/B 区文件删除时（通过 `trigger_delayed_cleanup`）。
 
 #### 停止序列（`stop()`）
 - 取消所有待执行的延迟清理定时器（`_pending_cleanups`）
@@ -76,7 +78,51 @@ AppService.__init__()
 
 > 注：`stop()` **不关闭数据库连接**，**不设置 `_running` 标志**。数据库生命周期由 `Database` 类独立管理。
 
+## B→C 安全迁移
+
+`get_c_path_for_b()` 是唯一 C 目标生成入口，要求唯一 mapping、非空 `mapping_id` 和 B 路径位于对应 B 根内，目标格式为 `C/<mapping_id>/<relative>`。目标已存在时只允许明确同源的幂等清理；异源、未知身份、移动失败或 C 记录写入失败均保留来源，不使用 basename fallback。
+
+`.duplicate`、`.quarantined`、`.invalid` 及时间戳变体不能仅凭后缀删除，必须先解析后缀自身或候选原始 `.strm` 的 mapping 与 WebDAV 身份，并证明同源。
+
 ## 同步管线：A → B
+
+### 数据库读路径与 bulk 写事务
+
+批量同步的 `bulk_connection()` 会在单事务模式下持续持有 SQLite 写事务。WAL 允许普通只读查询继续读取，但 `BEGIN IMMEDIATE` 仍会竞争 RESERVED 锁。因此，所有只做 SELECT 的数据库 getter（包括 B 区 watcher 使用的 `get_b_by_local_full`）必须使用 `read_connection()`，该连接设置 `PRAGMA query_only=ON`；只有 INSERT、UPDATE、DELETE 等写操作才使用 `connection()`。
+
+这条边界避免了 B 区 watcher 在 A→B 同步期间因只读查询误触发写锁探测而产生 `database is locked`。`bulk_connection()` 仍只允许用于启动阶段的单线程批量写入，主动刷新使用分批提交。
+
+### 并发安全设计：为什么 `_sync_one_record` 不使用指纹锁
+
+`_sync_one_record` 在批量同步（`scan_a_to_b_full_sync`）中使用，**不使用** `get_fingerprint_lock`。这是经过代码验证的设计决策，而非遗漏。
+
+B 区启动核对现支持两种优化：`b_lineage_snapshot` 快速路径（跳过完整血统校验）和 B 区核对缓存预载（`_build_reconcile_cache`：一次性加载 A 区记录、边界映射表与快照至内存，减少逐条 DB 读）。首轮、版本不匹配、stat/DB 异常或并发修改均回退完整核对。`force_full=True` 可强制审计且不能绕过 fail-safe。快照写入改为批量缓冲（`_store_valid_lineage_snapshot` 的 `buffered=True` 模式，每 `B_SNAPSHOT_BATCH_SIZE` 或循环结束时单事务批量写入），保持逐行容错语义。正式生产测试使用真实 `AppService + Database` 分别比较 force-full 与 incremental 的最终 DB、磁盘、projection、boundary 和快照状态；独立 benchmark 仅用于性能趋势，不等价于生产 reconciliation 验证。
+
+**现有三层防御**：
+
+| 防御层 | 机制 | 防护场景 |
+|--------|------|---------|
+| **L1**: 内存缓存 `_cache_b_fp` | 快速过滤已知指纹 | 同批次内重复、已收录条目 |
+| **L2**: 文件系统检查 `b_local.exists()` | 检查 B 区文件是否已存在 | 几乎所有并发场景 |
+| **L3**: `ensure_single_visible_instance` | 去重，将多余实例改名为 `.duplicate` | 兜底清理 |
+
+**为什么不添加指纹锁**：
+
+1. **性能灾难**：指纹锁持有时间从毫秒级变成秒级（包含文件拷贝），50,000 条记录 × 每次持锁 0.1-1 秒 = 1.4-2.8 小时总锁持有时间，会严重阻塞 watchdog 的 `handle_a_created_or_modified`（使用同一把锁）
+
+2. **`b_fingerprint_exists` 看不到 `bulk_connection` 的未提交写入**：
+   - `bulk_connection` 绕过 `rw_lock`，直接 `sqlite3.connect`
+   - `b_fingerprint_exists` 获取 `rw_lock` 读锁，打开新连接
+   - SQLite 事务隔离导致新连接看不到未提交写入
+   - "双重检查"只能看到 watchdog 的已提交写入，看不到同批次写入
+   - 内存缓存 `_cache_b_fp` 已经能处理同批次重复
+
+3. **并发场景已被覆盖**：
+   - `_sync_one_record` vs `handle_a_created_or_modified`：后者在指纹锁内检查 `b_local.exists()`，如果文件已存在则 upsert 已有文件并 return，不到达 `copy_a_record_to_b`
+   - `_sync_one_record` vs `copy_a_record_to_b_if_needed`：同样被 L2 文件系统检查覆盖
+   - 真正的 TOCTOU（两个线程同时检查 `b_local.exists()` → 都得到 False）：概率极低（需要微秒级时序），且 L3 兜底
+
+**结论**：添加指纹锁不带来实质安全提升，但引入性能风险和代码复杂度。
 
 ### `SyncService.copy_a_record_to_b()`（`domain/sync/sync_service.py`）
 
@@ -134,7 +180,7 @@ A 区文件被删除时触发：
 新 `.strm` 出现在 B 区时触发：
 1. 计算指纹
 2. 血统验证（9 步管线 `_verify_b_path_lineage`）
-3. 血统失败：调用 `_restore_b_from_a_after_violation()`（物理删除越界文件 → 从 A 区恢复到正确位置），而非设 `invalid` 状态
+3. 血统失败：先尝试 C 区迁移（`get_c_path_for_b` → 移动到 `C/<mapping_id>/<relative>`），迁移失败才回退到物理删除越界文件 → 从 A 区恢复到正确位置（`_restore_b_from_a_after_violation()`），而非设 `invalid` 状态；恢复 DB 前必须由目标 B 路径解析唯一 `mapping_id`，解析失败则 fail-closed 跳过 `BRecord` 写入，并由后续去重复用同一 mapping
 4. 无法解析 STRM：走 `_handle_unparseable_strm()` 分支
 5. 重复指纹：重命名为 `.duplicate`
 6. 有效新文件：注册 DB，加入身份跟踪
@@ -146,7 +192,7 @@ A 区文件被删除时触发：
 2. 查找 DB 记录（fingerprint、webdav_path 等）
 3. **第一重：`_restoring_markers` 检查** — 如果 fingerprint 在程序恢复标记集合中，跳过追删
 4. **第二重：`_engine_internal_markers` 检查**（B-7 标记）— 如果是程序内部删除（隔离/去重/迁移），跳过云端删除，仅清理本地 DB 记录
-5. **第三重：`has_other_b_instance` + `_check_fingerprint_exists_in_b`** — 如果 DB 或文件系统中仍存在同指纹的其他 B 区实例，跳过 WebDAV 删除
+5. **第三重：`has_other_b_instance(mapping_id, fingerprint, exclude_local_path)` + `_check_fingerprint_exists_in_b(fingerprint, exclude_path, mapping_id)`** — 仅检查同一 mapping 下的同指纹其他可见实例；mapping 无法解析时 fail-closed 跳过云端删除
 6. 三重全不通过，执行云端删除：
    - MOVE 模式：通过 `build_webdav_trash_path()` 递归创建回收站目录树，调用 `admin_api.move()`，触发刷新钩子
    - DELETE 模式：调用 `admin_api.remove()`，触发刷新钩子
@@ -167,20 +213,27 @@ A 区文件被删除时触发：
 
 ### RefreshService（`refresh_service.py`）
 
-后台线程周期调用 `app.refresh_webdav_root()`。工作线程每次循环重新读取间隔值，使 WebUI 热重载后的新间隔在下个周期生效：
+后台线程周期调用 `app.refresh_webdav_root()`。工作线程使用 `threading.Event` 等待，支持即时唤醒：WebUI 修改间隔/启用状态/刷新路径后调用 `reconfigure()` → `notify_config_changed()` → `_config_changed.set()`，工作线程立即退出等待并执行下一轮。
 
 ```python
+# 以下为简化示意，实际实现包含熔断器、enabled 守卫、max(1, interval) 下限、双重 _running 检查
 def _worker(self) -> None:
-    self.execute_refresh_cycle()
     while self._running:
-        interval = self.app.config.refresh.interval_seconds
-        waited = 0
-        while self._running and waited < interval:
-            time.sleep(1)
-            waited += 1
+        self.execute_refresh_cycle()
         if not self._running:
             break
-        self.execute_refresh_cycle()
+        interval = self.app.config.refresh.interval_seconds
+        self._config_changed.wait(timeout=interval)
+        self._config_changed.clear()
+
+def reconfigure(self) -> None:
+    """WebUI 配置变更后调用，即时重载间隔/启用状态/路径。"""
+    # 持有 _lifecycle_lock，停止旧线程或唤醒当前线程
+    ...
+
+def notify_config_changed(self) -> None:
+    """唤醒工作线程，使其立即读取新配置并执行下一轮刷新。"""
+    self._config_changed.set()
 ```
 
 ### 路径分析（`PathAnalysis`）
@@ -193,19 +246,60 @@ def _worker(self) -> None:
 | `only_refresh` | 仅在刷新列表，不在引擎管辖 | 只读模式（仅刷新，不清理 B 区） |
 | `only_engine` | 仅在引擎管辖，不在刷新列表 | 不参与本次刷新 |
 
-### 完整刷新周期（9 步）
+### 完整刷新周期（8 步）
 
 | 步骤 | 方法 | 说明 |
 |------|------|------|
 | 1 | `_sync_and_scan_protected_roots` | 同步并扫描受保护根目录（与 DB 快照对比） |
 | 2 | `_analyze_paths` + `_log_path_analysis` | 路径分析（交叉校验 `refresh_paths` vs `strm_engine_paths`） |
 | 3 | `_check_engine_accessibility` | 通过 Admin API 验证每个引擎存储状态 |
-| 4 | **`_cleanup_a_for_update_mode`** | **Update 模式 A 区清理**（清理云端已不存在的 A 区残留 STRM） |
-| 5 | `_calculate_safe_refresh_paths` | 计算安全刷新路径（`valid_refresh_paths` 与 `accessible_engines` 交集） |
-| 6 | `_execute_webdav_refreshes` | 对安全路径调用 `trigger_refresh_via_fs_list()` |
-| 7 | `_wait_for_sync` | 等待同步落地（睡眠 `a_to_b_restore_delay_seconds`，默认 30s） |
-| 8 | `_scan_and_sync` | 扫描与同步（`initial_scan_a()` → `scan_a_to_b_full_sync()`） |
-| 9 | `_persist_snapshot` | 持久化根目录快照（写入 `protected_roots_snapshot`） |
+| 4 | `_calculate_safe_refresh_paths` | 计算安全刷新路径（`valid_refresh_paths` 与 `accessible_engines` 交集） |
+| 5 | `_execute_webdav_refreshes` | 对安全路径调用 `trigger_refresh_via_fs_list()` |
+| 6 | `_wait_for_sync` | 等待同步落地（睡眠 `a_to_b_restore_delay_seconds`，默认 30s） |
+| 7 | `_scan_and_sync` | 扫描与同步（`initial_scan_a()` → `scan_a_to_b_full_sync()`） |
+| 8 | `_persist_snapshot` | 持久化根目录快照（写入 `protected_roots_snapshot`） |
+
+> **设计原则：冗余清理永远只在局部触发，不做全盘扫描。** 定期刷新不再调用 `_cleanup_a_for_update_mode()`（该方法会对全量 A 区记录逐条调用 `check_exists`，导致 OpenList 挂载被扫挂）。冗余清理改为运行时按需触发：WebUI 手动刷新媒体时、watchdog 检测到 A/B 区文件删除时（通过 `trigger_delayed_cleanup`）。
+
+### 全量审计（周期 + 手动）
+
+除了常规的 8 步刷新周期，`RefreshService` 还提供**全量审计**能力，用于周期性或按需对 A 区进行完整扫描、同步并推进代次。
+
+#### 周期全量审计（`_maybe_run_full_audit`）
+
+- 由配置 `refresh.full_audit_interval_days` 控制（设为 `0` 关闭）。
+- 在 `execute_refresh_cycle()` 开头（第 1 步 `_sync_and_scan_protected_roots` 之前）判断是否到达周期窗口；到达时执行全量审计，并跳过常规周期的第 7 步（`_scan_and_sync`）以避免重复扫描。
+- 到达时执行完整序列：
+  1. `initial_scan_a()` — 多线程并发读取 A 区 `.strm`，批量写入数据库
+  2. `scan_a_to_b_full_sync()` — A→B 全量同步（`use_bulk=False` 分批提交模式）
+  3. `complete_index_generation()` — 递增全局代次（`index_generation` +1），并在同一事务中写入 `index_generation_at`、`last_full_index_at` 时间戳，以及每个 mapping 的独立代次 `index_generation:{mapping_id}` 与 `index_generation_at:{mapping_id}`
+  4. `touch_verified_by_mapping()` — 为本次审计覆盖的所有 mapping 写入 `last_verified_at`
+  5. 记录 `last_full_audit_at` 控制键（`set_control`），供下一轮周期判断使用
+
+#### 手动全量审计（`run_full_audit_now`）
+
+- WebUI「立即全量审计」按钮触发 → `POST /api/index/audit` → `RefreshService.run_full_audit_now()`。
+- 执行**与周期审计完全相同的序列**（上述 1-5 步），并在完成后**重置 `_last_full_audit_at` + `set_control`**，使周期时钟对齐到本次手动审计时间点，避免紧接着再次触发周期审计。
+
+#### 互斥保护（`_full_audit_in_progress`）
+
+- 周期审计与手动审计共享同一布尔标志 `_full_audit_in_progress`。
+- 任一方正在进行时，另一方尝试进入将**跳过执行**（周期审计静默跳过；手动审计返回 `already_running` 供前端轮询）。
+- 避免并发全量扫描导致的数据库写入竞争与资源争用。
+
+#### WebUI 会话安全（M-4）
+
+WebUI 会话 token 绑定登录时客户端 IP：`_handle_login` 在登录时记录客户端 IP，`_check_auth` 在每次请求时校验 `X-Session-Token` 对应的 IP，若异 IP 则返回 401 拒绝。会话存储为 `dict[str, tuple[float, str]]`（过期时间戳 + 绑定 IP），`_cleanup_sessions` 使用 `v[0]` 读取过期时间。详见 AGENTS.md Authentication 小节。
+
+#### 代次推进（`complete_index_generation`）三种触发时机
+
+| 时机 | 说明 |
+|------|------|
+| **首启** | `AppService.start()` 中首次建立索引时 |
+| **周期审计** | `_maybe_run_full_audit` 周期窗口到达时 |
+| **手动审计** | `run_full_audit_now()` 手动触发时 |
+
+三者均调用 `complete_index_generation()` 推进 DB sync_control 的 index_generation 代次计数器，作为 B→C 恢复、幽灵保护等机制判断"当前代次"的依据。同时写入 `last_full_index_at` 时间戳（与 `last_full_audit_at` 不同——后者由 RefreshService 的审计流程写入，供 Dashboard 展示索引健康状态）。
 
 ### 三层验证清理
 
@@ -229,17 +323,28 @@ def _worker(self) -> None:
 ### 锁机制
 
 - **`get_webdav_lock(namespace)`** — 命名空间隔离的 WebDAV 操作锁，防止不同引擎/路径的并发冲突。
-- **`_refresh_lock`** — 刷新周期互斥锁，防止并发刷新。
+- **`_refresh_lock`** — 刷新周期互斥锁，防止并发刷新（已迁移：由 WebUIServer 持有，见 server.py）。
 - **`get_fingerprint_lock(fingerprint)`** — 按指纹创建/复用锁，串行化同一指纹的并发创建操作。
 
 ### 安全方法
 
-- **`_restore_b_from_a_after_violation(local, webdav_path, fingerprint)`** — 血统越界后恢复：物理删除越界文件 → 从 A 区复制到正确位置 → 更新 DB 记录。
+- **`_restore_b_from_a_after_violation(local, webdav_path, fingerprint)`** — 血统越界后恢复：先尝试 C 区迁移（`get_c_path_for_b` → 移动到 `C/<mapping_id>/<relative>`），迁移失败才回退到物理删除越界文件 → 从 A 区复制到正确位置 → 更新 DB 记录。写入前通过 `_mapping_id_for_b(correct_b_path)` 解析目标 mapping；无法解析时 fail-closed 返回，不写入 B 记录。调用 `ensure_single_visible_instance` 时复用已解析的 `mapping_id`，避免重复解析造成跨 mapping 去重。
+- **`_verify_a_source_exists(b_local_path, webdav_path, fingerprint)`** — A 源存在性校验：优先检查 identity 记录中的 A 源和按 WebDAV 路径查找到的 A 源；两者都缺失时，仅当 B 路径能解析唯一 mapping 且该 mapping 下存在对应 fingerprint 的 boundary 记录才放行，否则返回 `False`（mapping 无法解析时 fail-closed）。
 - **`_force_delete_and_verify(path)`** — 强制删除文件并验证删除是否成功。
 - **`_handle_b_zombie(path)`** — 处理 B 区僵尸文件（DB 记录存在但磁盘文件已消失）。
 - **`cleanup_a_deleted_on_cloud(webdav_path)`** — 清理云端已删除的 A 区残留记录。
 - **`handle_b_renamed_to_non_strm(src_path, dest_path)`** — B 区 `.strm` 被重命名为非 `.strm` 扩展名时的处理。
-- **`ensure_single_visible_instance(prefer_path)`** — 确保同一指纹仅一个 `valid` 实例可见，其余改为 `.duplicate`。
+- **`ensure_single_visible_instance(fingerprint, trigger_path, prefer_path=None, mapping_id=None)`** — 确保同一 fingerprint 在指定 mapping 内仅一个 `valid` 实例可见，其余改为 `.duplicate`。失败语义采用 **B3-A / B3-B** 自愈策略（详见 `wiki/Safety-and-Security.md` §9），不静默继续，回滚二次失败仍抛出异常使清理中止。
+
+### API 响应校验与 fail-closed 清理链路
+
+以下方法共同构成了 `/api/fs/list` 响应的 fail-closed 校验框架，参考 `docs/openlist_api_fs_list_contract.md`。
+
+- **`_parse_fs_list_content(res) -> tuple[list, int] | None`** — 共享响应校验器，统一判别 `/api/fs/list` 单页响应是否"权威成功"。要求 `code ∈ {0,200}`、`data` 为 dict、`data.content` 为 list、`data.total` 为 int ≥ 0；任一条件不满足返回 `None`（不可信），调用方必须 fail-closed。
+- **`_collect_cloud_files_concurrent(cloud_path) -> set[str] | None`** — A 区冗余清理链路的并发分页收集器。使用 `per_page=100`、5 线程并发、带重试。返回权威完整 `.strm` 文件路径集合；首页或任一页不可信（`_parse_fs_list_content` 返回 None）则返回 `None`，调用方必须将该父目录的本地 A 记录整组排除出冗余差集。
+- **`_collect_cloud_files_in_directory(directory_path) -> set[str] | None`** — B 区僵尸清理链路的顺序分页收集器。使用 `per_page=100`、100 页安全阀。返回权威完整集合；不可信或安全阀耗尽则返回 `None`，`cleanup_b_zombies_under_folder` 对 `None` `continue` 跳过该父目录。
+- **`cleanup_a_redundant_using_api()`** — A 区冗余清理。按父目录分组本地 A 记录，对每个父目录调用 `_collect_cloud_files_concurrent`。仅将"可信父目录"（返回非 None）的本地记录纳入冗余差集；不可信父目录整组跳过并记 warning，0 删除、0 ghost 新增。
+- **`cleanup_b_zombies_under_folder(root_path)`** — B 区僵尸清理。按父目录分组，对每个父目录调用 `_collect_cloud_files_in_directory`。返回 `None` 则 `continue` 跳过（fail-closed）。
 
 ### 刷新服务
 

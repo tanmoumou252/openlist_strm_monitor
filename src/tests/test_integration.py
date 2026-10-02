@@ -103,12 +103,14 @@ class TestDatabaseRecordTypes:
     def test_boundary_record_creation(self):
         """测试 BoundaryRecord 创建"""
         record = BoundaryRecord(
+            mapping_id="test_mapping",
             fingerprint="abc123",
             source_media_name="Source Show",
             current_media_name="Current Show",
             engine_entry_path="/engine/path",
             updated_at=time.time(),
         )
+        assert record.mapping_id == "test_mapping"
         assert record.source_media_name == "Source Show"
         assert record.current_media_name == "Current Show"
 
@@ -178,6 +180,7 @@ class TestDatabaseOperations:
             source_a_path="/source/path.strm",
             fingerprint="abc123",
             status="valid",
+            mapping_id="test_mapping",
         )
 
         # 查询记录
@@ -205,7 +208,7 @@ class TestDatabaseOperations:
 
     def test_get_all_b_records(self, temp_db: Database):
         """测试获取所有 B 区记录"""
-        # 插入多条记录
+# 插入记录
         for i in range(3):
             temp_db.upsert_b(
                 local_path=f"/test/path{i}.strm",
@@ -214,6 +217,7 @@ class TestDatabaseOperations:
                 source_a_path=f"/source/path{i}.strm",
                 fingerprint=f"fp{i}",
                 status="valid",
+                mapping_id="test_mapping",
             )
 
         # 获取所有记录
@@ -237,6 +241,7 @@ class TestDatabaseOperations:
         """测试媒体边界记录操作"""
         # 插入记录
         temp_db.upsert_media_boundary(
+            mapping_id="test_mapping",
             fingerprint="abc123",
             source_media_name="Source Show",
             current_media_name="Current Show",
@@ -244,7 +249,7 @@ class TestDatabaseOperations:
         )
 
         # 查询记录
-        record = temp_db.get_media_boundary_by_fingerprint("abc123")
+        record = temp_db.get_media_boundary_by_fingerprint("test_mapping", "abc123")
         assert record is not None
         assert isinstance(record, BoundaryRecord)
         assert record.source_media_name == "Source Show"
@@ -357,7 +362,6 @@ class TestFixes:
     def test_mkdir_return_value(self):
         """测试 mkdir 返回值逻辑"""
         # 这个测试需要实际的 WebDAV 连接
-        # 这里只验证方法签名
         from webdav_client import OpenlistWebDAV
 
         client = OpenlistWebDAV(
@@ -376,7 +380,6 @@ class TestFixes:
             user="admin",
             password="test",
         )
-        # 验证方法存在
         assert hasattr(client, "list_contents")
 
 
@@ -427,6 +430,7 @@ class TestDataFlow:
             source_a_path=a_record.local_path,
             fingerprint=fingerprint,
             status="valid",
+            mapping_id="test_mapping",
         )
 
         # 5. 更新身份记录的 current_b_path
@@ -491,7 +495,7 @@ class TestBatchOperations:
     def test_upsert_b_batch(self, temp_db: Database):
         """测试批量插入 B 区记录"""
         records = [
-            (f"/path{i}.strm", f"/webdav{i}.strm", "/webdav", f"/source{i}.strm", f"fp{i}", "valid")
+            (f"/path{i}.strm", f"/webdav{i}.strm", "/webdav", f"/source{i}.strm", f"fp{i}", "valid", "test_mapping")
             for i in range(10)
         ]
         count = temp_db.upsert_b_batch(records)
@@ -548,7 +552,7 @@ class TestFTSIntegrityBStrm:
         # 制造孤儿：插入后用 delete_b_under_root 删除主表行，
         # 再手动残留一个 FTS 行来模拟历史损坏状态。
         temp_db.upsert_b("/b/old.strm", "/w/old.mp4", "/w", "/a/old.strm",
-                         fingerprint="fpold", status="valid")
+                         fingerprint="fpold", status="valid", mapping_id="test_mapping")
         # 直接删主表行但保留 FTS 行，模拟旧版删除路径的 bug
         with temp_db.rw_lock.write_locked(), temp_db.connection() as conn:
             conn.execute("DELETE FROM b_strm_files")  # 只删主表，FTS 残留
@@ -557,7 +561,7 @@ class TestFTSIntegrityBStrm:
 
         # 新 upsert 会复用 rowid=1，历史版本此处会抛 constraint failed
         temp_db.upsert_b("/b/new.strm", "/w/new.mp4", "/w", "/a/new.strm",
-                         fingerprint="fpnew", status="valid")
+                         fingerprint="fpnew", status="valid", mapping_id="test_mapping")
 
         # 应成功且无孤儿
         rec = temp_db.get_b_by_local("/b/new.strm")
@@ -566,38 +570,139 @@ class TestFTSIntegrityBStrm:
 
     def test_delete_b_under_root_cleans_fts(self, temp_db: Database):
         temp_db.upsert_b("/b/x1.strm", "/root/a/x1.mp4", "/root/a", None,
-                         fingerprint="fp1", status="valid")
+                         fingerprint="fp1", status="valid", mapping_id="test_mapping")
         temp_db.upsert_b("/b/x2.strm", "/root/a/x2.mp4", "/root/a", None,
-                         fingerprint="fp2", status="valid")
+                         fingerprint="fp2", status="valid", mapping_id="test_mapping")
         temp_db.delete_b_under_root("/root/a")
         assert self._fts_orphan_count(temp_db) == 0
 
     def test_delete_b_by_fingerprint_cleans_fts(self, temp_db: Database):
         temp_db.upsert_b("/b/y.strm", "/w/y.mp4", "/w", None,
-                         fingerprint="fpY", status="valid")
+                         fingerprint="fpY", status="valid", mapping_id="test_mapping")
         temp_db.delete_b_by_fingerprint("fpY")
         assert self._fts_orphan_count(temp_db) == 0
 
     def test_delete_b_batch_cleans_fts(self, temp_db: Database):
         for i in range(3):
             temp_db.upsert_b(f"/b/z{i}.strm", f"/w/z{i}.mp4", "/w", None,
-                             fingerprint=f"fpZ{i}", status="valid")
+                             fingerprint=f"fpZ{i}", status="valid", mapping_id="test_mapping")
         temp_db.delete_b_batch([f"/b/z{i}.strm" for i in range(3)])
         assert self._fts_orphan_count(temp_db) == 0
 
     def test_move_b_record_cleans_fts(self, temp_db: Database):
         temp_db.upsert_b("/b/old.strm", "/w/m.mp4", "/w", None,
-                         fingerprint="fpM", status="valid")
+                         fingerprint="fpM", status="valid", mapping_id="test_mapping")
         assert temp_db.move_b_record("/b/old.strm", "/b/moved.strm") is True
         assert self._fts_orphan_count(temp_db) == 0
         # 移动后新路径可被搜索到、旧路径不残留
         assert temp_db.get_b_by_local("/b/moved.strm") is not None
         assert temp_db.get_b_by_local("/b/old.strm") is None
 
+    def test_move_b_record_on_conn_direct_semantics(self, temp_db: Database):
+        """C13-3：共享 SQL 助手直测——原行缺失/目标冲突返回 False 且不产生写入。"""
+        from database import _move_b_record_on_conn
+        temp_db.upsert_b("/b/src.strm", "/w/s.mp4", "/w", None,
+                         fingerprint="fpS", status="valid", mapping_id="test_mapping")
+        temp_db.upsert_b("/b/dst.strm", "/w/d.mp4", "/w", None,
+                         fingerprint="fpD", status="valid", mapping_id="test_mapping")
+        with temp_db.rw_lock.write_locked(), temp_db.connection() as conn:
+            # 原行缺失 → False
+            assert _move_b_record_on_conn(conn, "/b/none.strm", "/b/x.strm") is False
+            # 目标被其他指纹占用 → False（无写入）
+            assert _move_b_record_on_conn(conn, "/b/src.strm", "/b/dst.strm") is False
+            # 成功迁移 → True
+            assert _move_b_record_on_conn(conn, "/b/src.strm", "/b/moved.strm") is True
+            conn.commit()
+        assert self._fts_orphan_count(temp_db) == 0
+        assert temp_db.get_b_by_local("/b/moved.strm") is not None
+        assert temp_db.get_b_by_local("/b/src.strm") is None
+        # dst 未被冲突迁移影响
+        dst = temp_db.get_b_by_local("/b/dst.strm")
+        assert dst is not None and dst.fingerprint == "fpD"
+
+    def test_move_b_record_wrapper_and_run_group_terminal_equivalence(
+            self, temp_db: Database):
+        """C13-3：move_b_record 包装路径与 quarantine_session.run_group 路径
+        的行迁移 + FTS rowid 清理/重建终态一致（提取重构的 schema 漂移防线）。"""
+        webdav = "/w/eq.mp4"
+        # 两条同指纹记录：wrapper 迁移 wrap_a，run_group 迁移 grp_a
+        temp_db.upsert_b("/b/wrap_a.strm", webdav, "/w", None,
+                         fingerprint="fpEq", status="valid", mapping_id="test_mapping")
+        temp_db.upsert_b("/b/wrap_keep.strm", webdav, "/w", None,
+                         fingerprint="fpEq", status="valid", mapping_id="test_mapping")
+        temp_db.upsert_b("/b/grp_a.strm", webdav, "/w", None,
+                         fingerprint="fpEq2", status="valid", mapping_id="test_mapping")
+        temp_db.upsert_b("/b/grp_keep.strm", webdav, "/w", None,
+                         fingerprint="fpEq2", status="valid", mapping_id="test_mapping")
+
+        # 包装路径（现行 move_b_record）
+        assert temp_db.move_b_record("/b/wrap_a.strm", "/b/wrap_a.strm.duplicate") is True
+        # 会话路径（run_group：预标 duplicate → 迁移）
+        with temp_db.quarantine_session() as session:
+            moved = session.run_group(
+                "fpEq2", "test_mapping", "/b/grp_keep.strm",
+                [("/b/grp_a.strm", "/b/grp_a.strm.duplicate")])
+        assert moved == 1
+
+        def _row(path):
+            rec = temp_db.get_b_by_local(path)
+            return (rec.local_path, rec.webdav_path, rec.fingerprint,
+                    rec.status, rec.mapping_id) if rec else None
+
+        # 行迁移终态：webdav/fingerprint/迁移后路径两侧一致；
+        # status 按各自预标语义——wrapper 未预标继承 valid，
+        # run_group 预标后继承 duplicate（与 ensure 逐条路径终态一致）。
+        wrap_row = _row("/b/wrap_a.strm.duplicate")
+        grp_row = _row("/b/grp_a.strm.duplicate")
+        assert wrap_row is not None and grp_row is not None
+        assert wrap_row[1] == grp_row[1] == webdav
+        assert wrap_row[2] == "fpEq" and grp_row[2] == "fpEq2"
+        assert wrap_row[4] == grp_row[4] == "test_mapping"
+        assert wrap_row[3] == "valid"
+        assert grp_row[3] == "duplicate"
+        # keep 行均保持 valid 且未被迁移（预标仅覆盖 keep 以外的 valid 兄弟）
+        assert _row("/b/wrap_keep.strm")[3] == "valid"
+        assert _row("/b/grp_keep.strm")[3] == "valid"
+        # 旧路径不残留
+        assert _row("/b/wrap_a.strm") is None
+        assert _row("/b/grp_a.strm") is None
+        # FTS rowid 清理/重建对齐：无孤儿、行数一致、新路径可检索
+        assert self._fts_orphan_count(temp_db) == 0
+        with temp_db.read_connection() as conn:
+            fts = conn.execute("SELECT count(*) FROM b_strm_files_fts").fetchone()[0]
+            main = conn.execute("SELECT count(*) FROM b_strm_files").fetchone()[0]
+            hit = conn.execute(
+                "SELECT rowid FROM b_strm_files_fts WHERE b_strm_files_fts MATCH ?",
+                ('"eq.mp4"',)).fetchall()
+        assert fts == main
+        assert len(hit) >= 2  # wrap_a.duplicate 与 grp_a.duplicate 均可检索
+
+    def test_quarantine_session_run_group_fts_alignment(self, temp_db: Database):
+        """C13-3：run_group 组事务（预标 + 迁移 + FTS 维护）后 FTS 行数对齐。"""
+        webdav = "/w/grp.mp4"
+        for name in ("a.strm", "b.strm", "c.strm"):
+            temp_db.upsert_b(f"/b/{name}", webdav, "/w", None,
+                             fingerprint="fpGrp", status="valid", mapping_id="test_mapping")
+        with temp_db.quarantine_session() as session:
+            moved = session.run_group(
+                "fpGrp", "test_mapping", "/b/a.strm",
+                [("/b/b.strm", "/b/b.strm.duplicate"),
+                 ("/b/c.strm", None)])
+        assert moved == 1
+        assert self._fts_orphan_count(temp_db) == 0
+        with temp_db.read_connection() as conn:
+            fts = conn.execute("SELECT count(*) FROM b_strm_files_fts").fetchone()[0]
+            main = conn.execute("SELECT count(*) FROM b_strm_files").fetchone()[0]
+        assert fts == main
+        # b 迁移为 duplicate；c 物理改名失败（None）→ 置回 valid；keep a 保持 valid
+        assert temp_db.get_b_by_local("/b/b.strm.duplicate").status == "duplicate"
+        assert temp_db.get_b_by_local("/b/c.strm").status == "valid"
+        assert temp_db.get_b_by_local("/b/a.strm").status == "valid"
+
     def test_upsert_b_batch_cleans_fts(self, temp_db: Database):
         """批量 upsert 后不应残留 FTS 孤儿"""
         records = [
-            (f"/b/batch{i}.strm", f"/w/batch{i}.mp4", "/w", None, f"fpB{i}", "valid")
+            (f"/b/batch{i}.strm", f"/w/batch{i}.mp4", "/w", None, f"fpB{i}", "valid", "test_mapping")
             for i in range(3)
         ]
         temp_db.upsert_b_batch(records)

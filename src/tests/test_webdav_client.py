@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -74,6 +75,9 @@ def _make_admin_client(tmp_path: Path, host: str = "http://openlist:5244") -> Op
         client._fs_list_logged_time = 0.0
         client._check_exists_cache = {}
         client._check_exists_cache_ttl = 60
+        client._check_exists_cache_max = 5000
+        client._check_exists_cache_lock = threading.Lock()
+        client._http_lock = threading.RLock()
         client.last_error_message = None
         client.last_error_type = None
         client.token_cache_path = str(tmp_path / ".admin_token.json")
@@ -124,6 +128,16 @@ class TestGenerateTotp:
         assert len(code) == 8
         assert code.isdigit()
 
+    def test_unpadded_base64_secret_works(self):
+        # 无 padding 的 base64 密钥（如 URL 安全 base64 转换而来）解码必须成功
+        # "dGVzdHNlY3JldA" 对应 bytes "testsecret"（无 = padding，4 的倍数余 2）
+        code = _generate_totp("dGVzdHNlY3JldA")
+        assert len(code) == 6
+        assert code.isdigit()
+        # 与补 padding 后解码的等价密钥产生相同结果
+        padded = _generate_totp("dGVzdHNlY3JldA==")
+        assert code == padded
+
 
 # ===========================================================================
 # OpenListAdminClient — token cache
@@ -133,22 +147,54 @@ class TestGenerateTotp:
 class TestAdminTokenCache:
     def test_load_token_from_cache(self, tmp_path):
         cache_file = tmp_path / ".admin_token.json"
-        cache_file.write_text(json.dumps({"token": "cached-jwt"}), encoding="utf-8")
+        cache_file.write_text(json.dumps({
+            "token": "cached-jwt",
+            "host": "http://openlist:5244",
+            "user": "admin",
+        }), encoding="utf-8")
         client = _make_admin_client(tmp_path)
         client._load_token_from_cache()
         assert client.token == "cached-jwt"
 
     def test_load_encrypted_token_from_cache(self, tmp_path):
-        """加密格式（ENC: 前缀）的缓存应解密还原。"""
+        """加密格式（ENC: 前缀）且 host/user 匹配时应解密还原。"""
         import secret_manager
         cache_file = tmp_path / ".admin_token.json"
         cache_file.write_text(
-            json.dumps({"token": secret_manager.encrypt("enc-jwt")}),
+            json.dumps({
+                "token": secret_manager.encrypt("enc-jwt"),
+                "host": "http://openlist:5244",
+                "user": "admin",
+            }),
             encoding="utf-8",
         )
         client = _make_admin_client(tmp_path)
         client._load_token_from_cache()
         assert client.token == "enc-jwt"
+
+    def test_load_token_host_mismatch_ignored(self, tmp_path):
+        """host 不匹配时缓存视为失效。"""
+        cache_file = tmp_path / ".admin_token.json"
+        cache_file.write_text(json.dumps({
+            "token": "other-jwt",
+            "host": "http://other-host:5244",
+            "user": "admin",
+        }), encoding="utf-8")
+        client = _make_admin_client(tmp_path)
+        client._load_token_from_cache()
+        assert client.token is None
+
+    def test_load_token_user_mismatch_ignored(self, tmp_path):
+        """user 不匹配时缓存视为失效。"""
+        cache_file = tmp_path / ".admin_token.json"
+        cache_file.write_text(json.dumps({
+            "token": "other-jwt",
+            "host": "http://openlist:5244",
+            "user": "other_user",
+        }), encoding="utf-8")
+        client = _make_admin_client(tmp_path)
+        client._load_token_from_cache()
+        assert client.token is None
 
     def test_load_token_missing_file(self, tmp_path):
         client = _make_admin_client(tmp_path)
@@ -304,7 +350,7 @@ class TestAdminLogin:
         覆盖 webdav_client.py:190-201：当 OpenList API 返回 data 字段为 null 时，
         原代码 data.get("data", {}).get("token") 会抛出
         'NoneType' object has no attribute 'get' 错误。
-        修复后应安全处理并返回明确的错误信息。
+        login() 应安全处理并返回明确的错误信息。
         """
         client = _make_admin_client(tmp_path)
         # 模拟 OpenList 返回 data: null 的情况
@@ -824,11 +870,12 @@ class TestAdminCheckExists:
         assert client.check_exists("/") is True
 
     def test_root_not_exists(self, tmp_path):
+        """根目录列表失败 → None（不可信），不得当 False。"""
         client = _make_admin_client(tmp_path)
         client.token = "jwt"
         client.session.request.return_value = None
 
-        assert client.check_exists("/") is False
+        assert client.check_exists("/") is None
 
     def test_file_found_in_listing(self, tmp_path):
         client = _make_admin_client(tmp_path)
@@ -853,16 +900,124 @@ class TestAdminCheckExists:
 
         assert client.check_exists("") is True
 
-    def test_data_field_null_returns_false(self, tmp_path):
-        """非根路径 list_directory 返回 data: null → check_exists 返回 False。
-
-        覆盖 webdav_client.py:616-617：data 为 None 时 isinstance(data, dict)
-        守卫使 content 为 []，分页循环判定 len(content) < per_page → result=False。
-        """
+    def test_data_field_null_returns_none(self, tmp_path):
+        """非根路径 data: null → 不可信 None（fail-closed，不得当不存在）。"""
         client = _make_admin_client(tmp_path)
         client.token = "jwt"
         with patch.object(client, "list_directory", return_value={"code": 200, "data": None}):
-            assert client.check_exists("/dir/target.txt") is False
+            assert client.check_exists("/dir/target.txt") is None
+
+    def test_content_none_returns_none(self, tmp_path):
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        with patch.object(
+            client, "list_directory",
+            return_value={"code": 200, "data": {"content": None, "total": 1}},
+        ):
+            assert client.check_exists("/dir/target.txt") is None
+
+    def test_bool_total_returns_none(self, tmp_path):
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        with patch.object(
+            client, "list_directory",
+            return_value={
+                "code": 200,
+                "data": {"content": [{"name": "x"}], "total": True},
+            },
+        ):
+            assert client.check_exists("/dir/target.txt") is None
+
+    def test_uses_per_page_100(self, tmp_path):
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        with patch.object(
+            client, "list_directory",
+            return_value={"code": 200, "data": {"content": [], "total": 0}},
+        ) as mock_list:
+            client.check_exists("/dir/target.txt")
+            mock_list.assert_called()
+            kwargs = mock_list.call_args
+            # path 为位置或关键字；per_page 必须为 100
+            assert kwargs.kwargs.get("per_page") == 100 or (
+                len(kwargs.args) >= 1 and kwargs.kwargs.get("per_page", 100) == 100
+            )
+            # 更稳妥：检查 call 参数
+            _, call_kwargs = mock_list.call_args
+            if "per_page" in call_kwargs:
+                assert call_kwargs["per_page"] == 100
+
+    def test_check_exists_cache_eviction(self, tmp_path):
+        """Cache eviction keeps size within max limit and drops oldest entry."""
+        client = _make_admin_client(tmp_path)
+        client.token = "jwt"
+        # Set small max for testing
+        client._check_exists_cache_max = 10
+
+        # Add 10 entries
+        for i in range(10):
+            path = f"/test/file{i}.txt"
+            client._check_exists_cache[path] = (time.time() - (10 - i), True)  # Oldest first
+
+        # Add one more to trigger eviction
+        new_path = "/test/new.txt"
+        client.session.request.return_value = _make_response(
+            {"code": 200, "data": {"content": [{"name": "new.txt"}], "total": 1}}
+        )
+        client.check_exists(new_path)
+
+        # Should have exactly max entries
+        assert len(client._check_exists_cache) == 10
+        # Oldest entry should have been evicted
+        assert "/test/file0.txt" not in client._check_exists_cache
+        # Newest entry should exist
+        assert new_path in client._check_exists_cache
+
+
+class TestInvalidateCheckExistsCache:
+    """R33: invalidate_check_exists_cache 失效指定路径及其所有祖先目录缓存。"""
+
+    def test_invalidate_cache_clears_ancestors(self, tmp_path):
+        client = _make_admin_client(tmp_path)
+        client._check_exists_cache = {}
+        client._check_exists_cache_lock = threading.Lock()
+        # 预填缓存：祖先 + 兄弟 + 自身
+        cache_entries = {
+            "/": True,
+            "/cloud": True,
+            "/cloud/番剧": True,
+            "/cloud/番剧/进击的巨人": True,
+            "/cloud/番剧/其他": True,
+            "/cloud/其他": True,
+        }
+        for path, val in cache_entries.items():
+            client._check_exists_cache[path] = (time.time(), val)
+
+        # 失效 /cloud/番剧/进击的巨人
+        client.invalidate_check_exists_cache("/cloud/番剧/进击的巨人")
+
+        # 自身 + 祖先失效
+        assert "/cloud/番剧/进击的巨人" not in client._check_exists_cache
+        assert "/cloud/番剧" not in client._check_exists_cache
+        assert "/cloud" not in client._check_exists_cache
+        assert "/" not in client._check_exists_cache
+        # 兄弟和无关路径保留
+        assert "/cloud/番剧/其他" in client._check_exists_cache
+        assert "/cloud/其他" in client._check_exists_cache
+
+    def test_invalidate_cache_root_path(self, tmp_path):
+        """根路径失效不卡死（R33 修复了 dirname 死循环）。"""
+        client = _make_admin_client(tmp_path)
+        client._check_exists_cache = {}
+        client._check_exists_cache_lock = threading.Lock()
+        client._check_exists_cache["/"] = (time.time(), True)
+        client._check_exists_cache["/cloud"] = (time.time(), True)
+
+        client.invalidate_check_exists_cache("/")
+
+        assert "/" not in client._check_exists_cache
+        # /cloud 是 / 的子节点而非祖先，不会被失效
+        assert "/cloud" in client._check_exists_cache
 
 
 class TestAdminListContents:

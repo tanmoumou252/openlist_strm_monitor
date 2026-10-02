@@ -7,6 +7,8 @@ import hmac
 import json
 import logging
 import os
+import tempfile
+import threading
 import time
 from urllib.parse import unquote
 from pathlib import Path
@@ -51,7 +53,16 @@ def _generate_totp(secret: str, interval: int = 30, digits: int = 6) -> str:
     # 回退到 base64
     if secret_bytes is None:
         try:
-            secret_bytes = base64.b64decode(secret, validate=True)
+            # 无 padding 的 base64 密钥（如 URL 安全 base64 转换而来）会抛
+            # binascii.Error 并被吞掉。先补全 padding 再解码。
+            # URL 安全 base64 的 '-'/'_' 先规范化为 '+'/'/'，再用
+            # b64decode(validate=True) 严格校验非法字符。不能用
+            # urlsafe_b64decode——它不接受 validate 参数，且默认宽松解码会把
+            # 非法字符（如 "invalid-secret!!!" 的 '!'）静默忽略，导致坏密钥
+            # 被当作有效 secret 解码出垃圾字节而不报错。
+            normalized = secret.replace("-", "+").replace("_", "/")
+            padded_b64 = normalized + "=" * ((4 - len(normalized) % 4) % 4)
+            secret_bytes = base64.b64decode(padded_b64, validate=True)
         except (binascii.Error, ValueError):
             secret_bytes = None
 
@@ -78,11 +89,22 @@ class OpenListAdminClient:
         self.totp_secret = totp_secret
         self.token: str | None = None
         self.session = requests.Session()
+        # 共享 Session + token 访问锁。同一 client 可能被
+        # AppService 主线程、refresh_service 线程、WebUI 路由线程并发使用；
+        # 无锁共享 session + 无锁读写 self.token 会引发 requests
+        # pool-full / 连接复用竞态与 token 中途替换。锁仅包 session.request、
+        # 401 重登、token 读写、login() 与 token 缓存文件写，不包业务解析。
+        # 使用 RLock：login() 会被 _do_request 在持锁状态下调用，需可重入。
+        self._http_lock = threading.RLock()
         self._fs_list_logged: set[str] = set()
         self._fs_list_logged_time: float = 0.0  # 上次清理时间
 
+        # True=权威存在/不存在；None=列表不可信（fail-closed，不得当「不存在」）
+        # 只缓存 True；False/None 不缓存（避免陈旧 False 误导清理）
         self._check_exists_cache: dict[str, tuple[float, bool]] = {}
         self._check_exists_cache_ttl: int = 60  # 缓存 60 秒
+        self._check_exists_cache_max: int = 5000  # 缓存容量上限，超出时淘汰最旧项
+        self._check_exists_cache_lock = threading.Lock()  # 缓存访问加锁
 
         # 最近一次登录的错误详情（调用方可通过属性访问）
         self.last_error_message: str | None = None
@@ -103,6 +125,15 @@ class OpenListAdminClient:
             try:
                 with open(self.token_cache_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    if not isinstance(data, dict):
+                        self.token = None
+                        return
+                    cached_host = data.get("host")
+                    cached_user = data.get("user")
+                    if cached_host != self.host or cached_user != self.user:
+                        log.info("[OpenList] Token 缓存 host/user 不匹配，将重新登录")
+                        self.token = None
+                        return
                     cached_ts = data.get("ts", 0)
                     # 检查 Token 是否过期
                     if cached_ts and (time.time() - cached_ts) > self._TOKEN_CACHE_TTL:
@@ -121,21 +152,39 @@ class OpenListAdminClient:
 
     def _save_token_to_cache(self, token: str) -> None:
         """将 Token 加密保存到本地文件"""
-        self.token = token
-        try:
-            import os
-            # 创建文件时设置权限为 0o600（仅所有者可读写）
-            fd = os.open(self.token_cache_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                # Token 加密存储（空 token 不加密）
+        # token 写 + .admin_token.json 文件写加锁，
+        # 避免并发 login 相互覆盖 token 缓存文件。RLock 可重入。
+        with self._http_lock:
+            self.token = token
+            try:
                 encrypted_token = secret_manager.encrypt(token) if token else ""
-                json.dump({"token": encrypted_token, "ts": time.time()}, f)
-        except Exception as e:
-            log.warning(f"无法保存 Token 缓存: {e}")
+                payload = {
+                    "token": encrypted_token,
+                    "ts": time.time(),
+                    "host": self.host,
+                    "user": self.user,
+                }
+                cache_dir = os.path.dirname(self.token_cache_path) or "."
+                fd, temp_path = tempfile.mkstemp(
+                    prefix=".admin_token.", suffix=".tmp", dir=cache_dir)
+                try:
+                    os.chmod(temp_path, 0o600)
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(payload, f)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(temp_path, self.token_cache_path)
+                finally:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+            except Exception as e:
+                log.warning(f"无法保存 Token 缓存: {e}")
 
-    def login(self, force: bool = False) -> bool:
+    def login(self, force: bool = False, source: str = "unknown") -> bool:
         """登录获取 JWT。force=True 会无视缓存强制联网登录。
-        
+
+        source 参数用于标识调用来源，方便日志定位问题。
+
         返回: bool（True 成功，False 失败）
         错误详情通过属性访问:
           - self.last_error_type: "wrong_password", "wrong_2fa", "account_not_found",
@@ -171,8 +220,11 @@ class OpenListAdminClient:
 
         try:
             # 登录是唯一不走 _do_request 的方法，避免死循环
-            res = self.session.post(url, json=payload, timeout=10)
-            
+            # session.post 加锁（RLock 可重入，_do_request 持锁调用时安全），
+            # 防止并发登录与并发业务请求共享 session 触发连接竞态。
+            with self._http_lock:
+                res = self.session.post(url, json=payload, timeout=10)
+
             # 检查 HTTP 状态码
             if res.status_code != 200:
                 # 尝试解析错误消息
@@ -189,11 +241,21 @@ class OpenListAdminClient:
                     self.last_error_message = f"HTTP {res.status_code}"
                     self.last_error_type = "unknown"
                     return False
-            
+
             # HTTP 200，检查业务响应
             data = res.json()
-            # 诊断日志：记录实际响应内容
-            log.debug("登录响应内容: %r", data)
+            # 诊断日志：记录实际响应内容，但脱敏 token 字段
+            log_data = data.copy() if isinstance(data, dict) else data
+            if isinstance(log_data, dict):
+                # 脱敏 data.token
+                if "data" in log_data and isinstance(log_data["data"], dict):
+                    log_data["data"] = log_data["data"].copy()
+                    if "token" in log_data["data"]:
+                        log_data["data"]["token"] = "***REDACTED***"
+                # 脱敏顶层 token
+                if "token" in log_data:
+                    log_data["token"] = "***REDACTED***"
+            log.debug("登录响应内容（已脱敏）: %r", log_data)
             # OpenList API 在某些情况下可能返回 null（None）
             if not isinstance(data, dict):
                 log.error("登录响应格式异常（非 JSON 对象）: %r", data)
@@ -214,15 +276,15 @@ class OpenListAdminClient:
                 # 检查是否有业务错误码
                 error_msg = data.get("message", "")
                 error_type = self._parse_login_error(error_msg) if error_msg else "unknown"
-                log.error("登录响应中未获取到有效 Token: %s", data)
+                log.error("登录响应中未获取到有效 Token: %s（来源：%s）", data, source)
                 self.last_error_message = error_msg or "无法提取 token"
                 self.last_error_type = error_type
                 return False
-            
+
             self._save_token_to_cache(token)
             self.last_error_message = None
             self.last_error_type = None
-            log.info("OpenList 登录成功，Token 已更新")
+            log.info("OpenList 登录成功，Token 已更新（来源：%s）", source)
             return True
         except requests.exceptions.RequestException as e:
             # 使用错误翻译工具转换为易懂描述
@@ -243,10 +305,10 @@ class OpenListAdminClient:
             self.last_error_message = str(e)
             self.last_error_type = "unknown"
             return False
-    
+
     def _parse_login_error(self, message: str) -> str:
         """解析 OpenList 登录错误消息，返回错误类型。
-        
+
         常见错误消息:
         - "username or password is wrong" → wrong_password
         - "otp code is wrong" → wrong_2fa
@@ -267,102 +329,114 @@ class OpenListAdminClient:
             self.last_error_type = "not_configured"
             return None
 
-        if not self.token:
-            if not self.login():
-                return None
+        # 整个 token 校验-注入-请求-401 重登关键区加锁。
+        # 多线程并发调用共享 session + 无锁读写 self.token 会引发连接复用
+        # 竞态、pool-full 及 token 中途被替换（请求 A 用旧 token 打到 401，
+        # 重登后 token 已变，请求 B 却读到了新 token）。锁内串行化，锁外
+        # 不含业务解析，串行化开销极小。
+        with self._http_lock:
+            if not self.token:
+                if not self.login(source="auto_auth"):
+                    return None
 
-        # 注入 Header
-        headers = kwargs.get("headers", {})
-        # OpenList 的 JWT 认证不需要 "Bearer" 前缀，直接使用 token
-        headers["Authorization"] = self.token
-        headers["Content-Type"] = "application/json"
-        kwargs["headers"] = headers
+            # 注入 Header
+            headers = kwargs.get("headers", {})
+            # OpenList 的 JWT 认证不需要 "Bearer" 前缀，直接使用 token
+            headers["Authorization"] = self.token
+            headers["Content-Type"] = "application/json"
+            kwargs["headers"] = headers
 
-        try:
-            # 提取请求对象摘要（json payload 或 params），方便定位是哪个文件/路径
-            req_summary = ""
-            json_payload = kwargs.get("json")
-            if json_payload and isinstance(json_payload, dict):
-                # 取 path/dir/src_dir/names 等关键字段
-                keys_of_interest = ("path", "dir", "src_dir", "dst_dir", "names")
-                summary_parts = [f"{k}={json_payload[k]}" for k in keys_of_interest if k in json_payload]
-                if summary_parts:
-                    req_summary = " | " + ", ".join(summary_parts)
-            params = kwargs.get("params")
-            if params and isinstance(params, dict):
-                req_summary = " | params=" + str(params)
-            # /api/fs/list 日志精简：只输出一次路径扫描
-            _is_fs_list = url.endswith("/api/fs/list")
-            _fs_path = ""
-            if _is_fs_list and isinstance(json_payload, dict):
-                _fs_path = str(json_payload.get("path", "")).strip()
-
-            if _is_fs_list and _fs_path:
-                # 每 10 分钟清理一次日志缓存，防止无限增长
-                now = time.time()
-                if now - self._fs_list_logged_time > 600:  # 10 minutes
-                    self._fs_list_logged.clear()
-                    self._fs_list_logged_time = now
-                
-                if _fs_path not in self._fs_list_logged:
-                    self._fs_list_logged.add(_fs_path)
-                    log.debug("[STRM] 扫描 %s", _fs_path)
-            else:
-                log.debug("[API请求] %s %s%s", method, url, req_summary)
-
-            res = self.session.request(method, url, **kwargs)
-
-            if not _is_fs_list:
-                log.debug("[API响应] 状态码=%s", res.status_code)
-
-            # 检查是否过期：HTTP 401 或业务 JSON code 401
-            should_retry = res.status_code == 401
-            if not should_retry:
-                try:
-                    if res.json().get("code") == 401:
-                        should_retry = True
-                except (ValueError, KeyError, AttributeError):
-                    pass
-
-            if should_retry:
-                log.warning("Token 已过期，尝试自动重新登录...")
-                if self.login(force=True):
-                    kwargs["headers"]["Authorization"] = self.token
-                    res = self.session.request(method, url, **kwargs)
-                    if not _is_fs_list:
-                        log.debug("[API重试] 重新登录后状态码=%s", res.status_code)
-                else:
-                    log.error("[API重试] 重新登录失败: %s", self.last_error_message or "未知错误")
-                    return res  # 登录失败，直接返回 401 结果
-
-            # 记录响应摘要（避免记录大响应体）
             try:
-                if res.status_code == 200:
-                    response_json = res.json()
-                    code = response_json.get('code', 'N/A')
-                    message = response_json.get('message', '')
-                    if not _is_fs_list:
-                        log.debug("[API结果] 业务码=%s, 消息=%s", code, message)
-            except (ValueError, KeyError, AttributeError):
-                if not _is_fs_list:
-                    log.debug("[API结果] 响应非JSON格式")
+                # 提取请求对象摘要（json payload 或 params），方便定位是哪个文件/路径
+                req_summary = ""
+                json_payload = kwargs.get("json")
+                if json_payload and isinstance(json_payload, dict):
+                    # 取 path/dir/src_dir/names 等关键字段
+                    keys_of_interest = ("path", "dir", "src_dir", "dst_dir", "names")
+                    summary_parts = [f"{k}={json_payload[k]}" for k in keys_of_interest if k in json_payload]
+                    if summary_parts:
+                        req_summary = " | " + ", ".join(summary_parts)
+                params = kwargs.get("params")
+                if params and isinstance(params, dict):
+                    req_summary = " | params=" + str(params)
+                # /api/fs/list 日志精简：只输出一次路径扫描
+                _is_fs_list = url.endswith("/api/fs/list")
+                _fs_path = ""
+                if _is_fs_list and isinstance(json_payload, dict):
+                    _fs_path = str(json_payload.get("path", "")).strip()
 
-            return res
-        except Exception as e:
-            # 使用错误翻译工具转换为易懂描述
-            user_msg = translate_network_error(e, f"请求 {method}")
-            err_name = type(e).__name__
-            if err_name in ("MissingSchema", "InvalidURL"):
-                log.error(
-                    "OpenList host 配置无效或未设置 scheme（应为 http:// 或 https:// 开头）")
-            else:
-                log.error(user_msg)
-            return None
+                if _is_fs_list and _fs_path:
+                    # 每 10 分钟清理一次日志缓存，防止无限增长
+                    now = time.time()
+                    if now - self._fs_list_logged_time > 600:  # 10 minutes
+                        self._fs_list_logged.clear()
+                        self._fs_list_logged_time = now
+
+                    if _fs_path not in self._fs_list_logged:
+                        self._fs_list_logged.add(_fs_path)
+                        log.debug("[STRM] 扫描 %s", _fs_path)
+                else:
+                    log.debug("[API请求] %s %s%s", method, url, req_summary)
+
+                res = self.session.request(method, url, **kwargs)
+
+                if not _is_fs_list:
+                    log.debug("[API响应] 状态码=%s", res.status_code)
+
+                # 检查是否过期：HTTP 401 或业务 JSON code 401
+                should_retry = res.status_code == 401
+                response_json = None
+                if not should_retry:
+                    try:
+                        response_json = res.json()
+                        if response_json.get("code") == 401:
+                            should_retry = True
+                    except (ValueError, KeyError, AttributeError):
+                        pass
+
+                if should_retry:
+                    log.warning("Token 已过期，尝试自动重新登录...")
+                    if self.login(force=True, source="auto_auth"):
+                        kwargs["headers"]["Authorization"] = self.token
+                        res = self.session.request(method, url, **kwargs)
+                        response_json = None  # 响应已更换，缓存失效
+                        if not _is_fs_list:
+                            log.debug("[API重试] 重新登录后状态码=%s", res.status_code)
+                    else:
+                        log.error("[API重试] 登录失败: %s", self.last_error_message or "未知错误")
+                        return res  # 登录失败，直接返回 401 结果
+
+                # 记录响应摘要（避免记录大响应体）
+                # 复用上一次 res.json() 的解析结果，避免热路径上
+                # 同一响应体被重复解析 2-3 次（/api/fs/list 分页并发场景）。
+                try:
+                    if res.status_code == 200:
+                        if response_json is None:
+                            response_json = res.json()
+                        code = response_json.get('code', 'N/A')
+                        message = response_json.get('message', '')
+                        if not _is_fs_list:
+                            log.debug("[API结果] 业务码=%s, 消息=%s", code, message)
+                except (ValueError, KeyError, AttributeError):
+                    if not _is_fs_list:
+                        log.debug("[API结果] 响应非JSON格式")
+
+                return res
+            except Exception as e:
+                # 使用错误翻译工具转换为易懂描述
+                user_msg = translate_network_error(e, f"请求 {method}")
+                err_name = type(e).__name__
+                if err_name in ("MissingSchema", "InvalidURL"):
+                    log.error(
+                        "OpenList host 配置无效或未设置 scheme（应为 http:// 或 https:// 开头）")
+                else:
+                    log.error(user_msg)
+                return None
 
     # ================= 业务方法 (全量补全) =================
 
     # 1. 获取存储列表 (Admin API)
-    def list_storages(self, page: int = 1, per_page: int = 1000) -> dict[str, Any] | None:
+    def list_storages(self, page: int = 1, per_page: int = 100) -> dict[str, Any] | None:
         """获取全部存储列表（自动分页聚合）。
 
         返回结构与 OpenList API 一致：
@@ -423,39 +497,89 @@ class OpenListAdminClient:
 
     def get_strm_storages_full_info(self) -> list[dict[str, Any]]:
         """获取所有 STRM 类型存储的完整信息。
-        
+
         list 接口返回的 addition 是精简版，不含 SaveStrmLocalPath。
         此方法先 list 筛选 STRM 存储，再对每个调用 get_storage_info 拿完整 addition。
-        
+
+        使用受控线程池并发获取，避免 N 个串行存储详情阻塞启动。
+        单 storage detail 失败时记录告警并安全跳过，不无限阻塞整体启动。
+
         返回格式与 get_storage_info 返回的 data 一致，包含完整 addition。
         如果获取失败返回空列表。
         """
         storages = self.list_storages()
         if not storages or not isinstance(storages, dict):
             return []
-        
+
         data_field = storages.get("data") or {}
         if not isinstance(data_field, dict):
             return []
         content = data_field.get("content", [])
         strm_storages = [s for s in content if s.get("driver", "").lower() == "strm"]
-        
-        result = []
-        for storage in strm_storages:
+        if not strm_storages:
+            return []
+
+        # 并发获取存储详情：每存储一个任务，线程池上限 5
+        # 总体超时预算：N 个存储 × 10 秒单请求，但上限 30 秒以免极端情况挂死
+        import concurrent.futures
+        deadline = time.time() + min(len(strm_storages) * 10, 30)
+
+        def _fetch_detail(storage: dict[str, Any]) -> dict[str, Any] | None:
             storage_id = storage.get("id")
             if not storage_id:
-                continue
-            full_info = self.get_storage_info(storage_id)
+                return None
+            try:
+                remaining = max(1, deadline - time.time())
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as single_executor:
+                    future = single_executor.submit(self.get_storage_info, storage_id)
+                    full_info = future.result(timeout=min(remaining, 10))
+            except concurrent.futures.TimeoutError:
+                log.warning(
+                    "get_strm_storages_full_info: 获取存储 %s 详情超时",
+                    storage_id)
+                return None
+            except Exception:
+                log.warning(
+                    "get_strm_storages_full_info: 获取存储 %s 详情异常",
+                    storage_id, exc_info=True)
+                return None
             if full_info and isinstance(full_info, dict):
                 data = full_info.get("data", {})
                 if isinstance(data, dict) and data.get("id"):
-                    result.append(data)
-                else:
-                    result.append(storage)
-            else:
-                log.warning("get_strm_storages_full_info: 获取存储 %s 详情失败", storage_id)
-                result.append(storage)
-        
+                    return data
+            return None
+
+        result: list[dict[str, Any]] = [None] * len(strm_storages)
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(5, len(strm_storages))) as executor:
+            future_map = {
+                executor.submit(_fetch_detail, storage): i
+                for i, storage in enumerate(strm_storages)
+            }
+            try:
+                for future in concurrent.futures.as_completed(
+                        future_map, timeout=max(1, deadline - time.time())):
+                    idx = future_map[future]
+                    try:
+                        detail = future.result()
+                    except Exception:
+                        detail = None
+                    if detail is not None:
+                        result[idx] = detail
+                    else:
+                        # 并发失败时回退到 list 接口的精简条目
+                        result[idx] = strm_storages[idx]
+                        log.warning(
+                            "get_strm_storages_full_info: 存储 %s 详情获取失败，使用精简条目",
+                            strm_storages[idx].get("id"))
+            except concurrent.futures.TimeoutError:
+                log.warning("get_strm_storages_full_info: 批量获取存储详情总体超时")
+
+        # 确保超时未完成的项回退为基础条目，不留 None
+        for i, item in enumerate(result):
+            if item is None:
+                result[i] = strm_storages[i]
+
         return result
 
     # 2. 获取存储详情 (Admin API) - 【补全】
@@ -488,9 +612,15 @@ class OpenListAdminClient:
         return None
 
     # 4. 创建目录 (FS API)
+    def _invalidate_check_exists_cache(self, path: str) -> None:
+        """统一调强版本 invalidate_check_exists_cache，
+        失效指定路径及其所有祖先目录，避免 move/remove 等写操作后祖先目录
+        check_exists 命中至多 60 秒的陈旧 True 缓存。"""
+        self.invalidate_check_exists_cache(path)
+
     def mkdir(self, path: str) -> bool:
         """创建目录。
-        
+
         Returns:
             True: 目录创建成功，或目录已存在（幂等）。
             False: 请求失败或真正的创建失败。
@@ -552,6 +682,8 @@ class OpenListAdminClient:
             log.error("[移动] 业务失败: code=%s message=%s", code, data.get("message", ""))
             return False
         log.debug("[移动] 成功")
+        self._invalidate_check_exists_cache(src)
+        self._invalidate_check_exists_cache(dst)
         return True
 
     # 6. 删除文件 (FS API)
@@ -580,26 +712,61 @@ class OpenListAdminClient:
             log.error('[删除] 业务失败: code=%s message=%s', code, data.get('message', ''))
             return False
         log.debug('[删除] 成功')
+        self._invalidate_check_exists_cache(path)
         return True
 
     # 7. 检查路径是否存在 (逻辑方法)
-    def check_exists(self, path: str) -> bool:
-        """检查文件或目录是否存在。
-        
-        支持大目录（>1000 项）的分页搜索。
+    @staticmethod
+    def _parse_fs_list_page(res: Any) -> tuple[list, int] | None:
+        """解析 /api/fs/list 单页响应（与 app_service_core fail-closed 契约对齐）。
+
+        权威成功 → (content, total)；不可信 → None。
+        拒绝 bool total（bool 是 int 子类）、content=None、data=None 等。
+        """
+        if not isinstance(res, dict):
+            return None
+        code = res.get("code")
+        if code not in (0, 200):
+            return None
+        data = res.get("data")
+        if not isinstance(data, dict):
+            return None
+        content = data.get("content")
+        if not isinstance(content, list):
+            return None
+        total = data.get("total")
+        if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+            return None
+        if not content and total > 0:
+            return None
+        return content, total
+
+    def check_exists(self, path: str) -> bool | None:
+        """检查文件或目录是否存在（三态）。
+
+        Returns:
+            True: 权威确认存在
+            False: 权威确认不存在（完整可信列表中未出现）
+            None: 响应不可信 / 请求失败 / 安全阀耗尽 —— 调用方不得当「不存在」去删除
+
+        分页 per_page=100（对齐 OpenAPI maximum 与 fs/list 列表契约，见 docs/openlist_api_fs_list_contract.md）。
         """
         now = time.time()
-        # 检查缓存
-        if path in self._check_exists_cache:
-            cached_time, cached_result = self._check_exists_cache[path]
-            if now - cached_time < self._check_exists_cache_ttl:
-                log.debug("[check_exists] 命中缓存: %s -> %s", path, cached_result)
-                return cached_result
+        # 统一 key 规范化（strip 尾斜杠），避免 /path 与 /path/ 双 key
+        cache_key = path.rstrip("/") if path else "/"
+        with self._check_exists_cache_lock:
+            if cache_key in self._check_exists_cache:
+                cached_time, cached_result = self._check_exists_cache[cache_key]
+                if now - cached_time < self._check_exists_cache_ttl:
+                    log.debug("[check_exists] 命中缓存: %s -> %s", cache_key, cached_result)
+                    return cached_result
 
-        result = False
+        result: bool | None = None
         if not path or path == "/":
             res = self.list_directory("/", per_page=1)
-            result = res is not None and res.get("code") in (0, 200)
+            parsed = self._parse_fs_list_page(res)
+            # 根目录：仅权威成功响应视为连通/存在；不可信或失败 → None
+            result = True if parsed is not None else None
         else:
             path = path.rstrip("/")
             parts = path.split("/")
@@ -608,54 +775,94 @@ class OpenListAdminClient:
 
             try:
                 page = 1
-                per_page = 1000
-                max_pages = 100  # 安全阀：防止异常响应导致死循环
-                
+                per_page = 100  # 对齐 docs maximum:100 / fs/list 列表契约
+                max_pages = 100  # 安全阀
+
                 while page <= max_pages:
-                    res = self.list_directory(parent_path, page=page, per_page=per_page)
-                    if not res or res.get("code") not in (0, 200):
-                        result = False
+                    res = self.list_directory(
+                        parent_path, page=page, per_page=per_page)
+                    parsed = self._parse_fs_list_page(res)
+                    if parsed is None:
+                        log.warning(
+                            "[check_exists] 父目录列表不可信，返回 None: path=%s page=%s",
+                            path, page)
+                        result = None
                         break
 
-                    data = res.get("data", {})
-                    content = data.get("content", []) if isinstance(data, dict) else []
-                    
-                    # 检查当前页是否包含目标
+                    content, total = parsed
                     for item in content:
                         if isinstance(item, dict) and item.get("name") == target_name:
                             result = True
                             break
-                    if result:
+                    if result is True:
                         break
-                    
-                    # 如果当前页不满，说明已无更多数据
+
+                    # 当前页未满 → 已穷尽权威列表
                     if len(content) < per_page:
                         result = False
                         break
-                    
-                    # 检查总数，如果已遍历完所有项
-                    try:
-                        total = int(data.get("total", 0))
-                        if page * per_page >= total:
-                            result = False
-                            break
-                    except (TypeError, ValueError):
-                        pass
-                    
+                    if page * per_page >= total:
+                        result = False
+                        break
                     page += 1
                 else:
-                    log.warning("check_exists: 分页搜索超过 %d 页，强制终止: %s", max_pages, path)
-                    result = False
+                    log.warning(
+                        "check_exists: 分页搜索超过 %d 页，视为不可信: %s",
+                        max_pages, path)
+                    result = None
             except Exception as e:
                 log.error("check_exists 异常: %s - %s", path, e)
-        
-        self._check_exists_cache[path] = (now, result)
+                result = None
+
+        # 只缓存 True（权威存在）；False/None 不缓存（避免陈旧 False 误导清理）
+        if result is True:
+            with self._check_exists_cache_lock:
+                self._check_exists_cache[cache_key] = (now, result)
+                # 淘汰最旧项以保持容量上限
+                if len(self._check_exists_cache) > self._check_exists_cache_max:
+                    oldest_key = min(self._check_exists_cache.keys(),
+                                   key=lambda k: self._check_exists_cache[k][0])
+                    del self._check_exists_cache[oldest_key]
         return result
+
+    def invalidate_check_exists_cache(self, path: str) -> None:
+        """使 check_exists 缓存失效。
+        
+        写操作后失效 check_exists 缓存，避免陈旧 True
+        
+        清除指定路径及其所有父路径的缓存条目，确保写操作（MOVE/DELETE/mkdir）
+        后的缓存一致性。
+        
+        Args:
+            path: 要失效的路径（Cloud 路径，如 /dir1/file.strm）
+        """
+        if not path:
+            return
+
+        keys_to_remove: list[str] = []
+
+        # 用 os.path.dirname 逐级向上生成路径及所有祖先的缓存键。
+        # 原实现用 "/".join(path.split("/")[:-1])，在根 "/" 处会卡死（parent="",
+        # path=parent or "/", 永远等于 "/"，无限循环）。dirname("/") == "/" 为
+        # 终止条件，安全。
+        norm = path.rstrip("/") or "/"
+        while True:
+            keys_to_remove.append(norm)
+            parent = os.path.dirname(norm)
+            if parent == norm:
+                break
+            norm = parent or "/"
+
+        with self._check_exists_cache_lock:
+            for key in keys_to_remove:
+                if key in self._check_exists_cache:
+                    del self._check_exists_cache[key]
+                    log.debug("[check_exists] 缓存失效: %s", key)
 
     # 8. 获取兼容格式的内容列表 (逻辑方法)
     def list_contents(self, path: str) -> dict[str, list[dict[str, Any]]] | None:
         """列出目录内容，返回兼容格式。
-        
+
         Returns:
             dict: {"folders": [...], "files": [...]} 成功时返回。
             None: 目录不存在或请求失败时返回。

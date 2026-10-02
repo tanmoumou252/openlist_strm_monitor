@@ -21,13 +21,15 @@ from .file_utils import (
     local_relative,
     local_join,
     quarantine_file,
-    remove_file_strict,
 )
 from .webdav_utils import (
     webdav_parent,
     webdav_root_name,
     build_webdav_trash_path,
     _canonicalize_webdav_path_for_cloud,
+)
+from .encoding_utils import (
+    copy_subtitle_utf8,
 )
 
 __all__ = [
@@ -50,10 +52,11 @@ __all__ = [
     "local_relative",
     "local_join",
     "quarantine_file",
-    "remove_file_strict",
     # WebDAV
     "webdav_parent",
     "webdav_root_name",
     "build_webdav_trash_path",
     "_canonicalize_webdav_path_for_cloud",
+    # Encoding
+    "copy_subtitle_utf8",
 ]

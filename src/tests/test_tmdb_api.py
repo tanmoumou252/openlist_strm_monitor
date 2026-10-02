@@ -70,7 +70,7 @@ try:
     host = db_cfg.get("host", "") or toml_cfg.get("host", "")
     api_key = db_cfg.get("api_key", "") or toml_cfg.get("api_key", "")
     language = db_cfg.get("language", "") or toml_cfg.get("language", "zh-CN")
-    
+
     # 代理配置
     proxy_enabled_raw = db_cfg.get("proxy_enabled", "")
     if proxy_enabled_raw != "":
