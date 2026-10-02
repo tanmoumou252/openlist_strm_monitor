@@ -32,6 +32,8 @@ A 区字幕文件由 `AAreaEventHandler` 监控，在 `handle_a_created_or_modif
 
 ### 完整语言检测表
 
+> 以下为常用模式摘录，完整正则列表见 `media_renamer.py` 的 `LANGUAGE_PATTERNS` 和 `LANGUAGE_CONTENT_PATTERNS`。
+
 | 文件名模式 | 检测语言 | 代码 | 优先级 |
 |-----------|----------|------|--------|
 | `.sc` / `.chs` / `.scjp` | 简体中文 | `zho` | 高 |
@@ -50,6 +52,7 @@ A 区字幕文件由 `AAreaEventHandler` 监控，在 `handle_a_created_or_modif
 | `.vi` / `.vie` | 越南语 | `vie` | — |
 | `简中` / `简体` / `中文` / `双语` / `中英` | 简体中文 | `zho` | 高 |
 | `繁体` / `繁中` / `正體` | 繁体中文 | `zho` | 中 |
+| 完整规则 | `LANGUAGE_PATTERNS` + `LANGUAGE_CONTENT_PATTERNS`（`media_renamer.py`） | — | — |
 
 ### 语言优先级
 
@@ -57,24 +60,34 @@ A 区字幕文件由 `AAreaEventHandler` 监控，在 `handle_a_created_or_modif
 
 ## 媒体类型检测
 
-### 电影检测
-- 路径含关键词：`电影`、`movie`、`movies`、`film`、`films`
-- 目录仅 1 个 STRM 文件且无季集信息
-- 父目录命名暗示电影合集
+`detect_media_type_from_path()`（`media_renamer.py`）基于路径关键词进行严格优先级判断。检查**文件名**和所有父目录名，先匹配 movie 模式再匹配 anime 模式：
 
-### 番剧检测
-- 路径含关键词：`番剧`、`anime`、`show`、`tv`、`series`、`season`
-- STRM 文件名含季集信息（如 `S01E01`、`第1季`）
-- 同目录多个 STRM 文件且含季集编号
+### 电影检测（第一优先级）
+- 路径含关键词：`电影`、`movie`、`movies`、`film`、`films`、`cinema`、`片`、`国语`、`粤语`、`港片`、`外语片`、`好莱坞`
+- 匹配到即返回 `"movie"`，不会继续检查 anime
 
-## 媒体关联（4 策略查找）
+### 番剧检测（第二优先级）
+- 路径含关键词：`番剧`、`anime`、`show`、`tv`、`series`、`season`、`动漫`、`动画`、`cartoon`、`剧集`、`电视剧`、`国漫`、`日漫`、`美漫`、`韩漫`
+- 仅当所有父目录均不匹配 movie 模式时才检查
 
-系统使用 4 种策略将字幕文件关联到对应的 STRM 媒体文件：
+### 无法判断
+- 路径不含任何关键词时返回 `None`
+- `SubtitleHandler` 内部使用 STRM 辅助判断（从 STRM 内容解析 WebDAV 路径再做二次判断）
+- STRM 辅助判断**不会**将已识别为 anime 的误降级为 movie
 
-**策略 1：同目录同名匹配** — 去除字幕文件名的语言后缀，在相同目录查找同名 `.strm`
-**策略 2：同目录唯一 STRM** — 目录中仅一个 `.strm` 文件时直接关联
-**策略 3：季集模式匹配** — 从字幕文件名提取季集，查找同目录符合同季集模式的 `.strm`
-**策略 4：父目录唯一 STRM** — 字幕在子目录时检查父目录中的唯一 `.strm`
+> 完整正则列表见 `media_renamer.py` 的 `MOVIE_DIR_PATTERNS` 和 `ANIME_DIR_PATTERNS`。
+
+## 媒体关联（媒体类型检测优先级）
+
+系统使用 **`detect_media_type_from_path()`**（`media_renamer.py`）按严格优先级将字幕文件关联到对应的 STRM 媒体文件：
+
+**优先级判断（严格顺序，非并行）**：
+1. 路径关键词匹配 movie（`电影`/`movie`/`movies`/`film`/`films`）→ **电影模式**
+2. 路径关键词匹配 anime（`番剧`/`anime`/`show`/`tv`/`series`/`season`）→ **番剧模式**
+3. 无法从路径判断时返回 `None`，由 `SubtitleHandler` 内部使用 STRM 辅助判断
+4. STRM 辅助判断不会将已识别为 anime 的误降级为 movie
+
+> 注：不存在"4 策略并行查找"机制。实际为严格优先级路径判断 + STRM 辅助降级。
 
 ### 季集提取模式
 
@@ -84,9 +97,10 @@ A 区字幕文件由 `AAreaEventHandler` 监控，在 `handle_a_created_or_modif
 | `\d{1,2}x\d{2}` | `1x01` | 1 | 1 |
 | `Season\s*\d+.*E(?:p)?\s*\d+` | `Season 1 Ep 1` | 1 | 1 |
 | `第\d+季.*第\d+集` | `第1季第1集` | 1 | 1 |
-| `EP?\s*\d+` | `EP01` | 1 | 1 |
 
-**优先级**：SXXEXX > NxNN > Season X Ep Y > 第X季第Y集 > EP
+**优先级**：SXXEXX > NxNN > Season X Ep Y > 第X季第Y集
+
+**行为说明**：仅匹配到集没匹配到季时默认第一季。完整季集提取正则见 `media_renamer.py` 的 `_extract_season_episode`。
 
 ## 字幕处理管线
 
@@ -144,7 +158,7 @@ S01E01.jpn.日语.ass            # 日语
 
 ## 数据库跟踪
 
-`subtitles` 表记录已处理的字幕，避免重复处理。由 `AppService.__init__()` 期间调用 `Database.init_subtitle_table()` 初始化。
+`subtitles` 表记录已处理的字幕，避免重复处理。由 `Database.__init__()` 中调用 `init_subtitle_table()` 初始化（非 `AppService.__init__()`）。
 
 ## 与同步引擎的协作
 

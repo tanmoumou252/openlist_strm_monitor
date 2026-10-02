@@ -291,6 +291,7 @@ class TestAuthentication:
                 ("/api/openlist/test-connection", "POST"),
                 ("/api/tmdb/configure", "POST"),
                 ("/api/tmdb/watchlist/sync", "POST"),
+                ("/api/tmdb/watchlist/match/refresh", "POST"),
             ]
 
             for endpoint, method in protected:

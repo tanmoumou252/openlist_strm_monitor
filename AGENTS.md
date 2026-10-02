@@ -14,7 +14,8 @@ This file provides guidance to AI coding assistants when working with code in th
 8. **Preserve the TMDB integration.** Do not refactor TMDB API code unless specifically requested.
 9. **Prefer small, targeted changes** over large rewrites. This project is close to completion.
 10. **Do NOT fake verification** — use real commands, real server startup, and real API/UI checks when available. Do not claim tests were run unless they were actually executed.
-11. **Reply in Chinese** 
+11. **Reply in Chinese**
+12. **Documentation must not use exact line numbers**. When referencing code locations in wiki/docs/README markdown files, use method names, function names, class names, or approximate ranges (e.g., "in the authentication section", "near the database initialization") instead of specific line numbers like "line 123" or "lines 45-67". Line numbers change frequently as code evolves, making such references quickly outdated and misleading. 
 
 ## Configuration
 
@@ -25,6 +26,13 @@ This file provides guidance to AI coding assistants when working with code in th
 - **Database**: SQLite — `bridge.db` (core), `tmdb_watchlist.db` (TMDB cache + webui_config)
 - **Main config**: `config.toml` (YAML-like TOML)
 - **Runtime config overrides**: `webui_config` table in `tmdb_watchlist.db` (DB > config.toml)
+
+## Server Entry Points
+
+- **Sync engine only**: `python src/main.py` — starts the A/B/C zone sync engine, no WebUI.
+- **WebUI**: `python src/webui/server.py` — starts the management panel with an interactive menu to optionally launch the sync engine.
+
+> Do NOT use `python src/main.py --webui-only` or `--webui` — those flags do not exist (both are rejected by `main.py`).
 
 ## Project Overview
 
@@ -50,13 +58,13 @@ This file provides guidance to AI coding assistants when working with code in th
 |-------|-----------|
 | **Language** | Python 3.11+ (backend), JavaScript (frontend) |
 | **Frontend build** | Vite 8.x, vanilla JS (no React/Vue), MD3/Fluent2 dual theme |
-| **Backend HTTP** | Python stdlib `http.server` (single-threaded, one request at a time) |
-| **Database** | SQLite (WAL mode, two files) |
+| **Backend HTTP** | Python stdlib `http.server` (`ThreadingHTTPServer`, 多线程) |
+| **Database** | SQLite (WAL mode, two files) + FTS5 with `simple` extension for Chinese search |
+| **Search/Tokenizer** | `simple` tokenizer (wangfenjin/simple, cppjieba wrapper, v0.7.1) loaded from `src/tokenizers/simple/simple.dll`; hard dependency for Chinese search |
 | **File watching** | `watchdog` library |
 | **HTTP client** | `requests` library |
 | **WebDAV XML** | `lxml` library |
-| **2FA** | `pyotp` library |
-| **Testing** | pytest (20 test files under `src/tests/`) |
+| **Testing** | pytest (36 test files under `src/tests/`); dev deps in `src/tests/requirements-dev.txt` |
 
 ## Directory Structure
 
@@ -64,21 +72,24 @@ This file provides guidance to AI coding assistants when working with code in th
 openlist_strm_bridge/
 ├── src/
 │   ├── main.py                  # Entry point
-│   ├── app_service_core.py      # Core sync engine (2171 lines)
+│   ├── app_service_core.py      # Core sync engine
+│   ├── app_service.py           # Compat re-export layer
 │   ├── config.py                # Configuration classes (AppConfig, etc.)
-│   ├── database.py              # SQLite bridge.db manager (1401 lines)
+│   ├── database.py              # SQLite bridge.db manager
 │   ├── webdav_client.py         # OpenList Admin API + WebDAV client
 │   ├── area_watchers.py         # File system watchers for A/B/C zones
 │   ├── refresh_service.py       # Periodic WebDAV refresh
 │   ├── media_renamer.py         # Media renaming, season/episode extraction
-│   ├── subtitle_handler.py      # Subtitle synchronization
-│   ├── sync_service.py          # Sync service
 │   ├── tmdb_client.py           # TMDB API v3 client
 │   ├── tmdb_watchlist_db.py     # TMDB watchlist SQLite DB
+│   ├── tmdb_watchlist.py        # TMDB data classes (TmdbItem, etc.)
 │   ├── watchlist_match.py       # Watchlist matching logic
+│   ├── secret_manager.py        # Sensitive config encryption
+│   ├── logger_setup.py          # Logging setup
+│   ├── openlist_login_shared.py # Shared OpenList login logic
 │   ├── webui/
 │   │   ├── server.py            # HTTP server + auth + route dispatch
-│   │   ├── routes.py            # All API route handlers (2335 lines)
+│   │   ├── routes.py            # All API route handlers
 │   │   ├── index.html           # SPA entry point
 │   │   ├── main.js              # Frontend entry point
 │   │   ├── vite.config.js       # Vite build config
@@ -89,15 +100,23 @@ openlist_strm_bridge/
 │   │       └── components/      # dialog.js, toast.js
 │   ├── domain/media/            # subtitle_handler.py
 │   ├── domain/sync/             # sync_service.py
-│   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py
-│   └── tests/                   # 20 test files
+│   ├── domain/storage/
+│   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py
+│   ├── tokenizers/              # simple/ (cppjieba wrapper for Chinese search)
+│   └── tests/                   # 36 test files
 ├── dist/                        # Built frontend (Vite output)
 │   └── assets/                  # Hashed JS/CSS/font files
+├── wiki/                        # Documentation
 ├── docs/                        # API docs, design docs, UI templates
 ├── config.toml                  # Main configuration
 ├── bridge.db                    # Core SQLite database
 ├── tmdb_watchlist.db            # TMDB watchlist SQLite database
-└── reset_admin.py               # Password reset utility
+├── reset_admin.py               # Password reset utility
+├── requirements.txt             # Production dependencies
+├── config.toml.example          # Example configuration
+├── 嵌入式启动.bat                  # Embedded Python launcher
+├── 环境变量启动.bat                  # System Python launcher
+└── LICENSE                      # License file
 ```
 
 ## WebUI Build System
@@ -155,7 +174,7 @@ The Vite config groups modules into chunks:
 - Two SQLite databases, both in WAL mode
 - `bridge.db`: A/B/C zone file records, fingerprints, ghost protection, subtitles, sync state
 - `tmdb_watchlist.db`: TMDB cache, webui_config (scopes: tmdb, openlist, ui, migration), operation logs
-- `Database` class uses read/write connection managers with reentrant lock
+- `Database` class uses read/write connection managers with `ReadWriteLock`
 
 ### Frontend State Management
 - Global state in `state.js` (singleton module pattern, not a framework)
@@ -163,25 +182,41 @@ The Vite config groups modules into chunks:
 - Floating-label form field pattern: `createField()` in `utils.js` generates label + input HTML
 - All API calls go through `api()` wrapper in `api.js` (auto token injection, 401 redirect, timeout)
 
+### Search & Tokenizer (FTS5 + Simple)
+- Chinese media-name search uses SQLite **FTS5** with the **`simple`** tokenizer — a cppjieba wrapper from the wangfenjin/simple project (built-in v0.7.1). The `simple.dll` lives in `src/tokenizers/simple/` (see that dir's `README.md` / `VERSION`).
+- Loading: `database.py._load_simple_tokenizer` and `tmdb_watchlist_db.py._load_simple_into` call `conn.load_extension(simple.dll)` when opening a connection.
+- Soft fallback: if `simple.dll` is missing/fails to load, the code downgrades to SQLite's built-in `unicode61` tokenizer and only logs a `WARNING` — startup is NOT blocked.
+- **Hard dependency**: `unicode61` produces no tokens for Chinese, so when `simple.dll` is absent, Chinese search silently returns empty. With a Chinese media library, `simple` is a hard dependency for search; always ship `src/tokenizers/simple/simple.dll` with the build.
+
+### Regional/Area Search
+- `GET /api/area/{area}?q=` runs FTS5 over the area tables; the query string is escaped via `_escape_fts5_query` before use.
+- The `kind` parameter (`anime` / `movie` / `other` / `all`, validated against `_KIND_FILTER_MAP`) classifies anime vs movie in the paginated media list.
+- The detail endpoint `GET /api/area/{area}/detail?media=` intentionally uses `LIKE` (small data, needs exact per-media match) rather than FTS5, and escapes LIKE wildcards with `ESCAPE '\'`.
+
+### Onboarding
+- A **7-step onboarding** flow guides first-run setup: confirm admin password (auto-generated on first startup) → configure TMDB → configure OpenList → start main program → view A/B zones → refresh TMDB watchlist → detect TMDB match status. Steps are defined in `dashboard.js`'s `steps` array.
+- State is stored in `tmdb_watchlist.db` → `webui_config` (scope=`ui`, keys like `onboarding_completed`, `onboarding_<step>_completed`).
+- Single step completion: `POST /api/onboarding/complete-step` (sets `onboarding_<step>_completed='1'`). Mark the whole flow complete or skip it via `POST /api/webui/config/ui` with `{ onboarding_completed: '1' }`.
+
 ## Common Pitfalls
 
 1. **Dist not rebuilt**: If you change `src/webui/modules/*.js`, the browser won't see the changes until you run `npx vite build`. This is the #1 cause of "my fix didn't work" in this project.
-2. **Server single-threaded**: Python's `http.server` handles one request at a time. Long-running requests (like TMDB sync) block the server.
+2. **Server multi-threaded but DB-locked**: Python's `ThreadingHTTPServer` handles concurrent requests, but long-running operations (like TMDB sync) hold DB locks that may block other requests.
 3. **SQLite WAL mode**: The database files may have `-shm` and `-wal` companion files. Don't delete them.
 4. **Config layering**: DB configuration overrides config.toml. If you change config.toml and it doesn't take effect, check the DB `webui_config` table.
 5. **Password stored in DB**: The admin password hash is in `tmdb_watchlist.db` → `webui_config` where scope='ui' and key='admin_password'. Use `reset_admin.py` to reset.
 
 ## Key Files Reference
 
-| File | Lines | What to know |
-|------|-------|-------------|
-| `src/app_service_core.py` | 2100+ | Heart of the engine. Lock ordering is critical. |
-| `src/database.py` | 1400+ | SQLite with WAL, read/write connection managers, reentrant lock. |
-| `src/webui/routes.py` | 2300+ | All API handlers. `_get_media_groups_paginated` (~line 1800) has pagination logic. |
-| `src/webui/server.py` | 1200+ | Auth, routing, SPA serving. `_check_auth()` at ~line 290. |
-| `src/webui/modules/core/api.js` | 30+ | API wrapper — always use this instead of raw fetch. |
-| `src/webui/modules/core/router.js` | 100+ | Hash-based SPA router with auth guard. |
-| `src/webui/modules/core/utils.js` | 90+ | `createField()` for form labels, `esc()` for HTML escaping. |
-| `src/webui/modules/pages/openlist.js` | ~680 | OpenList config page. Engine select change handler at `_bindEngineSelectEvents()`. |
-| `src/config.py` | 600+ | `AppConfig` dataclass. `load_strm_storage_from_api()` for dynamic storage mapping. |
-| `src/webdav_client.py` | 700+ | JWT auth, Admin API, WebDAV protocol. TOTP support. |
+| File | What to know |
+|------|-------------|
+| `src/app_service_core.py` | Heart of the engine. Lock ordering is critical. |
+| `src/database.py` | SQLite with WAL, read/write connection managers, `ReadWriteLock`. |
+| `src/webui/routes.py` | All API handlers. `_get_media_groups_paginated` method handles pagination logic. |
+| `src/webui/server.py` | Auth, routing, SPA serving. `_check_auth()` method handles authentication. |
+| `src/webui/modules/core/api.js` | API wrapper — always use this instead of raw fetch. |
+| `src/webui/modules/core/router.js` | Hash-based SPA router with auth guard. |
+| `src/webui/modules/core/utils.js` | `createField()` for form labels, `esc()` for HTML escaping. |
+| `src/webui/modules/pages/openlist.js` | OpenList config page. Engine select change handler at `_bindEngineSelectEvents()`. |
+| `src/config.py` | `AppConfig` dataclass. `load_strm_storage_from_api()` for dynamic storage mapping. |
+| `src/webdav_client.py` | JWT auth, Admin API, WebDAV protocol. TOTP support. |

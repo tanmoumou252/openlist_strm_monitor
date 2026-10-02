@@ -1,0 +1,4 @@
+# 字体子集化构建依赖（src/webui/scripts/subset_font.py 使用）
+# 安装：pip install -r src/webui/scripts/requirements.txt
+
+fonttools[woff2]>=4.50.0

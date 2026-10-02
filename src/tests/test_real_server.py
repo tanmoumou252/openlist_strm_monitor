@@ -1,14 +1,14 @@
 """
 真实服务器安全测试脚本。
 连接到运行中的 WebUI (http://127.0.0.1:8579) 执行安全验证。
-输出 JSON 日志到 test_logs/real_server_test_*.json
+输出 JSON 日志到 <项目根>/test_logs/real_server_test_*.json
 """
 import json, urllib.request, urllib.error, time, os
 from datetime import datetime
 from pathlib import Path
 
 BASE = "http://127.0.0.1:8579"
-LOG_DIR = Path(__file__).resolve().parent / "test_logs"
+LOG_DIR = Path(__file__).resolve().parent.parent.parent / "test_logs"
 LOG_DIR.mkdir(exist_ok=True)
 LOG_FILE = LOG_DIR / f"real_server_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 

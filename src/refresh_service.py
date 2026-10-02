@@ -41,10 +41,15 @@ class PathAnalysis:
 
 
 class RefreshService:
+    # 连续失败熔断：前 N 次打全栈，之后降级为单行 WARNING
+    _CIRCUIT_BREAKER_THRESHOLD: int = 3
+
     def __init__(self, app: AppService) -> None:
         self.app = app
         self._running = False
         self._thread: threading.Thread | None = None
+        self._consecutive_failures: int = 0
+        self._last_error_summary: str = ""
 
     def start(self) -> None:
         if not self.app.config.refresh.enabled:
@@ -65,7 +70,11 @@ class RefreshService:
             self._thread.join(timeout=2)
 
     def _worker(self) -> None:
-        self.execute_refresh_cycle()
+        # 兜底：任何未捕获异常不得杀死刷新线程，记录后继续下一轮。
+        # SQLite 瞬时 readonly（Windows 杀毒锁文件）等属于可恢复错误。
+        # 熔断器：前 _CIRCUIT_BREAKER_THRESHOLD 次连续失败打全栈，
+        # 之后降级为单行 WARNING 避免日志洪泛。
+        self._run_cycle_with_breaker()
 
         while self._running:
             # 在循环内读取间隔，使热重载后的新间隔即时生效；
@@ -77,7 +86,31 @@ class RefreshService:
                 waited += 1
             if not self._running:
                 break
+            self._run_cycle_with_breaker()
+
+    def _run_cycle_with_breaker(self) -> None:
+        """执行一次刷新周期，带熔断器。"""
+        try:
             self.execute_refresh_cycle()
+            if self._consecutive_failures > 0:
+                logging.info(
+                    "[主动刷新] 恢复正常（此前连续失败 %d 次）",
+                    self._consecutive_failures)
+            self._consecutive_failures = 0
+            self._last_error_summary = ""
+        except Exception as exc:
+            self._consecutive_failures += 1
+            self._last_error_summary = f"{type(exc).__name__}: {exc}"
+            if self._consecutive_failures <= self._CIRCUIT_BREAKER_THRESHOLD:
+                logging.error(
+                    "[主动刷新] 执行失败 (%d/%d)",
+                    self._consecutive_failures,
+                    self._CIRCUIT_BREAKER_THRESHOLD,
+                    exc_info=True)
+            else:
+                logging.warning(
+                    "[主动刷新] 连续失败 %d 次，已降级为摘要: %s",
+                    self._consecutive_failures, self._last_error_summary)
 
     def execute_refresh_cycle(self) -> None:
         """执行完整的主动刷新周期。"""

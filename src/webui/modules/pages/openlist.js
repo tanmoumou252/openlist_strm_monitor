@@ -27,7 +27,7 @@ const _openlistHelpTexts = {
   log_level: '日志记录级别。\nDEBUG：最详细，包含所有调试信息。\nINFO：常规信息（推荐）。\nWARNING：只记录警告和错误。\nERROR：只记录错误。',
   log_max_size_mb: '单个日志文件最大大小（MB）。\n超过此大小会自动轮转。\n建议：2-10 MB。',
   log_backup_count: '保留的历史日志文件数量。\n超过此数量的旧日志会被删除。\n建议：5-10 个。',
-  log_file: '日志文件保存路径（相对路径相对项目根目录）。\n留空使用默认 logs/strm_bridge.log。\n修改并保存后，重启 WebUI / 主程序即按此路径与上面设置的级别写日志。',
+  log_file: '日志文件保存路径（默认存放在项目根目录下，文件名 strm_bridge.log）。\n留空使用默认值。\n修改并保存后，重启 WebUI / 主程序即按此路径与上面设置的级别写日志。',
 };
 
 function _olHelpIcon(key, tooltipBelow = false) {
@@ -177,8 +177,8 @@ export async function _renderOpenListConfig(cfg) {
       ${olField('ol-webdav-user', '用户名', openlistCfg.webdav_user || '', 'admin')}
       ${olField('ol-webdav-password', '密码', openlistCfg.webdav_password || '', '输入密码', 'password')}
       ${olField('ol-webdav-totp-secret', '2FA 密钥', openlistCfg.webdav_totp_secret || '', '留空则不使用 2FA', 'password')}
-      ${olField('ol-b-root', 'B 区根目录', openlistCfg.b_root || cfg.b_root || '', 'C:/path/to/b')}
-      ${olField('ol-c-root', 'C 区根目录', openlistCfg.c_root || cfg.c_root || '', 'C:/path/to/c')}
+      ${olField('ol-b-root', 'B 区根目录', openlistCfg.b_root || cfg.b_root || '', '请填写 B 区根目录的绝对路径')}
+      ${olField('ol-c-root', 'C 区根目录', openlistCfg.c_root || cfg.c_root || '', '请填写 C 区根目录的绝对路径')}
     </div>
     <div class="openlist-top-actions">
       <button class="toolbar-btn primary" id="ol-save">保存</button>
@@ -203,11 +203,15 @@ export async function _renderOpenListConfig(cfg) {
     <div class="field-grid">
       ${olField('ol-refresh-interval', '刷新间隔 (分钟)', refreshInterval, '10', 'number')}
       ${olField('ol-refresh-depth', '刷新深度', refreshDepth, '5', 'number')}
+      ${olSelect('ol-refresh-log-level', '刷新日志级别', openlistCfg.refresh_log_level || 'INFO', [
+        { value: 'DEBUG', label: 'DEBUG — 调试' },
+        { value: 'INFO', label: 'INFO — 信息（推荐）' },
+        { value: 'WARNING', label: 'WARNING — 警告' }
+      ])}
     </div>
     <div style="margin-top:12px">
-      <div style="font-size:calc(var(--font-base) - 1px);color:var(--text-muted);margin-bottom:6px;display:flex;align-items:center;gap:6px">
-        <span>刷新路径</span>
-        ${_olHelpIcon('refresh_paths')}
+      <div style="margin-bottom:6px">
+        <span>刷新路径${_olHelpIcon('refresh_paths')}</span>
       </div>
       <div class="refresh-paths-tags" id="refresh-paths-tags"></div>
       <div style="display:flex;gap:6px;margin-top:6px">
@@ -244,7 +248,7 @@ export async function _renderOpenListConfig(cfg) {
       ])}
       ${olField('ol-log-max-size', '日志最大大小 (MB)', openlistCfg.log_max_size_mb || '2', '2', 'number')}
       ${olField('ol-log-backup-count', '历史日志数量', openlistCfg.log_backup_count || '5', '5', 'number')}
-      ${olField('ol-log-path', '日志保存路径', openlistCfg.log_file || '', 'logs/strm_bridge.log')}
+      ${olField('ol-log-path', '日志保存路径', openlistCfg.log_file || cfg.log_file || '', 'strm_bridge.log')}
     </div>
   </div>`;
 
@@ -507,9 +511,28 @@ const data = await api('/api/restart-webui', { method: 'POST' });
 
   document.getElementById('ol-save')?.addEventListener('click', async () => {
     const btn = document.getElementById('ol-save');
+    // 分层必填校验：host 硬必填（return 前不得 disable 按钮，避免卡死）
+    const host = document.getElementById('ol-webdav-host')?.value.trim();
+    if (!host) {
+      showToast('请填写必填项：OpenList 地址', 'error');
+      return;
+    }
+    const bRoot = document.getElementById('ol-b-root')?.value.trim();
+    const cRoot = document.getElementById('ol-c-root')?.value.trim();
+    if (!bRoot || !cRoot) {
+      const miss = [];
+      if (!bRoot) miss.push('B 区根目录');
+      if (!cRoot) miss.push('C 区根目录');
+      showToast(`提示：${miss.join('、')} 未填写，可先保存连接信息，稍后再配置路径`, 'info');
+      // 不 return，继续保存（后端支持空 b/c）
+    }
     btn.disabled = true;
     btn.innerHTML = '保存中...';
     try {
+      // 过滤空引擎条目（UI 初始化会留一个空行供用户填写，保存时剔除）
+      const cleanedEngines = (OpenListState.strmEngines || [])
+        .filter(e => e && typeof e.engine === 'string' && e.engine.trim())
+        .map(e => ({ engine: e.engine, monitored_paths: Array.isArray(e.monitored_paths) ? e.monitored_paths : [] }));
       const body = {
         webdav_host: document.getElementById('ol-webdav-host')?.value || '',
         webdav_user: document.getElementById('ol-webdav-user')?.value || '',
@@ -518,10 +541,11 @@ const data = await api('/api/restart-webui', { method: 'POST' });
         b_root: document.getElementById('ol-b-root')?.value || '',
         c_root: document.getElementById('ol-c-root')?.value || '',
         refresh_paths: JSON.stringify(OpenListState.refreshPaths || []),
-        strm_engines: JSON.stringify(OpenListState.strmEngines),
+        strm_engines: JSON.stringify(cleanedEngines),
         refresh_enabled: document.querySelector('#ol-refresh-enabled button[data-value="on"].active') ? 'true' : 'false',
         refresh_interval_minutes: document.getElementById('ol-refresh-interval')?.value || '10',
         refresh_depth: document.getElementById('ol-refresh-depth')?.value || '5',
+        refresh_log_level: document.getElementById('ol-refresh-log-level')?.value || 'INFO',
         behavior_action: document.getElementById('ol-action')?.value || 'MOVE',
         behavior_trash_dir_name: document.getElementById('ol-trash-dir')?.value || 'trash',
         behavior_ghost_protect_seconds: document.getElementById('ol-ghost-protect')?.value || '300',

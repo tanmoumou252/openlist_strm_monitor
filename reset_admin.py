@@ -7,7 +7,7 @@ WebUI 管理员密码重置脚本。
   python reset_admin.py 我的密码     → 使用指定密码
 
 该脚本会直接操作数据库，对密码加盐 SHA256 哈希后写入 webui_config 表。
-运行后需重启 WebUI 使新密码生效。
+登录验证实时读取数据库，无需重启 WebUI 即可使用新密码。
 """
 
 import hashlib
@@ -119,7 +119,7 @@ def main():
     print(f"  新密码: {new_password}")
     print("=" * 50)
     print()
-    print("请重启 WebUI 使新密码生效。")
+    print("新密码已写入数据库，登录验证实时读取，无需重启 WebUI 即可使用。")
     print("如忘记此密码，再次运行本脚本即可重新生成。")
 
 

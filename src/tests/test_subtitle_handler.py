@@ -374,6 +374,54 @@ class TestProcessSubtitleFileDispatch:
         # 应该调用了 upsert（movie handler 会写 DB）
         app.db.upsert_subtitle.assert_called_once()
 
+    def test_anime_path_dispatches_to_anime_handler(self, tmp_path: Path):
+        """路径含 "番剧" 目录 + 字幕名含季集 → 走 anime 模式，目标含 Season 01"""
+        app = _make_app(tmp_path)
+        a_root = tmp_path / "a"
+        app.get_a_root_for_path.return_value = a_root
+
+        # 创建带 "番剧" 目录的字幕文件，文件名含季集
+        sub = a_root / "番剧" / "Show" / "S01E01.ass"
+        sub.parent.mkdir(parents=True)
+        sub.write_text("test", encoding="utf-8")
+
+        handler = SubtitleHandler(app)
+        handler.process_subtitle_file(sub)
+        # 应该调用了 upsert（anime handler 会写 DB）
+        app.db.upsert_subtitle.assert_called_once()
+        # 验证目标路径包含 Season 01（证明走了 anime 模式而非 movie）
+        call_kwargs = app.db.upsert_subtitle.call_args
+        target_path = call_kwargs[1]["target_path"] if "target_path" in call_kwargs[1] else call_kwargs[0][1]
+        assert "Season 01" in str(target_path)
+
+    def test_anime_path_no_strm_uses_subtitle_name_season(self, tmp_path: Path):
+        """路径含 "番剧" 目录 + 同目录无 STRM → 仍走 anime 模式，从字幕名提取季集
+
+        这是 L0 修复的核心价值：修复前，anime 路径 + 无 STRM 会被误降级为 movie。
+        """
+        app = _make_app(tmp_path)
+        a_root = tmp_path / "a"
+        app.get_a_root_for_path.return_value = a_root
+
+        # 创建带 "番剧" 目录的字幕文件，同目录无 STRM
+        sub = a_root / "番剧" / "Show" / "S02E03.ass"
+        sub.parent.mkdir(parents=True)
+        sub.write_text("test", encoding="utf-8")
+
+        handler = SubtitleHandler(app)
+        handler.process_subtitle_file(sub)
+        # 应该调用了 upsert
+        app.db.upsert_subtitle.assert_called_once()
+        # 验证目标路径包含 Season 02（证明走了 anime 模式）
+        call_kwargs = app.db.upsert_subtitle.call_args
+        target_path = call_kwargs[1]["target_path"] if "target_path" in call_kwargs[1] else call_kwargs[0][1]
+        assert "Season 02" in str(target_path)
+        # 验证 season/episode 参数正确
+        season = call_kwargs[1].get("season") if "season" in call_kwargs[1] else call_kwargs[0][3]
+        episode = call_kwargs[1].get("episode") if "episode" in call_kwargs[1] else call_kwargs[0][4]
+        assert season == 2
+        assert episode == 3
+
 
 class TestProcessMovieSubtitle:
     """测试 _process_movie_subtitle 的复制和命名逻辑"""
@@ -444,6 +492,37 @@ class TestProcessMovieSubtitle:
         app.db.upsert_subtitle.assert_called_once()
         # 目标文件内容应该不变（没被覆盖）
         assert target.read_text() == "existing"
+
+    def test_forced_subtitle_uses_und_when_language_unknown(self, tmp_path: Path):
+        """语言检测失败时，forced 字幕使用 .forced.und 而非 .forced.zho.中文。
+
+        覆盖 subtitle_handler.py:125-131：当 detect_subtitle_language 返回 None 时，
+        应使用 .forced.und 作为语言标识（而非旧的 .forced.zho.中文）。
+        """
+        app = _make_app(tmp_path)
+        a_root = tmp_path / "a"
+        a_root.mkdir()
+
+        # 创建不含语言标识的字幕文件（如 Movie.ass）
+        # detect_subtitle_language 应返回 None
+        sub = a_root / "电影" / "Movie.ass"
+        sub.parent.mkdir(parents=True)
+        sub.write_text("subtitle content", encoding="utf-8")
+
+        handler = SubtitleHandler(app)
+        handler._process_movie_subtitle(sub, a_root, "fp_test")
+
+        # 验证 DB 记录已写入
+        app.db.upsert_subtitle.assert_called_once()
+        call_kwargs = app.db.upsert_subtitle.call_args
+        target_path = call_kwargs[1]["target_path"] if "target_path" in call_kwargs[1] else call_kwargs[0][1]
+        target_name = Path(target_path).name
+
+        # 验证目标路径包含 .forced.und 而非 .forced.zho.中文
+        assert ".forced.und" in target_name, \
+            f"语言未知时应使用 .forced.und，实际文件名: {target_name}"
+        assert ".forced.zho" not in target_name, \
+            f"语言未知时不应使用 .forced.zho，实际文件名: {target_name}"
 
 
 class TestProcessAnimeSubtitle:

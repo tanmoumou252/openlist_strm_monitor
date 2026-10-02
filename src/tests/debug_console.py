@@ -36,7 +36,7 @@ def read_menu_choice() -> str:
     if os.name == "nt":
         while True:
             ch = msvcrt.getwch()
-            if ch in "12345678":
+            if ch in "12345":
                 print(ch)
                 return ch
     return input().strip()
@@ -64,13 +64,10 @@ def show_menu(python_exe: str) -> None:
     print(" " + "-" * 97)
     print()
     print("   [1] 在控制台运行              前台实时日志，按 q 或 Ctrl+C 退出")
-    print("   [2] 后台静默运行              启动并添加开机自启")
-    print("   [3] 停止后台进程              安全结束监控进程")
-    print("   [4] 打开自启文件夹            管理 strm_bridge.vbs")
-    print("   [5] 清除本地数据库            重置 bridge.db / wal / shm")
-    print(f"   [6] 打开 WebUI 管理面板       {WEBUI_URL}")
-    print("   [7] 查看数据库统计            各表记录数和 B 区状态分布")
-    print("   [8] 退出")
+    print("   [2] 清除本地数据库            重置 bridge.db / wal / shm")
+    print(f"   [3] 打开 WebUI 管理面板       {WEBUI_URL}")
+    print("   [4] 查看数据库统计            各表记录数和 B 区状态分布")
+    print("   [5] 退出")
     print()
     print(" " + "-" * 97)
     print()
@@ -100,63 +97,10 @@ def run_console(python_exe: str) -> None:
     time.sleep(3)
 
 
-def run_background(python_exe: str) -> None:
-    clear_screen()
-    set_color("09")
-    print_header(subtitle="[2] 后台静默运行 + 开机自启")
-
-    startup_dir = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
-    startup_dir.mkdir(parents=True, exist_ok=True)
-    startup_vbs = startup_dir / "strm_bridge.vbs"
-
-    with startup_vbs.open("w", encoding="utf-8") as f:
-        f.write('Set WshShell = CreateObject("WScript.Shell")\n')
-        f.write(f'WshShell.CurrentDirectory = "{ROOT_DIR}"\n')
-        f.write(f'WshShell.Run """{python_exe}"" ""{MAIN_PY}""", 0, False\n')
-
-    print("[OK] 自启脚本写入:")
-    print(f"     {startup_vbs}")
-    print()
-    print("[INFO] 正在启动后台监控...")
-    subprocess.run(["cscript.exe", "//nologo", str(startup_vbs)], cwd=str(ROOT_DIR), shell=False)
-    print()
-    print("[OK] 程序已在后台运行！关闭此窗口不影响监控。")
-    print("提示: 使用菜单 [3] 可停止它。")
-    pause()
-
-
-def stop_background() -> None:
-    clear_screen()
-    set_color("0C")
-    print_header(subtitle="[3] 停止后台进程")
-    print("[INFO] 正在扫描并结束 python main.py 进程...")
-
-    commands = [
-        'wmic process where "name=\'python.exe\' and commandline like \'%main.py%\'" call terminate',
-        'wmic process where "name=\'pythonw.exe\' and commandline like \'%main.py%\'" call terminate',
-    ]
-    for cmd in commands:
-        subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    print("[OK] 已发送停止指令。")
-    print("提示: 如果进程仍在运行，请在任务管理器中手动结束 python.exe。")
-    pause()
-
-
-def open_startup_folder() -> None:
-    clear_screen()
-    set_color("0D")
-    print_header(subtitle="[4] 打开开机自启文件夹")
-    print("[INFO] 正在打开 Windows 启动文件夹...")
-    print("提示: 删除 strm_bridge.vbs 即可取消开机自启。")
-    subprocess.Popen(["explorer", "shell:startup"])
-    pause()
-
-
 def clear_database() -> None:
     clear_screen()
     set_color("0C")
-    print_header(subtitle="[5] 清除本地数据库")
+    print_header(subtitle="[2] 清除本地数据库")
     print("警告: 此操作将删除数据库，所有本地记录将丢失！")
     confirm = input("\n请输入 YES 确认: ").strip()
     if confirm.upper() != "YES":
@@ -194,7 +138,7 @@ def clear_database() -> None:
 def open_webui() -> None:
     clear_screen()
     set_color("0B")
-    print_header(subtitle="[6] 打开 WebUI 管理面板")
+    print_header(subtitle="[3] 打开 WebUI 管理面板")
     print("[INFO] 正在打开浏览器...")
     webbrowser.open(WEBUI_URL)
     print(f"[OK] 已打开: {WEBUI_URL}")
@@ -205,7 +149,7 @@ def open_webui() -> None:
 def show_db_stats() -> None:
     clear_screen()
     set_color("0E")
-    print_header(subtitle="[7] 数据库统计信息")
+    print_header(subtitle="[4] 数据库统计信息")
     print("[INFO] 正在查询数据库统计...\n")
 
     if not DB_PATH.exists():
@@ -259,28 +203,22 @@ def main() -> int:
 
     while True:
         show_menu(python_exe)
-        print("请选择 1-8: ", end="", flush=True)
+        print("请选择 1-5: ", end="", flush=True)
         choice = read_menu_choice()
 
         if choice == "1":
             run_console(python_exe)
         elif choice == "2":
-            run_background(python_exe)
-        elif choice == "3":
-            stop_background()
-        elif choice == "4":
-            open_startup_folder()
-        elif choice == "5":
             clear_database()
-        elif choice == "6":
+        elif choice == "3":
             open_webui()
-        elif choice == "7":
+        elif choice == "4":
             show_db_stats()
-        elif choice == "8":
+        elif choice == "5":
             print("\n[OK] 再见！")
             return 0
         else:
-            print("\n请输入 1-8 之间的数字。")
+            print("\n请输入 1-5 之间的数字。")
             time.sleep(1)
 
 

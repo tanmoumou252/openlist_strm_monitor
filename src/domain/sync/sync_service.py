@@ -190,6 +190,9 @@ class SyncService:
             self.app.ensure_single_visible_instance(fingerprint, str(b_local))
             return True
         except Exception as e:
-            logging.error("[A->B复制失败] DB错误: %s", e)
+            logging.error(
+                "[A->B复制失败] DB错误: %s | b_local=%s webdav=%s parent=%s fingerprint=%s",
+                e, b_local, webdav_path, parent, fingerprint,
+            )
             safe_remove_file(b_local)
             return False

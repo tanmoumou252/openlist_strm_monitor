@@ -140,10 +140,14 @@ def main():
     log.info("=" * 70)
     log.info("【处理】筛选 Strm 类型的存储 ID")
     log.info("=" * 70)
+    # 防御 data: null —— storages.get("data", {}).get("content", []) 在 data 为
+    # None 时会抛 'NoneType' object has no attribute 'get'，与源码 bug 同模式。
+    data_field = storages.get("data") or {}
+    content = data_field.get("content", []) if isinstance(data_field, dict) else []
     strm_storage_ids = [
         storage["id"]
-        for storage in storages.get("data", {}).get("content", [])
-        if storage.get("driver", "").lower() == "strm"
+        for storage in content
+        if isinstance(storage, dict) and storage.get("driver", "").lower() == "strm"
     ]
     if not strm_storage_ids:
         log.warning("未找到任何 Strm 类型的存储")
@@ -157,7 +161,11 @@ def main():
         log.info("=" * 70)
         storage_info = client.get_storage_info(storage_id)
         if storage_info:
-            data = storage_info.get("data", {})
+            # 防御 data: null —— storage_info.get("data", {}) 在 data 为 None 时
+            # 会抛 'NoneType' object has no attribute 'get'，与源码 bug 同模式。
+            data = storage_info.get("data") or {}
+            if not isinstance(data, dict):
+                data = {}
             addition = data.get("addition", "")
             paths = extract_paths_from_addition(addition)
             save_local_mode = extract_save_local_mode(addition)
