@@ -182,6 +182,26 @@ python -m pytest src/tests/test_refresh_media.py::TestSyncToBZone::test_sync_cou
 python -m pytest src/tests/ --cov=src --cov-report=html
 ```
 
+## WebUI 专项回归
+
+WebUI 专项测试通过 `webui` marker 聚合（`conftest.py` 按文件名自动打标：`test_webui_*.py`、`test_e2e_full_flow.py`、`test_onboarding_e2e.py`），两个入口：
+
+```bash
+# Python 侧（pytest marker）
+python -m pytest src/tests -m webui
+
+# 一键双入口（JS node:test + pytest webui marker），仓库根执行
+run_webui_regression.bat
+```
+
+前端纯逻辑模块（不依赖 DOM/网络）另有 Node 内置 `node:test` 零依赖用例，位于 `src/webui/tests/`（说明见 `src/webui/tests/README.md`）：
+
+```bash
+node.exe --test "src/webui/tests/*.test.mjs"
+```
+
+`-m "not webui"` 可在跑全量时排除 WebUI 专项（含端到端启动服务器的慢用例）。
+
 ## 测试依赖
 
 ```bash
