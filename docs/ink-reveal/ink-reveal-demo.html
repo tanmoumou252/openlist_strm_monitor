@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ink Reveal Demo</title>
+  <link rel="stylesheet" href="./ink-reveal.css">
+  <style>
+    body {
+      background: #fcfaf8;
+      color: #26251e;
+      font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+
+    .ink-reveal__content h1 {
+      margin: 0 0 16px;
+      font-size: 56px;
+      line-height: 1.1;
+    }
+
+    .ink-reveal__content p {
+      margin: 0;
+      max-width: 640px;
+      font-size: 18px;
+      line-height: 1.8;
+    }
+  </style>
+</head>
+<body>
+  <section class="ink-reveal" id="inkReveal">
+    <div class="ink-reveal__bg" style="background-image: url('./wallpaper.png');" aria-hidden="true"></div>
+    <canvas class="ink-reveal__mask" id="inkRevealMask" aria-hidden="true"></canvas>
+    <div class="ink-reveal__content">
+      <h1>水墨揭示效果</h1>
+      <p>鼠标移动时，上层白色遮罩会被柔和的墨晕逐步擦开，露出底部壁纸。</p>
+    </div>
+  </section>
+
+  <script src="./ink-reveal.js"></script>
+  <script>
+    window.initInkReveal({
+      root: "#inkReveal"
+    });
+  </script>
+</body>
+</html>

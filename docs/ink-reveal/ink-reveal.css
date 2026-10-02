@@ -1,0 +1,54 @@
+:root {
+  --ink-mask-color: #fcfaf8;
+  --ink-text-color: #26251e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+.ink-reveal {
+  position: relative;
+  min-height: 560px;
+  overflow: hidden;
+  isolation: isolate;
+  background: var(--ink-mask-color);
+  color: var(--ink-text-color);
+}
+
+.ink-reveal__bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-position: center bottom;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+.ink-reveal__mask {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: block;
+  pointer-events: none;
+}
+
+.ink-reveal__content {
+  position: relative;
+  z-index: 2;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 96px 32px;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .ink-reveal__mask {
+    display: none;
+  }
+}

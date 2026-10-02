@@ -1,0 +1,25 @@
+[run]
+source = src
+omit =
+    src/tests/*
+    src/python_embed/*
+    src/scripts/*
+    src/webui/static/*
+    src/main.py
+    src/tmdb_watchlist.py
+    src/logger_setup.py
+    src/utils/bootstrap.py
+    src/openlist_login_shared.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
+    pass
+    \.\.\.
+    if TYPE_CHECKING:
+    if typing.TYPE_CHECKING:
+show_missing = True
+fail_under = 80
+skip_covered = False

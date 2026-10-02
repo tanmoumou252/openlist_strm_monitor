@@ -6,6 +6,24 @@
 
 ---
 
+<p align="center">
+  <img src="./docs/preview_1.png" alt="程序预览图" width="600">
+</p>
+
+---
+
+<p align="center">
+  <img src="./docs/preview_2.png" alt="程序预览图" width="600">
+</p>
+
+---
+
+<p align="center">
+  <img src="./docs/preview_3.png" alt="程序预览图" width="600">
+</p>
+
+---
+
 ## 🌟 核心特性
 
 1. **API 动态映射（告别死板配置）**
@@ -138,12 +156,11 @@ flowchart TD
 
 ## ⚙️ 配置文件
 
-主要配置文件包括：
+主要配置文件：
 
 - `config.toml` (主配置文件)
-- `a_folders.txt` (A区本地监听路径)
-- `refresh_paths.txt` (云端主动刷新与探活路径)
-- `strm_engine_paths.txt` (STRM引擎入口路径)
+
+> 💡 **路径配置**：A 区目录、STRM 引擎入口、主动刷新路径等均已迁移至 WebUI 配置页维护，存储在数据库 `webui_config` 表中，无需 txt 文件。
 
 ### 配置说明
 
@@ -165,32 +182,18 @@ pip install -r requirements.txt
 - `requests` (API 请求交互)
 - `lxml` (WebDAV XML解析)
 - `tomli` (Python < 3.11 环境下需要)
+- `pyotp` (TOTP 2FA 支持)
 
 ### 2. 运行程序
 
-**标准 Python 环境：**
-
 ```bash
-python main.py
+# 双击 嵌入式启动.bat（推荐，自带 Python 环境）
+# 或 环境变量启动.bat（使用系统 Python）
+# 或直接：
+python src/webui/server.py
 ```
 
-**Windows 建议使用启动脚本 (BAT)：**
-项目推荐使用便携式嵌入版 Python，可以直接编写 `run.bat` 一键启动：
-
-```bat
-@echo off
-setlocal
-cd /d "%~dp0"
-
-set "PYTHON=%~dp0python_embed\python.exe"
-set "APP=%~dp0main.py"
-
-echo =======================================================
-echo   OpenList STRM Bridge - 守护进程启动
-echo =======================================================
-"%PYTHON%" "%APP%"
-pause
-```
+启动后访问 `http://127.0.0.1:8579` 即可使用 WebUI 管理面板。
 
 ---
 
@@ -209,21 +212,50 @@ pause
 
 ---
 
+## 🖥️ WebUI 管理面板
+
+程序内置 WebUI 管理面板（默认地址 `http://localhost:8579`），提供可视化的运维管理功能。
+
+### 功能概览
+
+| 功能 | 说明 |
+| :--- | :--- |
+| **仪表盘** | 展示 A/B/C 区文件总数、各模块运行状态、磁盘占用概览 |
+| **A 区浏览** | 查看 STRM 引擎生成的原始目录结构，按子类/文件两级展开 |
+| **B 区浏览** | 查看媒体库消费区目录，支持删除联动操作 |
+| **C 区浏览** | 查看幽灵/隔离区内容 |
+| **TMDB 待看列表** | 对接 TMDB API，展示用户待看列表并与本地已收录内容做对比 |
+| **日志查看** | 实时查看程序运行日志，支持按级别筛选 |
+| **壁纸** | 内置水墨风遮罩壁纸效果 |
+
+### TMDB 待看列表
+
+- 通过 TMDB API 获取用户的待看列表（watchlist）
+- 与本地 STRM 已收录内容自动对比，标记"已收录"或"待下载"
+- 支持自动同步番剧季节数（season_count），卡片以竖杠标识多季番剧
+- 待看数据缓存至本地文件，避免重复 API 调用
+- 配置项通过 WebUI 面板 → TMDB 设置修改，保存至 `tmdb_watchlist.db` 数据库的 `webui_config` 表（scope=`tmdb`）
+
+### 多季番剧标识
+
+多季番剧在 TMDB 待看列表中会以 **竖杠 (`|`)** 标识，同时在信息卡片中显示大概的季节数，方便快速判断番剧是否多季节。
+
+### 访问地址与配置
+
+| 配置项 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `[webui] port` | `8579` | 监听端口 |
+| `[webui] bind` | `0.0.0.0` | 监听地址（仅本地和局域网） |
+| `access_token` | — | TMDB API 访问令牌（通过 WebUI 配置页填写，存储在 `tmdb_watchlist.db`） |
+
+---
+
 ## ⚠️ 使用建议与注意事项
 
 1. **初期安全建议**：在 `config.toml` 中强烈建议使用 `action = "MOVE"` 而非 `DELETE`。先在云端回收站观察联动效果，确认无误后再视情况调整。
 2. **字幕测试**：正式接入前，建议先用测试目录验证字幕同步：`电影字幕同目录保留`、`番剧字幕Season归档`、`多语种forced标记`。
 3. **测试验证**：正式接入庞大媒体库前，建议先用测试目录验证：`A -> B 优选同步`、`B 跨级移动血统拦截`、`B 删除联动云端回收站`。
 4. **数据库重建**：如果大规模修改了 OpenList 的存储结构，建议清空 `bridge.db` 让程序重新逆向建库。
-
----
-
-## 🌿 分支规划
-
-本项目计划与 OpenList 不同的 STRM 模式共用同一仓库，通过分支维护：
-
-- `main`：稳定版本
-- `sync_strm`：STRM 引擎更新模式 (本分支)
 
 ---
 

@@ -1,0 +1,200 @@
+# 五、数据库结构参考
+
+项目使用两个 SQLite 数据库，均采用 **WAL 模式** 以获得并发读取性能。
+
+## bridge.db — 核心同步状态
+
+由 `Database` 类管理（`src/database.py`，~1400 行）。通过 `threading.RLock()` 保证线程安全。所有表在 `_create_schema()`（第 184 行）中创建。
+
+### 性能 PRAGMA 设置
+
+每个连接应用以下优化：
+
+```sql
+PRAGMA journal_mode=WAL;      -- 写前日志，支持并发读取
+PRAGMA busy_timeout=10000;     -- 10 秒忙等待
+PRAGMA synchronous=NORMAL;     -- WAL 模式下安全与速度的平衡
+PRAGMA cache_size=-64000;      -- 64MB 页缓存
+PRAGMA temp_store=MEMORY;      -- 临时表在内存中
+PRAGMA mmap_size=268435456;    -- 256MB 内存映射 I/O
+```
+
+只读连接额外设置：`PRAGMA query_only=ON;`
+
+### 表结构
+
+#### `a_strm_files` — A 区 STRM 文件记录
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `local_path` | TEXT PRIMARY KEY | A 区本地绝对路径 |
+| `webdav_path` | TEXT NOT NULL | 规范化后的 WebDAV 路径 |
+| `parent_webdav_path` | TEXT NOT NULL | 父级 WebDAV 目录 |
+| `updated_at` | REAL NOT NULL | 最后更新时间戳 |
+
+**索引**：`idx_a_strm_webdav_path`（webdav_path）
+
+#### `b_strm_files` — B 区 STRM 文件记录
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `local_path` | TEXT PRIMARY KEY | B 区本地绝对路径 |
+| `webdav_path` | TEXT NOT NULL | 规范化后的 WebDAV 路径 |
+| `parent_webdav_path` | TEXT NOT NULL | 父级 WebDAV 目录 |
+| `source_a_path` | TEXT | 对应的 A 区源路径 |
+| `fingerprint` | TEXT | SHA-256 指纹 |
+| `status` | TEXT DEFAULT 'valid' | 状态：valid/duplicate/quarantined/invalid/ghost |
+| `updated_at` | REAL NOT NULL | 更新时间戳 |
+
+**索引**：`idx_b_strm_webdav_path`、`idx_b_strm_fingerprint`、`idx_b_strm_status`
+
+#### `strm_identity` — 身份指纹全局表
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `fingerprint` | TEXT PRIMARY KEY | SHA-256 指纹 |
+| `webdav_path` | TEXT NOT NULL | 规范化的 WebDAV 路径 |
+| `source_a_path` | TEXT | 原始 A 区源路径 |
+| `current_b_path` | TEXT | 当前 B 区路径（可能因改名而不同于 A 区） |
+| `updated_at` | REAL NOT NULL | 更新时间戳 |
+
+**索引**：`idx_identity_webdav_path`、`idx_identity_current_b_path`
+
+#### `c_ghost_files` — C 区幽灵文件记录
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `local_path` | TEXT PRIMARY KEY | C 区当前路径 |
+| `webdav_path` | TEXT NOT NULL | 原始 WebDAV 路径 |
+| `original_b_path` | TEXT NOT NULL | 迁移前的 B 区路径 |
+| `ghost_root` | TEXT NOT NULL | 所在的 C 区根目录 |
+| `moved_at` | REAL NOT NULL | 迁移时间戳 |
+
+#### `ghost_protection` — 幽灵保护表
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `webdav_path` | TEXT PRIMARY KEY | 受保护的 WebDAV 路径 |
+| `expire_time` | REAL NOT NULL | 保护过期时间戳 |
+| `reason` | TEXT | 保护原因（如 user_delete） |
+
+#### `known_folders` — 已知文件夹表
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `folder_path` | TEXT PRIMARY KEY | WebDAV 文件夹路径 |
+| `source` | TEXT | 发现来源 |
+| `updated_at` | REAL NOT NULL | 最后发现时间 |
+
+#### `protected_roots` — 受保护根目录表
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `root_path` | TEXT PRIMARY KEY | 引擎根 WebDAV 路径 |
+| `trash_path` | TEXT NOT NULL | 对应的回收站路径 |
+| `active` | INTEGER NOT NULL | 1=活跃，0=不活跃 |
+| `updated_at` | REAL NOT NULL | 更新时间戳 |
+
+#### `protected_roots_snapshot` — 根目录快照表
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `root_path` | TEXT PRIMARY KEY | 引擎根 WebDAV 路径 |
+| `trash_path` | TEXT NOT NULL | 对应的回收站路径 |
+| `updated_at` | REAL NOT NULL | 快照时间戳 |
+
+#### `sync_control` — 同步控制表
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `control_key` | TEXT PRIMARY KEY | 控制键名 |
+| `control_value` | TEXT NOT NULL | 控制值（JSON 编码） |
+| `updated_at` | REAL NOT NULL | 更新时间戳 |
+
+#### `strm_media_boundary` — 媒体边界映射表
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `fingerprint` | TEXT PRIMARY KEY | SHA-256 指纹 |
+| `source_media_name` | TEXT NOT NULL | 原始云端媒体名 |
+| `current_media_name` | TEXT NOT NULL | 当前本地文件夹名 |
+| `engine_entry_path` | TEXT NOT NULL | 对应的引擎入口路径 |
+| `updated_at` | REAL NOT NULL | 时间戳 |
+
+**索引**：`idx_boundary_source_name`、`idx_boundary_current_name`
+
+#### `subtitles` — 字幕处理记录表
+
+由 `init_subtitle_table()` 单独创建，`AppService.__init__()` 时调用。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | INTEGER PRIMARY KEY | 自增 ID |
+| `local_path` | TEXT NOT NULL | 原始字幕文件路径 |
+| `target_path` | TEXT NOT NULL | B 区同步路径 |
+| `fingerprint` | TEXT | 关联 STRM 的指纹 |
+| `season` | INTEGER | 提取的季号（番剧） |
+| `episode` | INTEGER | 提取的集号（番剧） |
+| `lang_code` | TEXT | 检测的语言代码 |
+| `status` | TEXT | 处理状态 |
+| `created_at` | TEXT | 创建时间 |
+| `updated_at` | TEXT | 更新时间 |
+
+## tmdb_watchlist.db — TMDB 缓存 + WebUI 配置
+
+由 `TmdbWatchlistDb` 类管理（`src/tmdb_watchlist_db.py`）。
+
+### 表结构
+
+#### `movies` — TMDB 待看列表电影
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `id` | INTEGER PRIMARY KEY | | TMDB 电影 ID |
+| `title` | TEXT | '' | 电影标题 |
+| `original_title` | TEXT | '' | 原始标题 |
+| `overview` | TEXT | '' | 剧情简介 |
+| `poster_path` | TEXT | '' | 海报路径 |
+| `release_date` | TEXT | '' | 上映日期 |
+| `vote_average` | REAL | 0.0 | TMDB 评分 |
+| `genre_ids` | TEXT | '[]' | 类型 ID 数组（JSON） |
+| `_media_type` | TEXT | 'movie' | 媒体类型 |
+| `_synced_at` | REAL | 0 | 同步时间戳 |
+| `match_status` | TEXT | 'uncomputed' | 匹配状态 |
+| `match_reason` | TEXT | '' | 匹配原因说明 |
+
+#### `tv` — TMDB 待看列表电视剧
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `id` | INTEGER PRIMARY KEY | | TMDB 剧集 ID |
+| `name` | TEXT | '' | 剧集名称 |
+| `original_name` | TEXT | '' | 原始名称 |
+| `overview` | TEXT | '' | 剧情简介 |
+| `poster_path` | TEXT | '' | 海报路径 |
+| `first_air_date` | TEXT | '' | 首播日期 |
+| `vote_average` | REAL | 0.0 | 评分 |
+| `_season_count` | INTEGER | 0 | 季数 |
+| `_episode_count` | INTEGER | 0 | 集数 |
+| `_media_type` | TEXT | 'tv' | 媒体类型 |
+| `match_status` | TEXT | 'uncomputed' | 匹配状态 |
+
+#### `meta` — 元数据存储
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `key` | TEXT PRIMARY KEY | 元数据键 |
+| `value` | TEXT NOT NULL | 值（JSON 编码） |
+
+#### `webui_config` — WebUI 配置存储
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `scope` | TEXT | 配置作用域（tmdb、openlist、ui、migration） |
+| `key` | TEXT | 配置键名 |
+| `value` | TEXT | 配置值（JSON 编码） |
+| `updated_at` | REAL | 更新时间戳 |
+
+**主键**：`(scope, key)`
+
+示例：`('tmdb', 'access_token', 'eyJ...', 1700000000)`、`('ui', 'admin_password', 'salt$600000$hash', 1700000000)`
