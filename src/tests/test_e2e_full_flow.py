@@ -288,6 +288,24 @@ def _http_post(base_url, path, body=None, session_token=None, timeout=3.0):
         return e.code, e.headers, body
 
 
+def _wait_main_phase(base_url, session_token, targets, timeout=10.0, interval=0.2):
+    """有界轮询 /api/main/status 至 phase ∈ targets；超时返回最后 phase。
+
+    异步受理后终态未定（worker 在后台线程），测试须有界等待 ready/fail_safe
+    再断言，避免裸 assert_called_once 竞态。超时返回实测 phase 由调用方
+    断言失败暴露，不静默通过（保真反假绿）。
+    """
+    deadline = time.time() + timeout
+    phase = None
+    while time.time() < deadline:
+        _, _, resp = _http_get(base_url, "/api/main/status", session_token)
+        phase = resp.get("phase")
+        if phase in targets:
+            return phase
+        time.sleep(interval)
+    return phase
+
+
 # ============================================================
 # 场景 1：成功路径
 # ============================================================
@@ -492,7 +510,19 @@ class TestSuccessfulFlow:
         fake_app._running = False
         fake_app.get_config_status.return_value = {
             "status": "ready", "reason": "mapping 配置有效"}
-        fake_app.start.side_effect = lambda: setattr(fake_app, "_running", True)
+        # 建模真实 AppService 状态面：get_state_summary 必须是可 JSON 序列化的 dict，
+        # 否则 /api/main/status（server.py:1347-1349）无法序列化，轮询拿不到 phase
+        _state = {"phase": "starting", "is_running": True, "is_ready": False,
+                  "error": None, "progress": {}}
+        fake_app.get_state_summary.return_value = _state
+        fake_app.set_phase.side_effect = lambda phase, error=None: _state.update(
+            {"phase": phase, **({"error": error} if error else {})})
+
+        def _fake_start():
+            _state.update({"phase": "ready", "is_running": True, "is_ready": True})
+        fake_app.start.side_effect = _fake_start
+        # worker 内远程存储映射加载走网络，测试内 stub 掉
+        server._config.load_strm_storage_from_api = Mock()
 
         with patch("webdav_client.OpenListAdminClient", return_value=mock_client), \
              patch("app_service.AppService", return_value=fake_app), \
@@ -500,13 +530,23 @@ class TestSuccessfulFlow:
             status, _, resp = _http_post(base, "/api/main/start", {}, token)
         assert status == 200
         assert resp.get("success") is True, f"启动应成功: {resp}"
-        assert resp.get("message") == "主程序已启动"
-        assert server._app_running is True
-        fake_app.start.assert_called_once()
+        assert resp.get("status") == "starting", f"应异步受理: {resp}"
+        # 异步受理文案语义断言（契约源：server.py 受理即返回分支）。文案必须
+        # 表达「后台启动中」而非以「已启动」宣告终态——前端据此不提前打勾；
+        # 不锁全等措辞，允许后端在不破坏语义的前提下调整文案。
+        msg = resp.get("message") or ""
+        assert not msg.endswith("已启动"), (
+            f"异步受理文案不得表述为已启动: {resp}")
+        assert "后台" in msg, f"异步受理文案应表达后台启动语义: {resp}"
+        # 异步受理后终态未定，有界轮询至 ready 再断言（消除裸 assert_called_once 竞态）
+        phase = _wait_main_phase(base, token, ("ready", "fail_safe"))
+        assert phase == "ready", f"应就绪而非 fail_safe: {phase}"
 
         status, _, resp = _http_get(base, "/api/main/status", token)
         assert status == 200
         assert resp.get("running") is True
+        assert resp.get("ready") is True
+        assert server._app_running is True
 
         # 立即收尾，避免残留状态影响后续步骤与其它用例
         status, _, resp = _http_post(base, "/api/main/stop", {}, token)
@@ -673,10 +713,17 @@ class TestSevenStepFailureReasons:
         with patch("webdav_client.OpenListAdminClient", return_value=mock_client), \
              patch("logger_setup.setup_logging"):
             status, _, resp = _http_post(base, "/api/main/start", {}, token)
-        # 业务失败应返回 200 + success:false + 原因
+        # 登录为慢操作：异步受理返回 success:true + status:"starting"，
+        # 失败经后台 fail_safe 暴露（两层契约）
         assert status == 200
-        assert resp.get("success") is False
-        assert "OpenList 登录失败" in resp.get("message", "")
+        assert resp.get("success") is True, f"应异步受理: {resp}"
+        assert resp.get("status") == "starting", f"应异步受理: {resp}"
+        phase = _wait_main_phase(base, token, ("ready", "fail_safe"))
+        assert phase == "fail_safe", f"登录失败应落 fail_safe: {phase}"
+        status, _, resp = _http_get(base, "/api/main/status", token)
+        # 异步 worker 透传 mock 客户端的 last_error_message 文案
+        assert "用户名或密码错误" in (resp.get("error") or ""), (
+            f"应暴露登录失败原因: {resp}")
         assert server._app_running is False
 
     def test_step5_invalid_area_rejected(self, webui_server):

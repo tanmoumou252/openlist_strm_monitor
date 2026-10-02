@@ -796,6 +796,21 @@ class Database:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_b_lineage_snapshot_path ON b_lineage_snapshot(local_path)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_b_lineage_snapshot_version ON b_lineage_snapshot(mapping_id, mapping_version, lineage_version)")
 
+            # A 区 STRM 内容读跳检快照（size+mtime_ns+parse_version 门），
+            # 仅服务于 initial_scan_a 的"未变即跳过正文读"，独立于 a_strm_files。
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS a_strm_snapshot (
+                    local_path TEXT PRIMARY KEY,
+                    file_size INTEGER NOT NULL,
+                    mtime_ns INTEGER NOT NULL,
+                    webdav_path TEXT NOT NULL,
+                    parent_webdav_path TEXT NOT NULL,
+                    parse_version INTEGER NOT NULL,
+                    indexed_at REAL NOT NULL
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_a_strm_snapshot_idx ON a_strm_snapshot(indexed_at)")
+
             # 创建索引
             cur.execute("CREATE INDEX IF NOT EXISTS idx_a_strm_webdav_path ON a_strm_files(webdav_path)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_b_strm_webdav_path ON b_strm_files(webdav_path)")
@@ -1103,6 +1118,87 @@ class Database:
                 conn.execute(
                     "DELETE FROM a_strm_files_fts WHERE rowid = ?", (rowid,)
                 )
+            conn.commit()
+
+    # ------------------------------------------------------------------
+    # A 区内容读跳检快照（a_strm_snapshot）
+    # 调用方约束：写方法必须在 initial_scan_a 的 bulk_connection 提交
+    # （bulk_ctx.__exit__）之后调用——bulk 连接绕过 rw_lock，未闭合时
+    # 再取 write_locked 会同进程自死锁。
+    # ------------------------------------------------------------------
+
+    def load_a_snapshot_map(self) -> dict[str, tuple[int, int, str, str, int]]:
+        """全表载入快照跳检 map：{local_path: (file_size, mtime_ns, webdav_path,
+        parent_webdav_path, parse_version)}。
+
+        fail-open：任何读异常（表未迁移到位 / DB 瞬时错误）在方法内捕获并返回
+        空 map，退化为"全量重读正文"，等同无快照行为，不得让扫描终止。
+        """
+        try:
+            with self.rw_lock.read_locked(), self.read_connection() as conn:
+                rows = conn.execute(
+                    "SELECT local_path, file_size, mtime_ns, webdav_path, "
+                    "parent_webdav_path, parse_version FROM a_strm_snapshot"
+                ).fetchall()
+                return {
+                    r[0]: (r[1], r[2], r[3], r[4], r[5]) for r in rows
+                }
+        except Exception:
+            logging.warning("[DB] a_strm_snapshot 读取失败，本轮扫描退化为全量重读", exc_info=True)
+            return {}
+
+    def upsert_a_snapshot_bulk(
+            self, rows: list[tuple[str, int, int, str, str, int, float]]) -> None:
+        """批量覆盖写快照行（单事务 executemany，按 900 参数切片）。"""
+        if not rows:
+            return
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            for chunk in chunk_list(rows, 900):
+                conn.executemany(
+                    """INSERT INTO a_strm_snapshot(
+                        local_path, file_size, mtime_ns, webdav_path,
+                        parent_webdav_path, parse_version, indexed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(local_path) DO UPDATE SET
+                        file_size=excluded.file_size, mtime_ns=excluded.mtime_ns,
+                        webdav_path=excluded.webdav_path,
+                        parent_webdav_path=excluded.parent_webdav_path,
+                        parse_version=excluded.parse_version,
+                        indexed_at=excluded.indexed_at""",
+                    chunk,
+                )
+            conn.commit()
+
+    def prune_a_snapshot_not_in(self, paths_iter) -> None:
+        """删除不在给定 local_path 集合内的快照行（全量审计后防表无界增长）。
+
+        经临时表单趟 NOT IN 子查询完成，规避 900 参数切片逐段全表扫描的开销
+        （审计路径墙钟无回退闸要求快照机制开销 ≤3%）。
+        """
+        keep = set(paths_iter)
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            if not keep:
+                conn.execute("DELETE FROM a_strm_snapshot")
+                conn.commit()
+                return
+            conn.execute("CREATE TEMP TABLE IF NOT EXISTS tmp_a_snap_keep (local_path TEXT PRIMARY KEY)")
+            conn.execute("DELETE FROM tmp_a_snap_keep")
+            for chunk in chunk_list(list(keep), 900):
+                conn.executemany(
+                    "INSERT OR IGNORE INTO tmp_a_snap_keep(local_path) VALUES (?)",
+                    [(p,) for p in chunk])
+            conn.execute(
+                "DELETE FROM a_strm_snapshot WHERE local_path NOT IN "
+                "(SELECT local_path FROM tmp_a_snap_keep)")
+            conn.execute("DELETE FROM tmp_a_snap_keep")
+            conn.commit()
+
+    def delete_a_snapshot(self, local_path: str) -> None:
+        """单行删除快照（watcher 删除/改写后即时失效）。"""
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            conn.execute(
+                "DELETE FROM a_strm_snapshot WHERE local_path = ?", (local_path,)
+            )
             conn.commit()
 
     def get_b_lineage_snapshot(self, mapping_id: str, local_path: str) -> BLineageSnapshotRecord | None:

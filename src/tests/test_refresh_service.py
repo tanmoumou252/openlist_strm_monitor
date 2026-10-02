@@ -332,7 +332,8 @@ class TestExecuteRefreshCycle:
              patch.object(app, "initial_scan_a") as scan_a, \
              patch.object(app, "scan_a_to_b_full_sync") as sync:
             svc._maybe_run_full_audit()
-        scan_a.assert_called_once_with(use_bulk=False, a_roots=None)
+        # 全量审计为 A 区快照权威自愈触发源：必须绕过内容读跳检
+        scan_a.assert_called_once_with(use_bulk=False, a_roots=None, use_snapshot=False)
         sync.assert_called_once_with(valid_engine_paths=None, use_bulk=False)
         app.db.set_control.assert_called_once()
 
@@ -871,7 +872,8 @@ class TestRunFullAuditNow:
              patch.object(app, "scan_a_to_b_full_sync") as m_sync:
             result = svc.run_full_audit_now()
 
-        m_scan.assert_called_once_with(use_bulk=False, a_roots=None)
+        # 全量审计为 A 区快照权威自愈触发源：必须绕过内容读跳检
+        m_scan.assert_called_once_with(use_bulk=False, a_roots=None, use_snapshot=False)
         m_sync.assert_called_once_with(valid_engine_paths=None, use_bulk=False)
         app.db.complete_index_generation.assert_called_once()
         app.db.set_control.assert_called_once_with("last_full_audit_at", str(8 * 86400))

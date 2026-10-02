@@ -1508,7 +1508,7 @@ def main():
         logger.info("正在启动主程序...")
         result = server.start_main()
         if result.get("success"):
-            logger.info("主程序已启动")
+            logger.info("主程序启动请求已受理（后台初始化中）")
         else:
             logger.error("主程序启动失败: %s", result.get("message"))
 

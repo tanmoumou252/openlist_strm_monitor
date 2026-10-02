@@ -11,6 +11,13 @@ from urllib.parse import unquote, urlparse
 
 FINGERPRINT_VERSION = "strmfp:v1"
 
+# A 区 STRM 解析算法版本（a_strm_snapshot.parse_version 失效门）。
+# 任何改动 parse_strm_content / canonicalize_webdav_path / make_strm_fingerprint
+# 的产出语义，或 bump FINGERPRINT_VERSION 时，必须同时递增本常量，
+# 使 a_strm_snapshot 全表失效、下一轮扫描以当前算法重算。
+STRM_PARSE_VERSION: int = 1
+
+
 def parse_strm_content(content: str) -> str | None:
     """
     从 STRM 内容中解析真实 WebDAV 路径。

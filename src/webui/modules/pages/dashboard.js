@@ -12,6 +12,10 @@ import {
 
 export { startUptimeTimer, stopUptimeTimer, updateUptime, _loadOnboarding };
 
+// 上次轮询观测到的主程序相位；null=尚未观测。用于识别「进入终态相位」的变化，
+// 仅在 ready/fail_safe/stopped 时刷新引导步骤④勾选（见 updateMainStatus）。
+let _lastMainPhase = null;
+
 // ============================================================
 // 首次配置引导（Onboarding Guide）
 // ============================================================
@@ -290,6 +294,20 @@ export async function updateMainStatus() {
 
     const phase = status.phase || (status.running ? 'ready' : 'stopped');
 
+    // 引导步骤④「启动主程序」以 main_running 判定勾选，而 main_running 在受理瞬间
+    // 即为真（server 先置 _app_running 再返回响应）。故仅在轮询观测到终态相位
+    // 且相位发生变化时刷新引导：避免受理瞬间过早打勾，且 Worker 落 fail_safe 后
+    // 错误勾选可自愈（此前无自愈路径）。
+    // 终态集合含 stopping：停止操作进行中 running 已转 false，④ 此刻就该取消勾选；
+    // 且 stop_main 失败（svc.stop() 抛异常）时相位会停在 stopping 不再变化，若不在
+    // 集合内则错误勾选将滞留到用户切页/刷新。
+    // 首次观测（_lastMainPhase === null）只建立基线，不重复刷新（init 已刷新）。
+    if (_lastMainPhase !== null && phase !== _lastMainPhase
+        && ['ready', 'fail_safe', 'stopped', 'stopping'].includes(phase)) {
+      _loadOnboarding();
+    }
+    _lastMainPhase = phase;
+
     const phaseMap = {
       'starting': '启动初始化中...',
       'authenticating': '正在连接 OpenList 并加载存储映射...',
@@ -366,6 +384,17 @@ export async function updateMainStatus() {
         startBtn.innerHTML = `${icon('refresh')} 启动主程序`;
       }
       if (stopBtn) stopBtn.style.display = 'none';
+    } else if (phase === 'stopping') {
+      // 停止操作进行中：running 已转 false 但相位未落 stopped，须与「已停止」
+      // 终态区分显示，避免误导用户再次点击启动。
+      dot.style.background = '#ff9800';
+      dot.style.boxShadow = '0 0 12px rgba(255,152,0,0.6)';
+      text.textContent = '正在停止主程序...';
+      text.style.color = 'var(--text-main)';
+      uptimeText.textContent = '停止操作进行中，请稍候';
+      if (progressContainer) progressContainer.style.display = 'none';
+      if (startBtn) startBtn.style.display = 'none';
+      if (stopBtn) stopBtn.style.display = 'none';
     } else {
       dot.style.background = '#f44336';
       dot.style.boxShadow = '0 0 12px rgba(244,67,54,0.6)';
@@ -427,10 +456,19 @@ export async function startMainProgram() {
     try {
       const result = await api('/api/main/start', { method: 'POST' });
       if (result.success) {
-        showToast('主程序已启动', 'success');
+        // 异步受理：status:"starting" 时终态未定，轮询定终态，不宣告成功
+        if (result.status === 'starting') {
+          showToast('主程序正在后台启动，请稍候…', 'info');
+        } else {
+          showToast('主程序已启动', 'success');
+        }
         updateMainStatus();
-        // 刷新引导状态
-        _loadOnboarding();
+        // 引导④以 main_running 判定，而受理瞬间 server 已置 _app_running=True；
+        // 异步受理（starting）不在此刷新，改由轮询观测到终态相位时刷新（见
+        // updateMainStatus），避免过早打勾且 fail_safe 后可自愈；仅同步成功立即刷新。
+        if (result.status !== 'starting') {
+          _loadOnboarding();
+        }
       } else {
         showToast('启动失败: ' + (result.message || '未知错误'), 'error');
         if (startBtn) {

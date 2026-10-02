@@ -17,12 +17,24 @@
 ## 仪表盘
 
 ### `GET /api/main/status`
-返回主程序运行状态。A/B/C 区记录数、数据库大小等汇总数据请见 `GET /api/dashboard`，本端点不返回这些字段。
+返回主程序运行状态。A/B/C 区记录数、数据库大小等汇总数据请见 `GET /api/dashboard`，本端点不返回这些字段。本端点是异步启动**终态的唯一权威查询口**：`POST /api/main/start` 受理即返回，终态须轮询本端点的 `phase` 判定（`ready` / `fail_safe` / `stopped`）。
 
-**响应**（主程序运行时）：
+**响应**（已就绪 `ready`）：
 ```json
 {
   "running": true,
+  "ready": true,
+  "phase": "ready",
+  "status": "ready",
+  "progress": {
+    "a_discovered": 1284,
+    "a_indexed": 1284,
+    "b_discovered": 1284,
+    "b_reconciled": 1284,
+    "synced_records": 1284,
+    "elapsed_seconds": 42.7
+  },
+  "error": null,
   "uptime": 3600,
   "refresh_healthy": true,
   "refresh_consecutive_failures": 0,
@@ -31,18 +43,36 @@
 }
 ```
 
-**响应**（主程序未运行时，仅含基础字段）：
+**响应**（启动受阻 `fail_safe`）：
+> 注：**未运行 / 已停止**（`phase` 为 `stopped`）时字段集相同，但 `progress` 为 `{}`（无 AppService 实例）——见下方 `progress` 字段说明。
 ```json
 {
   "running": false,
+  "ready": false,
+  "phase": "fail_safe",
+  "status": "fail_safe",
+  "progress": {
+    "a_discovered": 0,
+    "a_indexed": 0,
+    "b_discovered": 0,
+    "b_reconciled": 0,
+    "synced_records": 0,
+    "elapsed_seconds": 0.0
+  },
+  "error": "STRM 存储映射加载失败: ...",
   "uptime": null,
   "watchers_healthy": true
 }
 ```
 
 字段说明：
-- `running`（bool）— 主程序是否在运行。
-- `uptime`（int | null）— 主程序已运行秒数；未运行时为 `null`。
+- `running`（bool）— 主程序是否在运行。**注意**：`starting` / `authenticating` / `scanning_a` / `scanning_b` / `syncing_a_to_b` / `catching_up` 及 `ready` 下为 `true`；`stopping` / `fail_safe` / `stopped` 下为 `false`。`stopping` 本身也是过渡相位（其 `running` 已转 `false`），故**不可**据 `running` 区分「停止中」与「已停止」。无论如何**不得**以 `running:true` 判定启动成功，终态须读 `phase`。
+- `ready`（bool）— 是否已就绪（等价于 `phase === "ready"`）。
+- `phase`（str）— 当前相位，取值 `starting` / `authenticating` / `scanning_a` / `scanning_b` / `syncing_a_to_b` / `catching_up` / `ready` / `stopping` / `fail_safe` / `stopped`。**异步启动的终态判据**：`ready`（成功）/ `fail_safe`（受阻，见 `error`）/ `stopped`（未运行）。
+- `status`（str）— 与 `phase` 同值（历史兼容字段）。
+- `progress`（obj）— 进度快照，键集**恒为** `a_discovered` / `a_indexed` / `b_discovered` / `b_reconciled` / `synced_records` / `elapsed_seconds` 六项。`ready` 时各计数字段不再更新，但 `elapsed_seconds` 仍随运行时长递增；`fail_safe` / `stopped` 下 `elapsed_seconds` 为 `0.0`。**唯一例外**：当前**无 AppService 实例**时为 `{}` —— 即从未启动过，**或已正常停止并释放了实例**（此时 `phase` 为 `stopped`）。
+- `error`（str | null）— 最近一次失败/中止原因。`fail_safe` 时为后台 Worker 失败原因（登录失败、存储映射加载失败等）；`stopped` 时可能为「启动代次已失效」（停止操作与在途启动的竞态中止）；其余相位为 `null`。**判读受阻语义必须结合 `phase`，不可仅凭 `error` 非空**——一次正常停止的竞态中止同样会带上 `error`。
+- `uptime`（int | null）— 主程序已运行秒数；未运行 / 受阻时为 `null`。
 - `refresh_healthy`（bool）— 刷新服务是否健康。**仅当主程序运行时存在**。
 - `refresh_consecutive_failures`（int）— 刷新连续失败次数。**仅当主程序运行时存在**。
 - `refresh_last_error`（str）— 最近一次刷新错误描述。**仅当主程序运行时存在**。
@@ -53,13 +83,13 @@
 
 响应字段：
 
-- `success`（bool）— 是否真正启动/停止。
+- `success`（bool）— **`start`**：是否已**受理**（`true` 仅代表后台 Worker 已启动，终态须查 `GET /api/main/status` 的 `phase`）；**`stop`**：是否已停止。
 - `message`（str）— 面向用户的说明。
-- `status`（str，可选）— 仅失败时出现，取值如 `not_configured`（未配置 A/B mapping）、`fail_safe_active`（配置未通过 `AppService.get_config_status` 门禁）。
+- `status`（str，可选）— `start` 成功受理时为 `starting`；快同步预检失败时可能出现 `not_configured`（未配置 A/B mapping）或 `fail_safe_active`（配置未通过 `AppService.get_config_status` 门禁）。
 
-启动成功要求引擎完整走完 `AppService.start()`；配置未就绪时引擎进入 fail-safe 且不启动 watcher，此时接口返回 `success: false` 并带上 `status`，`_app_running` 保持 false。
+`start` 为**两层契约**：**快同步预检**（已在运行 / 配置未加载 / 未配置 A/B mapping / fail-safe 配置态）即时返回 `success:false`（仅「未配置 A/B mapping」与「fail-safe 门禁未过」两路另带 `status`；「已在运行」「配置未加载」不带 `status`），`_app_running` 保持 false；**慢操作**（OpenList 登录、STRM 存储映射加载）在后台 Worker 线程进行，HTTP 受理即返回 `success:true` + `status:"starting"`，其失败异步经 `GET /api/main/status` 的 `phase:"fail_safe"` + `error` 暴露，不阻塞请求线程。
 
-**状态码语义**：业务失败（未配置 A/B mapping、fail-safe 门禁未过、OpenList 登录失败、重复启动、主程序未在运行）均返回 **200 + `success: false`**，与 `POST /api/openlist/test-connection` 的约定一致。仅服务层未预期异常（`start_main` / `stop_main` 的 `except Exception` 兜底分支）返回 **500 + `error_type: "exception"`**。
+**状态码语义**：`start` 的**快同步预检**失败（配置未加载、未配置 A/B mapping、fail-safe 门禁未过、重复启动）返回 **200 + `success:false`**，与 `POST /api/openlist/test-connection` 的约定一致；**OpenList 登录失败、STRM 存储映射加载失败属慢操作**，同步响应为受理态 `success:true` + `status:"starting"`，其失败异步经 `GET /api/main/status` 的 `phase:"fail_safe"` + `error` 暴露。`stop` 的业务失败（如主程序未在运行）返回 200 + `success:false`。仅服务层未预期异常（`start_main` / `stop_main` 的 `except Exception` 兜底分支）返回 **500 + `error_type: "exception"`**。
 
 ### `GET /api/dashboard`
 返回仪表盘汇总数据：A/B/C 区记录数、B 区状态分布（valid/duplicate/quarantined）、数据库文件大小、TMDB 配置状态、服务运行时长。

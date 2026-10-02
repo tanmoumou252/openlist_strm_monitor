@@ -35,7 +35,11 @@ def _make_app(tmp_path: Path, *, a_dirs: list[Path] | None = None) -> Mock:
 
     委托给 _test_helpers.build_mock_app，消除重复实现。
     """
-    return build_mock_app(tmp_path, a_dirs=a_dirs, use_mock=True)
+    app = build_mock_app(tmp_path, a_dirs=a_dirs, use_mock=True)
+    # A 区快照跳检（a_strm_snapshot）：Mock db 默认空快照，
+    # 使既有用例维持"全量重读正文"的行为语义不变。
+    app.db.load_a_snapshot_map.return_value = {}
+    return app
 
 
 def _make_a_record(

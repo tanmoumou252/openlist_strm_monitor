@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from config import AppConfig
 
 from utils import read_strm_webdav_path, safe_remove_file, webdav_parent, make_strm_fingerprint
+from utils.strm_utils import STRM_PARSE_VERSION
 from utils.file_utils import chunk_list
 
 
@@ -50,7 +51,8 @@ class SyncService:
 
     def initial_scan_a(
             self, use_bulk: bool = False,
-            a_roots: list[Path] | None = None) -> None:
+            a_roots: list[Path] | None = None,
+            use_snapshot: bool = True) -> None:
         """启动时或刷新时批量索引指定 A 区 STRM 文件到数据库。
 
         性能优化：
@@ -70,7 +72,18 @@ class SyncService:
             use_bulk: True 用 bulk_connection（启动时，单线程安全）。
                       False 用 upsert_a_batch（刷新时，多线程安全）。
             a_roots: 显式限制扫描的 A 根；None 表示扫描全部配置根，空列表表示不扫描。
+            use_snapshot: True（默认）启用 a_strm_snapshot 的 size+mtime+parse_version
+                      内容读跳检；False（全量审计）强制逐文件重读正文并重建快照
+                      （权威自愈触发源）。快照整体读失败时 fail-open 退化为全读。
+                      约束：False 仅允许在 a_roots=None（全量扫描）场景调用——
+                      prune 的 keep 集来自本轮实际扫描集合，与局部 a_roots 同用
+                      会误剪范围外快照行（触发 WARNING 日志，行为不变）。
         """
+        if not use_snapshot and a_roots is not None:
+            logging.warning(
+                "[初始化] use_snapshot=False 与局部 a_roots 同用：prune keep 集"
+                "不含扫描范围外路径，将误剪范围外快照行"
+                "（全量审计应使用 a_roots=None）")
         logging.info("[初始化] 扫描 A 区 STRM 文件（%s）...",
                      "bulk模式" if use_bulk else "标准模式")
         if a_roots == []:
@@ -83,17 +96,43 @@ class SyncService:
         discovered_count = 0
         indexed_count = 0
         batch: list[tuple[str, str, str]] = []
+        snap_batch: list[tuple[str, int, int, str, str, int, float]] = []
+        audit_paths: list[str] = []  # 仅 use_snapshot=False 时收集，供 prune
         parent_set: set[str] = set()
         last_log_time = time.time()
+        # pool 前一次性载入快照（fail-open：读异常返回空 map → 全量重读）。
+        # use_snapshot=False（审计）也载入：仅用于跳过"重读结果与既有快照
+        # 五字段全等"的恒等行重写（读仍强制全读；写语义等价，省去约 3% 审计
+        # 墙钟的恒等 upsert，满足 P-1 audit 无回退闸）。
+        snap_map: dict[str, tuple[int, int, str, str, int]] = self.db.load_a_snapshot_map()
 
-        def process_strm_file(file_path: Path) -> tuple[str, str, str] | None:
-            """处理单个 .strm 文件，返回 (local_path, webdav_path, parent) 或 None"""
+        def process_strm_file(file_path: Path) -> tuple[str, str, str, tuple | None] | None:
+            """处理单个 .strm：命中 size+mtime+parse_version 未变的快照则跳过正文读。
+            返回 (local_path, webdav_path, parent, snapshot_row_or_None) 或 None。"""
+            lp = str(file_path)
+            try:
+                st = os.stat(file_path)
+            except OSError:
+                # 与 read_strm_webdav_path 对 FileNotFoundError 返回 None 同构
+                return None
+            snap = snap_map.get(lp) if use_snapshot else None
+            # snap = (file_size, mtime_ns, webdav_path, parent, parse_version)
+            # 设计决策: 命中采信 size+mtime_ns 双等（不校验内容哈希）——
+            # "同 size 同 mtime 恢复"理论上可骗过跳检；权威自愈由
+            # refresh_service 周期/手动全量审计（use_snapshot=False）兜底，
+            # 误采信窗口止于下一次全量审计，换取审计墙钟 ≤3% 的读跳检收益。
+            if (snap is not None and snap[0] == st.st_size and snap[1] == st.st_mtime_ns
+                    and snap[2] and st.st_mtime_ns > 0 and snap[4] == STRM_PARSE_VERSION):
+                # 复用缓存权威链接，不 open 正文
+                return (lp, snap[2], snap[3], None)
             webdav_path = read_strm_webdav_path(file_path)
             if not webdav_path:
                 logging.debug("[初始化] 无法解析 STRM: %s", file_path)
                 return None
             parent = webdav_parent(webdav_path)
-            return (str(file_path), webdav_path, parent)
+            snap_row = (lp, st.st_size, st.st_mtime_ns, webdav_path, parent,
+                        STRM_PARSE_VERSION, time.time())
+            return (lp, webdav_path, parent, snap_row)
 
         def flush_batch():
             """批量写入数据库。闭包捕获 conn 和 batch。"""
@@ -154,10 +193,25 @@ class SyncService:
                         for future in as_completed(futures):
                             result = future.result()
                             if result:
-                                local_path, webdav_path, parent = result
+                                local_path, webdav_path, parent, snap_row = result
                                 batch.append((local_path, webdav_path, parent))
                                 parent_set.add(parent)
                                 total_strm += 1
+                                if snap_row is not None:
+                                    if use_snapshot:
+                                        snap_batch.append(snap_row)
+                                    else:
+                                        # 审计模式：恒等行（与既有快照五字段全等）
+                                        # 跳过重写，非恒等/新行照常重建
+                                        prev = snap_map.get(local_path)
+                                        if (prev is None or prev[0] != snap_row[1]
+                                                or prev[1] != snap_row[2]
+                                                or prev[2] != snap_row[3]
+                                                or prev[3] != snap_row[4]
+                                                or prev[4] != snap_row[5]):
+                                            snap_batch.append(snap_row)
+                                    if not use_snapshot:
+                                        audit_paths.append(local_path)
 
                                 # 日志输出（每 100 条或每 2 秒）+ 性能基准
                                 current_time = time.time()
@@ -187,6 +241,11 @@ class SyncService:
                 bulk_ctx.__exit__(*_exc_info)
 
         # 以下操作使用 self.connection()（独立连接），必须在 bulk_connection 提交后执行
+        # （R-7 锁边界：bulk_ctx.__exit__ 之前绝不再取 rw_lock.write_locked，否则自死锁）
+        if snap_batch:
+            self.db.upsert_a_snapshot_bulk(snap_batch)
+        if not use_snapshot:
+            self.db.prune_a_snapshot_not_in(audit_paths)
         if use_bulk:
             self.app.update_progress(a_indexed=indexed_count)
         if parent_set:
@@ -1171,6 +1230,10 @@ class SyncService:
                     logging.warning("[A区清理] 物理删除失败，跳过DB删除以保持一致性: %s", a_local_path)
                     return False  # 物理删除失败，不删DB记录
             self.db.delete_a_by_local(a_local_path)
+            # 快照行同步失效：与 watcher 删除路径（handle_a_deleted 的
+            # delete_a_snapshot）对称，不留孤儿行等全量审计 prune 延迟自愈。
+            # 幂等清理，不参与 check_exists/mapping_id 判定。
+            self.db.delete_a_snapshot(a_local_path)
             # 设置 ghost 保护，防止再次同步
             self.db.set_ghost_protection(
                 webdav_path,

@@ -2062,7 +2062,9 @@ def _handle_restart_webui(handler, webui_server) -> None:
             logging.info("[Restart] 正在启动主程序...")
             result = webui_server.start_main()
             if result.get("success"):
-                logging.info("[Restart] 主程序已重启")
+                # start_main 为非阻塞异步启动：success 仅代表「已受理」，终态由
+                # /api/main/status 的 phase（ready / fail_safe / stopped）判定。
+                logging.info("[Restart] 主程序重启请求已受理（后台初始化中）")
             else:
                 logging.error("[Restart] 主程序启动失败: %s", result.get("message"))
 
@@ -3983,10 +3985,13 @@ def _handle_main_status(handler, webui_server) -> bool:
     return True
 
 def _handle_main_start(handler, webui_server, body: bytes) -> bool:
-    """POST /api/main/start — 启动主程序
-    
-    业务失败（未配置/fail-safe/登录失败等）返回 200 + success:false，
-    与 _handle_openlist_test_connection 的约定一致；
+    """POST /api/main/start — 启动主程序（非阻塞异步启动，两层契约）
+
+    快同步预检失败（已在运行/配置未加载/未配置 A-B mapping/fail-safe 配置态）
+    → 200 + success:false + 原因；
+    慢操作（OpenList 登录、STRM 存储映射加载）在后台 Worker 进行，
+    受理即返回 200 + success:true + status:"starting"，
+    其失败经 GET /api/main/status 的 phase="fail_safe" + error 暴露。
     仅服务层未预期异常返回 500 + error_type: "exception"。
     """
     if not webui_server:
