@@ -72,8 +72,9 @@ class SyncService:
             use_bulk: True 用 bulk_connection（启动时，单线程安全）。
                       False 用 upsert_a_batch（刷新时，多线程安全）。
             a_roots: 显式限制扫描的 A 根；None 表示扫描全部配置根，空列表表示不扫描。
-            use_snapshot: True（默认）启用 a_strm_snapshot 的 size+mtime+parse_version
-                      内容读跳检；False（全量审计）强制逐文件重读正文并重建快照
+            use_snapshot: True（默认）启用 a_strm_snapshot 的
+                      size+mtime+ctime+parse_version 内容读跳检；
+                      False（全量审计）强制逐文件重读正文并重建快照
                       （权威自愈触发源）。快照整体读失败时 fail-open 退化为全读。
                       约束：False 仅允许在 a_roots=None（全量扫描）场景调用——
                       prune 的 keep 集来自本轮实际扫描集合，与局部 a_roots 同用
@@ -96,18 +97,19 @@ class SyncService:
         discovered_count = 0
         indexed_count = 0
         batch: list[tuple[str, str, str]] = []
-        snap_batch: list[tuple[str, int, int, str, str, int, float]] = []
+        snap_batch: list[tuple[str, int, int, str, str, int, int, float]] = []
         audit_paths: list[str] = []  # 仅 use_snapshot=False 时收集，供 prune
+        traversed_roots = 0  # os.walk 无错完成的 A 根数（出错/缺失根不计入）
         parent_set: set[str] = set()
         last_log_time = time.time()
         # pool 前一次性载入快照（fail-open：读异常返回空 map → 全量重读）。
         # use_snapshot=False（审计）也载入：仅用于跳过"重读结果与既有快照
         # 五字段全等"的恒等行重写（读仍强制全读；写语义等价，省去约 3% 审计
         # 墙钟的恒等 upsert，满足 P-1 audit 无回退闸）。
-        snap_map: dict[str, tuple[int, int, str, str, int]] = self.db.load_a_snapshot_map()
+        snap_map: dict[str, tuple[int, int, str, str, int, int]] = self.db.load_a_snapshot_map()
 
         def process_strm_file(file_path: Path) -> tuple[str, str, str, tuple | None] | None:
-            """处理单个 .strm：命中 size+mtime+parse_version 未变的快照则跳过正文读。
+            """处理单个 .strm：命中 size+mtime+ctime+parse_version 未变的快照则跳过正文读。
             返回 (local_path, webdav_path, parent, snapshot_row_or_None) 或 None。"""
             lp = str(file_path)
             try:
@@ -116,22 +118,32 @@ class SyncService:
                 # 与 read_strm_webdav_path 对 FileNotFoundError 返回 None 同构
                 return None
             snap = snap_map.get(lp) if use_snapshot else None
-            # snap = (file_size, mtime_ns, webdav_path, parent, parse_version)
-            # 设计决策: 命中采信 size+mtime_ns 双等（不校验内容哈希）——
-            # "同 size 同 mtime 恢复"理论上可骗过跳检；权威自愈由
-            # refresh_service 周期/手动全量审计（use_snapshot=False）兜底，
-            # 误采信窗口止于下一次全量审计，换取审计墙钟 ≤3% 的读跳检收益。
+            # snap = (file_size, mtime_ns, webdav_path, parent, parse_version, ctime_ns)
+            # 设计决策: 命中采信 size+mtime_ns+ctime_ns 三等（不校验内容哈希）——
+            # 原 size+mtime 双等存在"同 size 同 mtime 还原"采信窗口，以 ctime
+            # 维度收窄：常规还原路径（Explorer 复制、解压、shutil.copy 等）产生
+            # 的新文件创建/inode 变更时间与旧快照不等 → 门失配回退读正文；
+            # 已知残余窗口：robocopy 等显式保留创建时间的还原工具在本机 NTFS
+            # 实测可保留 ctime（该路径仍靠全量审计兜底）。POSIX 元数据操作
+            # （chmod 等）引起的 ctime 变更仅导致一次多余重读（fail-safe 方向，
+            # 不引入新采信窗口）。权威自愈仍由 refresh_service 周期/手动全量
+            # 审计（use_snapshot=False）兜底，换取审计墙钟 ≤3% 的读跳检收益。
             if (snap is not None and snap[0] == st.st_size and snap[1] == st.st_mtime_ns
-                    and snap[2] and st.st_mtime_ns > 0 and snap[4] == STRM_PARSE_VERSION):
+                    and snap[2] and st.st_mtime_ns > 0 and snap[4] == STRM_PARSE_VERSION
+                    and snap[5] == st.st_ctime_ns):
                 # 复用缓存权威链接，不 open 正文
                 return (lp, snap[2], snap[3], None)
             webdav_path = read_strm_webdav_path(file_path)
             if not webdav_path:
                 logging.debug("[初始化] 无法解析 STRM: %s", file_path)
+                if not use_snapshot:
+                    # 审计模式：文件在场（os.stat 已成功）但正文不可解析，
+                    # 属现存文件，其旧快照行不应被 prune
+                    audit_paths.append(lp)
                 return None
             parent = webdav_parent(webdav_path)
             snap_row = (lp, st.st_size, st.st_mtime_ns, webdav_path, parent,
-                        STRM_PARSE_VERSION, time.time())
+                        STRM_PARSE_VERSION, st.st_ctime_ns, time.time())
             return (lp, webdav_path, parent, snap_row)
 
         def flush_batch():
@@ -147,6 +159,14 @@ class SyncService:
                 indexed_count += written if isinstance(written, int) else len(batch)
                 self.app.update_progress(a_indexed=indexed_count)
             batch.clear()
+            if not use_bulk and snap_batch:
+                # 非 bulk 模式（快照与审计两形态）无 bulk_connection 事务包裹，
+                # 可安全中途经独立连接分片提交快照写，消除 snap_batch 无界内存
+                # 累积（部署后首次快照全空的活跃刷新为大头）；bulk 启动模式保留
+                # 循环后统一写入（bulk_ctx 事务边界在 __exit__，中途取
+                # rw_lock.write_locked 有自死锁风险，见函数内 R-7 锁边界注释）。
+                self.db.upsert_a_snapshot_bulk(snap_batch)
+                snap_batch.clear()
 
         # 根据模式选择连接：bulk_connection 绕过 rw_lock，仅启动时单线程安全
         conn = None
@@ -172,9 +192,18 @@ class SyncService:
                     logging.warning("[初始化] A 区根目录不存在: %s", a_root)
                     continue
 
-                # 收集所有 .strm 文件路径
+                # 收集所有 .strm 文件路径。
+                # onerror 回调区分「walk 成功的空结果」（合法清空，权威）
+                # 与「walk 出错（不可读子树被静默跳过）」（keep 集不完整）。
+                root_walk_errors = 0
+
+                def _walk_error(err: OSError) -> None:
+                    nonlocal root_walk_errors
+                    root_walk_errors += 1
+                    logging.warning("[初始化] os.walk 遍历出错，子树被跳过: %s", err)
+
                 strm_files: list[Path] = []
-                for root, _dirs, files in os.walk(a_root):
+                for root, _dirs, files in os.walk(a_root, onerror=_walk_error):
                     for name in files:
                         if name.lower().endswith(".strm"):
                             strm_files.append(Path(root) / name)
@@ -201,14 +230,15 @@ class SyncService:
                                     if use_snapshot:
                                         snap_batch.append(snap_row)
                                     else:
-                                        # 审计模式：恒等行（与既有快照五字段全等）
+                                        # 审计模式：恒等行（与既有快照六字段全等）
                                         # 跳过重写，非恒等/新行照常重建
                                         prev = snap_map.get(local_path)
                                         if (prev is None or prev[0] != snap_row[1]
                                                 or prev[1] != snap_row[2]
                                                 or prev[2] != snap_row[3]
                                                 or prev[3] != snap_row[4]
-                                                or prev[4] != snap_row[5]):
+                                                or prev[4] != snap_row[5]
+                                                or prev[5] != snap_row[6]):
                                             snap_batch.append(snap_row)
                                     if not use_snapshot:
                                         audit_paths.append(local_path)
@@ -229,6 +259,8 @@ class SyncService:
 
                 # 刷新当前 a_root 的剩余记录
                 flush_batch()
+                if not root_walk_errors:
+                    traversed_roots += 1
         except BaseException:
             # 捕获 BaseException（含 KeyboardInterrupt/SystemExit），
             # 确保 __exit__ 收到正确的异常信息并 rollback bulk_connection，
@@ -245,7 +277,18 @@ class SyncService:
         if snap_batch:
             self.db.upsert_a_snapshot_bulk(snap_batch)
         if not use_snapshot:
-            self.db.prune_a_snapshot_not_in(audit_paths)
+            if traversed_roots < len(roots):
+                # 存在不可达（根缺失，中途 continue 未计数）或遍历出错
+                #（onerror 触发）的 A 根：keep 集不完整，prune 会把
+                #「本轮不可见 ≠ 云端已消失」的文件当冗余删除，fail-closed 跳过。
+                logging.warning(
+                    "[初始化] %d/%d 个 A 根不可达或遍历出错，keep 集不完整，跳过快照 prune",
+                    len(roots) - traversed_roots, len(roots))
+            else:
+                # 全部根 walk 无错完成（含合法清空：walk 成功但 0 文件=权威空
+                # 目录，放行 prune）；解析失败文件已记入 audit_paths（见
+                # process_strm_file），keep 集完整。
+                self.db.prune_a_snapshot_not_in(audit_paths)
         if use_bulk:
             self.app.update_progress(a_indexed=indexed_count)
         if parent_set:

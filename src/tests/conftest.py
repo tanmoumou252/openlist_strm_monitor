@@ -52,10 +52,9 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    import os
     webui_names = ("test_webui_", "test_e2e_full_flow", "test_onboarding_e2e")
     for item in items:
-        if os.path.basename(str(item.fspath)).startswith(webui_names):
+        if item.path.name.startswith(webui_names):
             item.add_marker(pytest.mark.webui)
 
 

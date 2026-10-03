@@ -170,6 +170,9 @@ def start_webui_server(tmp_path: Path):
         deadline = time.time() + 2.0
         while not server._server and time.time() < deadline:
             time.sleep(0.05)
+        if not server._server:
+            server.stop()
+            raise RuntimeError("test WebUI server failed to bind port within 2s")
 
         base_url = f"http://127.0.0.1:{port}"
         status, _, body = http_post(base_url, "/api/login", {"password": TEST_PASSWORD})

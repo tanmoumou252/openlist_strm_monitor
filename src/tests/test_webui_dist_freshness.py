@@ -45,6 +45,15 @@ def _dist_js_chunks() -> list[Path]:
     return sorted((DIST_DIR / "assets").glob("*.js"))
 
 
+def _is_dist_stale(src_latest: float, dist_mtime: float) -> bool:
+    """新鲜度判定唯一入口：最新 chunk mtime 落后最新源码超过 2s 容差即判陈旧。
+
+    容忍 2 秒粒度（FAT / 快速写入下同刻视为通过）。生产断言与红/绿路径
+    用例都必须经本函数判定，杜绝用例自算算式绕过真实护栏。
+    """
+    return src_latest > dist_mtime + 2
+
+
 class TestDistExistence:
     """dist 存在性与 hashed assets 引用完整性。"""
 
@@ -81,18 +90,19 @@ class TestDistExistence:
 
 
 class TestDistFreshness:
-    """新鲜度护栏：源码 mtime 不得晚于全部 dist chunk 的 mtime。"""
+    """新鲜度护栏：最新 dist chunk 的 mtime 不得早于最新源码 mtime。"""
 
     def test_dist_not_staler_than_sources(self):
         chunks = _dist_js_chunks()
         assert chunks, "dist/assets 下无任何 JS chunk"
         src_latest = _latest_source_mtime()
-        dist_oldest = min(c.stat().st_mtime for c in chunks)
-        # 容忍 2 秒粒度（FAT / 快速写入下同刻视为通过）
-        assert dist_oldest + 2 >= src_latest, (
+        # max 口径：陈旧 rebuild 表现为全部 chunk 落后源码；dist/assets 中的
+        # 残留旧文件（手工拷贝/未清理旧 hash 产物）不构成误报证据
+        dist_newest = max(c.stat().st_mtime for c in chunks)
+        assert not _is_dist_stale(src_latest, dist_newest), (
             "检测到 src/webui 前端源码比 dist 产物新 —— 源码已改未 rebuild dist。"
             f"请执行: cd src/webui && npx vite build（源码最新 mtime={src_latest}, "
-            f"dist 最旧 chunk mtime={dist_oldest}）"
+            f"dist 最新 chunk mtime={dist_newest}）"
         )
 
 
@@ -100,11 +110,11 @@ class TestStaleFixtureRedPath:
     """tmp_path 模拟陈旧夹具，验证新鲜度断言的 fail 路径可复现（不污染真实 dist）。"""
 
     def test_stale_dist_triggers_freshness_failure(self, tmp_path):
+        """红路径：全部 chunk 均落后源码 → _is_dist_stale 判 True。"""
         fake_src = tmp_path / "src"
         fake_dist_assets = tmp_path / "dist" / "assets"
         fake_src.mkdir(parents=True)
         fake_dist_assets.mkdir(parents=True)
-        # dist chunk mtime 在过去，源码 mtime 在现在 → 判定应 fail
         chunk = fake_dist_assets / "index-old.js"
         chunk.write_text("/* stale */", encoding="utf-8")
         old = time.time() - 3600
@@ -113,11 +123,12 @@ class TestStaleFixtureRedPath:
         src_file.write_text("// fresh", encoding="utf-8")
 
         src_latest = src_file.stat().st_mtime
-        dist_oldest = chunk.stat().st_mtime
-        assert not (dist_oldest + 2 >= src_latest), (
+        dist_newest = chunk.stat().st_mtime
+        assert _is_dist_stale(src_latest, dist_newest), (
             "陈旧夹具应触发新鲜度 fail 路径（dist mtime 早于源码）")
 
     def test_fresh_dist_passes_freshness_check(self, tmp_path):
+        """绿路径：dist 新于源码 → _is_dist_stale 判 False。"""
         fake_src = tmp_path / "src"
         fake_dist_assets = tmp_path / "dist" / "assets"
         fake_src.mkdir(parents=True)
@@ -130,5 +141,19 @@ class TestStaleFixtureRedPath:
         chunk.write_text("/* fresh */", encoding="utf-8")
 
         src_latest = src_file.stat().st_mtime
-        dist_oldest = chunk.stat().st_mtime
-        assert dist_oldest + 2 >= src_latest, "新鲜 dist 不应触发 fail"
+        dist_newest = chunk.stat().st_mtime
+        assert not _is_dist_stale(src_latest, dist_newest), (
+            "新鲜 dist 不应触发 fail")
+
+    def test_leftover_stale_chunk_does_not_flag_stale(self, tmp_path):
+        """红（新增）：残留旧 chunk + 本次构建新 chunk 并存 → 不得误报陈旧。
+
+        max 口径下"陈旧 rebuild"表现为全部 chunk 落后；单个残留旧文件
+        （手工拷贝/未清理旧 hash 产物）不构成"源码已改未 rebuild"证据。
+        """
+        fresh = time.time() - 1
+        stale = time.time() - 3600
+        assert not _is_dist_stale(time.time(), max(fresh, stale)), (
+            "存在任一新鲜 chunk 时不得误报陈旧（残留旧 chunk 不应翻红）")
+        assert _is_dist_stale(time.time(), stale), (
+            "全部 chunk 落后时仍必须判陈旧（护栏检测力不得因 max 口径丧失）")

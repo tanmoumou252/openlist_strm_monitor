@@ -354,6 +354,22 @@ export async function updateMainStatus() {
           </div>
         `;
       }
+    } else if (phase === 'stopping') {
+      // 停止操作进行中：running 已转 false 但相位未落 stopped，须与「已停止」
+      // 终态区分显示，避免误导用户再次点击启动。分支位于 ready/running 之前：
+      // stop 失败相位滞留 stopping 时（或 fallback 公式误报 running），启动
+      // 按钮保持可见但 disabled，避免双按钮全隐的不可恢复 UI 死角。
+      dot.style.background = '#ff9800';
+      dot.style.boxShadow = '0 0 12px rgba(255,152,0,0.6)';
+      text.textContent = '正在停止主程序...';
+      text.style.color = 'var(--text-main)';
+      uptimeText.textContent = '停止操作进行中，请稍候';
+      if (progressContainer) progressContainer.style.display = 'none';
+      if (startBtn) {
+        startBtn.style.display = 'inline-flex';
+        startBtn.disabled = true;
+      }
+      if (stopBtn) stopBtn.style.display = 'none';
     } else if (phase === 'ready' || status.running) {
       dot.style.background = '#4caf50';
       dot.style.boxShadow = '0 0 12px rgba(76,175,80,0.6)';
@@ -383,17 +399,6 @@ export async function updateMainStatus() {
         startBtn.disabled = false;
         startBtn.innerHTML = `${icon('refresh')} 启动主程序`;
       }
-      if (stopBtn) stopBtn.style.display = 'none';
-    } else if (phase === 'stopping') {
-      // 停止操作进行中：running 已转 false 但相位未落 stopped，须与「已停止」
-      // 终态区分显示，避免误导用户再次点击启动。
-      dot.style.background = '#ff9800';
-      dot.style.boxShadow = '0 0 12px rgba(255,152,0,0.6)';
-      text.textContent = '正在停止主程序...';
-      text.style.color = 'var(--text-main)';
-      uptimeText.textContent = '停止操作进行中，请稍候';
-      if (progressContainer) progressContainer.style.display = 'none';
-      if (startBtn) startBtn.style.display = 'none';
       if (stopBtn) stopBtn.style.display = 'none';
     } else {
       dot.style.background = '#f44336';

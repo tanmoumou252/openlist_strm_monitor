@@ -796,7 +796,7 @@ class Database:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_b_lineage_snapshot_path ON b_lineage_snapshot(local_path)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_b_lineage_snapshot_version ON b_lineage_snapshot(mapping_id, mapping_version, lineage_version)")
 
-            # A 区 STRM 内容读跳检快照（size+mtime_ns+parse_version 门），
+            # A 区 STRM 内容读跳检快照（size+mtime_ns+ctime_ns+parse_version 门），
             # 仅服务于 initial_scan_a 的"未变即跳过正文读"，独立于 a_strm_files。
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS a_strm_snapshot (
@@ -806,10 +806,26 @@ class Database:
                     webdav_path TEXT NOT NULL,
                     parent_webdav_path TEXT NOT NULL,
                     parse_version INTEGER NOT NULL,
+                    ctime_ns INTEGER NOT NULL DEFAULT 0,
                     indexed_at REAL NOT NULL
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_a_strm_snapshot_idx ON a_strm_snapshot(indexed_at)")
+            # 旧数据库迁移：ctime_ns 为快照采信门第五维（Windows=创建时间，
+            # POSIX=inode 变更时间）。NOT NULL DEFAULT 0 使存量行必然失配新门，
+            # 升级后首轮扫描全量重读一次并重写快照（与 parse_version 漂移同型
+            # 自愈）。全新库由上方 CREATE TABLE 直接带列，两路径并存幂等。
+            existing_snapshot_columns = {
+                row[1] for row in cur.execute(
+                    "PRAGMA table_info(a_strm_snapshot)").fetchall()
+            }
+            if existing_snapshot_columns and "ctime_ns" not in existing_snapshot_columns:
+                cur.execute(
+                    "ALTER TABLE a_strm_snapshot "
+                    "ADD COLUMN ctime_ns INTEGER NOT NULL DEFAULT 0")
+            # [已废弃] idx_a_strm_snapshot_idx(indexed_at)：无任何查询使用
+            # （快照命中路径不按 indexed_at 过滤），且命中跳检路径不刷新该列。
+            # DROP 兼容既有 DB 中已存在的索引；新库不再创建。
+            cur.execute("DROP INDEX IF EXISTS idx_a_strm_snapshot_idx")
 
             # 创建索引
             cur.execute("CREATE INDEX IF NOT EXISTS idx_a_strm_webdav_path ON a_strm_files(webdav_path)")
@@ -1127,9 +1143,9 @@ class Database:
     # 再取 write_locked 会同进程自死锁。
     # ------------------------------------------------------------------
 
-    def load_a_snapshot_map(self) -> dict[str, tuple[int, int, str, str, int]]:
+    def load_a_snapshot_map(self) -> dict[str, tuple[int, int, str, str, int, int]]:
         """全表载入快照跳检 map：{local_path: (file_size, mtime_ns, webdav_path,
-        parent_webdav_path, parse_version)}。
+        parent_webdav_path, parse_version, ctime_ns)}。
 
         fail-open：任何读异常（表未迁移到位 / DB 瞬时错误）在方法内捕获并返回
         空 map，退化为"全量重读正文"，等同无快照行为，不得让扫描终止。
@@ -1138,18 +1154,22 @@ class Database:
             with self.rw_lock.read_locked(), self.read_connection() as conn:
                 rows = conn.execute(
                     "SELECT local_path, file_size, mtime_ns, webdav_path, "
-                    "parent_webdav_path, parse_version FROM a_strm_snapshot"
+                    "parent_webdav_path, parse_version, ctime_ns FROM a_strm_snapshot"
                 ).fetchall()
                 return {
-                    r[0]: (r[1], r[2], r[3], r[4], r[5]) for r in rows
+                    r[0]: (r[1], r[2], r[3], r[4], r[5], r[6]) for r in rows
                 }
         except Exception:
             logging.warning("[DB] a_strm_snapshot 读取失败，本轮扫描退化为全量重读", exc_info=True)
             return {}
 
     def upsert_a_snapshot_bulk(
-            self, rows: list[tuple[str, int, int, str, str, int, float]]) -> None:
-        """批量覆盖写快照行（单事务 executemany，按 900 参数切片）。"""
+            self, rows: list[tuple[str, int, int, str, str, int, int, float]]) -> None:
+        """批量覆盖写快照行（单事务 executemany，按 900 参数切片）。
+
+        rows 行元组：(local_path, file_size, mtime_ns, webdav_path,
+        parent_webdav_path, parse_version, ctime_ns, indexed_at)。
+        """
         if not rows:
             return
         with self.rw_lock.write_locked(), self.connection() as conn:
@@ -1157,13 +1177,14 @@ class Database:
                 conn.executemany(
                     """INSERT INTO a_strm_snapshot(
                         local_path, file_size, mtime_ns, webdav_path,
-                        parent_webdav_path, parse_version, indexed_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)
+                        parent_webdav_path, parse_version, ctime_ns, indexed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(local_path) DO UPDATE SET
                         file_size=excluded.file_size, mtime_ns=excluded.mtime_ns,
                         webdav_path=excluded.webdav_path,
                         parent_webdav_path=excluded.parent_webdav_path,
                         parse_version=excluded.parse_version,
+                        ctime_ns=excluded.ctime_ns,
                         indexed_at=excluded.indexed_at""",
                     chunk,
                 )

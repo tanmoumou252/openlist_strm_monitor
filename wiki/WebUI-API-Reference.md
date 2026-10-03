@@ -87,7 +87,7 @@
 - `message`（str）— 面向用户的说明。
 - `status`（str，可选）— `start` 成功受理时为 `starting`；快同步预检失败时可能出现 `not_configured`（未配置 A/B mapping）或 `fail_safe_active`（配置未通过 `AppService.get_config_status` 门禁）。
 
-`start` 为**两层契约**：**快同步预检**（已在运行 / 配置未加载 / 未配置 A/B mapping / fail-safe 配置态）即时返回 `success:false`（仅「未配置 A/B mapping」与「fail-safe 门禁未过」两路另带 `status`；「已在运行」「配置未加载」不带 `status`），`_app_running` 保持 false；**慢操作**（OpenList 登录、STRM 存储映射加载）在后台 Worker 线程进行，HTTP 受理即返回 `success:true` + `status:"starting"`，其失败异步经 `GET /api/main/status` 的 `phase:"fail_safe"` + `error` 暴露，不阻塞请求线程。
+`start` 为**两层契约**：**快同步预检**（已在运行 / 配置未加载 / 未配置 A/B mapping / fail-safe 配置态）即时返回 `success:false`（仅「未配置 A/B mapping」与「fail-safe 门禁未过」两路另带 `status`；「已在运行」「配置未加载」不带 `status`），**快同步预检失败各场景（配置未加载、未配置 A/B mapping、fail-safe 门禁未过）`_app_running` 保持 false；「已在运行」的重复启动预检返回 `success:false` 时不停止主程序、亦不修改 `_app_running`（此时其值可能为 true）**；**慢操作**（OpenList 登录、STRM 存储映射加载）在后台 Worker 线程进行，HTTP 受理即返回 `success:true` + `status:"starting"`，其失败异步经 `GET /api/main/status` 的 `phase:"fail_safe"` + `error` 暴露，不阻塞请求线程。
 
 **状态码语义**：`start` 的**快同步预检**失败（配置未加载、未配置 A/B mapping、fail-safe 门禁未过、重复启动）返回 **200 + `success:false`**，与 `POST /api/openlist/test-connection` 的约定一致；**OpenList 登录失败、STRM 存储映射加载失败属慢操作**，同步响应为受理态 `success:true` + `status:"starting"`，其失败异步经 `GET /api/main/status` 的 `phase:"fail_safe"` + `error` 暴露。`stop` 的业务失败（如主程序未在运行）返回 200 + `success:false`。仅服务层未预期异常（`start_main` / `stop_main` 的 `except Exception` 兜底分支）返回 **500 + `error_type: "exception"`**。
 

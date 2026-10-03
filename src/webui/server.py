@@ -1340,6 +1340,16 @@ class WebUIServer:
                 return {"success": True, "message": "主程序已停止"}
             except Exception as exc:
                 logging.error("[Main] 停止失败: %s", exc, exc_info=True)
+                # 停止失败恢复可重试相位：svc.stop() 抛异常时服务状态未知，
+                # 保留 _app_service/_app_worker_thread 供再次 stop 重试；
+                # server 侧与 svc 侧相位须同步落 fail_safe——svc 存在时
+                # get_main_status 主路径读取 svc.get_state_summary()，且
+                # stop_main 已先行调用 svc.set_phase("stopping")，仅改
+                # server 侧 _app_phase 不消除前端滞留 stopping 的死角。
+                self._app_phase = "fail_safe"
+                self._app_error = str(exc)
+                if svc:
+                    svc.set_phase("fail_safe", error=str(exc))
                 return {"success": False, "message": "停止失败，请查看服务端日志", "error_type": "exception"}
 
     def get_main_status(self) -> dict:
