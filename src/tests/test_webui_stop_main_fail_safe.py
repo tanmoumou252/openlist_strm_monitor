@@ -95,6 +95,9 @@ class _RecoverableStopService:
         if self._fail_next:
             self._fail_next = False
             raise RuntimeError("boom")
+        # 成功停止后相位须落 stopped，使 stop_main 清句柄前的 is_running
+        # 权威复核判为假、放行正常清理（否则残留 stopping 被误判为引擎存活）。
+        self._phase = "stopped"
 
 
 class _RevivingStaleService:
@@ -125,6 +128,55 @@ class _RevivingStaleService:
         self.stop_called += 1
         # stop 已返回，但旧 worker 随后照常 start 旧引擎
         self._phase = "scanning_a"
+
+
+class _MockStaleSvc:
+    """start/stop/phase 多路可控替身，对齐 AppService 摘要契约：
+    - stop_raises：stop() 抛错（模拟停止失败）；
+    - start_raises：start() 抛错（保留能力）；
+    - is_revive_after_stop：stop() 后把相位翻成 running 域（模拟停止返回但引擎复活）；
+    - raise_on_start_phase：set_phase("starting") 抛错——供启动异常回滚用例把异常
+      落点后置于句柄赋值之后（get_config_status 已放行、句柄已赋值）；
+    - get_config_status() 返回 ready：让 start_main 通过配置就绪闸，推进到句柄赋值。"""
+
+    def __init__(self, stop_raises=False, start_raises=False,
+                 is_revive_after_stop=False, raise_on_start_phase=False):
+        self._phase = "fail_safe"
+        self._error = "上次错误"
+        self._stop_raises = stop_raises
+        self._start_raises = start_raises
+        self._revive = is_revive_after_stop
+        self._raise_on_start_phase = raise_on_start_phase
+        self.stop_called = 0
+
+    def get_config_status(self):
+        return {"status": "ready"}
+
+    def set_phase(self, phase, error=None):
+        if self._raise_on_start_phase and phase == "starting":
+            raise RuntimeError("startup phase transition boom")
+        self._phase = phase
+        self._error = error
+
+    def get_state_summary(self):
+        return {
+            "phase": self._phase,
+            "is_running": self._phase not in {"stopped", "fail_safe"},
+            "is_ready": False,
+            "error": self._error,
+            "progress": {},
+        }
+
+    def start(self):
+        if self._start_raises:
+            raise RuntimeError("start boom")
+
+    def stop(self):
+        self.stop_called += 1
+        if self._stop_raises:
+            raise RuntimeError("stale stop boom")
+        if self._revive:
+            self._phase = "scanning_a"
 
 
 class _BlockingWorkerStub:
@@ -206,10 +258,14 @@ def test_start_main_rejects_when_stale_engine_revives_after_join(
         worker.release()
 
 
-def test_start_main_gate_failures_land_fail_safe_visible(webui_server_shared):
-    """契约 W2：启动链路各失败 return（配置闸 / not_configured 闸）必须落
-    _app_phase=="fail_safe" 与 _app_error，经 get_main_status fallback 可见，
-    不得误报「stopped、无错误」。"""
+def test_start_main_gate_failures_land_stopped_with_visible_error(
+        webui_server_shared):
+    """启动链路配置类失败（配置闸 / not_configured 闸）落 stopped + 具体 error。
+
+    用户配置态不得占用引擎故障态 fail_safe：首次运行未配 mapping 若在 UI 显示
+    引擎故障即为误报。stopped 态下仍写 _app_error，经 get_main_status fallback 的
+    error 位对用户可见（running=False、phase=stopped、error=具体消息）。
+    """
     server, _base, _token = webui_server_shared
     from unittest.mock import Mock
     # 场景一：配置闸（_config=None）
@@ -218,12 +274,16 @@ def test_start_main_gate_failures_land_fail_safe_visible(webui_server_shared):
     server._app_worker_thread = None
     result = server.start_main()
     assert result["success"] is False
-    assert server._app_phase == "fail_safe", (
-        f"配置闸失败后相位必须落 fail_safe，实际 {server._app_phase!r}")
-    assert server._app_error, "配置闸失败后 _app_error 必须非空"
+    assert server._app_phase == "stopped", (
+        f"配置闸失败后相位必须落 stopped，实际 {server._app_phase!r}")
+    assert server._app_error == "配置未加载", (
+        f"配置闸必须写具体 _app_error，实际 {server._app_error!r}")
     status = server.get_main_status()
-    assert status["phase"] == "fail_safe", (
-        f"get_main_status fallback 必须可见 fail_safe，实际 {status['phase']!r}")
+    assert status["phase"] == "stopped", (
+        f"get_main_status fallback 必须可见 stopped，实际 {status['phase']!r}")
+    assert status["running"] is False
+    assert "配置未加载" in str(status.get("error")), (
+        f"配置闸错误必须经 error 位可见，实际返回体: {status!r}")
     # 场景二：not_configured 闸（Mock config 且 a_b_mappings=[]）
     server._config = Mock(a_b_mappings=[])
     server._app_service = None
@@ -231,18 +291,25 @@ def test_start_main_gate_failures_land_fail_safe_visible(webui_server_shared):
     result = server.start_main()
     assert result["success"] is False
     assert result.get("status") == "not_configured"
-    assert server._app_phase == "fail_safe", (
-        f"not_configured 闸失败后相位必须落 fail_safe，实际 {server._app_phase!r}")
-    assert server._app_error, "not_configured 闸失败后 _app_error 必须非空"
+    assert server._app_phase == "stopped", (
+        f"not_configured 闸失败后相位必须落 stopped，实际 {server._app_phase!r}")
+    assert server._app_error == "未配置 A/B mapping", (
+        f"not_configured 闸必须写具体 _app_error，实际 {server._app_error!r}")
     status = server.get_main_status()
-    assert status["phase"] == "fail_safe", (
-        f"get_main_status fallback 必须可见 fail_safe，实际 {status['phase']!r}")
+    assert status["phase"] == "stopped", (
+        f"get_main_status fallback 必须可见 stopped，实际 {status['phase']!r}")
+    assert status["running"] is False
+    assert "未配置 A/B mapping" in str(status.get("error")), (
+        f"not_configured 错误必须经 error 位可见，实际返回体: {status!r}")
 
 
-def test_start_main_cleanup_sets_fail_safe_when_gate_blocks(webui_server_shared):
-    """契约 W2：残留清理成功后若被配置闸拦下，相位落 fail_safe 且上一轮
-    陈旧错误被新错误覆盖可见（get_main_status fallback 可见）——终态/清错
-    推迟到新实例就位，启动链路上任何闸拦截都不得伪装成「stopped、无错误」。"""
+def test_start_main_cleanup_sets_stopped_with_visible_error_when_gate_blocks(
+        webui_server_shared):
+    """残留清理成功后被配置闸拦下 → 落 stopped 且陈旧错误被新具体错误覆盖可见。
+
+    清理块把上轮 fail_safe 陈旧错误遗留、新实例就位前的配置闸属用户配置态：
+    落 stopped + 写「配置未加载」，不得伪装成「stopped、无错误」丢失失败原因。
+    """
     server, _base, _token = webui_server_shared
     server._config = None
     server._app_phase = "fail_safe"
@@ -252,13 +319,16 @@ def test_start_main_cleanup_sets_fail_safe_when_gate_blocks(webui_server_shared)
     server._app_worker_thread = None
     result = server.start_main()
     assert server._app_service is not svc, "清理成功的旧句柄必须已清空"
-    assert server._app_phase == "fail_safe", (
-        f"清理成功后被配置闸拦下相位必须落 fail_safe，实际 {server._app_phase!r}")
+    assert server._app_phase == "stopped", (
+        f"清理成功后被配置闸拦下相位必须落 stopped，实际 {server._app_phase!r}")
     assert "配置未加载" in str(server._app_error), (
         f"配置闸错误必须覆盖写入 _app_error，实际 {server._app_error!r}")
     status = server.get_main_status()
-    assert status["phase"] == "fail_safe", (
-        f"get_main_status fallback 必须可见 fail_safe，实际 {status['phase']!r}")
+    assert status["phase"] == "stopped", (
+        f"get_main_status fallback 必须可见 stopped，实际 {status['phase']!r}")
+    assert status["running"] is False
+    assert "上次的错误" not in str(status.get("error")), (
+        f"陈旧错误必须被新具体错误覆盖，实际返回体: {status!r}")
     assert result["success"] is False
     assert "配置未加载" in result["message"], (
         f"清理后应确定性止于配置闸（封闭夹具），实际: {result!r}")
@@ -350,3 +420,121 @@ def test_start_main_after_fail_safe_stale_cleans_and_proceeds(webui_server_share
     assert result["success"] is False
     assert "配置未加载" in result["message"], (
         f"清理完成后应确定性止于配置闸（封闭夹具），实际: {result!r}")
+
+
+def test_start_main_rejects_when_stale_engine_revives_with_no_worker(
+        webui_server_shared):
+    """worker 句柄为 None 但残留引擎在 stop 后复活时，权威复核必须无条件拒绝。
+
+    复核曾嵌在 worker.is_alive() 分支内，worker 缺席时被整体跳过，复活引擎
+    被放行进入新建链路（句柄被清、generation 推进）。以权威状态复核后，
+    worker 缺席亦须拒绝并保留旧句柄。
+    """
+    server, _base, _token = webui_server_shared
+    svc = _RevivingStaleService()
+    server._config = None
+    server._app_service = svc
+    server._app_worker_thread = None
+    gen_before = server._app_generation
+    result = server.start_main()
+    assert result["success"] is False, (
+        f"worker 缺席但引擎复活必须拒绝，实际: {result!r}")
+    assert ("复活" in result["message"]) or ("仍存活" in result["message"]), (
+        f"拒绝消息必须指明旧引擎复活/仍存活，实际: {result['message']!r}")
+    assert server._app_service is svc, "拒绝后旧 svc 句柄必须保留，不得被清理链路清空"
+    assert server._app_generation == gen_before, "拒绝后 generation 不得推进"
+
+
+def test_start_main_rolls_back_handles_when_startup_raises_after_assignment(
+        webui_server_shared, monkeypatch):
+    """新 svc 已赋值后 set_phase("starting") 抛错 → 外层 except 必须回滚句柄再落 fail_safe。
+
+    现状仅落 fail_safe 不回滚：新实例 starting 相位（get_main_status 主路径读
+    summary.phase=="starting"）盖掉故障可见性、_app_service 未清导致下次命中
+    「已在运行」、_admin_client 被换成未认证 client。回滚后这些句柄必须清空、
+    相位可读为 fail_safe。异常落点后置于句柄赋值之后方触发回滚分支。
+    """
+    import importlib
+    import webdav_client as _wc_mod
+    import app_service as _as_mod
+    importlib.reload(_as_mod)
+    importlib.reload(_wc_mod)
+    monkeypatch.setitem(sys.modules, "app_service", _as_mod)
+    monkeypatch.setitem(sys.modules, "webdav_client", _wc_mod)
+
+    class _Cfg:
+        a_b_mappings = [{"mapping_id": "m1"}]
+        webdav = type("W", (), {
+            "host": "h", "user": "u", "password": "p", "totp_secret": None})()
+        log = type("L", (), {
+            "level": "INFO", "file": None, "max_size_mb": 1, "backup_count": 1})()
+
+        def load_strm_storage_from_api(self, admin_client=None):
+            return None
+
+    def _fake_client(*a, **k):
+        return object()
+
+    def _fake_service(*a, **k):
+        # get_config_status() 返回 ready 令流程推进过就绪闸，句柄得以赋值；
+        # raise_on_start_phase 令 set_phase("starting") 抛错——此时 self._app_service
+        # 已赋值、self._app_running 已置 True，异常现场为「赋值后」。
+        return _MockStaleSvc(raise_on_start_phase=True)
+
+    monkeypatch.setattr(_wc_mod, "OpenListAdminClient", _fake_client)
+    monkeypatch.setattr(_as_mod, "AppService", _fake_service)
+
+    server, _base, _token = webui_server_shared
+    server._config = _Cfg()
+    server._app_service = None
+    server._app_worker_thread = None
+    server._app_running = False
+    server._app_start_time = None
+    server._admin_client = None
+    result = server.start_main()
+    assert result["success"] is False, f"启动抛错必须失败，实际: {result!r}"
+    assert server._app_service is None, (
+        "启动异常后新 svc 句柄必须回滚清空，不得残留 starting 实例")
+    assert server._app_running is False, "启动异常后 _app_running 必须回滚为 False"
+    assert server._admin_client is None, "启动异常后 _admin_client 必须回滚清空"
+    status = server.get_main_status()
+    assert status["phase"] == "fail_safe", (
+        f"句柄回滚后 fallback 必须可见 fail_safe，实际: {status['phase']!r}")
+
+
+def test_stop_main_rejects_when_worker_survives_join(webui_server_shared):
+    """worker join(5.0) 超时仍存活 → stop_main 拒绝落成功、保留句柄供重试。"""
+    server, _base, _token = webui_server_shared
+    svc = _MockStaleSvc(stop_raises=False)
+    worker = _BlockingWorkerStub()  # start_blocked=True，join 期间不退出
+    server._app_service = svc
+    server._app_worker_thread = worker
+    try:
+        result = server.stop_main()
+        assert result["success"] is False, (
+            f"join 超时仍存活的 worker 必须拒绝停止成功，实际: {result!r}")
+        assert "未退出" in result["message"], (
+            f"拒绝消息须指明 worker 未退出，实际: {result['message']!r}")
+        assert server._app_service is svc, "拒绝后必须保留 svc 句柄供重试"
+        assert server._app_worker_thread is worker, "拒绝后必须保留 worker 句柄"
+        assert server._app_phase == "fail_safe", (
+            f"拒绝后相位须落 fail_safe，实际 {server._app_phase!r}")
+    finally:
+        worker.release()
+
+
+def test_stop_main_rejects_when_engine_revives_after_stop(webui_server_shared):
+    """worker=None、svc.stop() 返回成功但引擎随后 is_running 翻真 →
+    stop_main 权威复核拒绝、保留句柄、不落 stopped 成功。"""
+    server, _base, _token = webui_server_shared
+    svc = _MockStaleSvc(stop_raises=False, is_revive_after_stop=True)
+    server._app_service = svc
+    server._app_worker_thread = None
+    result = server.stop_main()
+    assert result["success"] is False, (
+        f"stop 后复活的引擎必须拒绝停止成功，实际: {result!r}")
+    assert "仍存活" in result["message"], (
+        f"拒绝消息须指明引擎仍存活，实际: {result['message']!r}")
+    assert server._app_service is svc, "拒绝后必须保留 svc 句柄供重试"
+    assert server._app_phase == "fail_safe", (
+        f"拒绝后相位须落 fail_safe，实际 {server._app_phase!r}")

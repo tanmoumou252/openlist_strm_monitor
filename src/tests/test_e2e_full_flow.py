@@ -511,15 +511,31 @@ class TestSuccessfulFlow:
         fake_app.get_config_status.return_value = {
             "status": "ready", "reason": "mapping 配置有效"}
         # 建模真实 AppService 状态面：get_state_summary 必须是可 JSON 序列化的 dict，
-        # 否则 /api/main/status（server.py:1347-1349）无法序列化，轮询拿不到 phase
+        # 否则 /api/main/status 无法序列化，轮询拿不到 phase。is_running/is_ready
+        # 须与真实 get_state_summary 同型由 phase 派生（app_service_core.py
+        # get_state_summary：is_running = phase in 运行集，"stopping"/"stopped"/
+        # "fail_safe" 不在其内）——否则 stop_main 先 set_phase("stopping") 后，
+        # 替身仍报 is_running=True 会被生命周期停止复核误判为引擎存活。
+        _running_phases = {
+            "starting", "authenticating", "scanning_a", "scanning_b",
+            "syncing_a_to_b", "catching_up", "ready"}
         _state = {"phase": "starting", "is_running": True, "is_ready": False,
                   "error": None, "progress": {}}
         fake_app.get_state_summary.return_value = _state
-        fake_app.set_phase.side_effect = lambda phase, error=None: _state.update(
-            {"phase": phase, **({"error": error} if error else {})})
+
+        def _fake_set_phase(phase, error=None):
+            _state.update({
+                "phase": phase,
+                "is_running": phase in _running_phases,
+                "is_ready": phase == "ready",
+            })
+            if error:
+                _state["error"] = error
+
+        fake_app.set_phase.side_effect = _fake_set_phase
 
         def _fake_start():
-            _state.update({"phase": "ready", "is_running": True, "is_ready": True})
+            _fake_set_phase("ready")
         fake_app.start.side_effect = _fake_start
         # worker 内远程存储映射加载走网络，测试内 stub 掉
         server._config.load_strm_storage_from_api = Mock()

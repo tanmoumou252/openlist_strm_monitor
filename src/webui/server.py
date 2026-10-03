@@ -1226,16 +1226,18 @@ class WebUIServer:
                                 "success": False,
                                 "message": "主程序处于 fail_safe 且旧 worker 未退出，请重试停止或查看服务端日志",
                             }
-                        # join 成功 ≠ 引擎已死：旧 worker 可能停在最后一次
-                        # generation 检查与 svc.start() 之间，stop 先完成、旧
-                        # 引擎随后照常 start。以权威状态复核 fail-closed。
-                        if stale_svc.get_state_summary().get("is_running"):
-                            logging.warning(
-                                "[Main] fail_safe 残留引擎在 stop 后复活，拒绝启动")
-                            return {
-                                "success": False,
-                                "message": "主程序处于 fail_safe 且旧引擎清理后仍存活，请重试停止或查看服务端日志",
-                            }
+                    # stop() 返回不保证旧引擎已停：worker 为 None / 已死 /
+                    # 当前线程时更不代表引擎已退出，旧 worker 可能停在最后一次
+                    # generation 检查与 svc.start() 之间、stop 先完成、旧引擎随后
+                    # 照常 start。权威状态复核须无条件执行，与 worker.is_alive()
+                    # 的「未退出」拒绝各自独立、互斥覆盖。
+                    if stale_svc.get_state_summary().get("is_running"):
+                        logging.warning(
+                            "[Main] fail_safe 残留引擎在 stop 后复活，拒绝启动")
+                        return {
+                            "success": False,
+                            "message": "主程序处于 fail_safe 且旧引擎清理后仍存活，请重试停止或查看服务端日志",
+                        }
                 except Exception as stale_exc:
                     logging.warning(
                         "[Main] fail_safe 残留实例停止失败: %s", stale_exc)
@@ -1254,13 +1256,16 @@ class WebUIServer:
                 # 「stopped、无错误」，两轮失败原因全丢。
 
             if not self._config:
-                self._app_phase = "fail_safe"
+                # 配置未加载属用户配置态而非引擎故障态，不得占用 fail_safe 语义
+                # （首次运行会在 UI 显示引擎故障）。落 stopped 仍写具体 error 保可见。
+                self._app_phase = "stopped"
                 self._app_error = "配置未加载"
                 return {"success": False, "message": "配置未加载"}
 
             configured_mappings = getattr(self._config, "a_b_mappings", [])
             if not configured_mappings:
-                self._app_phase = "fail_safe"
+                # 未配 A/B mapping 属用户配置态，落 stopped + 具体 error 可见。
+                self._app_phase = "stopped"
                 self._app_error = "未配置 A/B mapping"
                 return {"success": False, "status": "not_configured", "message": "未配置 A/B mapping"}
 
@@ -1375,6 +1380,22 @@ class WebUIServer:
                 }
             except Exception as e:
                 logging.error("[Main] 启动失败: %s", e, exc_info=True)
+                # 异常可能发生在同一 try 内新句柄已赋值之后。不回滚则新 svc 的
+                # starting 相位盖掉 fail_safe（UI 不可见）、is_running 若真使下次
+                # start_main 命中「已在运行」永不清掉、_admin_client 被换成未认证
+                # client。以 self._app_service 现值判定（异常可能早于局部名赋值，
+                # 不可引用可能 unbound 的局部 app_service）：尽力停引擎后清句柄。
+                if self._app_service is not None:
+                    try:
+                        self._app_service.stop()
+                    except Exception as rollback_exc:
+                        logging.warning(
+                            "[Main] 启动异常回滚 svc.stop() 失败: %s", rollback_exc)
+                self._app_service = None
+                self._app_worker_thread = None
+                self._app_running = False
+                self._app_start_time = None
+                self._admin_client = None
                 self._app_phase = "fail_safe"
                 self._app_error = f"启动失败: {e}"
                 return {"success": False, "message": "启动失败，请查看服务端日志", "error_type": "exception"}
@@ -1394,6 +1415,37 @@ class WebUIServer:
                     svc.stop()
                 if worker and worker.is_alive() and worker is not threading.current_thread():
                     worker.join(timeout=5.0)
+                # 拒绝伪造停止成功：worker join 超时仍存活 → 引擎运行状态未知；
+                # stop() 不保证旧引擎已停（可能停在最后一次 generation 检查与
+                # svc.start() 之间、stop 先完成、随后照常 start）。两种情形一律走
+                # 停止失败路径，保留句柄供重试，绝不伪造 stopped 清掉仍在跑的引擎。
+                # current_thread 守卫与 start_main fail-safe 清理块对称：stop_main 若
+                # 在 worker 线程上下文被调用，上方 join 被跳过、is_alive 为真，无该
+                # 守卫会把「调用者自身就是 worker」误判为未退出而立即误拒。
+                if (worker is not None and worker.is_alive()
+                        and worker is not threading.current_thread()):
+                    logging.error("[Main] 停止失败：worker join 超时仍存活")
+                    self._app_running = False
+                    self._app_phase = "fail_safe"
+                    self._app_error = "旧 worker 未退出，停止未完成"
+                    if svc:
+                        svc.set_phase("fail_safe", error="旧 worker 未退出，停止未完成")
+                    return {
+                        "success": False,
+                        "message": "旧 worker 未退出，停止未完成，请重试停止或查看服务端日志",
+                        "error_type": "worker_alive",
+                    }
+                if svc and svc.get_state_summary().get("is_running"):
+                    logging.error("[Main] 停止失败：引擎在 stop 后仍存活")
+                    self._app_running = False
+                    self._app_phase = "fail_safe"
+                    self._app_error = "引擎在 stop 后仍存活，停止未完成"
+                    svc.set_phase("fail_safe", error="引擎在 stop 后仍存活，停止未完成")
+                    return {
+                        "success": False,
+                        "message": "引擎在 stop 后仍存活，停止未完成，请重试停止或查看服务端日志",
+                        "error_type": "engine_alive",
+                    }
                 self._app_running = False
                 self._app_phase = "stopped"
                 self._app_service = None

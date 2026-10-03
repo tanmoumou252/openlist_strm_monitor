@@ -46,7 +46,6 @@ def _dist_js_chunks() -> list[Path]:
 
 
 FUTURE_TOLERANCE_SECONDS = 2  # 未来时间戳判定容差（与陈旧判定容差同口径）
-FUTURE_DELTA = 86400  # 1 天：夹具构造未来时间戳用的偏移量（远超容差）
 
 
 def _is_dist_stale(src_latest: float, dist_mtime: float) -> bool:
@@ -60,6 +59,20 @@ def _is_dist_stale(src_latest: float, dist_mtime: float) -> bool:
     if dist_mtime > time.time() + FUTURE_TOLERANCE_SECONDS:
         return True
     return src_latest > dist_mtime + 2
+
+
+def _stale_message(src_latest: float, dist_newest: float) -> str:
+    """陈旧/未来时间戳命中时统一的用户可见失败消息。
+
+    生产断言与红路径用例共用本函数，使用例真断言生产消息（而非自证自明的
+    内联副本）：删除本函数返回中的「时间戳异常」提示，用例 match 即失配转红。
+    """
+    return (
+        "检测到 src/webui 前端源码比 dist 产物新 —— 源码已改未 rebuild dist。"
+        "请执行: cd src/webui && npx vite build"
+        f"（源码最新 mtime={src_latest}, dist 最新 chunk mtime={dist_newest}）。"
+        "若 dist mtime 超前当前时钟，请检查 dist/assets 中时间戳异常文件"
+    )
 
 
 class TestDistExistence:
@@ -107,12 +120,8 @@ class TestDistFreshness:
         # max 口径：陈旧 rebuild 表现为全部 chunk 落后源码；dist/assets 中的
         # 残留旧文件（手工拷贝/未清理旧 hash 产物）不构成误报证据
         dist_newest = max(c.stat().st_mtime for c in chunks)
-        assert not _is_dist_stale(src_latest, dist_newest), (
-            "检测到 src/webui 前端源码比 dist 产物新 —— 源码已改未 rebuild dist。"
-            "请执行: cd src/webui && npx vite build（源码最新 mtime="
-            f"{src_latest}, dist 最新 chunk mtime={dist_newest}）。"
-            "若 dist mtime 超前当前时钟，请检查 dist/assets 中时间戳异常文件"
-        )
+        assert not _is_dist_stale(src_latest, dist_newest), _stale_message(
+            src_latest, dist_newest)
 
 
 class TestStaleFixtureRedPath:
@@ -185,7 +194,7 @@ class TestFutureTimestampGuard:
     未来时间戳残留文件使 max 口径"取最新"永久失效（最新永远是未来值，
     护栏对后续一切源码改动静默放行）。防线居测试文件内部（判定函数本就
     定义于本文件），不外溢业务源码。判定容差与陈旧判定同为
-    FUTURE_TOLERANCE_SECONDS；FUTURE_DELTA 仅为夹具偏移量。
+    FUTURE_TOLERANCE_SECONDS。
     """
 
     def test_future_dist_mtime_flags_stale(self, tmp_path):
@@ -194,12 +203,18 @@ class TestFutureTimestampGuard:
             "dist mtime 超前当前时钟属异常产物（未来时间戳残留），必须判陈旧")
 
     def test_future_hit_reports_distinguishable_message(self):
-        """未来时间戳命中时失败消息必须可区分（提示检查时间戳异常文件，
-        而非笼统 rebuild）。期望值由 S1 契约推导，非抄录现状。"""
+        """未来时间戳命中时，生产失败消息必须含「时间戳异常」可区分提示。
+
+        断言生产 `_stale_message` 真实返回值，而非用例内联副本；删生产提示
+        则 match 失配转红（消除自证自明）。
+        """
         future = time.time() + FUTURE_TOLERANCE_SECONDS * 10
+        src_latest = time.time() - 3600
+        assert _is_dist_stale(src_latest, future), (
+            "未来时间戳必须判陈旧（护栏检测力前提）")
+        msg = _stale_message(src_latest, future)
+        assert "时间戳异常" in msg, (
+            f"生产失败消息必须含可区分的时间戳异常提示，实际: {msg!r}")
         with pytest.raises(AssertionError, match="时间戳异常"):
-            src_latest = time.time() - 3600
-            assert not _is_dist_stale(src_latest, future), (
-                f"dist chunk mtime 超前当前时钟超过 {FUTURE_TOLERANCE_SECONDS}s 容差 —— "
-                "dist/assets 中存在时间戳异常的产物文件，请检查并清理异常 mtime 文件后 rebuild"
-            )
+            assert not _is_dist_stale(src_latest, future), _stale_message(
+                src_latest, future)
