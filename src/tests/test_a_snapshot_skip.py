@@ -499,8 +499,10 @@ class TestAuditPruneGuard:
         assert _snapshot_row(db, str(ghost)) is not None, (
             "全部根不可达时不得走 DELETE FROM a_strm_snapshot 全表清空")
 
-    def test_case_c_unparseable_file_snapshot_survives(self, env):
-        """文件在场但正文不可解析：现存文件的旧快照行不得被 prune。"""
+    def test_case_c_unparseable_file_row_deleted_after_audit(self, env):
+        """文件在场但正文不可解析：prune keep 集仍收录该文件（防误剪其它
+        行），但其旧快照行在审计后显式删除——防后续普通扫描经采信门复用
+        过期链接（契约 C4，替代旧"行保留"语义）。"""
         _app, db, svc, a_root = env
         p = a_root / "broken.strm"
         p.write_text("", encoding="utf-8")
@@ -511,8 +513,8 @@ class TestAuditPruneGuard:
         counter = _ReadCounter()
         with patch.object(sync_service_mod, "read_strm_webdav_path", counter):
             svc.initial_scan_a(use_bulk=False, use_snapshot=False)
-        assert _snapshot_row(db, str(p)) is not None, (
-            "文件在场（os.stat 成功）但解析失败，属现存文件，快照行应保留")
+        assert _snapshot_row(db, str(p)) is None, (
+            "审计后不可解析文件的旧快照行必须删除，防采信门复用过期链接")
 
     def test_case_d_legal_empty_all_roots_walked_prune_proceeds(self, env):
         """合法清空：全部根 walk 无错但 .strm 已全部移除 → prune 照常执行。"""
@@ -655,3 +657,52 @@ class TestFlushBatchDecoupledEarlyReturn:
         assert "if not batch and not snap_batch:" in src, (
             "flush_batch 早返回必须解耦：batch 与 snap_batch 均空才返回，"
             "防止快照提交被 batch 空判定静默跳过")
+
+
+def test_audit_scan_deletes_snapshot_rows_of_unparseable_files(env, tmp_path, monkeypatch):
+    """契约 C4：审计扫描（use_snapshot=False）中正文不可解析且存在旧快照行的
+    文件，扫描结束后其快照行必须被删除，防后续普通扫描经采信门复用过期链接；
+    其它文件快照行不受影响；快照模式扫描不触发删除。"""
+    app, db, svc, root = env
+    root = Path(root)
+    counter = _ReadCounter()
+    monkeypatch.setattr(sync_service_mod, "read_strm_webdav_path", counter)
+
+    # good.strm：正文可解析；bad.strm：写非法内容使正文不可解析（读得空串）
+    good = root / "good.strm"
+    good.write_text("/cloud/good.mkv", encoding="utf-8")
+    bad = root / "bad.strm"
+    bad.write_text("", encoding="utf-8")
+
+    for lp in (str(good), str(bad)):
+        st = os.stat(lp)
+        _insert_snapshot(db, (lp, st.st_size, st.st_mtime_ns, "/cloud/old.mkv",
+                              "/cloud", CUR_PARSE_VERSION, time.time()),
+                         st.st_ctime_ns)
+
+    svc.initial_scan_a(use_snapshot=False, use_bulk=False)
+
+    assert _snapshot_row(db, str(bad)) is None, (
+        "审计后不可解析文件的旧快照行必须已删除")
+    assert _snapshot_row(db, str(good)) is not None, (
+        "可解析文件的快照行不受影响")
+
+
+def test_snapshot_mode_scan_does_not_delete_unparseable_rows(env, tmp_path, monkeypatch):
+    """契约 C4 不该触发域：快照模式（use_snapshot=True）对正文不可解析文件
+    不收集不删除。用例不预插快照行，使文件真实走进不可解析分支（而非被
+    采信门短路），守门断言该分支在快照模式下不做任何快照行写入/删除——
+    该文件的快照行保持缺席，处置交由下轮审计。"""
+    app, db, svc, root = env
+    root = Path(root)
+    counter = _ReadCounter()
+    monkeypatch.setattr(sync_service_mod, "read_strm_webdav_path", counter)
+
+    # 不预插快照行：bad2.strm 无采信门命中，真实走进不可解析分支
+    bad = root / "bad2.strm"
+    bad.write_text("", encoding="utf-8")
+
+    svc.initial_scan_a(use_snapshot=True, use_bulk=False)
+
+    assert _snapshot_row(db, str(bad)) is None, (
+        "快照模式对不可解析文件不得写入或保留快照行")

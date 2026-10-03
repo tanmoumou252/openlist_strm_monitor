@@ -1219,6 +1219,13 @@ class WebUIServer:
                     if (stale_worker and stale_worker.is_alive()
                             and stale_worker is not threading.current_thread()):
                         stale_worker.join(timeout=5.0)
+                        if stale_worker.is_alive():
+                            logging.warning(
+                                "[Main] fail_safe 残留 worker join 超时仍存活，拒绝启动")
+                            return {
+                                "success": False,
+                                "message": "主程序处于 fail_safe 且旧 worker 未退出，请重试停止或查看服务端日志",
+                            }
                 except Exception as stale_exc:
                     logging.warning(
                         "[Main] fail_safe 残留实例停止失败: %s", stale_exc)
@@ -1226,8 +1233,16 @@ class WebUIServer:
                         "success": False,
                         "message": "主程序处于 fail_safe 且停止失败，请重试停止或查看服务端日志",
                     }
+                # 在清句柄之前推进 generation：旧 worker 后续的 gen 检查
+                # （_app_generation != gen）必然失配而退出，防止其复活旧引擎
+                # 状态；下方新建路径内另有一次推进，语义叠加无碍（仅序数跳变）。
+                self._app_generation += 1
                 self._app_service = None
                 self._app_worker_thread = None
+                # 清理成功即落 stopped 终态并清错：get_main_status 在句柄为空
+                # 的 fallback 中不再展示上一轮 fail_safe 的陈旧错误。
+                self._app_phase = "stopped"
+                self._app_error = None
 
             if not self._config:
                 return {"success": False, "message": "配置未加载"}

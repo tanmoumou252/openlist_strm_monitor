@@ -96,6 +96,74 @@ class _RecoverableStopService:
             raise RuntimeError("boom")
 
 
+class _BlockingWorkerStub:
+    """join(5.0) 超时后仍存活的 worker 替身：run() 阻塞在未 set 的 Event 上，
+    测试结束后经 release() 释放，避免线程泄漏。"""
+
+    def __init__(self):
+        self._release = None
+        import threading as _threading
+        ev = _threading.Event()
+
+        def _run():
+            ev.wait()
+        self._release = ev.set
+        import threading as _threading2
+        self._thread = _threading2.Thread(target=_run, daemon=True)
+        self._thread.start()
+
+    def is_alive(self):
+        return self._thread.is_alive()
+
+    def join(self, timeout=None):
+        self._thread.join(timeout=timeout)
+
+    def release(self):
+        self._release()
+
+
+def test_start_main_rejects_when_stale_worker_survives_join(webui_server_shared):
+    """契约 C2：残留 worker join(5.0) 超时仍存活 → start_main fail-closed
+    拒绝且句柄保留（generation 不得推进、句柄不得清空）。"""
+    server, _base, _token = webui_server_shared
+    svc = _FailSafeStaleService(stop_raises=False)
+    worker = _BlockingWorkerStub()
+    server._config = None
+    server._app_service = svc
+    server._app_worker_thread = worker
+    try:
+        result = server.start_main()
+        assert result["success"] is False, (
+            f"join 超时仍存活的旧 worker 必须触发拒绝，实际: {result!r}")
+        assert "未退出" in result["message"], (
+            f"拒绝消息必须指明旧 worker 未退出，实际: {result['message']!r}")
+        assert server._app_service is svc, "拒绝后旧 svc 句柄必须保留"
+        assert server._app_worker_thread is worker, "拒绝后旧 worker 句柄必须保留"
+    finally:
+        worker.release()
+
+
+def test_start_main_cleanup_sets_stopped_and_clears_error(webui_server_shared):
+    """契约 C3：残留清理成功后 _app_phase=="stopped" 且 _app_error 为 None，
+    get_main_status fallback 不再展示陈旧 fail_safe 错误。"""
+    server, _base, _token = webui_server_shared
+    server._config = None
+    server._app_phase = "fail_safe"
+    server._app_error = "上次的错误"
+    svc = _FailSafeStaleService(stop_raises=False)
+    server._app_service = svc
+    server._app_worker_thread = None
+    result = server.start_main()
+    assert server._app_service is not svc, "清理成功的旧句柄必须已清空"
+    assert server._app_phase == "stopped", (
+        f"清理成功后相位必须为 stopped，实际 {server._app_phase!r}")
+    assert server._app_error is None, (
+        f"清理成功后错误必须清空，实际 {server._app_error!r}")
+    assert result["success"] is False
+    assert "配置未加载" in result["message"], (
+        f"清理后应确定性止于配置闸（封闭夹具），实际: {result!r}")
+
+
 def test_stop_main_failure_lands_fail_safe_visible_via_get_main_status(
         webui_server_shared):
     server, _base, _token = webui_server_shared

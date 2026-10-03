@@ -100,6 +100,7 @@ class SyncService:
         batch: list[tuple[str, str, str]] = []
         snap_batch: list[tuple[str, int, int, str, str, int, int, float]] = []
         audit_paths: list[str] = []  # 仅 use_snapshot=False 时收集，供 prune
+        unparseable_paths: list[str] = []  # 审计模式收集正文不可解析路径，prune 后删其旧快照行
         traversed_roots = 0  # os.walk 无错完成的 A 根数（出错/缺失根不计入）
         parent_set: set[str] = set()
         last_log_time = time.time()
@@ -141,6 +142,10 @@ class SyncService:
                     # 审计模式：文件在场（os.stat 已成功）但正文不可解析，
                     # 属现存文件，其旧快照行不应被 prune
                     audit_paths.append(lp)
+                    # 但其旧快照行必须在 prune 后显式删除：行内 webdav_path
+                    # 非空且五字段若与后续还原文件全等，普通扫描会经采信门
+                    # 复用过期链接（删行后采信门失配回退读正文）。
+                    unparseable_paths.append(lp)
                 return None
             parent = webdav_parent(webdav_path)
             snap_row = (lp, st.st_size, st.st_mtime_ns, webdav_path, parent,
@@ -293,6 +298,10 @@ class SyncService:
                 # 目录，放行 prune）；解析失败文件已记入 audit_paths（见
                 # process_strm_file），keep 集完整。
                 self.db.prune_a_snapshot_not_in(audit_paths)
+                for lp in unparseable_paths:
+                    # 不可解析文件的旧快照行逐一删除：保留会被后续普通扫描
+                    # 的采信门复用过期 webdav 链接；删除后回退读正文。
+                    self.db.delete_a_snapshot(lp)
         if use_bulk:
             self.app.update_progress(a_indexed=indexed_count)
         if parent_set:
