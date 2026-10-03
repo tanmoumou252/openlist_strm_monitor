@@ -8,6 +8,7 @@ webui_server_shared（真实 WebUIServer，tmp 落盘）。
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -96,30 +97,65 @@ class _RecoverableStopService:
             raise RuntimeError("boom")
 
 
-class _BlockingWorkerStub:
-    """join(5.0) 超时后仍存活的 worker 替身：run() 阻塞在未 set 的 Event 上，
-    测试结束后经 release() 释放，避免线程泄漏。"""
+class _RevivingStaleService:
+    """fail_safe 残留替身（复活形态）：stop() 返回成功但旧引擎随后照常
+    start（get_state_summary().is_running 翻真），模拟旧 worker 停在最后一次
+    generation 检查与 svc.start() 之间、stop 先完成、"清理成功"判定后旧引擎
+    复活的竞态。"""
 
     def __init__(self):
-        self._release = None
-        import threading as _threading
-        ev = _threading.Event()
+        self._phase = "fail_safe"
+        self._error = "上次的错误"
+        self.stop_called = 0
 
-        def _run():
-            ev.wait()
-        self._release = ev.set
-        import threading as _threading2
-        self._thread = _threading2.Thread(target=_run, daemon=True)
+    def set_phase(self, phase, error=None):
+        self._phase = phase
+        self._error = error
+
+    def get_state_summary(self):
+        return {
+            "phase": self._phase,
+            "is_running": self._phase not in {"stopped", "fail_safe"},
+            "is_ready": False,
+            "error": self._error,
+            "progress": {},
+        }
+
+    def stop(self):
+        self.stop_called += 1
+        # stop 已返回，但旧 worker 随后照常 start 旧引擎
+        self._phase = "scanning_a"
+
+
+class _BlockingWorkerStub:
+    """join(5.0) 超时后仍存活的 worker 替身：run() 阻塞在未 set 的 Event 上，
+    测试结束后经 release() 释放，避免线程泄漏。
+
+    start_blocked=False 形态：Event 先 set 后启动线程，线程立即退出——
+    join 立即返回且线程已消亡，供「复活」用例模拟 join 成功判据被满足。
+    """
+
+    def __init__(self, start_blocked=True, exit_on_join=False):
+        self._ev = threading.Event()
+        self._exit_on_join = exit_on_join
+        if not start_blocked:
+            self._ev.set()
+        self._thread = threading.Thread(target=self._ev.wait, daemon=True)
         self._thread.start()
 
     def is_alive(self):
         return self._thread.is_alive()
 
     def join(self, timeout=None):
+        # exit_on_join 形态：线程在 join 被调用时才退出——确定性复现生产
+        # 时序「join 门槛 is_alive 为真 → join 期间 worker 退出 → join 返回」，
+        # 消除"线程先于 is_alive 门槛自然消亡导致 join 块被跳过"的夹具竞态。
+        if self._exit_on_join:
+            self._ev.set()
         self._thread.join(timeout=timeout)
 
     def release(self):
-        self._release()
+        self._ev.set()
 
 
 def test_start_main_rejects_when_stale_worker_survives_join(webui_server_shared):
@@ -131,8 +167,11 @@ def test_start_main_rejects_when_stale_worker_survives_join(webui_server_shared)
     server._config = None
     server._app_service = svc
     server._app_worker_thread = worker
+    gen_before = server._app_generation
     try:
         result = server.start_main()
+        assert server._app_generation == gen_before, (
+            "拒绝后 _app_generation 不得推进（代次推进=旧 worker 状态面被解管）")
         assert result["success"] is False, (
             f"join 超时仍存活的旧 worker 必须触发拒绝，实际: {result!r}")
         assert "未退出" in result["message"], (
@@ -143,9 +182,67 @@ def test_start_main_rejects_when_stale_worker_survives_join(webui_server_shared)
         worker.release()
 
 
-def test_start_main_cleanup_sets_stopped_and_clears_error(webui_server_shared):
-    """契约 C3：残留清理成功后 _app_phase=="stopped" 且 _app_error 为 None，
-    get_main_status fallback 不再展示陈旧 fail_safe 错误。"""
+def test_start_main_rejects_when_stale_engine_revives_after_join(
+        webui_server_shared):
+    """契约 W1：join 成功 ≠ 引擎已死——旧 worker 停在最后一次 generation
+    检查与 svc.start() 之间时，stop 先完成、旧引擎随后照常 start，
+    join 正常返回且线程已退出。清理路径必须以 get_state_summary 的
+    is_running 权威复核 fail-closed，拒绝启动且句柄保留。"""
+    server, _base, _token = webui_server_shared
+    svc = _RevivingStaleService()
+    worker = _BlockingWorkerStub(start_blocked=True, exit_on_join=True)
+    server._config = None
+    server._app_service = svc
+    server._app_worker_thread = worker
+    try:
+        result = server.start_main()
+        assert result["success"] is False, (
+            f"stop 后复活的旧引擎必须触发拒绝，实际: {result!r}")
+        assert ("复活" in result["message"]) or ("仍存活" in result["message"]), (
+            f"拒绝消息必须指明旧引擎复活/仍存活，实际: {result['message']!r}")
+        assert server._app_service is svc, "拒绝后旧 svc 句柄必须保留"
+        assert server._app_worker_thread is worker, "拒绝后旧 worker 句柄必须保留"
+    finally:
+        worker.release()
+
+
+def test_start_main_gate_failures_land_fail_safe_visible(webui_server_shared):
+    """契约 W2：启动链路各失败 return（配置闸 / not_configured 闸）必须落
+    _app_phase=="fail_safe" 与 _app_error，经 get_main_status fallback 可见，
+    不得误报「stopped、无错误」。"""
+    server, _base, _token = webui_server_shared
+    from unittest.mock import Mock
+    # 场景一：配置闸（_config=None）
+    server._config = None
+    server._app_service = None
+    server._app_worker_thread = None
+    result = server.start_main()
+    assert result["success"] is False
+    assert server._app_phase == "fail_safe", (
+        f"配置闸失败后相位必须落 fail_safe，实际 {server._app_phase!r}")
+    assert server._app_error, "配置闸失败后 _app_error 必须非空"
+    status = server.get_main_status()
+    assert status["phase"] == "fail_safe", (
+        f"get_main_status fallback 必须可见 fail_safe，实际 {status['phase']!r}")
+    # 场景二：not_configured 闸（Mock config 且 a_b_mappings=[]）
+    server._config = Mock(a_b_mappings=[])
+    server._app_service = None
+    server._app_worker_thread = None
+    result = server.start_main()
+    assert result["success"] is False
+    assert result.get("status") == "not_configured"
+    assert server._app_phase == "fail_safe", (
+        f"not_configured 闸失败后相位必须落 fail_safe，实际 {server._app_phase!r}")
+    assert server._app_error, "not_configured 闸失败后 _app_error 必须非空"
+    status = server.get_main_status()
+    assert status["phase"] == "fail_safe", (
+        f"get_main_status fallback 必须可见 fail_safe，实际 {status['phase']!r}")
+
+
+def test_start_main_cleanup_sets_fail_safe_when_gate_blocks(webui_server_shared):
+    """契约 W2：残留清理成功后若被配置闸拦下，相位落 fail_safe 且上一轮
+    陈旧错误被新错误覆盖可见（get_main_status fallback 可见）——终态/清错
+    推迟到新实例就位，启动链路上任何闸拦截都不得伪装成「stopped、无错误」。"""
     server, _base, _token = webui_server_shared
     server._config = None
     server._app_phase = "fail_safe"
@@ -155,10 +252,13 @@ def test_start_main_cleanup_sets_stopped_and_clears_error(webui_server_shared):
     server._app_worker_thread = None
     result = server.start_main()
     assert server._app_service is not svc, "清理成功的旧句柄必须已清空"
-    assert server._app_phase == "stopped", (
-        f"清理成功后相位必须为 stopped，实际 {server._app_phase!r}")
-    assert server._app_error is None, (
-        f"清理成功后错误必须清空，实际 {server._app_error!r}")
+    assert server._app_phase == "fail_safe", (
+        f"清理成功后被配置闸拦下相位必须落 fail_safe，实际 {server._app_phase!r}")
+    assert "配置未加载" in str(server._app_error), (
+        f"配置闸错误必须覆盖写入 _app_error，实际 {server._app_error!r}")
+    status = server.get_main_status()
+    assert status["phase"] == "fail_safe", (
+        f"get_main_status fallback 必须可见 fail_safe，实际 {status['phase']!r}")
     assert result["success"] is False
     assert "配置未加载" in result["message"], (
         f"清理后应确定性止于配置闸（封闭夹具），实际: {result!r}")

@@ -1226,6 +1226,16 @@ class WebUIServer:
                                 "success": False,
                                 "message": "主程序处于 fail_safe 且旧 worker 未退出，请重试停止或查看服务端日志",
                             }
+                        # join 成功 ≠ 引擎已死：旧 worker 可能停在最后一次
+                        # generation 检查与 svc.start() 之间，stop 先完成、旧
+                        # 引擎随后照常 start。以权威状态复核 fail-closed。
+                        if stale_svc.get_state_summary().get("is_running"):
+                            logging.warning(
+                                "[Main] fail_safe 残留引擎在 stop 后复活，拒绝启动")
+                            return {
+                                "success": False,
+                                "message": "主程序处于 fail_safe 且旧引擎清理后仍存活，请重试停止或查看服务端日志",
+                            }
                 except Exception as stale_exc:
                     logging.warning(
                         "[Main] fail_safe 残留实例停止失败: %s", stale_exc)
@@ -1239,16 +1249,19 @@ class WebUIServer:
                 self._app_generation += 1
                 self._app_service = None
                 self._app_worker_thread = None
-                # 清理成功即落 stopped 终态并清错：get_main_status 在句柄为空
-                # 的 fallback 中不再展示上一轮 fail_safe 的陈旧错误。
-                self._app_phase = "stopped"
-                self._app_error = None
+                # 终态/清错推迟到新实例真正就位：此时尚处启动链路起点，
+                # 提前落 stopped 会让后续闸拦截在 fallback 中误报
+                # 「stopped、无错误」，两轮失败原因全丢。
 
             if not self._config:
+                self._app_phase = "fail_safe"
+                self._app_error = "配置未加载"
                 return {"success": False, "message": "配置未加载"}
 
             configured_mappings = getattr(self._config, "a_b_mappings", [])
             if not configured_mappings:
+                self._app_phase = "fail_safe"
+                self._app_error = "未配置 A/B mapping"
                 return {"success": False, "status": "not_configured", "message": "未配置 A/B mapping"}
 
             try:
@@ -1268,6 +1281,8 @@ class WebUIServer:
                 if cfg_status.get("status") != "ready":
                     reason = cfg_status.get("reason", "配置未就绪")
                     logging.error("[Main] 启动被 fail-safe 拦截: %s", cfg_status)
+                    self._app_phase = "fail_safe"
+                    self._app_error = f"主程序未启动：{reason}"
                     return {
                         "success": False,
                         "status": str(cfg_status.get("status", "fail_safe_active")),
@@ -1286,6 +1301,11 @@ class WebUIServer:
 
                 self._admin_client = admin_client
                 self._app_service = app_service
+                # 新实例就位后才落 stopped 终态并清错：get_main_status fallback
+                # 在句柄为空时不展示上一轮 fail_safe 的陈旧错误，而启动链路上
+                # 任何闸拦截都保留 fail_safe 相位与错误可见。
+                self._app_phase = "stopped"
+                self._app_error = None
                 self._app_running = True
                 self._app_service.set_phase("starting")
                 self._app_start_time = time.time()
@@ -1320,6 +1340,13 @@ class WebUIServer:
                             return
 
                         svc._refresh_mapping_snapshot()
+                        # start 紧前最后一次代次复核：close 掉「gen 检查通过后
+                        # 另一代 start_main 完成 stop 并推进 generation、旧 worker
+                        # 随后照常 start」的竞态窗口（双实例并发防线）
+                        if getattr(self, "_app_generation", None) != gen:
+                            logging.warning(
+                                "[Main] 代次失配，放弃启动已被新一代接管的引擎")
+                            return
                         svc.start()
                     except Exception as e:
                         logging.error("[Main] 后台启动同步异常: %s", e, exc_info=True)
@@ -1348,6 +1375,8 @@ class WebUIServer:
                 }
             except Exception as e:
                 logging.error("[Main] 启动失败: %s", e, exc_info=True)
+                self._app_phase = "fail_safe"
+                self._app_error = f"启动失败: {e}"
                 return {"success": False, "message": "启动失败，请查看服务端日志", "error_type": "exception"}
 
     def stop_main(self) -> dict:

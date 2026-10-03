@@ -1222,6 +1222,25 @@ class Database:
             )
             conn.commit()
 
+    def delete_a_snapshots_batch(self, local_paths) -> int:
+        """批量删除快照行（审计模式对正文不可解析文件集）。
+
+        去重后按 900 参数切片 executemany，单事务提交；与逐行
+        delete_a_snapshot 相比把写锁获取次数从 O(n) 收敛为 O(1)。
+        返回去重后的删除意图条数（幂等 DELETE，不区分命中行数）。
+        """
+        unique = list(dict.fromkeys(local_paths))
+        if not unique:
+            return 0
+        with self.rw_lock.write_locked(), self.connection() as conn:
+            for chunk in chunk_list(unique, 900):
+                conn.executemany(
+                    "DELETE FROM a_strm_snapshot WHERE local_path = ?",
+                    [(p,) for p in chunk],
+                )
+            conn.commit()
+        return len(unique)
+
     def get_b_lineage_snapshot(self, mapping_id: str, local_path: str) -> BLineageSnapshotRecord | None:
         mapping_id = self._require_mapping_id(mapping_id)
         with self.rw_lock.read_locked(), self.read_connection() as conn:

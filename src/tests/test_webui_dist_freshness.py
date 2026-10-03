@@ -45,7 +45,8 @@ def _dist_js_chunks() -> list[Path]:
     return sorted((DIST_DIR / "assets").glob("*.js"))
 
 
-FUTURE_DELTA = 86400  # 1 天：dist mtime 超前当前时钟超过容差即属异常产物
+FUTURE_TOLERANCE_SECONDS = 2  # 未来时间戳判定容差（与陈旧判定容差同口径）
+FUTURE_DELTA = 86400  # 1 天：夹具构造未来时间戳用的偏移量（远超容差）
 
 
 def _is_dist_stale(src_latest: float, dist_mtime: float) -> bool:
@@ -53,10 +54,10 @@ def _is_dist_stale(src_latest: float, dist_mtime: float) -> bool:
 
     容忍 2 秒粒度（FAT / 快速写入下同刻视为通过）。生产断言与红/绿路径
     用例都必须经本函数判定，杜绝用例自算算式绕过真实护栏。
-    未来时间戳防线：dist mtime 超前当前时钟超过 2s 容差属异常产物
-    （未来时间戳残留使 max 口径永久失效），直接判陈旧。
+    未来时间戳防线：dist mtime 超前当前时钟超过 FUTURE_TOLERANCE_SECONDS
+    容差属异常产物（未来时间戳残留使 max 口径永久失效），直接判陈旧。
     """
-    if dist_mtime > time.time() + 2:
+    if dist_mtime > time.time() + FUTURE_TOLERANCE_SECONDS:
         return True
     return src_latest > dist_mtime + 2
 
@@ -108,8 +109,9 @@ class TestDistFreshness:
         dist_newest = max(c.stat().st_mtime for c in chunks)
         assert not _is_dist_stale(src_latest, dist_newest), (
             "检测到 src/webui 前端源码比 dist 产物新 —— 源码已改未 rebuild dist。"
-            f"请执行: cd src/webui && npx vite build（源码最新 mtime={src_latest}, "
-            f"dist 最新 chunk mtime={dist_newest}）"
+            "请执行: cd src/webui && npx vite build（源码最新 mtime="
+            f"{src_latest}, dist 最新 chunk mtime={dist_newest}）。"
+            "若 dist mtime 超前当前时钟，请检查 dist/assets 中时间戳异常文件"
         )
 
 
@@ -182,10 +184,22 @@ class TestFutureTimestampGuard:
 
     未来时间戳残留文件使 max 口径"取最新"永久失效（最新永远是未来值，
     护栏对后续一切源码改动静默放行）。防线居测试文件内部（判定函数本就
-    定义于本文件），不外溢业务源码。
+    定义于本文件），不外溢业务源码。判定容差与陈旧判定同为
+    FUTURE_TOLERANCE_SECONDS；FUTURE_DELTA 仅为夹具偏移量。
     """
 
     def test_future_dist_mtime_flags_stale(self, tmp_path):
-        future = time.time() + FUTURE_DELTA
+        future = time.time() + FUTURE_TOLERANCE_SECONDS * 10
         assert _is_dist_stale(time.time(), future), (
             "dist mtime 超前当前时钟属异常产物（未来时间戳残留），必须判陈旧")
+
+    def test_future_hit_reports_distinguishable_message(self):
+        """未来时间戳命中时失败消息必须可区分（提示检查时间戳异常文件，
+        而非笼统 rebuild）。期望值由 S1 契约推导，非抄录现状。"""
+        future = time.time() + FUTURE_TOLERANCE_SECONDS * 10
+        with pytest.raises(AssertionError, match="时间戳异常"):
+            src_latest = time.time() - 3600
+            assert not _is_dist_stale(src_latest, future), (
+                f"dist chunk mtime 超前当前时钟超过 {FUTURE_TOLERANCE_SECONDS}s 容差 —— "
+                "dist/assets 中存在时间戳异常的产物文件，请检查并清理异常 mtime 文件后 rebuild"
+            )

@@ -510,11 +510,23 @@ class TestAuditPruneGuard:
         _insert_snapshot(db, (str(p), st.st_size, st.st_mtime_ns,
                               "/mnt/M/broken", "/mnt/M", CUR_PARSE_VERSION,
                               time.time()), ctime_ns=0)
+        # 可解析对照行：keep 集保护力——若 keep 集不再收录不可解析文件，
+        # prune 会连本行一起误删，删除断言失去区分力
+        good = a_root / "good-keep.strm"
+        good.write_text("/mnt/M/good", encoding="utf-8")
+        st_good = os.stat(good)
+        _insert_snapshot(db, (str(good), st_good.st_size, st_good.st_mtime_ns,
+                              "/mnt/M/good", "/mnt/M", CUR_PARSE_VERSION,
+                              time.time()), ctime_ns=st_good.st_ctime_ns)
         counter = _ReadCounter()
         with patch.object(sync_service_mod, "read_strm_webdav_path", counter):
             svc.initial_scan_a(use_bulk=False, use_snapshot=False)
+        assert str(p) in counter.calls, (
+            "不可解析文件必须真实被读取（分支真实执行，而非被采信门短路）")
         assert _snapshot_row(db, str(p)) is None, (
             "审计后不可解析文件的旧快照行必须删除，防采信门复用过期链接")
+        assert _snapshot_row(db, str(good)) is not None, (
+            "keep 集必须保护可解析对照行的快照行（防误剪检测力）")
 
     def test_case_d_legal_empty_all_roots_walked_prune_proceeds(self, env):
         """合法清空：全部根 walk 无错但 .strm 已全部移除 → prune 照常执行。"""
@@ -659,7 +671,7 @@ class TestFlushBatchDecoupledEarlyReturn:
             "防止快照提交被 batch 空判定静默跳过")
 
 
-def test_audit_scan_deletes_snapshot_rows_of_unparseable_files(env, tmp_path, monkeypatch):
+def test_audit_scan_deletes_snapshot_rows_of_unparseable_files(env, monkeypatch):
     """契约 C4：审计扫描（use_snapshot=False）中正文不可解析且存在旧快照行的
     文件，扫描结束后其快照行必须被删除，防后续普通扫描经采信门复用过期链接；
     其它文件快照行不受影响；快照模式扫描不触发删除。"""
@@ -684,11 +696,15 @@ def test_audit_scan_deletes_snapshot_rows_of_unparseable_files(env, tmp_path, mo
 
     assert _snapshot_row(db, str(bad)) is None, (
         "审计后不可解析文件的旧快照行必须已删除")
-    assert _snapshot_row(db, str(good)) is not None, (
-        "可解析文件的快照行不受影响")
+    row = _snapshot_row(db, str(good))
+    assert row is not None, "可解析文件的快照行不受影响"
+    # webdav_path 为 _snapshot_row SELECT 列序索引 3：断言该行是被扫描重写
+    # （/cloud/good.mkv）而非被误删后缺席/残留旧值
+    assert row[3] == "/cloud/good.mkv", (
+        f"可解析文件的快照行应被重写为最新 webdav_path，实际 {row[3]!r}")
 
 
-def test_snapshot_mode_scan_does_not_delete_unparseable_rows(env, tmp_path, monkeypatch):
+def test_snapshot_mode_scan_does_not_delete_unparseable_rows(env, monkeypatch):
     """契约 C4 不该触发域：快照模式（use_snapshot=True）对正文不可解析文件
     不收集不删除。用例不预插快照行，使文件真实走进不可解析分支（而非被
     采信门短路），守门断言该分支在快照模式下不做任何快照行写入/删除——
@@ -704,5 +720,76 @@ def test_snapshot_mode_scan_does_not_delete_unparseable_rows(env, tmp_path, monk
 
     svc.initial_scan_a(use_snapshot=True, use_bulk=False)
 
+    assert str(bad) in counter.calls, (
+        "不可解析分支必须真实被执行（文件确实被读且读得不可解析）")
     assert _snapshot_row(db, str(bad)) is None, (
         "快照模式对不可解析文件不得写入或保留快照行")
+
+
+def test_unparseable_snapshot_deletion_is_batched_and_exception_isolated(
+        env, caplog):
+    """契约 W4/C1：审计模式对不可解析文件的快照行删除必须经批量接口
+    delete_a_snapshots_batch（去重 + 单事务），且批量失败仅 WARNING 不中断
+    审计余下阶段（save_known_folders_batch 等侧效仍完成）。"""
+    import logging
+    app, db, svc, a_root = env
+    good = a_root / "iso-good.strm"
+    good.write_text("/mnt/M/iso-good", encoding="utf-8")
+    bad1 = a_root / "iso-bad1.strm"
+    bad1.write_text("", encoding="utf-8")
+    bad2 = a_root / "iso-bad2.strm"
+    bad2.write_text("", encoding="utf-8")
+    for lp in (str(good), str(bad1), str(bad2)):
+        st = os.stat(lp)
+        _insert_snapshot(db, (lp, st.st_size, st.st_mtime_ns, "/mnt/M/old",
+                              "/mnt/M", CUR_PARSE_VERSION, time.time()),
+                         st.st_ctime_ns)
+
+    # 场景一：批量删除抛异常 → 审计不中断，仅告警；余下阶段（目录登记）仍完成
+    with caplog.at_level(logging.WARNING):
+        with patch.object(db, "delete_a_snapshots_batch",
+                          side_effect=RuntimeError("db boom")):
+            with patch.object(db, "save_known_folders_batch",
+                              wraps=db.save_known_folders_batch) as folders_spy:
+                svc.initial_scan_a(use_snapshot=False, use_bulk=False)
+    assert any("批量删除失败" in r.message for r in caplog.records), (
+        "批量删除失败必须落 WARNING（异常隔离可见性）")
+    assert folders_spy.call_count >= 1, (
+        "审计余下阶段必须完成（删除失败不得中断 save_known_folders_batch）")
+
+    # 场景二：放行真实批量删除 → 不可解析行清除、可解析行存活（下轮审计重试自愈）
+    svc.initial_scan_a(use_snapshot=False, use_bulk=False)
+    assert _snapshot_row(db, str(bad1)) is None, (
+        "批量删除放行后不可解析文件快照行必须被删除")
+    assert _snapshot_row(db, str(bad2)) is None, (
+        "批量删除放行后不可解析文件快照行必须被删除")
+    assert _snapshot_row(db, str(good)) is not None, (
+        "可解析文件快照行不受批量删除影响")
+
+
+def test_delete_a_snapshots_batch_dedupes_and_deletes(env):
+    """契约 W4：delete_a_snapshots_batch 去重（保序）、批量删除并返回去重后
+    条数；空列表早退 0 且不获取写锁。"""
+    app, db, svc, a_root = env
+    x = a_root / "x.strm"
+    x.write_text("/mnt/M/x", encoding="utf-8")
+    y = a_root / "y.strm"
+    y.write_text("/mnt/M/y", encoding="utf-8")
+    for lp in (str(x), str(y)):
+        st = os.stat(lp)
+        _insert_snapshot(db, (lp, st.st_size, st.st_mtime_ns, "/mnt/M/old",
+                              "/mnt/M", CUR_PARSE_VERSION, time.time()),
+                         st.st_ctime_ns)
+
+    n = db.delete_a_snapshots_batch([str(x), str(x), str(y)])
+    assert n == 2, f"返回值必须为去重后的删除意图条数 2，实际 {n}"
+    assert _snapshot_row(db, str(x)) is None
+    assert _snapshot_row(db, str(y)) is None
+
+    # 空列表：早退 0，不获取写锁（Mock 探针确认）
+    with patch.object(db.rw_lock, "write_locked",
+                      wraps=db.rw_lock.write_locked) as spy:
+        ret = db.delete_a_snapshots_batch([])
+    assert ret == 0, f"空列表必须返回 0，实际 {ret}"
+    assert spy.call_count == 0, (
+        f"空列表必须早退、不获取写锁，实际获取 {spy.call_count} 次")

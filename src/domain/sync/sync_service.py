@@ -298,10 +298,16 @@ class SyncService:
                 # 目录，放行 prune）；解析失败文件已记入 audit_paths（见
                 # process_strm_file），keep 集完整。
                 self.db.prune_a_snapshot_not_in(audit_paths)
-                for lp in unparseable_paths:
-                    # 不可解析文件的旧快照行逐一删除：保留会被后续普通扫描
-                    # 的采信门复用过期 webdav 链接；删除后回退读正文。
-                    self.db.delete_a_snapshot(lp)
+                if unparseable_paths:
+                    try:
+                        # 不可解析文件的旧快照行批量删除：保留会被后续普通
+                        # 扫描的采信门复用过期 webdav 链接；删除后回退读正文。
+                        # 失败仅告警不中断审计余下阶段，残留行由下轮审计重试。
+                        self.db.delete_a_snapshots_batch(unparseable_paths)
+                    except Exception:
+                        logging.warning(
+                            "[初始化] 不可解析文件快照行批量删除失败，残留行交由下轮审计重试",
+                            exc_info=True)
         if use_bulk:
             self.app.update_progress(a_indexed=indexed_count)
         if parent_set:
