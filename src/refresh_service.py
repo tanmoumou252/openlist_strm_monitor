@@ -119,7 +119,8 @@ class RefreshService:
             self._full_audit_in_progress = True
         try:
             logging.warning("[主动刷新] 触发兜底全量审计，可能访问所有 A 区磁盘")
-            self.app.initial_scan_a(use_bulk=False, a_roots=None)
+            # use_snapshot=False：全量审计为快照权威自愈触发源，强制全读并重建/剪枝
+            self.app.initial_scan_a(use_bulk=False, a_roots=None, use_snapshot=False)
             self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
             # _last_full_audit_at 必须在所有 DB 写入成功后才更新，
             # 防止 DB 写失败时时间戳已推进导致后续周期静默跳过审计
@@ -178,7 +179,8 @@ class RefreshService:
         try:
             now = time.time()
             logging.warning("[手动审计] 触发全量审计，可能访问所有 A 区磁盘")
-            self.app.initial_scan_a(use_bulk=False, a_roots=None)
+            # use_snapshot=False：全量审计为快照权威自愈触发源，强制全读并重建/剪枝
+            self.app.initial_scan_a(use_bulk=False, a_roots=None, use_snapshot=False)
             self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
             # _last_full_audit_at 必须在所有 DB 写入成功后才更新
             db_write_ok = True

@@ -3,18 +3,20 @@ import { esc } from './utils.js';
 import { _mainStatusTimer, setMainStatusTimer, stopUptimeTimer, _hasPassword, setHasPassword } from './state.js';
 import { ApiAuthError } from './api.js';
 
+// 导航链接数据源：buildNav 与 icons.test.mjs 的「调用方键需求」契约测试共同消费
+export const NAV_LINKS = [
+  ['dashboard', '仪表盘', 'dashboard'],
+  ['area_b', 'B 区', 'area_b'],
+  ['area_a', 'A 区', 'area_a'],
+  ['area_c', 'C 区', 'area_c'],
+  ['tmdb', 'TMDB', 'tmdb'],
+  ['logs', 'WebUI日志', 'log'],
+  ['config', '配置', 'config'],
+];
+
 export function buildNav(activeTab) {
-  const links = [
-    ['dashboard', '仪表盘', 'dashboard'],
-    ['area_b', 'B 区', 'area_b'],
-    ['area_a', 'A 区', 'area_a'],
-    ['area_c', 'C 区', 'area_c'],
-    ['tmdb', 'TMDB', 'tmdb'],
-    ['logs', 'WebUI日志', 'log'],
-    ['config', '配置', 'config'],
-  ];
   const areaLinkMap = { area_b: '?kind=anime', area_a: '?kind=anime', area_c: '?kind=anime' };
-  return links.map(([id, label, ic]) => {
+  return NAV_LINKS.map(([id, label, ic]) => {
     const cls = id === activeTab ? ' class="active"' : '';
     const href = areaLinkMap[id] ? `#${id}${areaLinkMap[id]}` : `#${id}`;
     return `<a href="${href}" data-tab="${id}"${cls}>${icon(ic)} ${label}</a>`;

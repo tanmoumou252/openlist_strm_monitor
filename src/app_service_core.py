@@ -2929,9 +2929,10 @@ class AppService:
 
     def initial_scan_a(
             self, use_bulk: bool = False,
-            a_roots: list[Path] | None = None):
+            a_roots: list[Path] | None = None,
+            use_snapshot: bool = True):
         return self.sync_service.initial_scan_a(
-            use_bulk=use_bulk, a_roots=a_roots)
+            use_bulk=use_bulk, a_roots=a_roots, use_snapshot=use_snapshot)
 
     def cleanup_a_redundant_using_api(self) -> None:
         """使用 OpenList API 批量清理 A 区冗余文件。
@@ -3533,6 +3534,8 @@ class AppService:
             return
         parent = webdav_parent(webdav_path)
         self.db.upsert_a(str(local), webdav_path, parent)
+        # E2：A 区 watcher 改写后即时失效快照行，下轮扫描以当前 size/mtime 重读重建
+        self.db.delete_a_snapshot(str(local))
         self.db.save_known_folder(parent, source="a")
         fingerprint = make_strm_fingerprint(webdav_path)
         # 按 fingerprint 串行化，避免并发创建 B 实例的 TOCTOU 竞争
@@ -3646,6 +3649,8 @@ class AppService:
             return
         row = self.db.get_a_by_local(local_path)
         self.db.delete_a_by_local(local_path)
+        # E2：watcher 删除后同步清除快照行，消除孤儿快照
+        self.db.delete_a_snapshot(local_path)
         if row:
             webdav_path = row.webdav_path
             parent_webdav_path = row.parent_webdav_path

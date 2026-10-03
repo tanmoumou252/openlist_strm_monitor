@@ -7,7 +7,7 @@
 3. 首启密码只打印一次：二次初始化时不再打印
 
 运行方式：
-  python -m pytest src/tests/test_auth_security.py -v
+  python -m pytest src/tests/test_webui_auth_security.py -v
 """
 
 from __future__ import annotations

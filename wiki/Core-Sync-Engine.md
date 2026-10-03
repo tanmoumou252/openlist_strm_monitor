@@ -92,6 +92,10 @@ AppService.__init__()
 
 这条边界避免了 B 区 watcher 在 A→B 同步期间因只读查询误触发写锁探测而产生 `database is locked`。`bulk_connection()` 仍只允许用于启动阶段的单线程批量写入，主动刷新使用分批提交。
 
+### A 区内容读跳检快照（`a_strm_snapshot`）
+
+`initial_scan_a()` 支持 size+mtime_ns+ctime_ns+parse_version 四等命中跳过 STRM 正文读（`domain/sync/sync_service.py` 的 `process_strm_file`），快照读写方法在 `database.py`（`load_a_snapshot_map` / `upsert_a_snapshot_bulk` / `prune_a_snapshot_not_in` / `delete_a_snapshot`）。失效路径与快照写入对称：watcher 删除/改写路径即时 `delete_a_snapshot`；`copy_a_record_to_b` 的 A 区冗余清理路径删除 A 区记录时同步删快照。设计决策：命中采信 size+mtime+ctime 三等而不校验内容哈希——ctime 维（Windows=创建时间，POSIX=inode 变更时间）收窄了早期 size+mtime 双等下"同 size 同 mtime 还原可骗过跳检"的采信窗口（常规还原路径的新文件 ctime 与旧快照不等，门失配回退读正文；robocopy 等显式保留创建时间的工具为已知残余窗口，仍靠全量审计兜底）；POSIX 元数据操作（chmod 等）致 ctime 变更仅引发一次多余重读，属 fail-safe 方向。存量库经 `ctime_ns INTEGER NOT NULL DEFAULT 0` 探测式迁移，旧行首轮扫描必然失配全量重读一次并重写（与 parse_version 漂移同型自愈）。权威自愈仍由 `refresh_service.py` 周期与手动全量审计（`use_snapshot=False` 强制逐文件重读并 prune）兜底，换取审计墙钟约 3% 的读跳检收益。`use_snapshot=False` 仅允许全量扫描（`a_roots=None`）场景调用：prune 的 keep 集来自本轮实际扫描集合，与局部 `a_roots` 同用会误剪范围外快照行（有 WARNING 守卫）。
+
 ### 并发安全设计：为什么 `_sync_one_record` 不使用指纹锁
 
 `_sync_one_record` 在批量同步（`scan_a_to_b_full_sync`）中使用，**不使用** `get_fingerprint_lock`。这是经过代码验证的设计决策，而非遗漏。
