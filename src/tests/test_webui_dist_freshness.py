@@ -45,12 +45,19 @@ def _dist_js_chunks() -> list[Path]:
     return sorted((DIST_DIR / "assets").glob("*.js"))
 
 
+FUTURE_DELTA = 86400  # 1 天：dist mtime 超前当前时钟超过容差即属异常产物
+
+
 def _is_dist_stale(src_latest: float, dist_mtime: float) -> bool:
     """新鲜度判定唯一入口：最新 chunk mtime 落后最新源码超过 2s 容差即判陈旧。
 
     容忍 2 秒粒度（FAT / 快速写入下同刻视为通过）。生产断言与红/绿路径
     用例都必须经本函数判定，杜绝用例自算算式绕过真实护栏。
+    未来时间戳防线：dist mtime 超前当前时钟超过 2s 容差属异常产物
+    （未来时间戳残留使 max 口径永久失效），直接判陈旧。
     """
+    if dist_mtime > time.time() + 2:
+        return True
     return src_latest > dist_mtime + 2
 
 
@@ -146,14 +153,39 @@ class TestStaleFixtureRedPath:
             "新鲜 dist 不应触发 fail")
 
     def test_leftover_stale_chunk_does_not_flag_stale(self, tmp_path):
-        """红（新增）：残留旧 chunk + 本次构建新 chunk 并存 → 不得误报陈旧。
+        """残留旧 chunk + 本次构建新 chunk 并存 → 不得误报陈旧。
 
         max 口径下"陈旧 rebuild"表现为全部 chunk 落后；单个残留旧文件
         （手工拷贝/未清理旧 hash 产物）不构成"源码已改未 rebuild"证据。
+        真实文件夹具：两个 chunk 落盘 + os.utime 设 mtime，杜绝纯字面量
+        断言（夹具必须复现真实产物并存形态）。
         """
-        fresh = time.time() - 1
-        stale = time.time() - 3600
-        assert not _is_dist_stale(time.time(), max(fresh, stale)), (
-            "存在任一新鲜 chunk 时不得误报陈旧（残留旧 chunk 不应翻红）")
-        assert _is_dist_stale(time.time(), stale), (
-            "全部 chunk 落后时仍必须判陈旧（护栏检测力不得因 max 口径丧失）")
+        fake_dist_assets = tmp_path / "dist" / "assets"
+        fake_dist_assets.mkdir(parents=True)
+        fresh_chunk = fake_dist_assets / "index-new.js"
+        stale_chunk = fake_dist_assets / "index-old.js"
+        fresh_chunk.write_text("/* fresh */", encoding="utf-8")
+        stale_chunk.write_text("/* stale */", encoding="utf-8")
+        now = time.time()
+        os.utime(fresh_chunk, (now - 1, now - 1))
+        os.utime(stale_chunk, (now - 3600, now - 3600))
+
+        dist_newest = max(c.stat().st_mtime for c in fake_dist_assets.glob("*.js"))
+        assert not _is_dist_stale(now, dist_newest), (
+            "fresh 与 stale chunk 并存时不得误报陈旧（残留旧 chunk 不应翻红）")
+        assert _is_dist_stale(now, stale_chunk.stat().st_mtime), (
+            "仅 stale chunk 存在时仍必须判陈旧（护栏检测力不得因 max 口径丧失）")
+
+
+class TestFutureTimestampGuard:
+    """dist 最新 mtime 远超当前时钟 → 判陈旧（未来时间戳残留防线）。
+
+    未来时间戳残留文件使 max 口径"取最新"永久失效（最新永远是未来值，
+    护栏对后续一切源码改动静默放行）。防线居测试文件内部（判定函数本就
+    定义于本文件），不外溢业务源码。
+    """
+
+    def test_future_dist_mtime_flags_stale(self, tmp_path):
+        future = time.time() + FUTURE_DELTA
+        assert _is_dist_stale(time.time(), future), (
+            "dist mtime 超前当前时钟属异常产物（未来时间戳残留），必须判陈旧")

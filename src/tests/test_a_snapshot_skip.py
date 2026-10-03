@@ -228,8 +228,8 @@ class TestASnapshotSkip:
         db.prune_a_snapshot_not_in = spy_prune
         counter = _ReadCounter()
         with patch.object(sync_service_mod, "read_strm_webdav_path", counter):
-            svc.initial_scan_a(use_bulk=False, a_roots=[a_root],
-                               use_snapshot=False)
+            # a_roots=None 全量审计（env 夹具单根，与原局部根等价覆盖）
+            svc.initial_scan_a(use_bulk=False, use_snapshot=False)
         # 权威重扫：快照全匹配也必须读（use_snapshot=False 是唯一触发变量）
         assert len(counter.calls) == 1
         assert seen, "全量审计后必须触发 prune_a_snapshot_not_in"
@@ -346,7 +346,8 @@ class TestASnapshotSkip:
                          ctime_ns=0)
         # 删除 gone.strm，使其成为「集外行」（扫描集合外 → 应被 prune 清除）
         gone.unlink()
-        svc.initial_scan_a(use_bulk=False, a_roots=[a_root], use_snapshot=False)
+        # a_roots=None 全量审计（env 夹具单根，与原局部根等价覆盖）
+        svc.initial_scan_a(use_bulk=False, use_snapshot=False)
         assert _snapshot_row(db, str(keep)) is not None, "集内行不得被误删"
         assert _snapshot_row(db, str(gone)) is None, "集外孤儿行必须被 prune 删除"
 
@@ -478,9 +479,10 @@ class TestAuditPruneGuard:
         ghost = a_root.parent / "missing-root" / "ghost.strm"
         _insert_snapshot(db, (str(ghost), 10, 123, "/mnt/G/ghost", "/mnt/G",
                               CUR_PARSE_VERSION, time.time()), ctime_ns=0)
-        svc.initial_scan_a(use_bulk=False,
-                           a_roots=[a_root, a_root.parent / "missing-root"],
-                           use_snapshot=False)
+        # a_roots=None 契约下经 app.a_roots 注入"部分根不可达"场景，
+        # prune fail-closed 检测力不变（traversed_roots < len(roots) 跳过 prune）
+        _app.a_roots.append(a_root.parent / "missing-root")
+        svc.initial_scan_a(use_bulk=False, use_snapshot=False)
         assert _snapshot_row(db, str(ghost)) is not None, (
             "根不可达 ≠ 云端文件已消失，该根快照行不得被 prune 整片误剪")
 
@@ -490,9 +492,10 @@ class TestAuditPruneGuard:
         ghost = a_root.parent / "missing-root" / "ghost.strm"
         _insert_snapshot(db, (str(ghost), 10, 123, "/mnt/G/ghost", "/mnt/G",
                               CUR_PARSE_VERSION, time.time()), ctime_ns=0)
-        svc.initial_scan_a(use_bulk=False,
-                           a_roots=[a_root.parent / "missing-root"],
-                           use_snapshot=False)
+        # a_roots=None 契约下经 app.a_roots 注入"全部根不可达"场景，
+        # "不得全表清空"检测力不变
+        _app.a_roots = [a_root.parent / "missing-root"]
+        svc.initial_scan_a(use_bulk=False, use_snapshot=False)
         assert _snapshot_row(db, str(ghost)) is not None, (
             "全部根不可达时不得走 DELETE FROM a_strm_snapshot 全表清空")
 
@@ -548,25 +551,107 @@ class TestAuditPruneGuard:
                 onerror(OSError(13, "permission denied"))
 
         with patch.object(sync_service_mod.os, "walk", side_effect=fake_walk):
-            svc.initial_scan_a(use_bulk=False, a_roots=[a_root],
-                               use_snapshot=False)
+            # a_roots=None 全量审计（env 夹具单根；fake_walk 对该根触发
+            # onerror → traversed_roots 不计数 → prune fail-closed 跳过）
+            svc.initial_scan_a(use_bulk=False, use_snapshot=False)
         assert _snapshot_row(db, str(hidden)) is not None, (
             "遍历出错（onerror 触发）时 keep 集不完整，prune 必须 fail-closed 跳过")
 
-    def test_e3_partial_audit_scope_warning(self, env, caplog):
-        """E3：use_snapshot=False 且局部 a_roots（keep 集不完备）→ WARNING；
-        全量审计（a_roots=None）不告警。"""
+    def test_e3_partial_audit_rejected_full_audit_no_warning(self, env, caplog):
+        """局部 a_roots + use_snapshot=False → 直接拒绝（fail-closed）；
+        全量审计（a_roots=None）keep 集完备，不告警。"""
         import logging
         _app, db, svc, a_root = env
         p = a_root / "w.strm"
         p.write_text("/mnt/M/w", encoding="utf-8")
-        with caplog.at_level(logging.WARNING):
+        with pytest.raises(ValueError):
             svc.initial_scan_a(use_bulk=False, a_roots=[a_root],
                                use_snapshot=False)
-        assert any("误剪" in r.message for r in caplog.records), (
-            "局部 a_roots + use_snapshot=False 必须记 prune 误剪风险 WARNING")
         caplog.clear()
         with caplog.at_level(logging.WARNING):
             svc.initial_scan_a(use_bulk=False, use_snapshot=False)
         assert not any("误剪" in r.message for r in caplog.records), (
             "全量审计（a_roots=None）keep 集完备，不得告警")
+
+
+# ===========================================================================
+# 审计非法组合 fail-closed 拒绝契约
+# ===========================================================================
+
+class TestAuditLocalRootsRejected:
+    """全量审计（use_snapshot=False）与局部 a_roots 同用必须直接拒绝。
+
+    期望值由行为契约推导：prune keep 集来自本轮实际扫描集合，与局部根同用
+    会误剪范围外快照行——fail-closed 抛 ValueError，而非 WARNING 后照跑。
+    """
+
+    def test_audit_with_local_roots_raises(self, tmp_path):
+        app = build_mock_app(tmp_path)
+        svc = SyncService(app)
+        with pytest.raises(ValueError, match="a_roots=None"):
+            svc.initial_scan_a(use_snapshot=False, a_roots=[tmp_path / "a"])
+
+    def test_audit_with_empty_roots_list_also_raises(self, tmp_path):
+        """a_roots=[] 也是"限定局部根"（空 keep 集会剪光快照），同样拒绝；
+        拒绝判定必须先于 a_roots==[] 的提前返回分支。"""
+        app = build_mock_app(tmp_path)
+        svc = SyncService(app)
+        with pytest.raises(ValueError):
+            svc.initial_scan_a(use_snapshot=False, a_roots=[])
+
+    def test_audit_with_none_roots_allowed(self, tmp_path):
+        """合法组合 a_roots=None + use_snapshot=False 不受影响。"""
+        app = build_mock_app(tmp_path, a_dirs=[tmp_path / "a"])
+        (tmp_path / "a").mkdir(parents=True, exist_ok=True)
+        svc = SyncService(app)
+        svc.initial_scan_a(use_snapshot=False, a_roots=None)
+
+    def test_snapshot_with_local_roots_allowed(self, tmp_path):
+        """合法组合 a_roots 非空 + use_snapshot=True 不受影响。"""
+        app = build_mock_app(tmp_path, a_dirs=[tmp_path / "a"])
+        (tmp_path / "a").mkdir(parents=True, exist_ok=True)
+        svc = SyncService(app)
+        svc.initial_scan_a(use_snapshot=True, a_roots=[tmp_path / "a"])
+
+    def test_empty_roots_early_return_still_works_for_snapshot(self, tmp_path):
+        """a_roots=[] + use_snapshot=True 走既有提前返回分支，不抛异常。"""
+        app = build_mock_app(tmp_path)
+        svc = SyncService(app)
+        svc.initial_scan_a(use_snapshot=True, a_roots=[])
+
+
+# ===========================================================================
+# flush_batch 解耦早返回——快照提交不得被 batch 空判定静默跳过
+# ===========================================================================
+
+class TestFlushBatchDecoupledEarlyReturn:
+    """batch 空 + snap_batch 非空时快照仍必须被提交。
+
+    选型说明：batch 与 snap_batch 在公开面上逐条同追加（process_strm_file
+    结果处理），"batch 空而 snap 非空"经公开入口不可达，纯黑盒行为断言
+    无法区分新旧实现。故本用例采用双锚：① 端到端端态正向回归锚（两根
+    扫描、第二根为空时 flush_batch 以 batch 空被再次调用，快照行必须仍在
+    终态写入——行为不变即应保持通过，防解耦改动反向破坏既有终态）；
+    ② inspect.getsource 机械防回退锚：早返回条件不得再单独键于 batch，
+    缺该形态时本用例失败。
+    """
+
+    def test_snapshot_survives_batch_empty_flush(self, tmp_path):
+        app = build_mock_app(tmp_path, a_dirs=[tmp_path / "a", tmp_path / "b"])
+        root_a = tmp_path / "a"
+        root_b = tmp_path / "b"
+        root_a.mkdir(parents=True, exist_ok=True)
+        root_b.mkdir(parents=True, exist_ok=True)
+        (root_a / "movie.strm").write_text("/mount/movie.mp4", encoding="utf-8")
+        # root_b 无任何 .strm → 该根尾部的 flush_batch() 以 batch 空被调用
+        svc = SyncService(app)
+        svc.initial_scan_a(use_snapshot=True, a_roots=[root_a, root_b])
+        rows = app.db.upsert_a_snapshot_bulk.call_args_list
+        assert rows, "快照行必须被提交（终态守恒：解耦不得反向吞掉快照写）"
+
+    def test_flush_early_return_not_solely_keyed_on_batch(self):
+        import inspect
+        src = inspect.getsource(SyncService.initial_scan_a)
+        assert "if not batch and not snap_batch:" in src, (
+            "flush_batch 早返回必须解耦：batch 与 snap_batch 均空才返回，"
+            "防止快照提交被 batch 空判定静默跳过")

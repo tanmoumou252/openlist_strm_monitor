@@ -1210,6 +1210,24 @@ class WebUIServer:
                 summary = self._app_service.get_state_summary()
                 if summary["is_running"]:
                     return {"success": False, "message": "主程序已在运行中"}
+                # fail_safe 残留：句柄仍在但引擎未运行。先尽力清理旧实例，
+                # 防止下方新建 AppService 覆盖句柄导致旧引擎线程失控。
+                stale_svc = self._app_service
+                stale_worker = self._app_worker_thread
+                try:
+                    stale_svc.stop()
+                    if (stale_worker and stale_worker.is_alive()
+                            and stale_worker is not threading.current_thread()):
+                        stale_worker.join(timeout=5.0)
+                except Exception as stale_exc:
+                    logging.warning(
+                        "[Main] fail_safe 残留实例停止失败: %s", stale_exc)
+                    return {
+                        "success": False,
+                        "message": "主程序处于 fail_safe 且停止失败，请重试停止或查看服务端日志",
+                    }
+                self._app_service = None
+                self._app_worker_thread = None
 
             if not self._config:
                 return {"success": False, "message": "配置未加载"}
@@ -1335,6 +1353,7 @@ class WebUIServer:
                 self._app_running = False
                 self._app_phase = "stopped"
                 self._app_service = None
+                self._app_error = None
                 self._app_worker_thread = None
                 self._app_start_time = None
                 return {"success": True, "message": "主程序已停止"}

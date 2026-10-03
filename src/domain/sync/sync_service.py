@@ -78,13 +78,14 @@ class SyncService:
                       （权威自愈触发源）。快照整体读失败时 fail-open 退化为全读。
                       约束：False 仅允许在 a_roots=None（全量扫描）场景调用——
                       prune 的 keep 集来自本轮实际扫描集合，与局部 a_roots 同用
-                      会误剪范围外快照行（触发 WARNING 日志，行为不变）。
+                      会误剪范围外快照行（直接拒绝调用，fail-closed）。
         """
         if not use_snapshot and a_roots is not None:
-            logging.warning(
-                "[初始化] use_snapshot=False 与局部 a_roots 同用：prune keep 集"
-                "不含扫描范围外路径，将误剪范围外快照行"
-                "（全量审计应使用 a_roots=None）")
+            # a_roots=[] 亦属限定局部根（空 keep 集会剪光快照行），
+            # 判定先于空列表早返回
+            raise ValueError(
+                "use_snapshot=False requires a_roots=None"
+                "（全量审计不得限定局部 A 根）")
         logging.info("[初始化] 扫描 A 区 STRM 文件（%s）...",
                      "bulk模式" if use_bulk else "标准模式")
         if a_roots == []:
@@ -149,16 +150,19 @@ class SyncService:
         def flush_batch():
             """批量写入数据库。闭包捕获 conn 和 batch。"""
             nonlocal indexed_count
-            if not batch:
+            # batch 与 snap_batch 均空才早返回：快照提交不得被 batch 空判定
+            # 静默跳过（两队列仅在公开面逐条同追加，解耦为防御性对称）。
+            if not batch and not snap_batch:
                 return
-            if use_bulk:
-                self._upsert_a_batch_bulk(conn, batch)
-                indexed_count += len(batch)
-            else:
-                written = self.db.upsert_a_batch(batch)
-                indexed_count += written if isinstance(written, int) else len(batch)
-                self.app.update_progress(a_indexed=indexed_count)
-            batch.clear()
+            if batch:
+                if use_bulk:
+                    self._upsert_a_batch_bulk(conn, batch)
+                    indexed_count += len(batch)
+                else:
+                    written = self.db.upsert_a_batch(batch)
+                    indexed_count += written if isinstance(written, int) else len(batch)
+                    self.app.update_progress(a_indexed=indexed_count)
+                batch.clear()
             if not use_bulk and snap_batch:
                 # 非 bulk 模式（快照与审计两形态）无 bulk_connection 事务包裹，
                 # 可安全中途经独立连接分片提交快照写，消除 snap_batch 无界内存
