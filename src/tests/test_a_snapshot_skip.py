@@ -835,6 +835,31 @@ def test_unparseable_snapshot_deletion_is_batched_and_exception_isolated(
         "可解析文件快照行不受批量删除影响")
 
 
+def test_handle_a_created_parse_failure_invalidates_snapshot(env, monkeypatch):
+    """契约：handle_a_created_or_modified 解析失败（webdav_path 为空）时，
+    该文件旧快照行必须在 return 前失效，防采信门复用过期链接。
+    期望值由行为契约推导：解析失败 = 无可信权威链接，旧快照不可采信。"""
+    import app_service_core as core_mod
+    app, db, _svc, a_root = env
+    a_root = Path(a_root)
+    p = a_root / "watch-broken.strm"
+    p.write_text("", encoding="utf-8")  # 正文为空 → 解析失败
+    st = os.stat(p)
+    _insert_snapshot(db, (str(p), st.st_size, st.st_mtime_ns, "/cloud/old.mkv",
+                          "/cloud", CUR_PARSE_VERSION, time.time()),
+                     st.st_ctime_ns)
+    # mock app 的 get_mapping_for_a 默认 None 会在解析前提前 return；
+    # 注入唯一 mapping 使流程推进到解析分支（夹具适配，非行为断言对象）。
+    # handle_a_created_or_modified 在 build_mock_app 中被替换为 Mock，
+    # 故以真实 AppService 类函数形态调用，绕过替身覆盖触达生产代码。
+    app.get_mapping_for_a = Mock(return_value=("mid-e4",))
+    monkeypatch.setattr(core_mod, "read_strm_webdav_path",
+                        lambda _p: None)
+    core_mod.AppService.handle_a_created_or_modified(app, str(p))
+    assert _snapshot_row(db, str(p)) is None, (
+        "解析失败分支必须失效旧快照行，不得残留供采信门复用")
+
+
 def test_delete_a_snapshots_batch_dedupes_and_deletes(env):
     """契约 W4：delete_a_snapshots_batch 去重（保序）、批量删除并返回去重后
     条数；空列表早退 0 且不获取写锁。"""

@@ -1465,9 +1465,10 @@ class WebUIServer:
                         # 引擎仍在跑（worker 未退出），svc 相位如实回写运行态：
                         # get_main_status 主路径读 svc.get_state_summary()，
                         # 滞留 stopping 会令前端卡死在「正在停止」死角；
-                        # 拒绝分支如实回写运行态相位并经返回体透出错误，
+                        # 拒绝分支如实回写运行态相位并经 error 参数透出拒绝
+                        # 原因（get_main_status 的 error 位直读 summary.error），
                         # 不落 fail_safe（与「拒绝不谎报」一致，引擎确实在跑）。
-                        svc.set_phase("ready")
+                        svc.set_phase("ready", error="旧 worker 未退出，停止未完成")
                     return {
                         "success": False,
                         "message": "旧 worker 未退出，停止未完成，请重试停止或查看服务端日志",
@@ -1479,9 +1480,9 @@ class WebUIServer:
                     logging.error("[Main] 停止失败：引擎在 stop 后仍存活")
                     self._app_phase = "fail_safe"
                     self._app_error = "引擎在 stop 后仍存活，停止未完成"
-                    # 同上：拒绝分支如实回写运行态相位并经返回体透出错误，
-                    # 避免滞留 stopping 令前端卡死。
-                    svc.set_phase("ready")
+                    # 同上：拒绝分支如实回写运行态相位并经 error 参数透出
+                    # 拒绝原因，避免滞留 stopping 令前端卡死。
+                    svc.set_phase("ready", error="引擎在 stop 后仍存活，停止未完成")
                     return {
                         "success": False,
                         "message": "引擎在 stop 后仍存活，停止未完成，请重试停止或查看服务端日志",

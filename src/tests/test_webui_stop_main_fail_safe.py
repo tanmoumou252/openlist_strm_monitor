@@ -638,6 +638,43 @@ def test_stop_main_rejects_when_engine_revives_after_stop(webui_server_shared):
         f"拒绝后相位须落 fail_safe，实际 {server._app_phase!r}")
 
 
+def test_stop_main_reject_worker_alive_surfaces_error_via_status(
+        webui_server_shared):
+    """E1 契约：worker join 超时拒绝分支必须把「旧 worker 未退出，停止未完成」
+    经 svc.set_phase 的 error 参数写入，get_main_status().error 可见。
+    ready 运行态 + error 属如实组合（引擎确实仍在跑）。"""
+    server, _base, _token = webui_server_shared
+    svc = _MockStaleSvc(stop_raises=False)
+    worker = _BlockingWorkerStub()
+    server._app_service = svc
+    server._app_worker_thread = worker
+    try:
+        result = server.stop_main()
+        assert result["success"] is False
+        status = server.get_main_status()
+        assert status["phase"] == "ready", (
+            f"拒绝分支须保持运行态 ready，实际 {status['phase']!r}")
+        assert "旧 worker 未退出" in str(status.get("error")), (
+            f"拒绝原因必须经 error 位可见，实际返回体: {status!r}")
+    finally:
+        worker.release()
+
+
+def test_stop_main_reject_engine_alive_surfaces_error_via_status(
+        webui_server_shared):
+    """E1 契约：引擎 stop 后仍存活拒绝分支的拒绝原因必须经 error 位可见。"""
+    server, _base, _token = webui_server_shared
+    svc = _MockStaleSvc(stop_raises=False, is_revive_after_stop=True)
+    server._app_service = svc
+    server._app_worker_thread = None
+    result = server.stop_main()
+    assert result["success"] is False
+    status = server.get_main_status()
+    assert status["phase"] == "ready"
+    assert "引擎在 stop 后仍存活" in str(status.get("error")), (
+        f"拒绝原因必须经 error 位可见，实际返回体: {status!r}")
+
+
 # ============================================================
 # 复合存活权威 Red-Light（RL-1..RL-5）：核心断言存活权威而非相位派生
 # ============================================================

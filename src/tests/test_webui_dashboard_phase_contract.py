@@ -41,12 +41,36 @@ def test_stopping_branch_not_shadowed_by_running_branch():
     运行分支以 status.running 为存活权威（running=true 任意相位走运行
     分支；phase==='ready' && !running 落异常态分支）。"""
     running_idx = DASHBOARD_SOURCE.find("} else if (status.running) {")
-    stopping_idx = DASHBOARD_SOURCE.find("phase === 'stopping'")
+    stopping_idx = _stopping_branch_index(DASHBOARD_SOURCE)
     assert running_idx != -1 and stopping_idx != -1
     assert stopping_idx < running_idx, (
         "stopping 分支必须整体位于运行分支之前，"
         "防止 stopping 期间 running 判定为真时该分支被遮蔽不可达"
     )
+
+
+def _stopping_branch_index(source: str) -> int:
+    """stopping 渲染分支唯一定位锚：分支链形态精确串。
+    严禁回退为 find("phase === 'stopping'")——任意早于分支链的出现点
+    （注释/其他条件）都会令遮蔽断言误通过。"""
+    return source.find("} else if (phase === 'stopping') {")
+
+
+def test_stopping_branch_locator_rejects_shadowed_sample():
+    """构造样例反假阳性：running 分支前插入其他 `phase === 'stopping'`
+    出现点时，精确定位必须返回 -1（找不到分支链形态）而非误取早现索引。"""
+    sample = (
+        "// 早期出现点: phase === 'stopping'（假阳性注入）\n"
+        "if (phase === 'stopping') { console.log('x'); }\n"
+        "if (status.running) { run(); }\n"
+        "} else if (status.running) {\n"
+        "  text.textContent = '主程序运行中';\n"
+        "}"
+    )
+    assert _stopping_branch_index(sample) == -1, (
+        "早于分支链的 stopping 出现点不得被当作渲染分支定位（旧 find 形态在此误通过）")
+    assert _stopping_branch_index(DASHBOARD_SOURCE) != -1, (
+        "真实 dashboard 源必须能定位到 stopping 渲染分支链")
 
 
 def test_running_branch_keys_on_survival_authority():
@@ -62,6 +86,36 @@ def test_running_branch_keys_on_survival_authority():
         "运行分支必须以 status.running 为存活权威")
     assert "phase === 'ready' && !status.running" in DASHBOARD_SOURCE, (
         "ready 且未运行的异常态必须有独立恢复分支（异常提示 + 启动入口）")
+
+
+def test_stop_failure_awaits_status_refresh_before_button_reset():
+    """E2 契约：停止失败分支必须 await updateMainStatus() 后再复位按钮，
+    消除「刷新渲染与按钮复位交错」竞态；成功分支保持裸调（终态渲染自会
+    隐藏 stopBtn），不该触发域零扰动。"""
+    failure_idx = DASHBOARD_SOURCE.find("停止失败: ' + (result.message")
+    assert failure_idx != -1
+    seg_end = DASHBOARD_SOURCE.find("} catch (e)", failure_idx)
+    seg = DASHBOARD_SOURCE[failure_idx:seg_end]
+    assert "await updateMainStatus();" in seg, (
+        "停止失败分支必须 await 状态刷新后再复位按钮（竞态消除）")
+    # 复位必须位于 await 之后（顺序锚）
+    await_idx = seg.find("await updateMainStatus();")
+    reset_idx = seg.find("stopBtn.innerHTML = `${icon('check')} 停止主程序`;")
+    assert reset_idx != -1 and reset_idx > await_idx, (
+        "按钮 innerHTML 复位必须位于 await updateMainStatus() 之后")
+
+
+def test_running_branch_resets_stop_button_and_surfaces_error():
+    """E2 契约：运行态分支必须复位 stopBtn.innerHTML（spinner「停止中...」
+    不得永久残留）且 error 非空时透出「主程序运行中：<error>」。"""
+    running_idx = DASHBOARD_SOURCE.find("} else if (status.running) {")
+    assert running_idx != -1
+    seg_end = DASHBOARD_SOURCE.find("} else if (phase === 'ready'", running_idx)
+    seg = DASHBOARD_SOURCE[running_idx:seg_end]
+    assert "stopBtn.innerHTML = `${icon('check')} 停止主程序`;" in seg, (
+        "运行态分支必须复位 stopBtn.innerHTML，防停止失败后 spinner 残留")
+    assert "status.error" in seg and "主程序运行中：" in seg, (
+        "运行态分支须透出 status.error（配合 stop_main 拒绝分支 error 透出）")
 
 
 def test_stopping_branch_keeps_start_button_visible_but_disabled():

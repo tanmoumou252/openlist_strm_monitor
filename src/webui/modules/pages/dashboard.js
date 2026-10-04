@@ -373,7 +373,9 @@ export async function updateMainStatus() {
     } else if (status.running) {
       dot.style.background = '#4caf50';
       dot.style.boxShadow = '0 0 12px rgba(76,175,80,0.6)';
-      text.textContent = '主程序运行中';
+      text.textContent = status.error
+        ? `主程序运行中：${status.error}`
+        : '主程序运行中';
       text.style.color = 'var(--text-main)';
       if (status.uptime != null) {
         const hours = Math.floor(status.uptime / 3600);
@@ -386,6 +388,7 @@ export async function updateMainStatus() {
       if (stopBtn) {
         stopBtn.style.display = 'inline-flex';
         stopBtn.disabled = false;
+        stopBtn.innerHTML = `${icon('check')} 停止主程序`;
       }
     } else if (phase === 'ready' && !status.running) {
       // 异常态：后端相位报 ready 但存活态为未运行，相位与存活脱钩时不再
@@ -525,7 +528,8 @@ export async function stopMainProgram() {
         updateMainStatus();
       } else {
         showToast('停止失败: ' + (result.message || '未知错误'), 'error');
-        updateMainStatus();
+        // await 先落地刷新渲染，再复位按钮态，消除渲染与复位交错的竞态
+        await updateMainStatus();
         if (stopBtn) {
           stopBtn.disabled = false;
           stopBtn.innerHTML = `${icon('check')} 停止主程序`;

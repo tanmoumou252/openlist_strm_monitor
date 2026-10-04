@@ -3546,6 +3546,8 @@ class AppService:
         webdav_path = read_strm_webdav_path(local)
         if not webdav_path:
             logging.warning("[A区] 无法解析STRM: %s", local)
+            # 解析失败 = 当前无可信权威链接，旧快照行不得留给采信门复用
+            self.db.delete_a_snapshot(str(local))
             return
         parent = webdav_parent(webdav_path)
         self.db.upsert_a(str(local), webdav_path, parent)
