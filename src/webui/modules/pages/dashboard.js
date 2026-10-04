@@ -370,7 +370,7 @@ export async function updateMainStatus() {
         startBtn.disabled = true;
       }
       if (stopBtn) stopBtn.style.display = 'none';
-    } else if (phase === 'ready' || status.running) {
+    } else if (status.running) {
       dot.style.background = '#4caf50';
       dot.style.boxShadow = '0 0 12px rgba(76,175,80,0.6)';
       text.textContent = '主程序运行中';
@@ -387,6 +387,22 @@ export async function updateMainStatus() {
         stopBtn.style.display = 'inline-flex';
         stopBtn.disabled = false;
       }
+    } else if (phase === 'ready' && !status.running) {
+      // 异常态：后端相位报 ready 但存活态为未运行，相位与存活脱钩时不再
+      // 按运行中渲染；提供启动入口恢复（服务端对残留 worker 有 join 超时
+      // 拒绝启动防线，不会误建第二个 AppService 实例）。
+      dot.style.background = '#ff9800';
+      dot.style.boxShadow = '0 0 12px rgba(255,152,0,0.6)';
+      text.textContent = '主程序状态异常（相位 ready 但未运行）';
+      text.style.color = 'var(--text-main)';
+      uptimeText.textContent = '可尝试重新启动主程序恢复';
+      if (progressContainer) progressContainer.style.display = 'none';
+      if (startBtn) {
+        startBtn.style.display = 'inline-flex';
+        startBtn.disabled = false;
+        startBtn.innerHTML = `${icon('refresh')} 启动主程序`;
+      }
+      if (stopBtn) stopBtn.style.display = 'none';
     } else if (phase === 'fail_safe') {
       dot.style.background = '#f44336';
       dot.style.boxShadow = '0 0 12px rgba(244,67,54,0.6)';
@@ -509,6 +525,7 @@ export async function stopMainProgram() {
         updateMainStatus();
       } else {
         showToast('停止失败: ' + (result.message || '未知错误'), 'error');
+        updateMainStatus();
         if (stopBtn) {
           stopBtn.disabled = false;
           stopBtn.innerHTML = `${icon('check')} 停止主程序`;
@@ -693,7 +710,14 @@ function _shortenPath(path) {
               // 显式判断 status === 'completed' 再读 generation，
               // 避免用 `!error` 推断成功、`|| 0` 掩盖缺 generation 的脆弱性
               if (st.result.status === 'completed') {
-                if (auditStatusText) auditStatusText.textContent = '审计完成，索引代次 #' + (st.result.index_generation || 0);
+                // 覆盖缺口可区分展示：存在未巡查 A 根时审计虽按节拍完成，
+                // 但索引代次推进与核对盖章被跳过，须透出而非静默吞掉。
+                const coverageNote = st.result.coverage_incomplete
+                  ? '（存在未巡查 A 根，已跳过索引代次推进与核对盖章）'
+                  : '';
+                if (auditStatusText) auditStatusText.textContent =
+                  '审计完成' + coverageNote + '，索引代次 #' + (st.result.index_generation || 0);
+                if (st.result.warning) showToast(st.result.warning, 'info');
               } else if (st.result.error) {
                 if (auditStatusText) auditStatusText.textContent = '审计失败: ' + st.result.error;
               } else {

@@ -717,6 +717,29 @@ def test_rl4_rejection_paths_never_write_fail_safe_phase_to_live_engine(
     assert server._app_service is svc, "拒绝后必须保留句柄供重试"
 
 
+def test_rl6_rejection_paths_restore_phase_not_stopping(webui_server_shared):
+    """RL-6：stop_main 拒绝（引擎 stop 后仍真活）后，svc 侧相位必须回写为
+    运行态 ready、不得滞留 stopping——get_main_status 主路径读
+    svc.get_state_summary()，svc 相位滞留 stopping 会让前端永久卡在
+    「正在停止」死角（刷新亦不可恢复）。回写 ready 是存活事实的如实反映，
+    与「拒绝不谎报」语义一致；失败语义经返回体 message/error_type 透出。"""
+    server, _base, _token = webui_server_shared
+    svc = _AuthorityStubSvc(observer_alive=True, phase="stopping",
+                            summary_is_running=True)
+    server._app_service = svc
+    server._app_worker_thread = None
+    result = server.stop_main()
+    assert result["success"] is False, (
+        f"引擎真活时停止必须拒绝伪造成功，实际: {result!r}")
+    assert result.get("error_type") == "engine_alive", (
+        f"须走引擎存活拒绝路径，实际: {result!r}")
+    assert svc.phases_written[-1] != "stopping", (
+        f"拒绝后 svc 相位不得滞留 stopping，实际写入序列: {svc.phases_written!r}")
+    assert svc.phases_written[-1] == "ready", (
+        f"拒绝后 svc 相位须回写为运行态 ready，实际写入序列: {svc.phases_written!r}")
+    assert server._app_service is svc, "拒绝后必须保留句柄供重试"
+
+
 def test_rl5_stop_bounded_join_does_not_hang_or_fake_success(
         webui_server_shared):
     """RL-5：observer.join 有界（5s 量级）——join 阻塞时 stop() 必须在

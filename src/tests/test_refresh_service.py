@@ -645,8 +645,8 @@ class TestFullAuditGap:
 
         assert ok is False, (
             "审计不完整必须以 False 上报（不得静默成功）")
-        sync.assert_called_once_with(valid_engine_paths=None, use_bulk=False), (
-            "B 区收敛不得因快照失效失败被跳过")
+        # B 区收敛不得因快照失效失败被跳过（参数契约由下行断言守护）
+        sync.assert_called_once_with(valid_engine_paths=None, use_bulk=False)
         app.db.complete_index_generation.assert_not_called()
         app.db.touch_verified_by_mapping.assert_not_called()
         app.db.set_control.assert_not_called()
@@ -688,9 +688,9 @@ class TestFullAuditGap:
             ok = svc._maybe_run_full_audit()
 
         assert ok is True, "覆盖缺口不阻断审计节拍（周期路径应计为已执行）"
-        app.db.complete_index_generation.assert_not_called(), (
+        assert not app.db.complete_index_generation.called, (
             "覆盖不完整不得宣称索引代次已刷新")
-        app.db.touch_verified_by_mapping.assert_not_called(), (
+        assert not app.db.touch_verified_by_mapping.called, (
             "覆盖不完整不得给未巡查行盖核对章")
         app.db.set_control.assert_called_once()
         assert app.db.set_control.call_args[0][0] == "last_full_audit_at", (

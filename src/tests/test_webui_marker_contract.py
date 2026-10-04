@@ -96,14 +96,18 @@ class TestRegressionEntry:
         """回归入口接线契约：cmd 侧枚举 JS 用例文件（不依赖 Node 的引号 glob
         展开语义），并对零覆盖显式判红。"""
         bat = BAT_PATH.read_text(encoding="utf-8", errors="replace")
-        assert 'for %%F in ("src\\webui\\tests\\*.test.mjs") do (' in bat, (
+        assert re.search(
+            r'for %%F in \("src\\webui\\tests\\\*\.test\.mjs"\) do \(', bat), (
             "run_webui_regression.bat 必须以 cmd 侧枚举 JS 用例文件，"
             "回归入口空转风险")
-        assert "if !JS_COUNT! EQU 0 (" in bat, (
+        assert re.search(r'if !JS_COUNT! EQU 0 \(', bat), (
             "run_webui_regression.bat 缺少零用例判红闸（JS 侧零覆盖必须显式失败）")
-        assert "node.exe --test !JS_ARGS!" in bat, (
+        assert re.search(r'set "JS_ARGS=!JS_ARGS! "%%~F""', bat), (
+            "run_webui_regression.bat 的 JS_ARGS 赋值必须整体引号包裹，"
+            "延迟展开变量含空格或特殊字符路径时裸赋值可能解析失败")
+        assert re.search(r'node\.exe --test !JS_ARGS!', bat), (
             "run_webui_regression.bat 的 node:test 调用形态变更，回归入口空转风险")
-        assert "python.exe -m pytest src/tests -m webui" in bat, (
+        assert re.search(r'python\.exe -m pytest src/tests -m webui', bat), (
             "run_webui_regression.bat 的 pytest 收集原文变更，回归入口空转风险")
 
     def test_node_test_suite_is_non_empty(self):

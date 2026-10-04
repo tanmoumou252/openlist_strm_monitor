@@ -1155,8 +1155,9 @@ class AppService:
         不读 _current_phase（可被 set_phase 合法写成谎）、不读 _running
         （仅 start() 末尾置位且从不被内部读）——两者均不可信为存活事实。
         不提供 phase/progress 语义（那是 get_state_summary 的展示通道）。
+        判定表达式委托 _watchers_live()（同一事实源，避免双份函数体漂移）。
         """
-        return self.observer is not None and self.observer.is_alive()
+        return self._watchers_live()
 
     def get_mapping_for_a(self, local_path: str | Path) -> tuple[str, Path, Path] | None:
         """严格解析 A 路径所属的唯一 mapping。零/多命中均 fail-closed。"""

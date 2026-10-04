@@ -11,7 +11,7 @@ set "JS_COUNT=0"
 set "JS_ARGS="
 for %%F in ("src\webui\tests\*.test.mjs") do (
     set /a JS_COUNT+=1
-    set JS_ARGS=!JS_ARGS! "%%~F"
+    set "JS_ARGS=!JS_ARGS! "%%~F""
 )
 if !JS_COUNT! EQU 0 (
     echo [ERROR] src\webui\tests 下无任何 *.test.mjs，JS 侧零覆盖（判红）

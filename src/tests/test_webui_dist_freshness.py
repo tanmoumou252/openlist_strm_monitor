@@ -58,7 +58,8 @@ def _dist_artifact_mtime(chunks: list[Path]) -> float:
     return max(c.stat().st_mtime for c in chunks)
 
 
-FUTURE_TOLERANCE_SECONDS = 2  # 未来时间戳判定容差（与陈旧判定容差同口径）
+FUTURE_TOLERANCE_SECONDS = 2  # 未来时间戳判定容差
+STALE_TOLERANCE_SECONDS = 2  # 陈旧判定容差（mtime 粒度容忍，与未来时间戳容差语义独立）
 
 
 def _is_dist_stale(src_latest: float, dist_mtime: float) -> bool:
@@ -71,7 +72,7 @@ def _is_dist_stale(src_latest: float, dist_mtime: float) -> bool:
     """
     if dist_mtime > time.time() + FUTURE_TOLERANCE_SECONDS:
         return True
-    return src_latest > dist_mtime + 2
+    return src_latest > dist_mtime + STALE_TOLERANCE_SECONDS
 
 
 def _stale_message(src_latest: float, dist_newest: float) -> str:

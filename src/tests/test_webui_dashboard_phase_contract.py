@@ -35,16 +35,33 @@ def test_stopping_phase_has_dedicated_render_branch():
 
 
 def test_stopping_branch_not_shadowed_by_running_branch():
-    """stopping 分支必须位于 ready/running 分支之前（契约防回归：消除
+    """stopping 分支必须位于运行分支之前（契约防回归：消除
     fallback 公式 `phase not in {"stopped", "fail_safe"}` 与相位竞态下的
-    理论遮蔽面——stopping 期间一旦被报 running，后置分支不可达）。"""
-    ready_idx = DASHBOARD_SOURCE.find("phase === 'ready' || status.running")
+    理论遮蔽面——stopping 期间一旦被报 running，后置分支不可达）。
+    运行分支以 status.running 为存活权威（running=true 任意相位走运行
+    分支；phase==='ready' && !running 落异常态分支）。"""
+    running_idx = DASHBOARD_SOURCE.find("} else if (status.running) {")
     stopping_idx = DASHBOARD_SOURCE.find("phase === 'stopping'")
-    assert ready_idx != -1 and stopping_idx != -1
-    assert stopping_idx < ready_idx, (
-        "stopping 分支必须整体位于 ready/running 分支之前，"
+    assert running_idx != -1 and stopping_idx != -1
+    assert stopping_idx < running_idx, (
+        "stopping 分支必须整体位于运行分支之前，"
         "防止 stopping 期间 running 判定为真时该分支被遮蔽不可达"
     )
+
+
+def test_running_branch_keys_on_survival_authority():
+    """运行分支不得以相位 ready 单独判运行：必须以 status.running 为存活
+    权威，且 ready 相位与存活脱钩（ready 且未运行）须落异常态恢复分支，
+    不得误渲染为「主程序运行中」。"""
+    legacy_idx = DASHBOARD_SOURCE.find("phase === 'ready' || status.running")
+    assert legacy_idx == -1, (
+        "运行分支不得回退为 `phase === 'ready' || status.running`——"
+        "相位 ready 但未运行时会被误判为运行中（存活权威必须键于 "
+        "status.running）")
+    assert "} else if (status.running) {" in DASHBOARD_SOURCE, (
+        "运行分支必须以 status.running 为存活权威")
+    assert "phase === 'ready' && !status.running" in DASHBOARD_SOURCE, (
+        "ready 且未运行的异常态必须有独立恢复分支（异常提示 + 启动入口）")
 
 
 def test_stopping_branch_keeps_start_button_visible_but_disabled():
