@@ -82,17 +82,17 @@ python -m pytest src/tests/ -v
 
 | 文件 | 说明 |
 |------|------|
-| `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试（含 `TestAreaDetailKindParameter`、`TestAreaDetailCZonePagination`、`TestAreaDetailSingleMappingMid`、`TestTMDBWatchlistMatchOverrideConsistency`、`TestManualFullIndexAuditAPI`）。**D2 回归**：全新安装 `/api/config` 不抛异常（`TestConfigApiFreshInstall`）；**D3 回归**：fail-safe 时 `start_main` 返回失败且不置 `_app_running`（`TestStartMainFailSafe`）。**安全边界**：`TestSecurity`（公网 IP 拒绝、5 次失败限流 429）、`TestSessionIPBinding`（会话 IP 绑定拒绝异 IP / 放行原 IP）、`TestConfigApiUnifiedSession`（token 滑动过期、空 stored_ip 兼容、无效 token 拒绝）、`TestMainStartHidesExceptionDetail`（后台异常返回通用消息）。**第 23 轮回归**（`TestRound13Regressions`）：**M3** `_MEDIA_NAME_SQL` 别名目录（`/movies/` 等）不再坍缩「未分类」、**M4** 改密后旧 token 立即失效、**M5** `/api/admin/status` 带无效 token 返回 401 / 无 token 保持 200。**日志顺序与下载**：`TestLogsOrdering` 锁定 `/api/tmdb/logs` 最近 N 条截取 + 旧到新展示（`count == len(logs)`、无分页字段、同时间戳不断言相对顺序）与 `/api/logs` 主程序日志文件原序返回；`TestLogsDownloadFilename` 锁定 `webui_operations.log` 下载名、下载内容不受页面 limit 截断、主程序日志仍为 `strm_bridge.log`。**OpenList 数字校验**：`TestOpenListNumericValidation` 覆盖 8 个数字字段 ×（合法整数/负数/中文/英文/小数/科学计数法/空字符串/bool/None），断言非法值 HTTP 400 且 `set_config` 完全未调用（零写入）、合法零值（`refresh_full_audit_interval_days=0`、`behavior_sync_on_startup_wait=0`）与空字段可保存。 |
+| `test_webui_http.py` | WebUI HTTP 服务器与路由分发测试（含 `TestAreaDetailKindParameter`、`TestAreaDetailCZonePagination`、`TestAreaDetailSingleMappingMid`、`TestTMDBWatchlistMatchOverrideConsistency`、`TestManualFullIndexAuditAPI`）。**D2 回归**：全新安装 `/api/config` 不抛异常（`TestConfigApiFreshInstall`）；**D3 回归**：fail-safe 时 `start_main` 返回失败且不置存活态（`TestStartMainFailSafe`）。**安全边界**：`TestSecurity`（公网 IP 拒绝、5 次失败限流 429）、`TestSessionIPBinding`（会话 IP 绑定拒绝异 IP / 放行原 IP）、`TestConfigApiUnifiedSession`（token 滑动过期、空 stored_ip 兼容、无效 token 拒绝）、`TestMainStartHidesExceptionDetail`（后台异常返回通用消息）。**第 23 轮回归**（`TestRound13Regressions`）：**M3** `_MEDIA_NAME_SQL` 别名目录（`/movies/` 等）不再坍缩「未分类」、**M4** 改密后旧 token 立即失效、**M5** `/api/admin/status` 带无效 token 返回 401 / 无 token 保持 200。**日志顺序与下载**：`TestLogsOrdering` 锁定 `/api/tmdb/logs` 最近 N 条截取 + 旧到新展示（`count == len(logs)`、无分页字段、同时间戳不断言相对顺序）与 `/api/logs` 主程序日志文件原序返回；`TestLogsDownloadFilename` 锁定 `webui_operations.log` 下载名、下载内容不受页面 limit 截断、主程序日志仍为 `strm_bridge.log`。**OpenList 数字校验**：`TestOpenListNumericValidation` 覆盖 8 个数字字段 ×（合法整数/负数/中文/英文/小数/科学计数法/空字符串/bool/None），断言非法值 HTTP 400 且 `set_config` 完全未调用（零写入）、合法零值（`refresh_full_audit_interval_days=0`、`behavior_sync_on_startup_wait=0`）与空字段可保存。 |
 | `test_webui_help_texts.py` | WebUI 帮助文案系统测试：`createField` 输出 `.field-helper-text`、`_openlistHelpTexts` 键完整性、`log_file` 已删除、`refresh_*` 含「即时生效」、TMDB 阈值字段 helpIcon、孤儿键标注、死字段「未接入匹配逻辑」标注 |
 | `test_webui_source_contracts.py` | 前端源码契约回归测试：未定义变量（`mappingIdParam`/`deleteDisabled`）、死参数（`mapping_id`）、CSV 公式注入安全、`_do_bg_sync` 预检查、dialog 断言正则、配置「未接入」标注、畸形请求不计数、交付文档无行号、`captureRenderGuard()` 渲染护栏、`parseHash` 畸形编码容错。**数字零值保护**：`test_openlist_field_value_preserves_zero` / `test_openlist_no_value_or_default_for_numeric_fields` 锁定 `_olFieldValue` 严格空字符串判断（禁止 `value || default` 吞掉合法零值）。**详情返回契约**：`test_area_detail_link_preserves_list_state` / `test_area_back_link_preserves_list_state` / `test_area_page_size_whitelist_rejects_invalid` 锁定 `{kind, q, sort, order, page, page_size}` 状态保留与 `page_size` 50/100/200 白名单；`test_area_search_and_kind_switch_reset_page` 锁定搜索/分类切换主动移除旧 page（P2-1/P2-2）。**表单属性透传**：`test_create_field_passes_numeric_attributes` 锁定 `createField` 透传 min/max/step/inputMode。**TMDB 比例字段**：`test_tmdb_ratio_fields_min_0_01` 锁定 `fuzzy_threshold` / `anime_min_ep_ratio` / `anime_min_season_ratio` 的 `min:'0.01'`（与后端 `(0,1]` 契约一致）且保留 `step:'0.01'`。 |
 | `test_webui_dashboard_phase_contract.py` | dashboard.js 相位契约静态断言（零 node/零 DOM）：`_lastMainPhase` 基线门终态集合含 `stopping`、`updateMainStatus` 有独立 stopping 渲染分支（文案「正在停止主程序...」）、stopping 分支位于 ready 分支与最终 else 之间不被遮蔽 |
-| `test_webui_entry_behavior.py` | WebUI 入口行为测试（`server.py` `main()` 的普通交互模式与 `BRIDGE_HEADLESS=1` 无头模式）：覆盖普通交互菜单（选 1 启动 Bridge、默认仅 WebUI）、无头自动启动 Bridge 并跳过 stdin 静默等待、交互循环 `q`/`quit` 退出、EOFError 不崩溃、KeyboardInterrupt 可控退出、退出时清理子程序与服务器、配置缺失 `sys.exit(1)`、启动失败 `sys.exit(1)`。**无头失败入口**：`test_headless_start_main_failure_does_not_escape` 验证 `start_main` 返回失败结果时异常不逃逸并进入清理路径（该测试直接断言清理路径，不断言日志内容；`_app_running` 不被置位的 fail-safe 见 `test_webui_http.py::TestStartMainFailSafe`）。验证 `q` 退出用例真实断言未启动 Bridge（`start_main.call_count == 0`）。 |
+| `test_webui_entry_behavior.py` | WebUI 入口行为测试（`server.py` `main()` 的普通交互模式与 `BRIDGE_HEADLESS=1` 无头模式）：覆盖普通交互菜单（选 1 启动 Bridge、默认仅 WebUI）、无头自动启动 Bridge 并跳过 stdin 静默等待、交互循环 `q`/`quit` 退出、EOFError 不崩溃、KeyboardInterrupt 可控退出、退出时清理子程序与服务器、配置缺失 `sys.exit(1)`、启动失败 `sys.exit(1)`。**无头失败入口**：`test_headless_start_main_failure_does_not_escape` 验证 `start_main` 返回失败结果时异常不逃逸并进入清理路径（该测试直接断言清理路径，不断言日志内容；不置存活态的 fail-safe 见 `test_webui_http.py::TestStartMainFailSafe`）。验证 `q` 退出用例真实断言未启动 Bridge（`start_main.call_count == 0`）。 |
 | `test_call_coverage.py` | 启动链调用覆盖率测试 |
 | `test_webui_logging_system.py` | WebUI 操作日志表、日志读取接口与轮转产物测试 |
 | `test_logger_setup.py` | logger_setup 模块单元测试：handler 装配、重复初始化（热更新）、回退路径、级别过滤、启动分隔标记、临时目录清理（**窄编码控制台下无法编码字符不丢日志、且不改写流的全局 errors 策略**（`TestConsoleEncodingFallback`））。 |
 | `test_webui_concurrency.py` | 并发请求与锁竞争测试 |
 | `test_webui_auth_whitelist_contract.py` | 白名单免 token 契约的 HTTP 级回归锚定（自带 `shared_server` 夹具）：`/api/config` 与 `/api/webui/config/ui` **GET 免 token、POST 必须认证**（4 条）、`/api/admin/status` 双语义（无 token 200 / 带无效 token 401，2 条）、静态资产免 token放行、受保护路径无 token 拒绝 |
-| `test_webui_marker_contract.py` | 回归入口接线契约：每个 import WebUI 符号的测试文件都带 `test_webui_` 前缀（否则不进 `-m webui`）、`conftest` marker 名与 `run_webui_regression.bat` 字面量一致、`.bat` 保留 `node --test` 引号 glob 与 `-m webui`、`node:test` 套件非空、`collect_ignore_glob` 条目仍存在 |
+| `test_webui_marker_contract.py` | 回归入口接线契约：每个 import WebUI 符号的测试文件都带 `test_webui_` 前缀（否则不进 `-m webui`）、`conftest` marker 名与 `run_webui_regression.bat` 字面量一致、`.bat` 以 cmd 侧枚举 JS 用例文件（显式路径传参）并保留 `-m webui`、`.bat` 含零用例判红闸、`node:test` 套件非空、`collect_ignore_glob` 条目仍存在 |
 | `test_webui_dist_asset_contracts.py` | 构建产物与二进制资产存在性契约：`dist/assets` 必须存在 vite `manualChunks` 的 `core-*.js` 分组；`publicDir` 资产（favicon 等）必须原样复制进 `dist` 且不加哈希；FTS5 `simple` 分词 DLL 必须随仓库分发（缺失时中文搜索静默退化） |
 | `test_webui_dist_freshness.py` | dist 新鲜度与引用完整性护栏（`-m webui` 成员）：`index.html` 引用的每个产物（`.js`/`.css`/`.ico` 等，含嵌套子目录）必须真实存在于磁盘（捕获悬空引用）；`index-` entry chunk 必须存在；源码 mtime 不得晚于 dist chunk |
 | `test_webui_launcher_contracts.py` | 启动器契约：`后台带Bridge启动webui.vbs` 保留 UTF-8 BOM、设置 `BRIDGE_HEADLESS` 且与 `server.py` 一致、回退端口与 `config.toml` 默认值一致、含 Python 版本检查；两个 `.bat` 均含版本检查且依赖探测为 `requirements.txt` 子集 |
@@ -213,11 +213,13 @@ python -m pytest src/tests -m webui
 run_webui_regression.bat
 ```
 
-前端纯逻辑模块（不依赖 DOM/网络）另有 Node 内置 `node:test` 零依赖用例，位于 `src/webui/tests/`（说明见 `src/webui/tests/README.md`）：
+前端纯逻辑模块（不依赖 DOM/网络）另有 Node 内置 `node:test` 零依赖用例，位于 `src/webui/tests/`（要求 Node >= 20.19，说明见 `src/webui/tests/README.md`）：
 
 ```bash
 node.exe --test "src/webui/tests/*.test.mjs"
 ```
+
+注意：上式引号 glob 的展开依赖 Node 版本——未展开且不报错时会静默零覆盖。需要机械保证零覆盖必红时，用上方 `run_webui_regression.bat`（cmd 侧枚举 + 零用例判红）。
 
 `-m "not webui"` 可在跑全量时排除 WebUI 专项（含端到端启动服务器的慢用例）。
 

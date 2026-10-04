@@ -38,6 +38,40 @@ class _SyncPrep:
     needs_copy: bool
 
 
+class AuditIncompleteError(RuntimeError):
+    """全量审计终态不完整：审计权威性缺口，调用方不得据其推进核对时间戳。
+
+    触发域：use_snapshot=False（全量审计）且不可解析文件的旧快照行批量失效
+    失败——已知过期链接未被作废，后续普通扫描仍可能经采信门复用。审计扫描
+    已完成的其余阶段（目录登记、进度）不回滚，本异常在函数末尾抛出。
+    自愈：调用方本轮不推进 index_generation / last_verified_at /
+    last_full_audit_at，下轮周期或手动审计重试。
+    """
+
+
+class AuditCoverageIncompleteError(AuditIncompleteError):
+    """全量审计覆盖不完整：存在未被巡查的 A 根（根不可达 / os.walk 出错）。
+
+    与父类共同点：审计未覆盖全量 A 区 → 调用方不得推进索引代次、不得给未
+    巡查的行盖核对时间戳（避免"未验证当已验证"）。差异：本类**不**阻断审计
+    节拍（last_full_audit_at 仍推进）——覆盖缺口由挂载/权限等外部条件造成，
+    若同时冻结节拍，故障期间每个刷新周期都会重跑一次全量审计（逐文件强制
+    重读），代价与收益不成比例；且 prune 已 fail-closed 跳过、行未被破坏，
+    故节拍推进不构成"已核对"的虚假声明。
+    """
+
+
+def _snapshot_flush_needed(batch: list, snap_batch: list) -> bool:
+    """A 区扫描 flush_batch 的早返回判据：两队列均空才免提交。
+
+    快照队列不得被 batch 空判定静默跳过（两队列在公开面逐条同追加，解耦为
+    防御性对称）。单独抽出为模块级函数，使该契约可由行为用例直接锚定——
+    源码字符串断言不构成行为验证且对格式改动脆弱；"batch 空而 snap 非空"
+    经公开入口不可达，故行为用例锚定本函数而非端到端路径。
+    """
+    return bool(batch) or bool(snap_batch)
+
+
 class SyncService:
     """A->B 同步服务"""
 
@@ -79,6 +113,11 @@ class SyncService:
                       约束：False 仅允许在 a_roots=None（全量扫描）场景调用——
                       prune 的 keep 集来自本轮实际扫描集合，与局部 a_roots 同用
                       会误剪范围外快照行（直接拒绝调用，fail-closed）。
+
+        Raises:
+            AuditIncompleteError: 全量审计中不可解析文件的旧快照行失效失败。
+                余下阶段已完成，但审计终态不完整——调用方不得推进索引代次与
+                核对时间戳，应保留时间戳使下轮审计重试。
         """
         if not use_snapshot and a_roots is not None:
             # a_roots=[] 亦属限定局部根（空 keep 集会剪光快照行），
@@ -102,6 +141,10 @@ class SyncService:
         audit_paths: list[str] = []  # 仅 use_snapshot=False 时收集，供 prune
         unparseable_paths: list[str] = []  # 审计模式收集正文不可解析路径，prune 后删其旧快照行
         traversed_roots = 0  # os.walk 无错完成的 A 根数（出错/缺失根不计入）
+        # 审计不完整信号：余下阶段照常完成，函数末尾据此抛出分级异常
+        audit_incomplete_reason: str | None = None
+        audit_incomplete_cause: Exception | None = None
+        audit_coverage_incomplete = False  # True → 抛子类（不阻断审计节拍）
         parent_set: set[str] = set()
         last_log_time = time.time()
         # pool 前一次性载入快照（fail-open：读异常返回空 map → 全量重读）。
@@ -157,7 +200,7 @@ class SyncService:
             nonlocal indexed_count
             # batch 与 snap_batch 均空才早返回：快照提交不得被 batch 空判定
             # 静默跳过（两队列仅在公开面逐条同追加，解耦为防御性对称）。
-            if not batch and not snap_batch:
+            if not _snapshot_flush_needed(batch, snap_batch):
                 return
             if batch:
                 if use_bulk:
@@ -293,6 +336,12 @@ class SyncService:
                 logging.warning(
                     "[初始化] %d/%d 个 A 根不可达或遍历出错，keep 集不完整，跳过快照 prune",
                     len(roots) - traversed_roots, len(roots))
+                # 覆盖缺口信号：prune 的 fail-open 跳过不变（仍不删行），但调用方
+                # 不得据此推进索引代次、不得给本轮未巡查的行盖核对时间戳。
+                audit_coverage_incomplete = True
+                audit_incomplete_reason = (
+                    f"{len(roots) - traversed_roots}/{len(roots)} 个 A 根不可达或"
+                    "遍历出错，keep 集不完整（存在未巡查范围）")
             else:
                 # 全部根 walk 无错完成（含合法清空：walk 成功但 0 文件=权威空
                 # 目录，放行 prune）；解析失败文件已记入 audit_paths（见
@@ -302,9 +351,14 @@ class SyncService:
                     try:
                         # 不可解析文件的旧快照行批量删除：保留会被后续普通
                         # 扫描的采信门复用过期 webdav 链接；删除后回退读正文。
-                        # 失败仅告警不中断审计余下阶段，残留行由下轮审计重试。
+                        # 失败不中断审计余下阶段（目录登记等侧效照常完成），
+                        # 但记入不完整信号，函数末尾显式抛出拒绝被当作成功。
                         self.db.delete_a_snapshots_batch(unparseable_paths)
-                    except Exception:
+                    except Exception as exc:
+                        audit_incomplete_reason = (
+                            "不可解析文件旧快照行失效失败 "
+                            f"({len(unparseable_paths)} 条): {exc}")
+                        audit_incomplete_cause = exc
                         logging.warning(
                             "[初始化] 不可解析文件快照行批量删除失败，残留行交由下轮审计重试",
                             exc_info=True)
@@ -323,6 +377,16 @@ class SyncService:
         logging.info(
             "[初始化] A 区扫描完成，共索引 %d 个 STRM 文件 (%.1fs, %.0f 条/秒)",
             total_strm, elapsed, rate)
+        if audit_incomplete_reason is not None:
+            # 审计权威性缺口：本轮不得被当作完整成功审计。
+            # 余下阶段（目录登记/进度/FTS）已完成，此处显式上报而非静默返回——
+            # 调用方据此跳过索引代次与核对时间戳推进（覆盖缺口不阻断审计节拍）。
+            message = f"全量审计不完整：{audit_incomplete_reason}"
+            error_cls = (AuditCoverageIncompleteError if audit_coverage_incomplete
+                         else AuditIncompleteError)
+            if audit_incomplete_cause is not None:
+                raise error_cls(message) from audit_incomplete_cause
+            raise error_cls(message)
 
     def _upsert_a_batch_bulk(self, conn, records: list[tuple[str, str, str]]) -> int:
         """批量插入 A 区记录（使用 bulk_connection，跳过 FTS 同步）。

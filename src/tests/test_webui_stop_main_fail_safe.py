@@ -17,28 +17,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 pytestmark = pytest.mark.webui
 
+# 与生产 AppService.get_state_summary 的在跑相位集合逐字对齐：
+# "stopping"/"stopped"/"fail_safe" 不在其内（夹具反假绿对齐项）。
+_RUNNING_PHASES = {
+    "starting", "authenticating", "scanning_a", "scanning_b",
+    "syncing_a_to_b", "catching_up", "ready",
+}
+
 
 class _StopFailService:
-    """stop() 抛异常的最小 svc 替身；相位/摘要语义对齐 AppService 契约。"""
+    """stop() 抛异常的最小 svc 替身；相位/摘要语义对齐 AppService 契约。
+
+    存活建模：observer 在 stop() 内先停成功、后续清理步骤才抛错——
+    故 stop() 先置 observer 死亡再 raise，is_engine_running 读该位。
+    """
 
     def __init__(self):
         self._phase = "scanning_a"
         self._error = None
+        self._observer_alive = True
 
     def set_phase(self, phase, error=None):
         self._phase = phase
         self._error = error
 
+    def is_engine_running(self):
+        return self._observer_alive
+
     def get_state_summary(self):
         return {
             "phase": self._phase,
-            "is_running": self._phase not in {"stopped", "fail_safe"},
+            "is_running": self._phase in _RUNNING_PHASES,
             "is_ready": False,
             "error": self._error,
             "progress": {},
         }
 
     def stop(self):
+        self._observer_alive = False
         raise RuntimeError("boom")
 
 
@@ -55,10 +71,13 @@ class _FailSafeStaleService:
         self._phase = phase
         self._error = error
 
+    def is_engine_running(self):
+        return self._phase in _RUNNING_PHASES
+
     def get_state_summary(self):
         return {
             "phase": self._phase,
-            "is_running": self._phase not in {"stopped", "fail_safe"},
+            "is_running": self._phase in _RUNNING_PHASES,
             "is_ready": False,
             "error": self._error,
             "progress": {},
@@ -71,54 +90,68 @@ class _FailSafeStaleService:
 
 
 class _RecoverableStopService:
-    """首次 stop 抛异常、此后成功的可恢复替身（再次停止清错用例）。"""
+    """首次 stop 抛异常、此后成功的可恢复替身（再次停止清错用例）。
+
+    存活建模同 _StopFailService：observer 在 stop() 内先停、后续步骤抛错。
+    """
 
     def __init__(self):
         self._phase = "scanning_a"
         self._error = None
         self._fail_next = True
+        self._observer_alive = True
 
     def set_phase(self, phase, error=None):
         self._phase = phase
         self._error = error
 
+    def is_engine_running(self):
+        return self._observer_alive
+
     def get_state_summary(self):
         return {
             "phase": self._phase,
-            "is_running": self._phase not in {"stopped", "fail_safe"},
+            "is_running": self._phase in _RUNNING_PHASES,
             "is_ready": False,
             "error": self._error,
             "progress": {},
         }
 
     def stop(self):
+        self._observer_alive = False
         if self._fail_next:
             self._fail_next = False
             raise RuntimeError("boom")
-        # 成功停止后相位须落 stopped，使 stop_main 清句柄前的 is_running
-        # 权威复核判为假、放行正常清理（否则残留 stopping 被误判为引擎存活）。
+        # 成功停止后相位须落 stopped，使 stop_main 清句柄前的存活权威
+        # 复核判为假、放行正常清理（否则残留 stopping 被误判为引擎存活）。
         self._phase = "stopped"
 
 
 class _RevivingStaleService:
     """fail_safe 残留替身（复活形态）：stop() 返回成功但旧引擎随后照常
-    start（get_state_summary().is_running 翻真），模拟旧 worker 停在最后一次
-    generation 检查与 svc.start() 之间、stop 先完成、"清理成功"判定后旧引擎
-    复活的竞态。"""
+    start，模拟旧 worker 停在最后一次 generation 检查与 svc.start() 之间、
+    stop 先完成、"清理成功"判定后旧引擎复活的竞态。
+
+    存活建模与生产对齐：真实 stop() 不改相位，复活由 observer 存活位在
+    stop 返回后翻真表达（等价于旧 worker 随后调用了 svc.start()）。"""
 
     def __init__(self):
         self._phase = "fail_safe"
         self._error = "上次的错误"
+        self._observer_alive = False
         self.stop_called = 0
 
     def set_phase(self, phase, error=None):
         self._phase = phase
         self._error = error
 
+    def is_engine_running(self):
+        return self._observer_alive
+
     def get_state_summary(self):
         return {
             "phase": self._phase,
-            "is_running": self._phase not in {"stopped", "fail_safe"},
+            "is_running": self._phase in _RUNNING_PHASES,
             "is_ready": False,
             "error": self._error,
             "progress": {},
@@ -126,23 +159,29 @@ class _RevivingStaleService:
 
     def stop(self):
         self.stop_called += 1
-        # stop 已返回，但旧 worker 随后照常 start 旧引擎
-        self._phase = "scanning_a"
+        # stop 已返回，但旧 worker 随后照常 start 旧引擎：存活位翻真，
+        # 相位不动（与真实 stop() 副作用一致）。
+        self._observer_alive = True
 
 
 class _MockStaleSvc:
     """start/stop/phase 多路可控替身，对齐 AppService 摘要契约：
     - stop_raises：stop() 抛错（模拟停止失败）；
     - start_raises：start() 抛错（保留能力）；
-    - is_revive_after_stop：stop() 后把相位翻成 running 域（模拟停止返回但引擎复活）；
+    - is_revive_after_stop：stop() 返回后 observer 存活位翻真（模拟停止返回
+      但引擎复活）；
     - raise_on_start_phase：set_phase("starting") 抛错——供启动异常回滚用例把异常
       落点后置于句柄赋值之后（get_config_status 已放行、句柄已赋值）；
-    - get_config_status() 返回 ready：让 start_main 通过配置就绪闸，推进到句柄赋值。"""
+    - get_config_status() 返回 ready：让 start_main 通过配置就绪闸，推进到句柄赋值。
+
+    存活建模与生产对齐：真实 stop() 不改相位，复活由 observer 存活位表达，
+    不以相位写入充当存活信号。"""
 
     def __init__(self, stop_raises=False, start_raises=False,
                  is_revive_after_stop=False, raise_on_start_phase=False):
         self._phase = "fail_safe"
         self._error = "上次错误"
+        self._observer_alive = False
         self._stop_raises = stop_raises
         self._start_raises = start_raises
         self._revive = is_revive_after_stop
@@ -158,10 +197,13 @@ class _MockStaleSvc:
         self._phase = phase
         self._error = error
 
+    def is_engine_running(self):
+        return self._observer_alive
+
     def get_state_summary(self):
         return {
             "phase": self._phase,
-            "is_running": self._phase not in {"stopped", "fail_safe"},
+            "is_running": self._phase in _RUNNING_PHASES,
             "is_ready": False,
             "error": self._error,
             "progress": {},
@@ -176,22 +218,81 @@ class _MockStaleSvc:
         if self._stop_raises:
             raise RuntimeError("stale stop boom")
         if self._revive:
-            self._phase = "scanning_a"
+            # stop 返回后旧引擎复活：存活位翻真，相位不动（与生产 stop() 一致）
+            self._observer_alive = True
+
+
+class _AuthorityStubSvc:
+    """复合存活权威 Red-Light 用例替身：observer 存活位与相位/摘要
+    is_running 互相独立，可构造「相位说谎」场景——
+    - observer_alive=True + phase="stopped"：相位谎停、observer 真跑（RL-1）；
+    - observer_alive=False + phase="ready"：相位谎跑、observer 不在场（RL-2）；
+    - observer_alive=True + stop() 后仍真跑：拒绝路径不谎报（RL-4）。
+    set_phase 记录全部写入序列，供断言「拒绝分支不得写 fail_safe」。
+    """
+
+    def __init__(self, observer_alive, phase, summary_is_running):
+        self._observer_alive = observer_alive
+        self._phase = phase
+        self._summary_is_running = summary_is_running
+        self.phases_written = []
+
+    def set_phase(self, phase, error=None):
+        self.phases_written.append(phase)
+        self._phase = phase
+
+    def is_engine_running(self):
+        return self._observer_alive
+
+    def get_state_summary(self):
+        return {
+            "phase": self._phase,
+            "is_running": self._summary_is_running,
+            "is_ready": False,
+            "error": None,
+            "progress": {},
+        }
+
+    def stop(self):
+        pass
+
+
+class _BlockingObserver:
+    """join(timeout) 阻塞的 observer 替身：run 形态阻塞在未 set 的 Event 上，
+    供 RL-5 验证 stop() 的 join 有界（不 hang）；release() 供测试收尾防泄漏。
+    """
+
+    def __init__(self):
+        self._ev = threading.Event()
+        self._thread = threading.Thread(target=self._ev.wait, daemon=True)
+        self._thread.start()
+        self.join_timeout_used = None
+
+    def is_alive(self):
+        return self._thread.is_alive()
+
+    def stop(self):
+        pass
+
+    def join(self, timeout=None):
+        self.join_timeout_used = timeout
+        self._thread.join(timeout=timeout)
+
+    def release(self):
+        self._ev.set()
 
 
 class _BlockingWorkerStub:
     """join(5.0) 超时后仍存活的 worker 替身：run() 阻塞在未 set 的 Event 上，
     测试结束后经 release() 释放，避免线程泄漏。
 
-    start_blocked=False 形态：Event 先 set 后启动线程，线程立即退出——
-    join 立即返回且线程已消亡，供「复活」用例模拟 join 成功判据被满足。
+    exit_on_join=True 形态：线程在 join 被调用时才退出——确定性复现生产时序
+    「join 门槛 is_alive 为真 → join 期间 worker 退出 → join 返回」。
     """
 
-    def __init__(self, start_blocked=True, exit_on_join=False):
+    def __init__(self, exit_on_join=False):
         self._ev = threading.Event()
         self._exit_on_join = exit_on_join
-        if not start_blocked:
-            self._ev.set()
         self._thread = threading.Thread(target=self._ev.wait, daemon=True)
         self._thread.start()
 
@@ -242,7 +343,7 @@ def test_start_main_rejects_when_stale_engine_revives_after_join(
     is_running 权威复核 fail-closed，拒绝启动且句柄保留。"""
     server, _base, _token = webui_server_shared
     svc = _RevivingStaleService()
-    worker = _BlockingWorkerStub(start_blocked=True, exit_on_join=True)
+    worker = _BlockingWorkerStub(exit_on_join=True)
     server._config = None
     server._app_service = svc
     server._app_worker_thread = worker
@@ -454,11 +555,8 @@ def test_start_main_rolls_back_handles_when_startup_raises_after_assignment(
     「已在运行」、_admin_client 被换成未认证 client。回滚后这些句柄必须清空、
     相位可读为 fail_safe。异常落点后置于句柄赋值之后方触发回滚分支。
     """
-    import importlib
     import webdav_client as _wc_mod
     import app_service as _as_mod
-    importlib.reload(_as_mod)
-    importlib.reload(_wc_mod)
     monkeypatch.setitem(sys.modules, "app_service", _as_mod)
     monkeypatch.setitem(sys.modules, "webdav_client", _wc_mod)
 
@@ -477,8 +575,8 @@ def test_start_main_rolls_back_handles_when_startup_raises_after_assignment(
 
     def _fake_service(*a, **k):
         # get_config_status() 返回 ready 令流程推进过就绪闸，句柄得以赋值；
-        # raise_on_start_phase 令 set_phase("starting") 抛错——此时 self._app_service
-        # 已赋值、self._app_running 已置 True，异常现场为「赋值后」。
+        # raise_on_start_phase 令 set_phase("starting") 抛错——此时
+        # self._app_service 已赋值、存活权威已可判在跑，异常现场为「赋值后」。
         return _MockStaleSvc(raise_on_start_phase=True)
 
     monkeypatch.setattr(_wc_mod, "OpenListAdminClient", _fake_client)
@@ -488,14 +586,14 @@ def test_start_main_rolls_back_handles_when_startup_raises_after_assignment(
     server._config = _Cfg()
     server._app_service = None
     server._app_worker_thread = None
-    server._app_running = False
     server._app_start_time = None
     server._admin_client = None
     result = server.start_main()
     assert result["success"] is False, f"启动抛错必须失败，实际: {result!r}"
     assert server._app_service is None, (
         "启动异常后新 svc 句柄必须回滚清空，不得残留 starting 实例")
-    assert server._app_running is False, "启动异常后 _app_running 必须回滚为 False"
+    assert server.get_main_status()["running"] is False, (
+        "启动异常回滚后存活权威必须判未在跑（句柄已清、无 worker 兜底）")
     assert server._admin_client is None, "启动异常后 _admin_client 必须回滚清空"
     status = server.get_main_status()
     assert status["phase"] == "fail_safe", (
@@ -506,7 +604,7 @@ def test_stop_main_rejects_when_worker_survives_join(webui_server_shared):
     """worker join(5.0) 超时仍存活 → stop_main 拒绝落成功、保留句柄供重试。"""
     server, _base, _token = webui_server_shared
     svc = _MockStaleSvc(stop_raises=False)
-    worker = _BlockingWorkerStub()  # start_blocked=True，join 期间不退出
+    worker = _BlockingWorkerStub()  # 阻塞在未 set 的 Event 上，join 期间不退出
     server._app_service = svc
     server._app_worker_thread = worker
     try:
@@ -538,3 +636,118 @@ def test_stop_main_rejects_when_engine_revives_after_stop(webui_server_shared):
     assert server._app_service is svc, "拒绝后必须保留 svc 句柄供重试"
     assert server._app_phase == "fail_safe", (
         f"拒绝后相位须落 fail_safe，实际 {server._app_phase!r}")
+
+
+# ============================================================
+# 复合存活权威 Red-Light（RL-1..RL-5）：核心断言存活权威而非相位派生
+# ============================================================
+
+def test_rl1_phase_lying_stopped_but_observer_alive_reports_running(
+        webui_server_shared):
+    """RL-1：observer 真活且相位被写成 stopped → get_main_status()["running"]
+    必须为 True（存活权威读 observer/worker，不读相位派生）。"""
+    server, _base, _token = webui_server_shared
+    svc = _AuthorityStubSvc(observer_alive=True, phase="stopped",
+                            summary_is_running=False)
+    server._app_service = svc
+    server._app_worker_thread = None
+    status = server.get_main_status()
+    assert status["running"] is True, (
+        "相位被谎写成 stopped 但 observer 真活时 running 必须如实为 True，"
+        f"实际: {status!r}")
+
+
+def test_rl2_phase_lying_ready_but_no_observer_no_worker_reports_stopped(
+        webui_server_shared):
+    """RL-2：相位谎报 ready 但 observer 不在场、worker 缺席 → running 必须
+    为 False（假在跑不得经相位派生放大为存活事实）。"""
+    server, _base, _token = webui_server_shared
+    svc = _AuthorityStubSvc(observer_alive=False, phase="ready",
+                            summary_is_running=True)
+    server._app_service = svc
+    server._app_worker_thread = None
+    status = server.get_main_status()
+    assert status["running"] is False, (
+        "相位 ready 但 observer/worker 均不在场时 running 必须为 False，"
+        f"实际: {status!r}")
+
+
+def test_rl3_scan_window_worker_alive_counts_as_running_and_gates_start(
+        webui_server_shared):
+    """RL-3：observer 未挂载但启动 worker 存活 → _engine_is_running() 为 True
+    且 start_main 命中「已在运行」拒绝（worker 兜底覆盖扫描窗）。"""
+    server, _base, _token = webui_server_shared
+    svc = _AuthorityStubSvc(observer_alive=False, phase="scanning_a",
+                            summary_is_running=True)
+    worker = _BlockingWorkerStub()
+    server._app_service = svc
+    server._app_worker_thread = worker
+    try:
+        assert server._engine_is_running() is True, (
+            "observer 未挂但 worker 存活时复合权威必须判在跑")
+        result = server.start_main()
+        assert result["success"] is False, (
+            f"扫描窗复合权威在跑时 start_main 必须拒绝，实际: {result!r}")
+        assert "已在运行" in result["message"], (
+            f"拒绝消息须指明已在运行，实际: {result['message']!r}")
+        assert server._app_service is svc, "拒绝后句柄必须保留"
+        assert server._app_worker_thread is worker, "拒绝后 worker 句柄必须保留"
+    finally:
+        worker.release()
+
+
+def test_rl4_rejection_paths_never_write_fail_safe_phase_to_live_engine(
+        webui_server_shared):
+    """RL-4：引擎真活（observer 存活）但 stop 未完成 → stop_main 必须
+    fail-closed 拒绝（error_type=engine_alive），且绝不把在跑引擎的相位
+    写成 fail_safe（拒绝不谎报）。"""
+    server, _base, _token = webui_server_shared
+    svc = _AuthorityStubSvc(observer_alive=True, phase="scanning_a",
+                            summary_is_running=True)
+    server._app_service = svc
+    server._app_worker_thread = None
+    result = server.stop_main()
+    assert result["success"] is False, (
+        f"引擎真活时停止必须拒绝伪造成功，实际: {result!r}")
+    assert result.get("error_type") in ("worker_alive", "engine_alive"), (
+        f"拒绝须携带存活类 error_type，实际: {result!r}")
+    assert "fail_safe" not in svc.phases_written, (
+        "拒绝路径不得把在跑引擎相位写成 fail_safe，实际写入序列: "
+        f"{svc.phases_written!r}")
+    assert server._app_service is svc, "拒绝后必须保留句柄供重试"
+
+
+def test_rl5_stop_bounded_join_does_not_hang_or_fake_success(
+        webui_server_shared):
+    """RL-5：observer.join 有界（5s 量级）——join 阻塞时 stop() 必须在
+    有界时间内返回、不得无限持锁；observer 仍存活不得谎报停止完成。"""
+    import app_service as _as_mod
+    from app_service import AppService
+
+    svc = AppService.__new__(AppService)
+    svc._startup_cancel_event = threading.Event()
+    svc._subtitle_scan_cancel_event = threading.Event()
+    svc._startup_generation = 0
+    svc.startup_generation = 0
+    svc._cleanup_lock = threading.Lock()
+    svc._pending_cleanups = {}
+    import types as _types
+    svc.refresh_service = _types.SimpleNamespace(stop=lambda: None)
+    svc._watcher_handlers = []
+    svc._subtitle_scan_thread = None
+    svc._running = True
+    observer = _BlockingObserver()
+    svc.observer = observer
+
+    stop_thread = threading.Thread(target=svc.stop, daemon=True)
+    stop_thread.start()
+    try:
+        stop_thread.join(timeout=8)
+        assert not stop_thread.is_alive(), (
+            "stop() 必须在有界时间内返回（join 须带超时，不得无限阻塞）")
+        assert observer.join_timeout_used == 5.0, (
+            f"observer.join 必须以 5s 超时调用，实际: "
+            f"{observer.join_timeout_used!r}")
+        assert observer.is_alive(), "join 超时后 observer 仍存活不得谎报已停"
+    finally:
+        observer.release()

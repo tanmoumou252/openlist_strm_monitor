@@ -45,6 +45,19 @@ def _dist_js_chunks() -> list[Path]:
     return sorted((DIST_DIR / "assets").glob("*.js"))
 
 
+def _dist_artifact_mtime(chunks: list[Path]) -> float:
+    """dist 产物 mtime 聚合口径（唯一实现，生产断言与用例共用）。
+
+    取「最新产物 mtime」：陈旧 rebuild 表现为全部产物落后源码；dist/assets
+    中的残留旧文件（手工拷贝/未清理旧 hash 产物）不构成"源码已改未 rebuild"
+    证据。用例必须经本函数聚合——自算 min/max 会使护栏口径被改坏而无红。
+    空集合抛错：护栏失去输入时不得静默通过。
+    """
+    if not chunks:
+        raise ValueError("dist 产物集合为空，无 mtime 可聚合")
+    return max(c.stat().st_mtime for c in chunks)
+
+
 FUTURE_TOLERANCE_SECONDS = 2  # 未来时间戳判定容差（与陈旧判定容差同口径）
 
 
@@ -119,7 +132,7 @@ class TestDistFreshness:
         src_latest = _latest_source_mtime()
         # max 口径：陈旧 rebuild 表现为全部 chunk 落后源码；dist/assets 中的
         # 残留旧文件（手工拷贝/未清理旧 hash 产物）不构成误报证据
-        dist_newest = max(c.stat().st_mtime for c in chunks)
+        dist_newest = _dist_artifact_mtime(chunks)
         assert not _is_dist_stale(src_latest, dist_newest), _stale_message(
             src_latest, dist_newest)
 
@@ -141,7 +154,7 @@ class TestStaleFixtureRedPath:
         src_file.write_text("// fresh", encoding="utf-8")
 
         src_latest = src_file.stat().st_mtime
-        dist_newest = chunk.stat().st_mtime
+        dist_newest = _dist_artifact_mtime([chunk])
         assert _is_dist_stale(src_latest, dist_newest), (
             "陈旧夹具应触发新鲜度 fail 路径（dist mtime 早于源码）")
 
@@ -159,7 +172,7 @@ class TestStaleFixtureRedPath:
         chunk.write_text("/* fresh */", encoding="utf-8")
 
         src_latest = src_file.stat().st_mtime
-        dist_newest = chunk.stat().st_mtime
+        dist_newest = _dist_artifact_mtime([chunk])
         assert not _is_dist_stale(src_latest, dist_newest), (
             "新鲜 dist 不应触发 fail")
 
@@ -181,10 +194,13 @@ class TestStaleFixtureRedPath:
         os.utime(fresh_chunk, (now - 1, now - 1))
         os.utime(stale_chunk, (now - 3600, now - 3600))
 
-        dist_newest = max(c.stat().st_mtime for c in fake_dist_assets.glob("*.js"))
+        # 经生产聚合口径（_dist_artifact_mtime）取值：口径被改坏（如退回 min）
+        # 时本断言必红——这正是本用例对生产护栏的检测力所在
+        dist_newest = _dist_artifact_mtime(
+            sorted(fake_dist_assets.glob("*.js")))
         assert not _is_dist_stale(now, dist_newest), (
             "fresh 与 stale chunk 并存时不得误报陈旧（残留旧 chunk 不应翻红）")
-        assert _is_dist_stale(now, stale_chunk.stat().st_mtime), (
+        assert _is_dist_stale(now, _dist_artifact_mtime([stale_chunk])), (
             "仅 stale chunk 存在时仍必须判陈旧（护栏检测力不得因 max 口径丧失）")
 
 

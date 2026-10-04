@@ -802,9 +802,10 @@ class WebUIServer:
         self._thread: threading.Thread | None = None
         self._project_root = PROJECT_ROOT
 
-        # AppService 管理（主程序）
+        # AppService 管理（主程序）。存活真相唯一单源 = 复合存活权威
+        # _engine_is_running()（引擎侧 observer 真活 ∨ 启动 worker 存活），
+        # 不设 phase 派生/手写的存活标量。
         self._app_service: AppService | None = None
-        self._app_running = False
         self._app_start_lock = threading.Lock()
         self._app_worker_thread: threading.Thread | None = None
         self._app_generation = 0
@@ -1203,12 +1204,46 @@ class WebUIServer:
     # AppService 管理（主程序）
     # ============================================================
 
+    def _engine_is_running(self) -> bool:
+        """复合存活权威：引擎侧 observer 真活 ∨ 启动 worker 存活。
+
+        所有「引擎是否在跑」的决策与展示（停机门、退出是否 stop_main、
+        状态 running）一律读本封装，绝不以 phase 派生 is_running 作存活
+        真相。worker 存活项覆盖扫描窗——observer 迟至 start_watchers 才
+        挂载，启动链路上由 worker 兜住「引擎正在启动/扫描」。
+        svc 缺失或无 is_engine_running 方法时退化为 worker 存活判 + WARNING。
+        """
+        svc = self._app_service
+        if svc is not None:
+            checker = getattr(svc, "is_engine_running", None)
+            if callable(checker):
+                try:
+                    if checker():
+                        return True
+                except Exception:
+                    logging.warning(
+                        "[Main] is_engine_running 调用失败，退化为 worker 存活判",
+                        exc_info=True)
+            else:
+                logging.warning(
+                    "[Main] 引擎侧缺少 is_engine_running，存活判定退化为 worker 线程存活")
+        worker = self._app_worker_thread
+        return bool(worker is not None and worker.is_alive())
+
     def start_main(self) -> dict:
         """启动主程序（非阻塞异步启动，Gate 1 轻量准入）。"""
         with self._app_start_lock:
             if self._app_service:
-                summary = self._app_service.get_state_summary()
-                if summary["is_running"]:
+                _summary_getter = getattr(self._app_service, "get_state_summary",
+                                          None)
+                summary = (_summary_getter() if callable(_summary_getter)
+                           else {})
+                # 复合存活权威在跑 + 相位非终态残留 → 拒绝重复启动。
+                # 相位已是 stopped/fail_safe 时即便 worker 仍存活也不在此
+                # 拒绝，交下方残留清理路径给出更精确的「未退出/复活」拒绝，
+                # 保留句柄与重试语义。
+                if (self._engine_is_running()
+                        and summary.get("phase") not in ("stopped", "fail_safe")):
                     return {"success": False, "message": "主程序已在运行中"}
                 # fail_safe 残留：句柄仍在但引擎未运行。先尽力清理旧实例，
                 # 防止下方新建 AppService 覆盖句柄导致旧引擎线程失控。
@@ -1229,9 +1264,9 @@ class WebUIServer:
                     # stop() 返回不保证旧引擎已停：worker 为 None / 已死 /
                     # 当前线程时更不代表引擎已退出，旧 worker 可能停在最后一次
                     # generation 检查与 svc.start() 之间、stop 先完成、旧引擎随后
-                    # 照常 start。权威状态复核须无条件执行，与 worker.is_alive()
-                    # 的「未退出」拒绝各自独立、互斥覆盖。
-                    if stale_svc.get_state_summary().get("is_running"):
+                    # 照常 start。权威存活复核（复合权威）须无条件执行，与
+                    # worker.is_alive() 的「未退出」拒绝各自独立、互斥覆盖。
+                    if self._engine_is_running():
                         logging.warning(
                             "[Main] fail_safe 残留引擎在 stop 后复活，拒绝启动")
                         return {
@@ -1311,7 +1346,8 @@ class WebUIServer:
                 # 任何闸拦截都保留 fail_safe 相位与错误可见。
                 self._app_phase = "stopped"
                 self._app_error = None
-                self._app_running = True
+                # 不再手写存活标量：启动在跑由复合存活权威
+                # （observer 真活 ∨ worker 存活）如实表达。
                 self._app_service.set_phase("starting")
                 self._app_start_time = time.time()
                 self._app_generation += 1
@@ -1325,7 +1361,6 @@ class WebUIServer:
                             logging.error("[Main] 后台鉴权失败: %s", err)
                             if getattr(self, "_app_generation", None) == gen:
                                 svc.set_phase("fail_safe", error=err)
-                                self._app_running = False
                             return
 
                         if getattr(self, "_app_generation", None) != gen:
@@ -1338,7 +1373,6 @@ class WebUIServer:
                             logging.error("[Main] %s", err, exc_info=True)
                             if getattr(self, "_app_generation", None) == gen:
                                 svc.set_phase("fail_safe", error=err)
-                                self._app_running = False
                             return
 
                         if getattr(self, "_app_generation", None) != gen:
@@ -1363,7 +1397,6 @@ class WebUIServer:
                             # 重新检查代次：若在 stop() 期间有新一代 start_main，不再写 fail_safe
                             if getattr(self, "_app_generation", None) == gen:
                                 svc.set_phase("fail_safe", error=str(e))
-                                self._app_running = False
 
                 self._app_worker_thread = threading.Thread(
                     target=_worker,
@@ -1393,7 +1426,6 @@ class WebUIServer:
                             "[Main] 启动异常回滚 svc.stop() 失败: %s", rollback_exc)
                 self._app_service = None
                 self._app_worker_thread = None
-                self._app_running = False
                 self._app_start_time = None
                 self._admin_client = None
                 self._app_phase = "fail_safe"
@@ -1419,34 +1451,32 @@ class WebUIServer:
                 # stop() 不保证旧引擎已停（可能停在最后一次 generation 检查与
                 # svc.start() 之间、stop 先完成、随后照常 start）。两种情形一律走
                 # 停止失败路径，保留句柄供重试，绝不伪造 stopped 清掉仍在跑的引擎。
+                # 拒绝分支不把在跑引擎的相位写成 fail_safe（拒绝不谎报）：
+                # 仅落 server 侧展示态，存活交复合权威如实给出。
                 # current_thread 守卫与 start_main fail-safe 清理块对称：stop_main 若
                 # 在 worker 线程上下文被调用，上方 join 被跳过、is_alive 为真，无该
                 # 守卫会把「调用者自身就是 worker」误判为未退出而立即误拒。
                 if (worker is not None and worker.is_alive()
                         and worker is not threading.current_thread()):
                     logging.error("[Main] 停止失败：worker join 超时仍存活")
-                    self._app_running = False
                     self._app_phase = "fail_safe"
                     self._app_error = "旧 worker 未退出，停止未完成"
-                    if svc:
-                        svc.set_phase("fail_safe", error="旧 worker 未退出，停止未完成")
                     return {
                         "success": False,
                         "message": "旧 worker 未退出，停止未完成，请重试停止或查看服务端日志",
                         "error_type": "worker_alive",
                     }
-                if svc and svc.get_state_summary().get("is_running"):
+                # engine_alive 判据读引擎存活权威（observer 真活）而非相位派生
+                # is_running——相位可被谎写，observer 存活不可。
+                if svc and svc.is_engine_running():
                     logging.error("[Main] 停止失败：引擎在 stop 后仍存活")
-                    self._app_running = False
                     self._app_phase = "fail_safe"
                     self._app_error = "引擎在 stop 后仍存活，停止未完成"
-                    svc.set_phase("fail_safe", error="引擎在 stop 后仍存活，停止未完成")
                     return {
                         "success": False,
                         "message": "引擎在 stop 后仍存活，停止未完成，请重试停止或查看服务端日志",
                         "error_type": "engine_alive",
                     }
-                self._app_running = False
                 self._app_phase = "stopped"
                 self._app_service = None
                 self._app_error = None
@@ -1468,31 +1498,30 @@ class WebUIServer:
                 return {"success": False, "message": "停止失败，请查看服务端日志", "error_type": "exception"}
 
     def get_main_status(self) -> dict:
-        """获取主程序状态，优先使用 AppService 的原子状态快照。"""
+        """获取主程序状态：存活读复合存活权威，相位/进度作纯展示（纯读无写回）。"""
         svc = self._app_service
         if svc and hasattr(svc, "get_state_summary"):
             summary = svc.get_state_summary()
         else:
             phase = getattr(self, "_app_phase", "stopped")
+            # fallback 集合仅作展示相位、不作存活权威
             summary = {
                 "phase": phase,
-                "is_running": phase not in {"stopped", "fail_safe"},
                 "is_ready": phase == "ready",
                 "error": getattr(self, "_app_error", None),
                 "progress": {},
             }
-        is_running = summary["is_running"]
-        self._app_running = is_running
+        running = self._engine_is_running()
         result: dict = {
-            "running": is_running,
+            "running": running,
             "ready": summary["is_ready"],
             "phase": summary["phase"],
             "status": summary["phase"],
             "progress": summary["progress"],
             "error": summary.get("error"),
-            "uptime": int(time.time() - self._app_start_time) if is_running and self._app_start_time else None,
+            "uptime": int(time.time() - self._app_start_time) if running and self._app_start_time else None,
         }
-        if is_running and svc:
+        if running and svc:
             rs = getattr(svc, "refresh_service", None)
             if rs:
                 result["refresh_healthy"] = rs.healthy
@@ -1655,8 +1684,8 @@ def main():
         except (KeyboardInterrupt, EOFError):
             pass
 
-    # 退出时停止主程序（如果在运行）
-    if server._app_running:
+    # 退出时停止主程序（若复合存活权威判在跑）
+    if server._engine_is_running():
         logger.info("正在停止主程序...")
         server.stop_main()
 

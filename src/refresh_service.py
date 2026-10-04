@@ -29,6 +29,12 @@ except ImportError:
 # 规范化 A 根路径（a_strm_files.local_path 一律经 resolve() 写入，
 # 传原始配置串会导致 touch_verified_by_mapping 匹配 0 行、last_verified_at 永不推进）
 from config import normalize_local_root
+# 全量审计不完整信号：失效失败（父类，四项推进全跳过）与覆盖缺口
+# （子类，只跳过索引代次与核对盖章、不阻断审计节拍）
+from domain.sync.sync_service import (
+    AuditCoverageIncompleteError,
+    AuditIncompleteError,
+)
 
 
 # ==================== PathAnalysis 定义 ====================
@@ -120,12 +126,35 @@ class RefreshService:
         try:
             logging.warning("[主动刷新] 触发兜底全量审计，可能访问所有 A 区磁盘")
             # use_snapshot=False：全量审计为快照权威自愈触发源，强制全读并重建/剪枝
-            self.app.initial_scan_a(use_bulk=False, a_roots=None, use_snapshot=False)
+            audit_incomplete: AuditIncompleteError | None = None
+            audit_coverage_incomplete = False
+            try:
+                self.app.initial_scan_a(use_bulk=False, a_roots=None, use_snapshot=False)
+            except AuditCoverageIncompleteError as exc:
+                # 覆盖不完整（存在未巡查 A 根）：B 区收敛照常，但下方索引代次与
+                # 核对盖章跳过；审计节拍照常推进（否则故障期每周期重跑全量审计）。
+                audit_coverage_incomplete = True
+                logging.error(
+                    "[主动刷新] 全量审计覆盖不完整，跳过索引代次与核对盖章: %s", exc)
+            except AuditIncompleteError as exc:
+                # 审计终态不完整（不可解析文件旧快照行失效失败）：A 索引已写入、
+                # 过期链接未作废，审计权威性未建立。B 区收敛照常执行（a_strm_files
+                # 不受影响），但下方索引代次与核对时间戳推进一律跳过——保留时间戳
+                # 使本轮不计成功、下轮周期重新放行审计。
+                audit_incomplete = exc
+                logging.error("[主动刷新] 全量审计不完整，跳过核对时间戳推进: %s", exc)
             self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
+            if audit_incomplete is not None:
+                # False 交由 execute_refresh_cycle 的非正常跳过分支更新健康状态
+                return False
             # _last_full_audit_at 必须在所有 DB 写入成功后才更新，
             # 防止 DB 写失败时时间戳已推进导致后续周期静默跳过审计
             db_write_ok = True
-            mapping_ids = self.app._current_mapping_ids()
+            # 覆盖不完整（存在未巡查 A 根）：不得推进索引代次，也不得给未巡查
+            # 的行盖"已核对"时间戳——两条推进均由 mapping_ids 驱动，置空即跳过；
+            # 审计节拍（下方 set_control）仍推进，避免故障期每周期重跑全量审计。
+            mapping_ids = ([] if audit_coverage_incomplete
+                           else self.app._current_mapping_ids())
             if mapping_ids:
                 try:
                     self.app.db.complete_index_generation(mapping_ids)
@@ -180,11 +209,30 @@ class RefreshService:
             now = time.time()
             logging.warning("[手动审计] 触发全量审计，可能访问所有 A 区磁盘")
             # use_snapshot=False：全量审计为快照权威自愈触发源，强制全读并重建/剪枝
-            self.app.initial_scan_a(use_bulk=False, a_roots=None, use_snapshot=False)
+            audit_incomplete: AuditIncompleteError | None = None
+            audit_coverage_incomplete = False
+            try:
+                self.app.initial_scan_a(use_bulk=False, a_roots=None, use_snapshot=False)
+            except AuditCoverageIncompleteError as exc:
+                # 覆盖不完整：B 区收敛照常，跳过索引代次与核对盖章，节拍照常推进，
+                # 并在返回体中带 coverage_incomplete / warning 供 UI 与运维可见。
+                audit_coverage_incomplete = True
+                logging.error(
+                    "[手动审计] 审计覆盖不完整，跳过索引代次与核对盖章: %s", exc)
+            except AuditIncompleteError as exc:
+                # 审计终态不完整：B 区收敛照常执行，但索引代次与核对时间戳推进
+                # 全部跳过，并向调用方返回可区分的 incomplete 终态（error 位透出根因）。
+                audit_incomplete = exc
+                logging.error("[手动审计] 审计不完整，跳过核对时间戳推进: %s", exc)
             self.app.scan_a_to_b_full_sync(valid_engine_paths=None, use_bulk=False)
+            if audit_incomplete is not None:
+                return {"ok": False, "status": "incomplete",
+                        "error": str(audit_incomplete)}
             # _last_full_audit_at 必须在所有 DB 写入成功后才更新
             db_write_ok = True
-            mapping_ids = self.app._current_mapping_ids()
+            # 覆盖不完整：同上，跳过索引代次与核对盖章，节拍照常推进。
+            mapping_ids = ([] if audit_coverage_incomplete
+                           else self.app._current_mapping_ids())
             if mapping_ids:
                 try:
                     self.app.db.complete_index_generation(mapping_ids)
@@ -224,6 +272,11 @@ class RefreshService:
                 "status": "completed" if db_write_ok else "db_write_failed",
                 "index_generation": meta.get("index_generation", 0) if isinstance(meta, dict) else 0,
                 "index_generation_at": meta.get("index_generation_at", 0) if isinstance(meta, dict) else 0,
+                # 覆盖缺口：审计已按节拍完成，但存在未巡查 A 根——索引代次与
+                # 核对盖章未推进，透出可区分的 warning 供运维判断挂载健康。
+                "coverage_incomplete": audit_coverage_incomplete,
+                "warning": ("存在未巡查 A 根：已跳过索引代次推进与核对时间戳盖章"
+                            if audit_coverage_incomplete else None),
             }
         except Exception as e:
             logging.error("[手动审计] 审计失败: %s", e, exc_info=True)

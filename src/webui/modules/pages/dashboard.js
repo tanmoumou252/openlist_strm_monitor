@@ -295,7 +295,7 @@ export async function updateMainStatus() {
     const phase = status.phase || (status.running ? 'ready' : 'stopped');
 
     // 引导步骤④「启动主程序」以 main_running 判定勾选，而 main_running 在受理瞬间
-    // 即为真（server 先置 _app_running 再返回响应）。故仅在轮询观测到终态相位
+    // 即为真（server 侧复合存活权威已判在跑）。故仅在轮询观测到终态相位
     // 且相位发生变化时刷新引导：避免受理瞬间过早打勾，且 Worker 落 fail_safe 后
     // 错误勾选可自愈（此前无自愈路径）。
     // 终态集合含 stopping：停止操作进行中 running 已转 false，④ 此刻就该取消勾选；
@@ -403,7 +403,11 @@ export async function updateMainStatus() {
     } else {
       dot.style.background = '#f44336';
       dot.style.boxShadow = '0 0 12px rgba(244,67,54,0.6)';
-      text.textContent = '主程序已停止';
+      // stopped/not_configured 类终态：错误非空时如实透出（不只 fail_safe 分支），
+      // 避免配置类失败落 stopped 后「已停止、无原因」丢失失败信息。
+      text.textContent = status.error
+        ? `主程序已停止: ${status.error}`
+        : '主程序已停止';
       text.style.color = 'var(--text-main)';
       uptimeText.textContent = '点击启动按钮开始同步服务';
       if (progressContainer) progressContainer.style.display = 'none';
@@ -468,7 +472,7 @@ export async function startMainProgram() {
           showToast('主程序已启动', 'success');
         }
         updateMainStatus();
-        // 引导④以 main_running 判定，而受理瞬间 server 已置 _app_running=True；
+        // 引导④以 main_running 判定，而受理瞬间 server 侧存活权威已判在跑；
         // 异步受理（starting）不在此刷新，改由轮询观测到终态相位时刷新（见
         // updateMainStatus），避免过早打勾且 fail_safe 后可自愈；仅同步成功立即刷新。
         if (result.status !== 'starting') {

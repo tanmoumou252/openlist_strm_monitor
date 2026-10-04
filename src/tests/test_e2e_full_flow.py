@@ -440,7 +440,7 @@ class TestSuccessfulFlow:
         B 区有同 mapping_id 记录（⑥⑦）。
 
         边界说明：步骤④用 AppService 替身，只验证 WebUI 的启动契约
-        （门禁 + _app_running + stop 收尾）。引擎侧「start() 成功必须置
+        （门禁 + 复合存活权威 running + stop 收尾）。引擎侧「start() 成功必须置
         _running=True」的不变式由 test_app_service_lifecycle.py 的
         TestStartMarksRunningWhenReady 锁死，两者分工互补。
         """
@@ -534,9 +534,19 @@ class TestSuccessfulFlow:
 
         fake_app.set_phase.side_effect = _fake_set_phase
 
+        # 存活权威替身：observer 存活位显式建模（严禁 MagicMock 默认子属性
+        # 真值充当存活=True 的假绿）——start() 成功置真、stop() 置假。
+        _observer = {"alive": False}
+        fake_app.is_engine_running.side_effect = lambda: _observer["alive"]
+
         def _fake_start():
+            _observer["alive"] = True
             _fake_set_phase("ready")
         fake_app.start.side_effect = _fake_start
+
+        def _fake_stop():
+            _observer["alive"] = False
+        fake_app.stop.side_effect = _fake_stop
         # worker 内远程存储映射加载走网络，测试内 stub 掉
         server._config.load_strm_storage_from_api = Mock()
 
@@ -567,13 +577,13 @@ class TestSuccessfulFlow:
         assert status == 200
         assert resp.get("running") is True
         assert resp.get("ready") is True
-        assert server._app_running is True
+        assert server.get_main_status()["running"] is True
 
         # 立即收尾，避免残留状态影响后续步骤与其它用例
         status, _, resp = _http_post(base, "/api/main/stop", {}, token)
         assert status == 200
         assert resp.get("success") is True
-        assert server._app_running is False
+        assert server.get_main_status()["running"] is False
 
         # ── 步骤⑤：查看 AB 分区（空库表现） ──
         for area in ("a", "b", "c"):
@@ -716,7 +726,7 @@ class TestSevenStepFailureReasons:
         assert status == 200
         assert resp.get("success") is False
         assert resp.get("status") == "fail_safe_active"
-        assert server._app_running is False
+        assert server.get_main_status()["running"] is False
 
     def test_step4_openlist_login_failure_reports_reason(self, webui_server, tmp_path):
         """④失败原因：OpenList 登录失败。
@@ -734,6 +744,9 @@ class TestSevenStepFailureReasons:
         mock_client = MagicMock()
         mock_client.login.return_value = False
         mock_client.last_error_message = "用户名或密码错误"
+        # 登录失败 → observer 从未挂载，存活权威如实为 False（显式打桩防假绿）
+        fake_app = MagicMock()
+        fake_app.is_engine_running.return_value = False
 
         with patch("webdav_client.OpenListAdminClient", return_value=mock_client), \
              patch("logger_setup.setup_logging"):
@@ -749,7 +762,7 @@ class TestSevenStepFailureReasons:
         # 异步 worker 透传 mock 客户端的 last_error_message 文案
         assert "用户名或密码错误" in (resp.get("error") or ""), (
             f"应暴露登录失败原因: {resp}")
-        assert server._app_running is False
+        assert server.get_main_status()["running"] is False
 
     def test_step5_invalid_area_rejected(self, webui_server):
         """⑤失败原因：非法分区名。成功条件：area ∈ {a,b,c}。"""

@@ -23,7 +23,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import domain.sync.sync_service as sync_service_mod
 from database import Database
-from domain.sync.sync_service import SyncService
+from domain.sync.sync_service import (
+    AuditCoverageIncompleteError,
+    AuditIncompleteError,
+    SyncService,
+    _snapshot_flush_needed,
+)
 from _test_helpers import build_mock_app
 
 # 当前解析算法版本（对齐 strm_utils.STRM_PARSE_VERSION = 1；漂移测试用 999）
@@ -482,7 +487,8 @@ class TestAuditPruneGuard:
         # a_roots=None 契约下经 app.a_roots 注入"部分根不可达"场景，
         # prune fail-closed 检测力不变（traversed_roots < len(roots) 跳过 prune）
         _app.a_roots.append(a_root.parent / "missing-root")
-        svc.initial_scan_a(use_bulk=False, use_snapshot=False)
+        with pytest.raises(AuditCoverageIncompleteError):
+            svc.initial_scan_a(use_bulk=False, use_snapshot=False)
         assert _snapshot_row(db, str(ghost)) is not None, (
             "根不可达 ≠ 云端文件已消失，该根快照行不得被 prune 整片误剪")
 
@@ -495,7 +501,8 @@ class TestAuditPruneGuard:
         # a_roots=None 契约下经 app.a_roots 注入"全部根不可达"场景，
         # "不得全表清空"检测力不变
         _app.a_roots = [a_root.parent / "missing-root"]
-        svc.initial_scan_a(use_bulk=False, use_snapshot=False)
+        with pytest.raises(AuditCoverageIncompleteError):
+            svc.initial_scan_a(use_bulk=False, use_snapshot=False)
         assert _snapshot_row(db, str(ghost)) is not None, (
             "全部根不可达时不得走 DELETE FROM a_strm_snapshot 全表清空")
 
@@ -567,9 +574,25 @@ class TestAuditPruneGuard:
         with patch.object(sync_service_mod.os, "walk", side_effect=fake_walk):
             # a_roots=None 全量审计（env 夹具单根；fake_walk 对该根触发
             # onerror → traversed_roots 不计数 → prune fail-closed 跳过）
-            svc.initial_scan_a(use_bulk=False, use_snapshot=False)
+            with pytest.raises(AuditCoverageIncompleteError):
+                svc.initial_scan_a(use_bulk=False, use_snapshot=False)
         assert _snapshot_row(db, str(hidden)) is not None, (
             "遍历出错（onerror 触发）时 keep 集不完整，prune 必须 fail-closed 跳过")
+
+    def test_legal_empty_and_walk_success_do_not_trigger_coverage_error(self, env):
+        """不该触发域（防过修）：全部根 walk 成功且无不可解析文件时，
+        即便目录为空，也不得抛覆盖缺口异常（否则合法清空会被误判为缺口）。"""
+        _app, db, svc, a_root = env
+        svc.initial_scan_a(use_bulk=False, use_snapshot=False)
+        assert _snapshot_row(db, str(a_root / "never.strm")) is None, (
+            "空目录合法清空：无行可保留，且不得抛异常（上一行未抛即为本断言前提）")
+
+    def test_snapshot_mode_never_raises_coverage_error(self, env):
+        """不该触发域（防过修）：快照模式（use_snapshot=True）即便根不可达，
+        也不得抛覆盖缺口异常（该信号只属审计口径）。"""
+        _app, _db, svc, a_root = env
+        _app.a_roots = [a_root.parent / "missing-root"]
+        svc.initial_scan_a(use_bulk=False, use_snapshot=True)
 
     def test_e3_partial_audit_rejected_full_audit_no_warning(self, env, caplog):
         """局部 a_roots + use_snapshot=False → 直接拒绝（fail-closed）；
@@ -641,13 +664,17 @@ class TestAuditLocalRootsRejected:
 class TestFlushBatchDecoupledEarlyReturn:
     """batch 空 + snap_batch 非空时快照仍必须被提交。
 
-    选型说明：batch 与 snap_batch 在公开面上逐条同追加（process_strm_file
-    结果处理），"batch 空而 snap 非空"经公开入口不可达，纯黑盒行为断言
-    无法区分新旧实现。故本用例采用双锚：① 端到端端态正向回归锚（两根
-    扫描、第二根为空时 flush_batch 以 batch 空被再次调用，快照行必须仍在
-    终态写入——行为不变即应保持通过，防解耦改动反向破坏既有终态）；
-    ② inspect.getsource 机械防回退锚：早返回条件不得再单独键于 batch，
-    缺该形态时本用例失败。
+    可达性声明：batch 与 snap_batch 在公开面上逐条同追加（process_strm_file
+    结果处理）、非 bulk 每次 flush 两队列同清、bulk 仅清 batch，故"batch 空
+    而 snap 非空"经公开入口不可达——不存在能区分新旧实现的纯黑盒用例。故本
+    类改用双锚并明确分工：
+      ① 行为锚（主）：直接调用生产判据函数 `_snapshot_flush_needed`，
+         语义变更（如退回只键 batch）必红——它断言的是生产函数本体，
+         不是源码字符串，也不受格式改动影响；
+      ② 端态回归锚：两根扫描、第二根为空时 flush_batch 以 batch 空被再次
+         调用，快照行必须仍在终态写入（防解耦改动反向吞掉快照写）。
+    另保留一条空白归一化的接线锚，仅用于保证 flush_batch 未退回旧形态
+    （诚实标注：它是机械接线锚，不构成行为验证；语义由行为锚负责）。
     """
 
     def test_snapshot_survives_batch_empty_flush(self, tmp_path):
@@ -663,12 +690,32 @@ class TestFlushBatchDecoupledEarlyReturn:
         rows = app.db.upsert_a_snapshot_bulk.call_args_list
         assert rows, "快照行必须被提交（终态守恒：解耦不得反向吞掉快照写）"
 
+    def test_flush_early_return_predicate_treats_snapshot_queue_as_data(self):
+        """行为锚：早返回判据（生产模块级函数）必须把快照队列当数据。
+
+        分歧形态 = batch 空 + snap_batch 非空：判据必须返回 True（需要提交）。
+        若判据退回"只键 batch"，本断言必红。
+        """
+        assert _snapshot_flush_needed([], [("row",)]) is True, (
+            "batch 空而 snap_batch 非空必须判为需要提交（快照提交不得被"
+            "batch 空判定静默跳过）")
+        assert _snapshot_flush_needed([("a", "b", "c")], []) is True, (
+            "batch 非空必须判为需要提交")
+        assert _snapshot_flush_needed([], []) is False, (
+            "两队列均空才免提交")
+
     def test_flush_early_return_not_solely_keyed_on_batch(self):
+        """接线锚（空白归一化）：flush_batch 必须经生产判据函数早返回。
+
+        仅锚"接线在场、未退回只键 batch 的旧形态"。语义由上一条行为用例
+        锚定；本断言不承担行为验证职责（该路径经公开入口不可达）。
+        """
         import inspect
-        src = inspect.getsource(SyncService.initial_scan_a)
-        assert "if not batch and not snap_batch:" in src, (
-            "flush_batch 早返回必须解耦：batch 与 snap_batch 均空才返回，"
-            "防止快照提交被 batch 空判定静默跳过")
+        import re
+        src = re.sub(r"\s+", " ", inspect.getsource(SyncService.initial_scan_a))
+        assert "if not _snapshot_flush_needed(batch, snap_batch): return" in src, (
+            "flush_batch 早返回必须经 _snapshot_flush_needed 判据"
+            "（batch 与 snap_batch 均空才返回）")
 
 
 def test_audit_scan_deletes_snapshot_rows_of_unparseable_files(env, monkeypatch):
@@ -706,31 +753,47 @@ def test_audit_scan_deletes_snapshot_rows_of_unparseable_files(env, monkeypatch)
 
 def test_snapshot_mode_scan_does_not_delete_unparseable_rows(env, monkeypatch):
     """契约 C4 不该触发域：快照模式（use_snapshot=True）对正文不可解析文件
-    不收集不删除。用例不预插快照行，使文件真实走进不可解析分支（而非被
-    采信门短路），守门断言该分支在快照模式下不做任何快照行写入/删除——
-    该文件的快照行保持缺席，处置交由下轮审计。"""
+    既不得删除也不得改写其既有快照行。
+
+    保真说明：预插一行**采信门失配**的旧快照行（file_size 与 ctime_ns 均与
+    磁盘实况差 1）——失配保证文件必被读且读得不可解析；预插保证断言具备
+    检测力（此前"不预插"写法下 `_snapshot_row` 恒为 None，删除逻辑被误引入
+    快照模式也测不出）。若删除/prune 脱离 `if not use_snapshot:` 守门，该行
+    将被清除 → 本用例转红。检测力由受控变异（守门改 `if True:`）实跑取证。"""
     app, db, svc, root = env
     root = Path(root)
     counter = _ReadCounter()
     monkeypatch.setattr(sync_service_mod, "read_strm_webdav_path", counter)
 
-    # 不预插快照行：bad2.strm 无采信门命中，真实走进不可解析分支
     bad = root / "bad2.strm"
     bad.write_text("", encoding="utf-8")
+    st = os.stat(bad)
+    # 采信门失配行（size 与 ctime 双双失配）→ 必读正文 → 走进不可解析分支
+    _insert_snapshot(db, (str(bad), st.st_size + 1, st.st_mtime_ns + 1,
+                          "/cloud/old.mkv", "/cloud", CUR_PARSE_VERSION,
+                          time.time()),
+                     st.st_ctime_ns + 1)
 
     svc.initial_scan_a(use_snapshot=True, use_bulk=False)
 
     assert str(bad) in counter.calls, (
         "不可解析分支必须真实被执行（文件确实被读且读得不可解析）")
-    assert _snapshot_row(db, str(bad)) is None, (
-        "快照模式对不可解析文件不得写入或保留快照行")
+    row = _snapshot_row(db, str(bad))
+    assert row is not None, (
+        "快照模式对不可解析文件不得删除既有快照行"
+        "（删除/prune 必须键于 use_snapshot=False）")
+    assert row[3] == "/cloud/old.mkv", (
+        f"快照模式不得改写该行（文件不可解析 → 无新行写入），"
+        f"实际 webdav_path={row[3]!r}")
 
 
 def test_unparseable_snapshot_deletion_is_batched_and_exception_isolated(
         env, caplog):
     """契约 W4/C1：审计模式对不可解析文件的快照行删除必须经批量接口
-    delete_a_snapshots_batch（去重 + 单事务），且批量失败仅 WARNING 不中断
-    审计余下阶段（save_known_folders_batch 等侧效仍完成）。"""
+    delete_a_snapshots_batch（去重 + 单事务）；批量失败时余下阶段仍须完成
+    （save_known_folders_batch 等侧效照常），但函数末尾必须以
+    AuditIncompleteError 显式上报不完整终态——审计权威性未建立时不得静默
+    返回成功（调用方据此跳过核对时间戳推进），残留行原样保留待下轮重试。"""
     import logging
     app, db, svc, a_root = env
     good = a_root / "iso-good.strm"
@@ -745,17 +808,22 @@ def test_unparseable_snapshot_deletion_is_batched_and_exception_isolated(
                               "/mnt/M", CUR_PARSE_VERSION, time.time()),
                          st.st_ctime_ns)
 
-    # 场景一：批量删除抛异常 → 审计不中断，仅告警；余下阶段（目录登记）仍完成
+    # 场景一：批量删除抛异常 → 余下阶段（目录登记）仍完成，但终态显式不完整
     with caplog.at_level(logging.WARNING):
         with patch.object(db, "delete_a_snapshots_batch",
                           side_effect=RuntimeError("db boom")):
             with patch.object(db, "save_known_folders_batch",
                               wraps=db.save_known_folders_batch) as folders_spy:
-                svc.initial_scan_a(use_snapshot=False, use_bulk=False)
+                with pytest.raises(AuditIncompleteError) as excinfo:
+                    svc.initial_scan_a(use_snapshot=False, use_bulk=False)
     assert any("批量删除失败" in r.message for r in caplog.records), (
         "批量删除失败必须落 WARNING（异常隔离可见性）")
     assert folders_spy.call_count >= 1, (
-        "审计余下阶段必须完成（删除失败不得中断 save_known_folders_batch）")
+        "审计余下阶段必须完成（不完整终态不得中断 save_known_folders_batch）")
+    assert "旧快照行失效失败" in str(excinfo.value), (
+        f"不完整异常必须指明快照行失效失败根因，实际: {excinfo.value!r}")
+    assert _snapshot_row(db, str(bad1)) is not None, (
+        "失效失败时残留行必须原样保留（不得静默清行，交下轮审计重试）")
 
     # 场景二：放行真实批量删除 → 不可解析行清除、可解析行存活（下轮审计重试自愈）
     svc.initial_scan_a(use_snapshot=False, use_bulk=False)

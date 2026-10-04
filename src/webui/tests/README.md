@@ -10,6 +10,8 @@
 node.exe --test "src/webui/tests/*.test.mjs"
 ```
 
+注意：上式引号 glob 的展开依赖 Node 版本——未展开且不报错时会静默零覆盖（得到假绿）。需要机械保证时用 `run_webui_regression.bat`：它由 cmd 侧枚举文件并以显式路径传参，且在文件数为 0 时显式判红。
+
 或一键双入口回归（JS + pytest webui marker）：
 
 ```bat

@@ -1082,7 +1082,12 @@ class AppService:
                     logging.warning("[停止] watcher handler close 失败", exc_info=True)
         if self.observer is not None and self.observer.is_alive():
             self.observer.stop()
-            self.observer.join()
+            # 有界 join：与同块字幕扫描 join(timeout=5) 对齐，防止 observer
+            # 退出卡死拖垮停机路径。超时不抛错、不谎报停止完成，调用方
+            # （stop_main）以存活权威复核后 fail-closed 处理。
+            self.observer.join(timeout=5.0)
+            if self.observer.is_alive():
+                logging.warning("[停止] watcher observer 未在超时内退出，停止未完全完成")
         subtitle_thread = self._subtitle_scan_thread
         if (subtitle_thread is not None
                 and subtitle_thread is not threading.current_thread()):
@@ -1141,6 +1146,15 @@ class AppService:
         - stop() 后 is_alive() False → False。
         会话批量隔离路径以 not _watchers_live() 门控（启动上下文专用），
         避开 Database.ReadWriteLock._writers_active 的命名陷阱。
+        """
+        return self.observer is not None and self.observer.is_alive()
+
+    def is_engine_running(self) -> bool:
+        """引擎存活权威（唯一单源的引擎侧 origin）：基于 observer 真实存活。
+
+        不读 _current_phase（可被 set_phase 合法写成谎）、不读 _running
+        （仅 start() 末尾置位且从不被内部读）——两者均不可信为存活事实。
+        不提供 phase/progress 语义（那是 get_state_summary 的展示通道）。
         """
         return self.observer is not None and self.observer.is_alive()
 

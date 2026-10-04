@@ -207,7 +207,8 @@ class TestHandleRestartWebui:
 
     def _make_ws(self, app_running, watchlist_db=None):
         ws = MagicMock()
-        ws._app_running = app_running
+        # 停机门改判复合存活权威：打桩 _engine_is_running 返回该 bool
+        ws._engine_is_running.return_value = app_running
         ws._watchlist_db = watchlist_db
         events = []
         ws.stop_main.side_effect = lambda: events.append("stop")

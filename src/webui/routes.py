@@ -2051,8 +2051,8 @@ def _handle_restart_webui(handler, webui_server) -> None:
     def _do_restart():
         time.sleep(0.5)
         try:
-            # 1. 停止主程序（如果在运行）
-            if webui_server._app_running:
+            # 1. 停止主程序（若复合存活权威判在跑：句柄在场 ∨ worker 存活）
+            if webui_server._engine_is_running():
                 logging.info("[Restart] 正在停止主程序...")
                 webui_server.stop_main()
 
@@ -4061,8 +4061,8 @@ def _handle_config_status(handler, webui_server) -> None:
     host, _user, _password, _totp = _openlist_merged_webdav_cfg(webui_server)
     openlist_configured = bool(host)
 
-    # main_running
-    main_running = bool(getattr(webui_server, '_app_running', False))
+    # main_running：读 get_main_status 的 running 位（内部走复合存活权威）
+    main_running = bool(webui_server.get_main_status().get("running"))
 
     # onboarding_completed: 检查 DB 中的标记
     # 返回字符串 "1"/"0"（与 DB 存储一致），前端用 === '1' 严格比较。

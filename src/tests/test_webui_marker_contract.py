@@ -92,10 +92,17 @@ class TestMarkerCoverage:
 
 
 class TestRegressionEntry:
-    def test_bat_keeps_node_glob_and_pytest_marker(self):
+    def test_bat_enumerates_js_files_and_guards_zero_coverage(self):
+        """回归入口接线契约：cmd 侧枚举 JS 用例文件（不依赖 Node 的引号 glob
+        展开语义），并对零覆盖显式判红。"""
         bat = BAT_PATH.read_text(encoding="utf-8", errors="replace")
-        assert 'node.exe --test "src/webui/tests/*.test.mjs"' in bat, (
-            "run_webui_regression.bat 的 node:test glob 原文变更，回归入口空转风险")
+        assert 'for %%F in ("src\\webui\\tests\\*.test.mjs") do (' in bat, (
+            "run_webui_regression.bat 必须以 cmd 侧枚举 JS 用例文件，"
+            "回归入口空转风险")
+        assert "if !JS_COUNT! EQU 0 (" in bat, (
+            "run_webui_regression.bat 缺少零用例判红闸（JS 侧零覆盖必须显式失败）")
+        assert "node.exe --test !JS_ARGS!" in bat, (
+            "run_webui_regression.bat 的 node:test 调用形态变更，回归入口空转风险")
         assert "python.exe -m pytest src/tests -m webui" in bat, (
             "run_webui_regression.bat 的 pytest 收集原文变更，回归入口空转风险")
 
