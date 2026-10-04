@@ -1441,6 +1441,20 @@ class WebUIServer:
                 return {"success": False, "message": "主程序未在运行"}
             self._app_generation += 1
             self._app_phase = "stopping"
+            # 拒绝分支相位恢复基线：在任何 svc 相位写入之前先读真实相位。
+            # 拒绝时若该相位属运行态集合则原样恢复（保留引擎真实相位与
+            # 原始 _phase_error）；否则（stopping 为 stop_main 自写的停止
+            # 语义相位、fail_safe/stopped/None 非真实运行相位）回落 ready，
+            # 保留「拒绝后不得滞留 stopping」契约。集合与 AppService
+            # get_state_summary 的在跑集合逐字对齐。
+            prev_phase = (
+                svc.get_state_summary().get("phase")
+                if svc and hasattr(svc, "get_state_summary") else None
+            )
+            restore_phase = prev_phase if prev_phase in {
+                "starting", "authenticating", "scanning_a", "scanning_b",
+                "syncing_a_to_b", "catching_up", "ready",
+            } else "ready"
             try:
                 if svc:
                     svc.set_phase("stopping")
@@ -1462,13 +1476,13 @@ class WebUIServer:
                     self._app_phase = "fail_safe"
                     self._app_error = "旧 worker 未退出，停止未完成"
                     if svc:
-                        # 引擎仍在跑（worker 未退出），svc 相位如实回写运行态：
-                        # get_main_status 主路径读 svc.get_state_summary()，
-                        # 滞留 stopping 会令前端卡死在「正在停止」死角；
-                        # 拒绝分支如实回写运行态相位并经 error 参数透出拒绝
-                        # 原因（get_main_status 的 error 位直读 summary.error），
-                        # 不落 fail_safe（与「拒绝不谎报」一致，引擎确实在跑）。
-                        svc.set_phase("ready", error="旧 worker 未退出，停止未完成")
+                        # 引擎仍在跑（worker 未退出），svc 相位恢复为拒绝前
+                        # 真实运行相位（无真实运行相位时回落 ready，不滞留
+                        # stopping）；不得向仍在运行的引擎写 _phase_error——
+                        # 引擎 idle 后不再调 set_phase，该错误永不自愈，会把
+                        # 运行态展示永久污染。拒绝原因由 server 侧 _app_error
+                        # 经 get_main_status 的合并 error 位透出。
+                        svc.set_phase(restore_phase)
                     return {
                         "success": False,
                         "message": "旧 worker 未退出，停止未完成，请重试停止或查看服务端日志",
@@ -1480,9 +1494,10 @@ class WebUIServer:
                     logging.error("[Main] 停止失败：引擎在 stop 后仍存活")
                     self._app_phase = "fail_safe"
                     self._app_error = "引擎在 stop 后仍存活，停止未完成"
-                    # 同上：拒绝分支如实回写运行态相位并经 error 参数透出
-                    # 拒绝原因，避免滞留 stopping 令前端卡死。
-                    svc.set_phase("ready", error="引擎在 stop 后仍存活，停止未完成")
+                    # 同上：恢复拒绝前真实运行相位（无则回落 ready，不滞留
+                    # stopping），不向仍存活的引擎写 _phase_error；拒绝原因
+                    # 经 server 侧 _app_error 的合并 error 位透出。
+                    svc.set_phase(restore_phase)
                     return {
                         "success": False,
                         "message": "引擎在 stop 后仍存活，停止未完成，请重试停止或查看服务端日志",
@@ -1529,7 +1544,9 @@ class WebUIServer:
             "phase": summary["phase"],
             "status": summary["phase"],
             "progress": summary["progress"],
-            "error": summary.get("error"),
+            # svc 摘要错误优先（真实引擎故障）；摘要无错时透出 server 侧
+            # 拒绝/失败原因 _app_error（stop_main 拒绝分支不再写 svc error）。
+            "error": summary.get("error") or getattr(self, "_app_error", None),
             "uptime": int(time.time() - self._app_start_time) if running and self._app_start_time else None,
         }
         if running and svc:

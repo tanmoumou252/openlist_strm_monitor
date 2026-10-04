@@ -135,3 +135,31 @@ def test_stopping_branch_keeps_start_button_visible_but_disabled():
     assert "startBtn.style.display = 'none'" not in seg, (
         "stopping 分支不得隐藏 startBtn（stop_main 失败滞留 stopping 时"
         "双按钮全隐属不可恢复 UI 死角）")
+
+
+def test_running_branch_error_has_warning_color_and_length_guard():
+    """N2 契约：运行态分支 error 非空时须转告警色（文本 + 状态点）并做
+    120 字符截断 + title 存完整原因；error 为空路径不得染告警色（不该
+    触发域零扰动）。期望值由行为契约推导：告警色只出现在 if (status.error)
+    子分支内，else 子分支维持绿点健康配色。"""
+    running_idx = DASHBOARD_SOURCE.find("} else if (status.running) {")
+    assert running_idx != -1
+    seg_end = DASHBOARD_SOURCE.find("} else if (phase === 'ready'", running_idx)
+    seg = DASHBOARD_SOURCE[running_idx:seg_end]
+    assert "String(status.error).slice(0, 120)" in seg, (
+        "运行态 error 须截断 120 字符防溢出")
+    assert "text.title = String(status.error);" in seg, (
+        "完整拒绝原因须写入 title 供悬浮查看")
+    err_if_idx = seg.find("if (status.error) {")
+    assert err_if_idx != -1, "运行态分支须以 if (status.error) 区分错误/健康展示"
+    else_idx = seg.find("} else {", err_if_idx)
+    assert else_idx != -1, "运行态分支须有 error 为空的 else 健康态路径"
+    warn_idx = seg.find("var(--warning, #ff9800)", err_if_idx, else_idx)
+    assert warn_idx != -1, (
+        "error 非空子分支内文本须转告警色 var(--warning, #ff9800)")
+    assert "dot.style.background = '#ff9800';" in seg[:else_idx], (
+        "error 非空时状态点须用告警色（对齐 stopping 分支形态）")
+    assert seg.find("dot.style.background = '#4caf50';", else_idx) != -1, (
+        "error 为空的 else 路径须维持绿点健康配色")
+    assert "text.title = '';" in seg[else_idx:], (
+        "error 为空时须清空 title 防上一轮渲染残留悬浮提示")

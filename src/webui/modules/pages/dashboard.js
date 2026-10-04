@@ -371,12 +371,21 @@ export async function updateMainStatus() {
       }
       if (stopBtn) stopBtn.style.display = 'none';
     } else if (status.running) {
-      dot.style.background = '#4caf50';
-      dot.style.boxShadow = '0 0 12px rgba(76,175,80,0.6)';
-      text.textContent = status.error
-        ? `主程序运行中：${status.error}`
-        : '主程序运行中';
-      text.style.color = 'var(--text-main)';
+      // 运行态错误展示：error 非空时文本与状态点转告警色并截断防溢出，
+      // 完整原因入 title 悬浮；error 为空时维持绿点与健康态配色零扰动。
+      if (status.error) {
+        dot.style.background = '#ff9800';
+        dot.style.boxShadow = '0 0 12px rgba(255,152,0,0.6)';
+        text.textContent = `主程序运行中：${String(status.error).slice(0, 120)}…`;
+        text.title = String(status.error);
+        text.style.color = 'var(--warning, #ff9800)';
+      } else {
+        dot.style.background = '#4caf50';
+        dot.style.boxShadow = '0 0 12px rgba(76,175,80,0.6)';
+        text.textContent = '主程序运行中';
+        text.title = '';
+        text.style.color = 'var(--text-main)';
+      }
       if (status.uptime != null) {
         const hours = Math.floor(status.uptime / 3600);
         const mins = Math.floor((status.uptime % 3600) / 60);

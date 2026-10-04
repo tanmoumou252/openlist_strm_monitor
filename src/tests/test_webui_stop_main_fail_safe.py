@@ -164,6 +164,38 @@ class _RevivingStaleService:
         self._observer_alive = True
 
 
+class _PhaseRestoreStubSvc:
+    """N1 相位恢复契约替身：初始相位可设（默认 scanning_a），记录
+    _phase_error 污染与相位写入序列。observer 常真 → stop_main 必走
+    engine_alive 拒绝分支；stop() 无副作用（引擎不因 stop 而死）。"""
+
+    def __init__(self, initial_phase="scanning_a"):
+        self._phase = initial_phase
+        self._error = None
+        self._observer_alive = True
+        self.phases_written = []
+
+    def set_phase(self, phase, error=None):
+        self.phases_written.append((phase, error))
+        self._phase = phase
+        self._error = error
+
+    def is_engine_running(self):
+        return self._observer_alive
+
+    def get_state_summary(self):
+        return {
+            "phase": self._phase,
+            "is_running": self._phase in _RUNNING_PHASES,
+            "is_ready": False,
+            "error": self._error,
+            "progress": {},
+        }
+
+    def stop(self):
+        pass
+
+
 class _MockStaleSvc:
     """start/stop/phase 多路可控替身，对齐 AppService 摘要契约：
     - stop_raises：stop() 抛错（模拟停止失败）；
@@ -673,6 +705,58 @@ def test_stop_main_reject_engine_alive_surfaces_error_via_status(
     assert status["phase"] == "ready"
     assert "引擎在 stop 后仍存活" in str(status.get("error")), (
         f"拒绝原因必须经 error 位可见，实际返回体: {status!r}")
+
+
+def test_stop_main_reject_engine_alive_restores_prev_phase_no_pollution(
+        webui_server_shared):
+    """N1 契约：engine_alive 拒绝分支不得向仍存活的 svc 写 error
+    （_phase_error 保持 None，引擎 idle 后无人自愈），且必须恢复拒绝前
+    真实相位（scanning_a 而非 ready）；拒绝原因改经 get_main_status 的
+    server 侧合并 error 位可见。"""
+    server, _base, _token = webui_server_shared
+    svc = _PhaseRestoreStubSvc(initial_phase="scanning_a")
+    server._app_service = svc
+    server._app_worker_thread = None
+    result = server.stop_main()
+    assert result["success"] is False
+    assert result.get("error_type") == "engine_alive", (
+        f"须走引擎存活拒绝路径，实际: {result!r}")
+    assert svc._error is None, (
+        f"拒绝分支不得污染活引擎 _phase_error，实际 {svc._error!r}")
+    summary = svc.get_state_summary()
+    assert summary["phase"] == "scanning_a", (
+        f"拒绝分支必须恢复拒绝前真实相位 scanning_a，实际 {summary['phase']!r}")
+    assert "引擎在 stop 后仍存活" in str(server._app_error), (
+        f"拒绝原因必须落 server 侧 _app_error，实际 {server._app_error!r}")
+    status = server.get_main_status()
+    assert "引擎在 stop 后仍存活" in str(status.get("error")), (
+        f"拒绝原因须经合并 error 位可见，实际返回体: {status!r}")
+
+
+def test_stop_main_reject_worker_alive_restores_prev_phase_no_pollution(
+        webui_server_shared):
+    """N1 契约（worker_alive 对称分支）：join 超时拒绝同样不得写 svc error、
+    须恢复拒绝前真实相位，拒绝原因经合并 error 位可见。"""
+    server, _base, _token = webui_server_shared
+    svc = _PhaseRestoreStubSvc(initial_phase="scanning_a")
+    worker = _BlockingWorkerStub()
+    server._app_service = svc
+    server._app_worker_thread = worker
+    try:
+        result = server.stop_main()
+        assert result["success"] is False
+        assert result.get("error_type") == "worker_alive", (
+            f"须走 worker 存活拒绝路径，实际: {result!r}")
+        assert svc._error is None, (
+            f"拒绝分支不得污染活引擎 _phase_error，实际 {svc._error!r}")
+        summary = svc.get_state_summary()
+        assert summary["phase"] == "scanning_a", (
+            f"拒绝分支必须恢复拒绝前真实相位 scanning_a，实际 {summary['phase']!r}")
+        status = server.get_main_status()
+        assert "旧 worker 未退出" in str(status.get("error")), (
+            f"拒绝原因须经合并 error 位可见，实际返回体: {status!r}")
+    finally:
+        worker.release()
 
 
 # ============================================================
