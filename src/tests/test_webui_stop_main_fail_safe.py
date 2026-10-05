@@ -865,9 +865,10 @@ def test_rl6_rejection_paths_restore_phase_not_stopping(webui_server_shared):
     stopping——get_main_status 主路径读 svc.get_state_summary()，svc 相位
     滞留 stopping 会让前端永久卡在「正在停止」死角（刷新亦不可恢复）。
     prev_phase 属真实运行相位时原样恢复；prev_phase 不属运行态集合时兜底
-    落中性相位 unknown（不在运行集合、不伪造 ready：伪 ready 会让
-    is_ready 被 UI 与 start_main 的 fail_safe 闸读到就绪假象；unknown 对
-    活引擎零副作用）。失败语义经返回体
+    落词表内中性终态 stopped（unknown 不在 AppService PHASE_* 词表、也不在
+    start_main 在跑闸放行二元组 {stopped, fail_safe} 内，会让拒停后的引擎
+    既停不掉也启不动；stopped 使 start_main 天然放行、重试语义闭环；
+    start_time 重置仅影响进度耗时展示）。失败语义经返回体
     message/error_type 透出。"""
     server, _base, _token = webui_server_shared
     svc = _AuthorityStubSvc(observer_alive=True, phase="stopping",
@@ -881,19 +882,21 @@ def test_rl6_rejection_paths_restore_phase_not_stopping(webui_server_shared):
         f"须走引擎存活拒绝路径，实际: {result!r}")
     assert svc.phases_written[-1] != "stopping", (
         f"拒绝后 svc 相位不得滞留 stopping，实际写入序列: {svc.phases_written!r}")
-    assert svc.phases_written[-1] == "unknown", (
-        f"拒绝后 svc 相位兜底须落中性相位 unknown（不在运行集合、无 start_time "
-        f"副作用、不得伪造 ready），实际写入序列: {svc.phases_written!r}")
+    assert svc.phases_written[-1] == "stopped", (
+        f"拒绝后 svc 相位兜底须落词表内中性终态 stopped（在 start_main 在跑闸"
+        f"放行集合内，保证拒停后可重试启动），实际写入序列: "
+        f"{svc.phases_written!r}")
     assert server._app_service is svc, "拒绝后必须保留句柄供重试"
 
 
 def test_stop_main_reject_fallback_lands_stopped_not_ready(
         webui_server_shared):
-    """E2 契约：拒绝分支兜底相位必须落中性相位 unknown 而非 ready——
+    """E2 契约：拒绝分支兜底相位必须落词表内中性终态 stopped 而非 ready——
     引擎存活但真实相位未知（stopping/fail_safe/stopped/None）时，伪 ready
     会让 get_main_status 的 is_ready 被 UI 与 start_main fail_safe 闸读到
-    就绪假象。unknown 同样满足「拒绝后不得滞留 stopping」，且不在
-    {stopped, fail_safe} 终态集合内、对活引擎零副作用。"""
+    就绪假象；unknown 不在 AppService 词表与 start_main 放行集合内，会让
+    拒停后的引擎陷入停不掉也启不动的死锁。stopped 同样满足「拒绝后不得
+    滞留 stopping」，且 start_time 重置仅影响进度耗时展示。"""
     server, _base, _token = webui_server_shared
     svc = _AuthorityStubSvc(observer_alive=True, phase="stopping",
                             summary_is_running=True)
@@ -905,8 +908,8 @@ def test_stop_main_reject_fallback_lands_stopped_not_ready(
     assert result.get("error_type") == "engine_alive", (
         f"须走引擎存活拒绝路径，实际: {result!r}")
     status = server.get_main_status()
-    assert status["phase"] == "unknown", (
-        f"兜底相位须落中性相位 unknown，实际 {status['phase']!r}")
+    assert status["phase"] == "stopped", (
+        f"兜底相位须落词表内中性终态 stopped，实际 {status['phase']!r}")
     assert status["ready"] is False, (
         f"兜底不得伪造就绪态，实际: {status!r}")
     assert status["running"] is True, (
@@ -976,11 +979,12 @@ def test_rejection_error_visible_when_engine_busy_not_ready(
         f"引擎忙于非 ready 相位时拒绝原因必须可见，实际返回体: {status!r}")
 
 
-def test_stale_rejection_error_hidden_when_engine_advances_past_snapshot(
+def test_stale_rejection_error_hidden_when_generation_advances(
         webui_server_shared):
-    """N2 门控契约（触发域）：拒绝后引擎自行推进相位（scanning_a →
-    catching_up）即自愈证据，陈旧拒绝原因不再透出；_app_error 存储位
-    保持纯读不清。快照缺省或相位未推进时不抑制（fail-closed）。"""
+    """门控契约（触发域）：拒绝后发生过新的 start/stop 代次推进（单调
+    自愈证据）时，陈旧拒绝原因不再透出；_app_error 存储位保持纯读不清。
+    代次未推进时即便相位自行变化也不抑制——相位非单调（回摆会闪烁、
+    非自愈相位变化不构成自愈证据），一律 fail-closed 透出。"""
     server, _base, _token = webui_server_shared
     svc = _PhaseRestoreStubSvc(initial_phase="scanning_a")
     server._app_service = svc
@@ -988,18 +992,85 @@ def test_stale_rejection_error_hidden_when_engine_advances_past_snapshot(
     result = server.stop_main()
     assert result["success"] is False, (
         f"引擎真活时停止必须拒绝伪造成功，实际: {result!r}")
-    # 拒绝当下（相位 == 快照，未推进）必须透出——fail-closed。
+    # 拒绝当下（快照代次 == 当前代次）必须透出——fail-closed。
     status_now = server.get_main_status()
     assert "引擎在 stop 后仍存活" in str(status_now.get("error")), (
-        f"引擎未推进时拒绝原因必须可见，实际返回体: {status_now!r}")
-    # 引擎自行推进相位（自愈证据）→ 抑制。
+        f"代次未推进时拒绝原因必须可见，实际返回体: {status_now!r}")
+    # 相位自行推进但无新代次 → 仍透出（相位非单调，不作自愈判据）。
     svc._phase = "catching_up"
+    status_phase_moved = server.get_main_status()
+    assert "引擎在 stop 后仍存活" in str(status_phase_moved.get("error")), (
+        f"仅相位推进（无代次推进）时拒绝原因不得被抑制，实际返回体: "
+        f"{status_phase_moved!r}")
+    # 发生新代次推进（后续 start/stop 周期）→ 单调自愈证据成立 → 抑制。
+    server._app_generation += 1
     status_healed = server.get_main_status()
     assert status_healed.get("error") is None, (
-        f"引擎已自行推进相位时陈旧拒绝原因不得透出，实际返回体: "
-        f"{status_healed!r}")
+        f"代次已推进时陈旧拒绝原因不得透出，实际返回体: {status_healed!r}")
     assert "引擎在 stop 后仍存活" in str(server._app_error), (
         f"存储位 _app_error 必须保持纯读不清，实际 {server._app_error!r}")
+
+
+def test_stale_error_not_suppressed_while_worker_alive(
+        webui_server_shared):
+    """门控契约（不该触发域）：启动 worker 仍存活时不得把相位推进当
+    自愈证据——启动 worker 在 stop_main 使代次失效前刚通过检查、引擎
+    相位随后推进甚至回到 ready 的场景下，若仅凭相位/代次判据抑制，
+    仍有效的停止失败原因会被隐藏。worker 存活判据与 stop_main 的
+    join 守卫一致；worker 退出后门控按单调判据继续生效。"""
+    server, _base, _token = webui_server_shared
+    svc = _PhaseRestoreStubSvc(initial_phase="ready")
+    server._app_service = svc
+    release = threading.Event()
+
+    def _worker_body():
+        release.wait(timeout=10)
+
+    worker = threading.Thread(target=_worker_body, daemon=True)
+    worker.start()
+    server._app_worker_thread = worker
+    # 预置一次历史拒绝记录（快照代次落后于当前代次，模拟拒绝后引擎
+    # 相位推进的场景）；相位 ready 且摘要无错，若无 worker 守卫即会抑制。
+    server._app_error = "旧 worker 未退出，停止未完成"
+    server._app_error_generation = server._app_generation - 1
+    try:
+        status = server.get_main_status()
+        assert status["running"] is True, (
+            f"observer 常真时 running 须如实为 True，实际: {status!r}")
+        assert "旧 worker 未退出" in str(status.get("error")), (
+            f"worker 仍存活时陈旧拒绝原因不得被抑制，实际返回体: {status!r}")
+    finally:
+        release.set()
+        worker.join(timeout=5)
+    # worker 退出后：代次快照仍落后（单调自愈证据成立）→ 抑制生效。
+    status_after = server.get_main_status()
+    assert status_after.get("error") is None, (
+        f"worker 已退出且代次已推进时陈旧拒绝原因应被抑制，实际返回体: "
+        f"{status_after!r}")
+
+
+def test_stop_exception_write_clears_rejection_snapshot(
+        webui_server_shared):
+    """非拒绝类失败写入契约：stop 异常分支写 _app_error 时必须清除门控
+    代次快照——陈旧拒绝快照与新失败原因错位配对时，新失败原因会被
+    「相位已越过陈旧快照」的伪自愈证据静默吞掉。无拒绝快照时不抑制
+    （fail-closed）。"""
+    server, _base, _token = webui_server_shared
+    svc = _MockStaleSvc(stop_raises=True)
+    server._app_service = svc
+    server._app_worker_thread = None
+    # 预置陈旧拒绝快照（模拟此前一次拒绝记录遗留）
+    server._app_error = "旧 worker 未退出，停止未完成"
+    server._app_error_generation = server._app_generation - 1
+    result = server.stop_main()
+    assert result["success"] is False, (
+        f"stop() 抛异常时停止必须失败，实际: {result!r}")
+    assert result.get("error_type") == "exception", (
+        f"须走异常失败路径，实际: {result!r}")
+    assert server._app_error_generation is None, (
+        "非拒绝类失败写入必须清除门控代次快照")
+    assert "stale stop boom" in str(server._app_error), (
+        f"新失败原因必须如实可见，实际 {server._app_error!r}")
 
 
 def test_rl5_stop_bounded_join_does_not_hang_or_fake_success(

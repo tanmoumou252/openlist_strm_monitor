@@ -3246,28 +3246,41 @@ def _process_mapping_partition(
     }
 
 def _guard_engine_ready_for_mutation(handler, webui_server) -> bool:
-    """启动扫描期间阻止外部破坏性/重型刷新请求，保持 HTTP 200 业务契约。
+    """启动同步期间阻止外部破坏性/重型刷新请求，保持 HTTP 200 业务契约。
 
     在跑判据读复合存活权威 _engine_is_running()，不读摘要相位派生的
-    is_running——引擎相位可被兜底写成中性值（unknown），相位派生值
-    不可作存活真相；摘要仅贡献 is_ready 判定与提示相位。"""
+    is_running——相位派生值不可作存活真相；拦截条件按相位集合收窄：
+    仅当引擎存活且摘要相位处于运行相位集合（与 AppService
+    get_state_summary 的 is_running 集合逐字对齐）且未就绪时拦截。
+    fail_safe（引擎失败暂停、未在跑启动同步）、stopping（stop_main
+    自写瞬态）等非运行相位一律放行，避免用「启动全量同步」文案误导；
+    worker 存活的启动扫描窗（starting/scanning_*）仍被拦，守卫本意
+    保住。"""
     app_service = getattr(webui_server, "_app_service", None)
     if not app_service:
         return True
     engine_running = getattr(webui_server, "_engine_is_running", None)
     if not callable(engine_running):
+        logging.warning(
+            "[Guard] webui_server 缺少 _engine_is_running，"
+            "突变守卫退化为放行")
         return True
     get_summary = getattr(app_service, "get_state_summary", None)
     if not callable(get_summary):
         return True
     summary = get_summary()
-    if engine_running() and not summary.get("is_ready"):
+    phase = summary.get("phase")
+    if (engine_running()
+            and not summary.get("is_ready")
+            and phase in {"starting", "authenticating", "scanning_a",
+                          "scanning_b", "syncing_a_to_b", "catching_up",
+                          "ready"}):
         handler._send_json({
             "ok": False,
             "success": False,
             "status": "sync_in_progress",
             "message": "引擎正在执行启动全量同步，请稍候再试",
-            "phase": summary.get("phase"),
+            "phase": phase,
         }, 200)
         return False
     return True

@@ -3072,13 +3072,13 @@ class TestStartupMutationGuard:
 
     def test_guard_reads_composite_authority_not_phase_derived_running(
             self, webui_server):
-        """N1 守卫契约：拦截判据读 webui_server._engine_is_running() 复合
-        存活权威，而非摘要相位派生的 is_running——摘要相位被谎写成
-        stopped/unknown 时守卫不得被误导放行。"""
+        """守卫契约：拦截判据读 webui_server._engine_is_running() 复合
+        存活权威，而非摘要相位派生的 is_running——摘要 is_running 被谎写
+        为 False 时，运行相位（scanning_a）下的守卫不得被误导放行。"""
         server, base, session_token = webui_server
         mock_app = MagicMock()
         mock_app.get_state_summary.return_value = {
-            "phase": "unknown",
+            "phase": "scanning_a",
             "is_running": False,
             "is_ready": False,
         }
@@ -3088,6 +3088,35 @@ class TestStartupMutationGuard:
         status, _, resp = _http_post(base, "/api/index/audit", {}, session_token)
         assert status == 200
         assert resp.get("status") == "sync_in_progress"
+
+    def test_guard_allows_non_running_phases_when_engine_alive(
+            self, webui_server):
+        """守卫收窄契约（不该触发域）：引擎存活但摘要相位为 fail_safe /
+        stopping / unknown（非运行相位集合）时不拦截——引擎并未在跑
+        启动全量同步，「引擎正在执行启动全量同步」文案对这些相位属
+        误导。替身 _running 显式置 False 使端点确定性走 not_configured
+        业务闸（避免 truthy MagicMock 穿 _running 闸真实拉起审计后台
+        线程）。守卫放行后由端点自身业务闸返回 400 not_configured。"""
+        server, base, session_token = webui_server
+        for phase in ("fail_safe", "stopping", "unknown"):
+            mock_app = MagicMock()
+            mock_app._running = False
+            mock_app.get_state_summary.return_value = {
+                "phase": phase,
+                "is_running": False,
+                "is_ready": False,
+            }
+            server._app_service = mock_app
+            server._engine_is_running = lambda: True
+
+            status, _, resp = _http_post(
+                base, "/api/index/audit", {}, session_token)
+            assert status == 400, (
+                f"相位 {phase} 放行后应确定性到达端点业务闸，实际 HTTP {status}")
+            assert resp.get("status") == "not_configured", (
+                f"相位 {phase} 放行后应落 not_configured 业务闸，实际: {resp!r}")
+            assert resp.get("status") != "sync_in_progress", (
+                f"相位 {phase} 不属运行相位集合，守卫不得拦截")
 
 
 # ============================================================

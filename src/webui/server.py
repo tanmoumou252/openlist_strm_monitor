@@ -811,10 +811,13 @@ class WebUIServer:
         self._app_generation = 0
         self._app_phase = "stopped"
         self._app_error: str | None = None
-        # 拒绝分支写 _app_error 时的引擎相位快照：None＝无在跑拒绝记录。
-        # get_main_status 门控据此判断「引擎拒绝后是否自行推进过相位」，
-        # 仅在推进过（自愈证据）时抑制陈旧拒绝原因；缺省一律透出。
-        self._app_error_phase: str | None = None
+        # 拒绝分支写 _app_error 时的代次快照：None＝无在跑拒绝记录。
+        # get_main_status 门控据此判断「拒绝后是否发生过新的 start/stop
+        # 代次推进」（单调自愈证据）；缺省或代次未推进一律透出
+        # （fail-closed）。相位快照被弃用：相位非单调（可回摆、可被外部
+        # 改写），作自愈判据会产生告警闪烁与「非自愈相位变化也算自愈」
+        # 的误抑制。
+        self._app_error_generation: int | None = None
         # 主程序启动时间戳（None 表示未运行）；与 WebUIServer._start_time 区分
         self._app_start_time: float | None = None
 
@@ -1208,6 +1211,21 @@ class WebUIServer:
     # AppService 管理（主程序）
     # ============================================================
 
+    def _set_app_error(self, message: str, *,
+                       snapshot_generation: bool = False) -> None:
+        """server 侧错误写入唯一入口：错误与门控代次快照成对维护。
+
+        snapshot_generation=True（stop_main 拒绝类写入）：记录当前代次，
+        供 get_main_status 判定后续是否发生过新代次推进（单调自愈证据）；
+        snapshot_generation=False（其余失败写入）：清除快照，保证「无拒绝
+        快照」时门控永不抑制（fail-closed），杜绝陈旧快照与新错误的错位
+        配对吞掉新失败原因。"""
+        self._app_error = message
+        if snapshot_generation:
+            self._app_error_generation = self._app_generation
+        else:
+            self._app_error_generation = None
+
     def _engine_is_running(self) -> bool:
         """复合存活权威：引擎侧 observer 真活 ∨ 启动 worker 存活。
 
@@ -1298,14 +1316,14 @@ class WebUIServer:
                 # 配置未加载属用户配置态而非引擎故障态，不得占用 fail_safe 语义
                 # （首次运行会在 UI 显示引擎故障）。落 stopped 仍写具体 error 保可见。
                 self._app_phase = "stopped"
-                self._app_error = "配置未加载"
+                self._set_app_error("配置未加载")
                 return {"success": False, "message": "配置未加载"}
 
             configured_mappings = getattr(self._config, "a_b_mappings", [])
             if not configured_mappings:
                 # 未配 A/B mapping 属用户配置态，落 stopped + 具体 error 可见。
                 self._app_phase = "stopped"
-                self._app_error = "未配置 A/B mapping"
+                self._set_app_error("未配置 A/B mapping")
                 return {"success": False, "status": "not_configured", "message": "未配置 A/B mapping"}
 
             try:
@@ -1326,7 +1344,7 @@ class WebUIServer:
                     reason = cfg_status.get("reason", "配置未就绪")
                     logging.error("[Main] 启动被 fail-safe 拦截: %s", cfg_status)
                     self._app_phase = "fail_safe"
-                    self._app_error = f"主程序未启动：{reason}"
+                    self._set_app_error(f"主程序未启动：{reason}")
                     return {
                         "success": False,
                         "status": str(cfg_status.get("status", "fail_safe_active")),
@@ -1350,7 +1368,7 @@ class WebUIServer:
                 # 任何闸拦截都保留 fail_safe 相位与错误可见。
                 self._app_phase = "stopped"
                 self._app_error = None
-                self._app_error_phase = None
+                self._app_error_generation = None
                 # 不再手写存活标量：启动在跑由复合存活权威
                 # （observer 真活 ∨ worker 存活）如实表达。
                 self._app_service.set_phase("starting")
@@ -1434,7 +1452,7 @@ class WebUIServer:
                 self._app_start_time = None
                 self._admin_client = None
                 self._app_phase = "fail_safe"
-                self._app_error = f"启动失败: {e}"
+                self._set_app_error(f"启动失败: {e}")
                 return {"success": False, "message": "启动失败，请查看服务端日志", "error_type": "exception"}
 
     def stop_main(self) -> dict:
@@ -1458,14 +1476,20 @@ class WebUIServer:
                 svc.get_state_summary().get("phase")
                 if svc and hasattr(svc, "get_state_summary") else None
             )
-            # 兜底取中性相位 unknown（不在运行集合、不在 {stopped, fail_safe}
-            # 内）：写 stopped 会让活引擎 is_running 派生转假、并经 set_phase
-            # 重置 start_time，进而误导突变守卫放行破坏性请求；unknown 对
-            # 引擎零语义副作用，存活真相仍由复合存活权威表达。
+            # 兜底取词表内中性终态 stopped：unknown 不在 AppService PHASE_*
+            # 词表、也不在 start_main 在跑闸放行二元组 {stopped, fail_safe}
+            # 内——拒停引擎（observer 仍活）时会陷入「停不掉也启不动」
+            # 死锁，只能重启 WebUI。stopped 使 start_main 在跑闸天然放行，
+            # 重试语义闭环；「假 is_running」的消费面已由守卫与在跑闸改读
+            # 复合存活权威收口，set_phase 重置 start_time 仅影响进度耗时
+            # 展示，对拒绝场景（引擎仍活、进度本就不可信）可接受。
+            # set_phase 回写仍受 compare-then-write 保护，不倒退引擎自行
+            # 推进的相位。集合与 AppService get_state_summary 的在跑集合
+            # 逐字对齐。
             restore_phase = prev_phase if prev_phase in {
                 "starting", "authenticating", "scanning_a", "scanning_b",
                 "syncing_a_to_b", "catching_up", "ready",
-            } else "unknown"
+            } else "stopped"
             try:
                 if svc:
                     svc.set_phase("stopping")
@@ -1485,13 +1509,13 @@ class WebUIServer:
                         and worker is not threading.current_thread()):
                     logging.error("[Main] 停止失败：worker join 超时仍存活")
                     self._app_phase = "fail_safe"
-                    self._app_error = "旧 worker 未退出，停止未完成"
-                    # 相位快照与拒绝原因成对记录：供 get_main_status 门控
-                    # 判定引擎拒绝后是否自行推进过（自愈即抑制）。
-                    self._app_error_phase = restore_phase
+                    # 代次快照与拒绝原因成对记录：供 get_main_status 门控
+                    # 判定拒绝后是否发生过新代次推进（单调自愈即抑制）。
+                    self._set_app_error("旧 worker 未退出，停止未完成",
+                                        snapshot_generation=True)
                     if svc:
                         # 引擎仍在跑（worker 未退出）：恢复拒绝前真实运行
-                        # 相位（无真实运行相位时回落中性相位 unknown，不滞留
+                        # 相位（无真实运行相位时回落词表内终态 stopped，不滞留
                         # stopping）；不得向仍在运行的引擎写 _phase_error——
                         # 引擎 idle 后不再调 set_phase，该错误永不自愈，会把
                         # 运行态展示永久污染。拒绝原因由 server 侧 _app_error
@@ -1516,10 +1540,10 @@ class WebUIServer:
                 if svc and svc.is_engine_running():
                     logging.error("[Main] 停止失败：引擎在 stop 后仍存活")
                     self._app_phase = "fail_safe"
-                    self._app_error = "引擎在 stop 后仍存活，停止未完成"
-                    # 相位快照与拒绝原因成对记录（同 worker_alive 分支）。
-                    self._app_error_phase = restore_phase
-                    # 同上：恢复拒绝前真实运行相位（无则回落中性相位 unknown，不滞留
+                    # 代次快照与拒绝原因成对记录（同 worker_alive 分支）。
+                    self._set_app_error("引擎在 stop 后仍存活，停止未完成",
+                                        snapshot_generation=True)
+                    # 同上：恢复拒绝前真实运行相位（无则回落词表内终态 stopped，不滞留
                     # stopping），不向仍存活的引擎写 _phase_error；拒绝原因
                     # 经 server 侧 _app_error 的合并 error 位透出。
                     # compare-then-write：仅当引擎相位仍为本方法写入的
@@ -1540,7 +1564,7 @@ class WebUIServer:
                 self._app_phase = "stopped"
                 self._app_service = None
                 self._app_error = None
-                self._app_error_phase = None
+                self._app_error_generation = None
                 self._app_worker_thread = None
                 self._app_start_time = None
                 return {"success": True, "message": "主程序已停止"}
@@ -1553,7 +1577,7 @@ class WebUIServer:
                 # stop_main 已先行调用 svc.set_phase("stopping")，仅改
                 # server 侧 _app_phase 不消除前端滞留 stopping 的死角。
                 self._app_phase = "fail_safe"
-                self._app_error = str(exc)
+                self._set_app_error(str(exc))
                 if svc:
                     svc.set_phase("fail_safe", error=str(exc))
                 return {"success": False, "message": "停止失败，请查看服务端日志", "error_type": "exception"}
@@ -1573,22 +1597,37 @@ class WebUIServer:
                 "progress": {},
             }
         running = self._engine_is_running()
+        # worker 存活判据与 stop_main 的 join 守卫一致：存活中的启动
+        # worker 随时可能推进相位甚至重新拉起引擎，其存在本身就是
+        # 「停止尚未完成」的持续证据，不得把相位推进当自愈信号。
+        _worker = self._app_worker_thread
+        worker_alive = (
+            _worker is not None
+            and _worker.is_alive()
+            and _worker is not threading.current_thread()
+        )
+        # 单调自愈证据：拒绝后发生过新的 start/stop 代次推进。相位不作
+        # 判据——相位非单调（可回摆、可被外部改写），回摆会让已抑制的
+        # 告警复现（闪烁），非自愈相位变化会被误判自愈而永久吞掉仍有效
+        # 的失败原因。
+        _stale_rejection = (
+            getattr(self, "_app_error_generation", None) is not None
+            and self._app_error_generation != self._app_generation
+        )
         # svc 摘要错误优先（真实引擎故障）。server 侧拒绝/失败原因
-        # _app_error 仅在引擎未自愈时透出：引擎复合存活为真、摘要无错，
-        # 且（相位已回 ready 的健康运行态，或相位已自行推进过拒绝快照
-        # ＝自愈证据）时拒绝原因属陈旧信息，不再透出，避免配合前端
-        # 告警色渲染长期橙色告警。快照缺省或相位未推进时不抑制
-        # （fail-closed：无据不隐藏）。纯读实现，不改写 _app_error
-        # 存储位（清除点仍归 start/stop 成功路径）。
+        # _app_error 仅在引擎未自愈时透出：引擎复合存活为真、摘要无错、
+        # 启动 worker 已退出，且（相位已回 ready 的健康运行态，或拒绝后
+        # 发生过新代次推进＝单调自愈证据）时拒绝原因属陈旧信息，不再
+        # 透出，避免配合前端告警色渲染长期橙色告警。快照缺省、代次未
+        # 推进或 worker 仍存活时不抑制（fail-closed：无据不隐藏）。纯读
+        # 实现，不改写 _app_error 存储位（清除点仍归 start/stop 成功路径）。
         _self_healed = (
             running
             and not summary.get("error")
+            and not worker_alive
             and (
                 summary.get("phase") == "ready"
-                or (
-                    getattr(self, "_app_error_phase", None) is not None
-                    and summary.get("phase") != self._app_error_phase
-                )
+                or _stale_rejection
             )
         )
         result: dict = {
