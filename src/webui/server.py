@@ -1442,11 +1442,13 @@ class WebUIServer:
             self._app_generation += 1
             self._app_phase = "stopping"
             # 拒绝分支相位恢复基线：在任何 svc 相位写入之前先读真实相位。
-            # 拒绝时若该相位属运行态集合则原样恢复（保留引擎真实相位与
-            # 原始 _phase_error）；否则（stopping 为 stop_main 自写的停止
-            # 语义相位、fail_safe/stopped/None 非真实运行相位）回落 ready，
-            # 保留「拒绝后不得滞留 stopping」契约。集合与 AppService
-            # get_state_summary 的在跑集合逐字对齐。
+            # 拒绝时若 prev_phase 属运行态集合则原样恢复（保留引擎真实相位
+            # 与原始 _phase_error）；否则（stopping 为 stop_main 自写的停止
+            # 语义相位、fail_safe/stopped/None 非真实运行相位）回落中性终态
+            # stopped——不伪造 ready：引擎存活但真实相位未知时，伪 ready 会让
+            # is_ready 被 UI 与 start_main 的 fail_safe 闸读到就绪假象。
+            # stopped 同样满足「拒绝后不得滞留 stopping」契约。集合与
+            # AppService get_state_summary 的在跑集合逐字对齐。
             prev_phase = (
                 svc.get_state_summary().get("phase")
                 if svc and hasattr(svc, "get_state_summary") else None
@@ -1454,7 +1456,7 @@ class WebUIServer:
             restore_phase = prev_phase if prev_phase in {
                 "starting", "authenticating", "scanning_a", "scanning_b",
                 "syncing_a_to_b", "catching_up", "ready",
-            } else "ready"
+            } else "stopped"
             try:
                 if svc:
                     svc.set_phase("stopping")
@@ -1476,13 +1478,22 @@ class WebUIServer:
                     self._app_phase = "fail_safe"
                     self._app_error = "旧 worker 未退出，停止未完成"
                     if svc:
-                        # 引擎仍在跑（worker 未退出），svc 相位恢复为拒绝前
-                        # 真实运行相位（无真实运行相位时回落 ready，不滞留
+                        # 引擎仍在跑（worker 未退出）：恢复拒绝前真实运行
+                        # 相位（无真实运行相位时回落 stopped，不滞留
                         # stopping）；不得向仍在运行的引擎写 _phase_error——
                         # 引擎 idle 后不再调 set_phase，该错误永不自愈，会把
                         # 运行态展示永久污染。拒绝原因由 server 侧 _app_error
                         # 经 get_main_status 的合并 error 位透出。
-                        svc.set_phase(restore_phase)
+                        # compare-then-write：仅当引擎相位仍为本方法写入的
+                        # stopping 时才回写恢复相位；引擎已在 stop/join 窗口
+                        # 内自行推进相位（last-writer-wins 竞态输家）则放弃
+                        # 回写，严禁把引擎相位倒退或长期滞留陈旧值。
+                        current_phase = (
+                            svc.get_state_summary().get("phase")
+                            if hasattr(svc, "get_state_summary") else None
+                        )
+                        if current_phase == "stopping":
+                            svc.set_phase(restore_phase)
                     return {
                         "success": False,
                         "message": "旧 worker 未退出，停止未完成，请重试停止或查看服务端日志",
@@ -1494,10 +1505,19 @@ class WebUIServer:
                     logging.error("[Main] 停止失败：引擎在 stop 后仍存活")
                     self._app_phase = "fail_safe"
                     self._app_error = "引擎在 stop 后仍存活，停止未完成"
-                    # 同上：恢复拒绝前真实运行相位（无则回落 ready，不滞留
+                    # 同上：恢复拒绝前真实运行相位（无则回落 stopped，不滞留
                     # stopping），不向仍存活的引擎写 _phase_error；拒绝原因
                     # 经 server 侧 _app_error 的合并 error 位透出。
-                    svc.set_phase(restore_phase)
+                    # compare-then-write：仅当引擎相位仍为本方法写入的
+                    # stopping 时才回写恢复相位；引擎已在 stop/join 窗口
+                    # 内自行推进相位（last-writer-wins 竞态输家）则放弃
+                    # 回写，严禁把引擎相位倒退或长期滞留陈旧值。
+                    current_phase = (
+                        svc.get_state_summary().get("phase")
+                        if hasattr(svc, "get_state_summary") else None
+                    )
+                    if current_phase == "stopping":
+                        svc.set_phase(restore_phase)
                     return {
                         "success": False,
                         "message": "引擎在 stop 后仍存活，停止未完成，请重试停止或查看服务端日志",
@@ -1544,9 +1564,23 @@ class WebUIServer:
             "phase": summary["phase"],
             "status": summary["phase"],
             "progress": summary["progress"],
-            # svc 摘要错误优先（真实引擎故障）；摘要无错时透出 server 侧
-            # 拒绝/失败原因 _app_error（stop_main 拒绝分支不再写 svc error）。
-            "error": summary.get("error") or getattr(self, "_app_error", None),
+            # svc 摘要错误优先（真实引擎故障）。server 侧拒绝/失败原因
+            # _app_error 仅在引擎未自愈时透出：引擎复合存活为真、摘要相位
+            # 已回 ready 且摘要无错（自愈健康运行态）时拒绝原因属陈旧信息，
+            # 不再透出，避免配合前端告警色渲染长期橙色告警。纯读实现，
+            # 不改写 _app_error 存储位（清除点仍归 start/stop 成功路径）。
+            "error": (
+                summary.get("error")
+                or (
+                    None
+                    if (
+                        running
+                        and summary.get("phase") == "ready"
+                        and not summary.get("error")
+                    )
+                    else getattr(self, "_app_error", None)
+                )
+            ),
             "uptime": int(time.time() - self._app_start_time) if running and self._app_start_time else None,
         }
         if running and svc:

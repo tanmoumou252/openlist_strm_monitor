@@ -292,6 +292,10 @@ export async function updateMainStatus() {
 
     if (!dot || !text) return;
 
+    // 统一出口复位悬浮提示：错误分支随后写入完整原因覆盖，其余相位分支
+    // 由此自然清空，消除上一轮渲染的 tooltip 残留。
+    text.title = '';
+
     const phase = status.phase || (status.running ? 'ready' : 'stopped');
 
     // 引导步骤④「启动主程序」以 main_running 判定勾选，而 main_running 在受理瞬间
@@ -371,14 +375,20 @@ export async function updateMainStatus() {
       }
       if (stopBtn) stopBtn.style.display = 'none';
     } else if (status.running) {
-      // 运行态错误展示：error 非空时文本与状态点转告警色并截断防溢出，
-      // 完整原因入 title 悬浮；error 为空时维持绿点与健康态配色零扰动。
+      // 运行态错误展示：error 非空时文本与状态点转告警色并按长度条件
+      // 截断防溢出（仅超长才加省略号），完整原因入 title 悬浮；error 为
+      // 空时维持绿点与健康态配色零扰动。
       if (status.error) {
-        dot.style.background = '#ff9800';
+        const errText = String(status.error);
+        dot.style.background = 'var(--color-warning, #ff9800)';
         dot.style.boxShadow = '0 0 12px rgba(255,152,0,0.6)';
-        text.textContent = `主程序运行中：${String(status.error).slice(0, 120)}…`;
-        text.title = String(status.error);
-        text.style.color = 'var(--warning, #ff9800)';
+        // 仅超长错误才截断加省略号：短错误原样全文展示，避免
+        // 「未截断却带省略号」的误导形态。
+        text.textContent = errText.length > 120
+          ? `主程序运行中：${errText.slice(0, 120)}…`
+          : `主程序运行中：${errText}`;
+        text.title = errText;
+        text.style.color = 'var(--color-warning, #ff9800)';
       } else {
         dot.style.background = '#4caf50';
         dot.style.boxShadow = '0 0 12px rgba(76,175,80,0.6)';

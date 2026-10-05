@@ -196,6 +196,25 @@ class _PhaseRestoreStubSvc:
         pass
 
 
+class _EngineAdvanceStubSvc(_PhaseRestoreStubSvc):
+    """E3 compare-then-write 契约替身：stop() 副作用把相位推进为
+    syncing_a_to_b，模拟引擎线程在 stop/join 窗口内自行 set_phase 推进。
+    相位写入记录平铺字符串（区别于父类的 (phase, error) 元组），供断言
+    「拒绝分支放弃回写」时的写入序列形态。observer 常真 → stop_main 必走
+    engine_alive 拒绝分支。"""
+
+    def __init__(self, initial_phase="scanning_a"):
+        super().__init__(initial_phase=initial_phase)
+        self.phases_written = []
+
+    def set_phase(self, phase, error=None):
+        self.phases_written.append(phase)
+        self._phase = phase
+
+    def stop(self):
+        self._phase = "syncing_a_to_b"
+
+
 class _MockStaleSvc:
     """start/stop/phase 多路可控替身，对齐 AppService 摘要契约：
     - stop_raises：stop() 抛错（模拟停止失败）；
@@ -672,20 +691,21 @@ def test_stop_main_rejects_when_engine_revives_after_stop(webui_server_shared):
 
 def test_stop_main_reject_worker_alive_surfaces_error_via_status(
         webui_server_shared):
-    """E1 契约：worker join 超时拒绝分支必须把「旧 worker 未退出，停止未完成」
-    经 svc.set_phase 的 error 参数写入，get_main_status().error 可见。
-    ready 运行态 + error 属如实组合（引擎确实仍在跑）。"""
+    """E1 契约：worker join 超时拒绝分支必须把拒绝原因经 get_main_status 的
+    合并 error 位可见。引擎忙于非 ready 运行相位 + error 属如实组合
+    （引擎确实仍在跑，且 E4 门控不隐藏忙态拒绝原因）。"""
     server, _base, _token = webui_server_shared
     svc = _MockStaleSvc(stop_raises=False)
     worker = _BlockingWorkerStub()
     server._app_service = svc
     server._app_worker_thread = worker
+    svc._phase = "scanning_a"
     try:
         result = server.stop_main()
         assert result["success"] is False
         status = server.get_main_status()
-        assert status["phase"] == "ready", (
-            f"拒绝分支须保持运行态 ready，实际 {status['phase']!r}")
+        assert status["phase"] == "scanning_a", (
+            f"拒绝分支须恢复拒绝前真实运行相位，实际 {status['phase']!r}")
         assert "旧 worker 未退出" in str(status.get("error")), (
             f"拒绝原因必须经 error 位可见，实际返回体: {status!r}")
     finally:
@@ -694,15 +714,17 @@ def test_stop_main_reject_worker_alive_surfaces_error_via_status(
 
 def test_stop_main_reject_engine_alive_surfaces_error_via_status(
         webui_server_shared):
-    """E1 契约：引擎 stop 后仍存活拒绝分支的拒绝原因必须经 error 位可见。"""
+    """E1 契约：引擎 stop 后仍存活拒绝分支的拒绝原因必须经 error 位可见
+    （引擎忙于非 ready 运行相位，E4 门控不隐藏忙态拒绝原因）。"""
     server, _base, _token = webui_server_shared
     svc = _MockStaleSvc(stop_raises=False, is_revive_after_stop=True)
     server._app_service = svc
     server._app_worker_thread = None
+    svc._phase = "scanning_a"
     result = server.stop_main()
     assert result["success"] is False
     status = server.get_main_status()
-    assert status["phase"] == "ready"
+    assert status["phase"] == "scanning_a"
     assert "引擎在 stop 后仍存活" in str(status.get("error")), (
         f"拒绝原因必须经 error 位可见，实际返回体: {status!r}")
 
@@ -839,11 +861,13 @@ def test_rl4_rejection_paths_never_write_fail_safe_phase_to_live_engine(
 
 
 def test_rl6_rejection_paths_restore_phase_not_stopping(webui_server_shared):
-    """RL-6：stop_main 拒绝（引擎 stop 后仍真活）后，svc 侧相位必须回写为
-    运行态 ready、不得滞留 stopping——get_main_status 主路径读
-    svc.get_state_summary()，svc 相位滞留 stopping 会让前端永久卡在
-    「正在停止」死角（刷新亦不可恢复）。回写 ready 是存活事实的如实反映，
-    与「拒绝不谎报」语义一致；失败语义经返回体 message/error_type 透出。"""
+    """RL-6：stop_main 拒绝（引擎 stop 后仍真活）后，svc 侧相位不得滞留
+    stopping——get_main_status 主路径读 svc.get_state_summary()，svc 相位
+    滞留 stopping 会让前端永久卡在「正在停止」死角（刷新亦不可恢复）。
+    prev_phase 属真实运行相位时原样恢复；prev_phase 不属运行态集合时兜底
+    落中性终态 stopped（不伪造 ready：伪 ready 会让 is_ready 被 UI 与
+    start_main 的 fail_safe 闸读到就绪假象）。失败语义经返回体
+    message/error_type 透出。"""
     server, _base, _token = webui_server_shared
     svc = _AuthorityStubSvc(observer_alive=True, phase="stopping",
                             summary_is_running=True)
@@ -856,9 +880,96 @@ def test_rl6_rejection_paths_restore_phase_not_stopping(webui_server_shared):
         f"须走引擎存活拒绝路径，实际: {result!r}")
     assert svc.phases_written[-1] != "stopping", (
         f"拒绝后 svc 相位不得滞留 stopping，实际写入序列: {svc.phases_written!r}")
-    assert svc.phases_written[-1] == "ready", (
-        f"拒绝后 svc 相位须回写为运行态 ready，实际写入序列: {svc.phases_written!r}")
+    assert svc.phases_written[-1] == "stopped", (
+        f"拒绝后 svc 相位兜底须落中性终态 stopped（不得伪造 ready），"
+        f"实际写入序列: {svc.phases_written!r}")
     assert server._app_service is svc, "拒绝后必须保留句柄供重试"
+
+
+def test_stop_main_reject_fallback_lands_stopped_not_ready(
+        webui_server_shared):
+    """E2 契约：拒绝分支兜底相位必须落中性终态 stopped 而非 ready——
+    引擎存活但真实相位未知（stopping/fail_safe/stopped/None）时，伪 ready
+    会让 get_main_status 的 is_ready 被 UI 与 start_main fail_safe 闸读到
+    就绪假象。stopped 同样满足「拒绝后不得滞留 stopping」。"""
+    server, _base, _token = webui_server_shared
+    svc = _AuthorityStubSvc(observer_alive=True, phase="stopping",
+                            summary_is_running=True)
+    server._app_service = svc
+    server._app_worker_thread = None
+    result = server.stop_main()
+    assert result["success"] is False, (
+        f"引擎真活时停止必须拒绝伪造成功，实际: {result!r}")
+    assert result.get("error_type") == "engine_alive", (
+        f"须走引擎存活拒绝路径，实际: {result!r}")
+    status = server.get_main_status()
+    assert status["phase"] == "stopped", (
+        f"兜底相位须落 stopped，实际 {status['phase']!r}")
+    assert status["ready"] is False, (
+        f"兜底不得伪造就绪态，实际: {status!r}")
+
+
+def test_stop_main_reject_gives_way_when_engine_advanced_phase(
+        webui_server_shared):
+    """E3 compare-then-write 契约：拒绝分支回写恢复相位前必须读当前相位，
+    仅当仍为本方法写入的 stopping 时才回写；引擎已在 stop/join 窗口内自行
+    推进相位（last-writer-wins 竞态输家）时放弃回写，严禁把引擎相位倒退。"""
+    server, _base, _token = webui_server_shared
+    svc = _EngineAdvanceStubSvc(initial_phase="scanning_a")
+    server._app_service = svc
+    server._app_worker_thread = None
+    result = server.stop_main()
+    assert result["success"] is False, (
+        f"引擎真活时停止必须拒绝伪造成功，实际: {result!r}")
+    assert result.get("error_type") == "engine_alive", (
+        f"须走引擎存活拒绝路径，实际: {result!r}")
+    assert svc.phases_written == ["stopping"], (
+        f"引擎已自行推进相位时拒绝分支必须放弃回写，实际写入序列: "
+        f"{svc.phases_written!r}")
+    assert svc.get_state_summary()["phase"] == "syncing_a_to_b", (
+        f"引擎自行推进的新相位不得被回写倒退，实际: "
+        f"{svc.get_state_summary()['phase']!r}")
+
+
+def test_stale_rejection_error_hidden_when_engine_self_heals_ready(
+        webui_server_shared):
+    """E4 门控契约（触发域）：拒绝后引擎自愈进入 ready 健康运行态
+    （running=True、摘要相位 ready、摘要无错）时，陈旧拒绝原因不再经
+    get_main_status 合并 error 位透出；_app_error 存储位保持纯读不清
+    （清除点仍归 start/stop 成功路径）。"""
+    server, _base, _token = webui_server_shared
+    svc = _PhaseRestoreStubSvc(initial_phase="ready")
+    server._app_service = svc
+    server._app_worker_thread = None
+    result = server.stop_main()
+    assert result["success"] is False, (
+        f"引擎真活时停止必须拒绝伪造成功，实际: {result!r}")
+    assert result.get("error_type") == "engine_alive", (
+        f"须走引擎存活拒绝路径，实际: {result!r}")
+    assert "引擎在 stop 后仍存活" in str(server._app_error), (
+        f"存储位 _app_error 必须保持纯读不清，实际 {server._app_error!r}")
+    status = server.get_main_status()
+    assert status["running"] is True, (
+        f"自愈场景引擎存活须如实为 True，实际: {status!r}")
+    assert status.get("error") is None, (
+        f"引擎已自愈 ready 且摘要无错时陈旧拒绝原因不得透出，实际返回体: "
+        f"{status!r}")
+
+
+def test_rejection_error_visible_when_engine_busy_not_ready(
+        webui_server_shared):
+    """E4 门控契约（不该触发域）：拒绝当下引擎仍存活在非 ready 运行相位
+    （如 scanning_a）时，拒绝原因必须经合并 error 位可见（零扰动）。"""
+    server, _base, _token = webui_server_shared
+    svc = _PhaseRestoreStubSvc(initial_phase="scanning_a")
+    server._app_service = svc
+    server._app_worker_thread = None
+    result = server.stop_main()
+    assert result["success"] is False, (
+        f"引擎真活时停止必须拒绝伪造成功，实际: {result!r}")
+    status = server.get_main_status()
+    assert "引擎在 stop 后仍存活" in str(status.get("error")), (
+        f"引擎忙于非 ready 相位时拒绝原因必须可见，实际返回体: {status!r}")
 
 
 def test_rl5_stop_bounded_join_does_not_hang_or_fake_success(

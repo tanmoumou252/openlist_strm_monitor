@@ -138,28 +138,70 @@ def test_stopping_branch_keeps_start_button_visible_but_disabled():
 
 
 def test_running_branch_error_has_warning_color_and_length_guard():
-    """N2 契约：运行态分支 error 非空时须转告警色（文本 + 状态点）并做
-    120 字符截断 + title 存完整原因；error 为空路径不得染告警色（不该
-    触发域零扰动）。期望值由行为契约推导：告警色只出现在 if (status.error)
-    子分支内，else 子分支维持绿点健康配色。"""
+    """N2 契约：运行态分支 error 非空时须转告警色（文本 + 状态点，统一用
+    --color-warning 主题令牌）并按长度条件截断（仅 >120 才加省略号）+
+    title 存完整原因；error 为空路径不得染告警色（不该触发域零扰动）。
+    期望值由行为契约推导：告警色只出现在 if (status.error) 子分支内，
+    else 子分支维持绿点健康配色。"""
     running_idx = DASHBOARD_SOURCE.find("} else if (status.running) {")
     assert running_idx != -1
     seg_end = DASHBOARD_SOURCE.find("} else if (phase === 'ready'", running_idx)
     seg = DASHBOARD_SOURCE[running_idx:seg_end]
-    assert "String(status.error).slice(0, 120)" in seg, (
-        "运行态 error 须截断 120 字符防溢出")
-    assert "text.title = String(status.error);" in seg, (
+    assert "errText.length > 120" in seg, (
+        "截断钳制触发域须为 errText.length > 120（≤120 原样展示）")
+    assert "`主程序运行中：${errText.slice(0, 120)}…`" in seg, (
+        "截断路径须为前 120 字符加省略号")
+    assert "`主程序运行中：${errText}`" in seg, (
+        "非截断路径须原样全文展示、不追加省略号")
+    assert "text.title = errText;" in seg, (
         "完整拒绝原因须写入 title 供悬浮查看")
+    assert "var(--warning," not in seg, (
+        "不得引用不存在的 --warning 变量（主题令牌为 --color-warning）")
     err_if_idx = seg.find("if (status.error) {")
     assert err_if_idx != -1, "运行态分支须以 if (status.error) 区分错误/健康展示"
     else_idx = seg.find("} else {", err_if_idx)
     assert else_idx != -1, "运行态分支须有 error 为空的 else 健康态路径"
-    warn_idx = seg.find("var(--warning, #ff9800)", err_if_idx, else_idx)
+    warn_idx = seg.find("var(--color-warning, #ff9800)", err_if_idx, else_idx)
     assert warn_idx != -1, (
-        "error 非空子分支内文本须转告警色 var(--warning, #ff9800)")
-    assert "dot.style.background = '#ff9800';" in seg[:else_idx], (
-        "error 非空时状态点须用告警色（对齐 stopping 分支形态）")
+        "error 非空子分支内文本须转告警色 var(--color-warning, #ff9800)")
+    assert "dot.style.background = 'var(--color-warning, #ff9800)';" in seg[:else_idx], (
+        "error 非空时状态点须用 --color-warning 告警令牌（保留字面量兜底）")
     assert seg.find("dot.style.background = '#4caf50';", else_idx) != -1, (
         "error 为空的 else 路径须维持绿点健康配色")
     assert "text.title = '';" in seg[else_idx:], (
         "error 为空时须清空 title 防上一轮渲染残留悬浮提示")
+
+
+def test_running_branch_error_short_text_no_ellipsis():
+    """E1 契约：错误截断钳制——非截断路径（≤120 字符）模板串不含省略号，
+    截断路径（>120）模板串以省略号结尾。期望值由 E1 契约推导。"""
+    running_idx = DASHBOARD_SOURCE.find("} else if (status.running) {")
+    assert running_idx != -1
+    seg_end = DASHBOARD_SOURCE.find("} else if (phase === 'ready'", running_idx)
+    seg = DASHBOARD_SOURCE[running_idx:seg_end]
+    trunc_idx = seg.find("`主程序运行中：${errText.slice(0, 120)}…`")
+    assert trunc_idx != -1, "截断路径模板串必须存在且以省略号结尾"
+    full_idx = seg.find("`主程序运行中：${errText}`")
+    assert full_idx != -1, "非截断路径模板串必须存在"
+    assert full_idx != trunc_idx, (
+        "截断与非截断必须是两条互斥路径（三元表达式）")
+
+
+def test_tooltip_reset_before_branch_chain():
+    """E6 契约：updateMainStatus 分支链之前必须有统一出口复位
+    text.title = ''（各相位分支由此自然清空上一轮 tooltip），错误分支
+    随后写入完整原因覆盖（后写优先）。"""
+    func_idx = DASHBOARD_SOURCE.find("function updateMainStatus(")
+    if func_idx == -1:
+        func_idx = DASHBOARD_SOURCE.find("updateMainStatus = ")
+    assert func_idx != -1, "须能定位 updateMainStatus 函数体"
+    guard_idx = DASHBOARD_SOURCE.find("if (!dot || !text) return;", func_idx)
+    assert guard_idx != -1, "须能定位 updateMainStatus 的元素存在性守卫"
+    reset_idx = DASHBOARD_SOURCE.find("text.title = '';", guard_idx)
+    assert reset_idx != -1, "守卫之后、分支链之前须有统一出口 text.title = ''"
+    first_branch_idx = DASHBOARD_SOURCE.find("} else if (", guard_idx)
+    assert first_branch_idx != -1 and reset_idx < first_branch_idx, (
+        "title 复位必须位于首个渲染分支之前（统一出口）")
+    err_write_idx = DASHBOARD_SOURCE.find("text.title = errText;", reset_idx)
+    assert err_write_idx != -1, (
+        "错误分支须在统一复位之后写入完整原因（后写覆盖优先）")
