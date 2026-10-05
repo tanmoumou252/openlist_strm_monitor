@@ -42,7 +42,9 @@ def mock_config_path(tmp_path):
 def _patch_main_deps(mock_config_path):
     """Mock 掉 main() 的全部外部依赖，返回 mock_server 实例。"""
     mock_server = MagicMock()
-    mock_server._app_running = False
+    mock_server._app_service = None
+    mock_server._app_worker_thread = None
+    mock_server._engine_is_running.return_value = False
     mock_server.start.return_value = None
     mock_server.stop.return_value = None
     mock_server.start_main.return_value = {"success": True, "message": "ok"}
@@ -89,7 +91,7 @@ class TestHeadlessMode:
         # （如果 input 被调用，side_effect=RuntimeError 会抛出异常导致测试失败）
         # stop 和 stop_main 应被调用（清理路径）
         mock_server.stop.assert_called_once()
-        # 如果 _app_running=False，stop_main 不会被调用
+        # 如果引擎未在运行（存活权威 False），stop_main 不会被调用
         mock_server.start.assert_called_once()
 
     def test_headless_auto_start_main_flag(self, _patch_main_deps):
@@ -106,9 +108,9 @@ class TestHeadlessMode:
         assert mock_server.start_main.called, "无头模式应调用 start_main"
 
     def test_headless_cleanup_stops_main_if_running(self, _patch_main_deps):
-        """无头模式退出时若 _app_running=True，应调用 stop_main()。"""
+        """无头模式退出时若引擎在跑（存活权威 True），应调用 stop_main()。"""
         mock_server = _patch_main_deps
-        mock_server._app_running = True
+        mock_server._engine_is_running.return_value = True
         os.environ["BRIDGE_HEADLESS"] = "1"
 
         from webui.server import main
@@ -181,9 +183,9 @@ class TestNormalMode:
         mock_server.start.assert_called_once()
 
     def test_normal_choice_1_cleanup_stops_main(self, _patch_main_deps):
-        """普通模式选择 1 退出时若 _app_running=True，应调用 stop_main()。"""
+        """普通模式选择 1 退出时若引擎在跑（存活权威 True），应调用 stop_main()。"""
         mock_server = _patch_main_deps
-        mock_server._app_running = True
+        mock_server._engine_is_running.return_value = True
 
         from webui.server import main
 

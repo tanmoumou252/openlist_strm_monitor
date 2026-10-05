@@ -23,6 +23,10 @@ import pytest
 # 确保 src/ 在 sys.path 中（conftest.py 也会处理，此处冗余保护）
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from domain.sync.sync_service import (
+    AuditCoverageIncompleteError,
+    AuditIncompleteError,
+)
 from refresh_service import RefreshService, PartialRefreshError
 from _test_helpers import build_mock_app
 
@@ -332,7 +336,8 @@ class TestExecuteRefreshCycle:
              patch.object(app, "initial_scan_a") as scan_a, \
              patch.object(app, "scan_a_to_b_full_sync") as sync:
             svc._maybe_run_full_audit()
-        scan_a.assert_called_once_with(use_bulk=False, a_roots=None)
+        # 全量审计为 A 区快照权威自愈触发源：必须绕过内容读跳检
+        scan_a.assert_called_once_with(use_bulk=False, a_roots=None, use_snapshot=False)
         sync.assert_called_once_with(valid_engine_paths=None, use_bulk=False)
         app.db.set_control.assert_called_once()
 
@@ -625,6 +630,93 @@ class TestFullAuditGap:
         assert call_args[0][0] == "last_full_audit_at"
         assert int(call_args[0][1]) == 8 * 86400
 
+    def test_full_audit_incomplete_skips_all_advancement(self):
+        """审计不完整（快照行失效失败）时：B 区收敛照常，但四项推进全跳过，
+        周期路径返回 False（交 execute_refresh_cycle 计健康失败）。"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        svc = RefreshService(app)
+        last_before = svc._last_full_audit_at
+
+        with patch.object(app, "initial_scan_a",
+                          side_effect=AuditIncompleteError("旧快照行失效失败: db boom")), \
+             patch.object(app, "scan_a_to_b_full_sync") as sync:
+            ok = svc._maybe_run_full_audit()
+
+        assert ok is False, (
+            "审计不完整必须以 False 上报（不得静默成功）")
+        # B 区收敛不得因快照失效失败被跳过（参数契约由下行断言守护）
+        sync.assert_called_once_with(valid_engine_paths=None, use_bulk=False)
+        app.db.complete_index_generation.assert_not_called()
+        app.db.touch_verified_by_mapping.assert_not_called()
+        app.db.set_control.assert_not_called()
+        assert svc._last_full_audit_at == last_before, (
+            "内存审计时间戳不得推进（否则下轮周期静默跳过审计）")
+        assert svc._full_audit_in_progress is False, (
+            "finally 必须复位 in-progress 标志（否则审计永久锁死）")
+
+    def test_manual_audit_incomplete_returns_incomplete_status(self):
+        """手动审计不完整：返回可区分的 incomplete 终态且不推进时间戳。"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        svc = RefreshService(app)
+
+        with patch.object(app, "initial_scan_a",
+                          side_effect=AuditIncompleteError("旧快照行失效失败: db boom")), \
+             patch.object(app, "scan_a_to_b_full_sync"):
+            result = svc.run_full_audit_now()
+
+        assert result["ok"] is False, f"实际: {result!r}"
+        assert result["status"] == "incomplete", (
+            f"不完整必须返回可区分状态，实际: {result!r}")
+        assert "旧快照行失效失败" in result["error"], (
+            f"必须透出根因，实际: {result!r}")
+        app.db.complete_index_generation.assert_not_called()
+        app.db.touch_verified_by_mapping.assert_not_called()
+        app.db.set_control.assert_not_called()
+
+    def test_full_audit_coverage_incomplete_skips_stamps_but_keeps_cadence(self):
+        """覆盖缺口（根不可达）：跳过索引代次与核对盖章，但**仍推进审计节拍**
+        （last_full_audit_at）——否则挂载故障期间每个周期重跑全量审计。"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        app.db.get_control.return_value = "0"
+        svc = RefreshService(app)
+        app._current_mapping_ids.return_value = ["m1"]
+
+        with patch.object(app, "initial_scan_a",
+                          side_effect=AuditCoverageIncompleteError("1/2 个 A 根不可达")), \
+             patch.object(app, "scan_a_to_b_full_sync"):
+            ok = svc._maybe_run_full_audit()
+
+        assert ok is True, "覆盖缺口不阻断审计节拍（周期路径应计为已执行）"
+        assert not app.db.complete_index_generation.called, (
+            "覆盖不完整不得宣称索引代次已刷新")
+        assert not app.db.touch_verified_by_mapping.called, (
+            "覆盖不完整不得给未巡查行盖核对章")
+        app.db.set_control.assert_called_once()
+        assert app.db.set_control.call_args[0][0] == "last_full_audit_at", (
+            "审计节拍必须推进")
+        current_failures = svc._consecutive_failures
+        _ = current_failures  # 覆盖缺口不计入健康失败（节拍已推进）
+
+    def test_manual_audit_coverage_incomplete_flags_result(self):
+        """手动审计覆盖缺口：status 仍为 completed，但带 coverage_incomplete 标记
+        与 warning 文本，且不推进索引代次/盖章。"""
+        app = _make_app(refresh_paths=[], full_audit_interval_days=7)
+        svc = RefreshService(app)
+
+        with patch.object(app, "initial_scan_a",
+                          side_effect=AuditCoverageIncompleteError("1/2 个 A 根不可达")), \
+             patch.object(app, "scan_a_to_b_full_sync"):
+            result = svc.run_full_audit_now()
+
+        assert result["ok"] is True, f"实际: {result!r}"
+        assert result["status"] == "completed", f"实际: {result!r}"
+        assert result["coverage_incomplete"] is True, f"实际: {result!r}"
+        assert "未巡查" in (result.get("warning") or ""), f"实际: {result!r}"
+        app.db.complete_index_generation.assert_not_called()
+        app.db.touch_verified_by_mapping.assert_not_called()
+        app.db.set_control.assert_called_once()
+
 
 class TestBDeleteIndependence:
     """验证 B 区删除不受 refresh_paths 影响。
@@ -871,7 +963,8 @@ class TestRunFullAuditNow:
              patch.object(app, "scan_a_to_b_full_sync") as m_sync:
             result = svc.run_full_audit_now()
 
-        m_scan.assert_called_once_with(use_bulk=False, a_roots=None)
+        # 全量审计为 A 区快照权威自愈触发源：必须绕过内容读跳检
+        m_scan.assert_called_once_with(use_bulk=False, a_roots=None, use_snapshot=False)
         m_sync.assert_called_once_with(valid_engine_paths=None, use_bulk=False)
         app.db.complete_index_generation.assert_called_once()
         app.db.set_control.assert_called_once_with("last_full_audit_at", str(8 * 86400))

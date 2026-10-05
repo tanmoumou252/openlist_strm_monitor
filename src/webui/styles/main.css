@@ -98,6 +98,9 @@
   --surface-hover:color-mix(in srgb,var(--primary) 10%,var(--bg-card));
   /* 状态色 */
   --color-danger:#d93025;
+  /* 内联样式别名：dashboard.js var(--error) / login.js var(--text-error) */
+  --error:var(--color-danger);
+  --text-error:var(--color-danger);
   --color-warning:#e37400;
   --color-success:#188038;
   --color-info:var(--primary);

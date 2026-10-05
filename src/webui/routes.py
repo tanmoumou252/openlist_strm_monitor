@@ -2051,8 +2051,8 @@ def _handle_restart_webui(handler, webui_server) -> None:
     def _do_restart():
         time.sleep(0.5)
         try:
-            # 1. 停止主程序（如果在运行）
-            if webui_server._app_running:
+            # 1. 停止主程序（若复合存活权威判在跑：句柄在场 ∨ worker 存活）
+            if webui_server._engine_is_running():
                 logging.info("[Restart] 正在停止主程序...")
                 webui_server.stop_main()
 
@@ -2062,7 +2062,9 @@ def _handle_restart_webui(handler, webui_server) -> None:
             logging.info("[Restart] 正在启动主程序...")
             result = webui_server.start_main()
             if result.get("success"):
-                logging.info("[Restart] 主程序已重启")
+                # start_main 为非阻塞异步启动：success 仅代表「已受理」，终态由
+                # /api/main/status 的 phase（ready / fail_safe / stopped）判定。
+                logging.info("[Restart] 主程序重启请求已受理（后台初始化中）")
             else:
                 logging.error("[Restart] 主程序启动失败: %s", result.get("message"))
 
@@ -3244,21 +3246,41 @@ def _process_mapping_partition(
     }
 
 def _guard_engine_ready_for_mutation(handler, webui_server) -> bool:
-    """启动扫描期间阻止外部破坏性/重型刷新请求，保持 HTTP 200 业务契约。"""
+    """启动同步期间阻止外部破坏性/重型刷新请求，保持 HTTP 200 业务契约。
+
+    在跑判据读复合存活权威 _engine_is_running()，不读摘要相位派生的
+    is_running——相位派生值不可作存活真相；拦截条件按相位集合收窄：
+    仅当引擎存活且摘要相位处于运行相位集合（与 AppService
+    get_state_summary 的 is_running 集合逐字对齐）且未就绪时拦截。
+    fail_safe（引擎失败暂停、未在跑启动同步）、stopping（stop_main
+    自写瞬态）等非运行相位一律放行，避免用「启动全量同步」文案误导；
+    worker 存活的启动扫描窗（starting/scanning_*）仍被拦，守卫本意
+    保住。"""
     app_service = getattr(webui_server, "_app_service", None)
     if not app_service:
+        return True
+    engine_running = getattr(webui_server, "_engine_is_running", None)
+    if not callable(engine_running):
+        logging.warning(
+            "[Guard] webui_server 缺少 _engine_is_running，"
+            "突变守卫退化为放行")
         return True
     get_summary = getattr(app_service, "get_state_summary", None)
     if not callable(get_summary):
         return True
     summary = get_summary()
-    if summary.get("is_running") and not summary.get("is_ready"):
+    phase = summary.get("phase")
+    if (engine_running()
+            and not summary.get("is_ready")
+            and phase in {"starting", "authenticating", "scanning_a",
+                          "scanning_b", "syncing_a_to_b", "catching_up",
+                          "ready"}):
         handler._send_json({
             "ok": False,
             "success": False,
             "status": "sync_in_progress",
             "message": "引擎正在执行启动全量同步，请稍候再试",
-            "phase": summary.get("phase"),
+            "phase": phase,
         }, 200)
         return False
     return True
@@ -3983,10 +4005,13 @@ def _handle_main_status(handler, webui_server) -> bool:
     return True
 
 def _handle_main_start(handler, webui_server, body: bytes) -> bool:
-    """POST /api/main/start — 启动主程序
-    
-    业务失败（未配置/fail-safe/登录失败等）返回 200 + success:false，
-    与 _handle_openlist_test_connection 的约定一致；
+    """POST /api/main/start — 启动主程序（非阻塞异步启动，两层契约）
+
+    快同步预检失败（已在运行/配置未加载/未配置 A-B mapping/fail-safe 配置态）
+    → 200 + success:false + 原因；
+    慢操作（OpenList 登录、STRM 存储映射加载）在后台 Worker 进行，
+    受理即返回 200 + success:true + status:"starting"，
+    其失败经 GET /api/main/status 的 phase="fail_safe" + error 暴露。
     仅服务层未预期异常返回 500 + error_type: "exception"。
     """
     if not webui_server:
@@ -4056,8 +4081,8 @@ def _handle_config_status(handler, webui_server) -> None:
     host, _user, _password, _totp = _openlist_merged_webdav_cfg(webui_server)
     openlist_configured = bool(host)
 
-    # main_running
-    main_running = bool(getattr(webui_server, '_app_running', False))
+    # main_running：读 get_main_status 的 running 位（内部走复合存活权威）
+    main_running = bool(webui_server.get_main_status().get("running"))
 
     # onboarding_completed: 检查 DB 中的标记
     # 返回字符串 "1"/"0"（与 DB 存储一致），前端用 === '1' 严格比较。

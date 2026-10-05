@@ -1082,7 +1082,12 @@ class AppService:
                     logging.warning("[停止] watcher handler close 失败", exc_info=True)
         if self.observer is not None and self.observer.is_alive():
             self.observer.stop()
-            self.observer.join()
+            # 有界 join：与同块字幕扫描 join(timeout=5) 对齐，防止 observer
+            # 退出卡死拖垮停机路径。超时不抛错、不谎报停止完成，调用方
+            # （stop_main）以存活权威复核后 fail-closed 处理。
+            self.observer.join(timeout=5.0)
+            if self.observer.is_alive():
+                logging.warning("[停止] watcher observer 未在超时内退出，停止未完全完成")
         subtitle_thread = self._subtitle_scan_thread
         if (subtitle_thread is not None
                 and subtitle_thread is not threading.current_thread()):
@@ -1143,6 +1148,16 @@ class AppService:
         避开 Database.ReadWriteLock._writers_active 的命名陷阱。
         """
         return self.observer is not None and self.observer.is_alive()
+
+    def is_engine_running(self) -> bool:
+        """引擎存活权威（唯一单源的引擎侧 origin）：基于 observer 真实存活。
+
+        不读 _current_phase（可被 set_phase 合法写成谎）、不读 _running
+        （仅 start() 末尾置位且从不被内部读）——两者均不可信为存活事实。
+        不提供 phase/progress 语义（那是 get_state_summary 的展示通道）。
+        判定表达式委托 _watchers_live()（同一事实源，避免双份函数体漂移）。
+        """
+        return self._watchers_live()
 
     def get_mapping_for_a(self, local_path: str | Path) -> tuple[str, Path, Path] | None:
         """严格解析 A 路径所属的唯一 mapping。零/多命中均 fail-closed。"""
@@ -2929,9 +2944,10 @@ class AppService:
 
     def initial_scan_a(
             self, use_bulk: bool = False,
-            a_roots: list[Path] | None = None):
+            a_roots: list[Path] | None = None,
+            use_snapshot: bool = True):
         return self.sync_service.initial_scan_a(
-            use_bulk=use_bulk, a_roots=a_roots)
+            use_bulk=use_bulk, a_roots=a_roots, use_snapshot=use_snapshot)
 
     def cleanup_a_redundant_using_api(self) -> None:
         """使用 OpenList API 批量清理 A 区冗余文件。
@@ -3530,9 +3546,13 @@ class AppService:
         webdav_path = read_strm_webdav_path(local)
         if not webdav_path:
             logging.warning("[A区] 无法解析STRM: %s", local)
+            # 解析失败 = 当前无可信权威链接，旧快照行不得留给采信门复用
+            self.db.delete_a_snapshot(str(local))
             return
         parent = webdav_parent(webdav_path)
         self.db.upsert_a(str(local), webdav_path, parent)
+        # E2：A 区 watcher 改写后即时失效快照行，下轮扫描以当前 size/mtime 重读重建
+        self.db.delete_a_snapshot(str(local))
         self.db.save_known_folder(parent, source="a")
         fingerprint = make_strm_fingerprint(webdav_path)
         # 按 fingerprint 串行化，避免并发创建 B 实例的 TOCTOU 竞争
@@ -3646,6 +3666,8 @@ class AppService:
             return
         row = self.db.get_a_by_local(local_path)
         self.db.delete_a_by_local(local_path)
+        # E2：watcher 删除后同步清除快照行，消除孤儿快照
+        self.db.delete_a_snapshot(local_path)
         if row:
             webdav_path = row.webdav_path
             parent_webdav_path = row.parent_webdav_path

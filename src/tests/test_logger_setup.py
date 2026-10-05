@@ -10,7 +10,7 @@
 - ``MaxLevelFilter`` 边界
 - ``_has_available_windows_drive`` 判定
 
-与 ``test_logging_system.py`` 的关系：该文件覆盖 WebUI 操作日志表、日志读取
+与 ``test_webui_logging_system.py`` 的关系：该文件覆盖 WebUI 操作日志表、日志读取
 接口、轮转产物与前端标签；本文件专注 ``logger_setup`` 模块自身的 handler
 装配、回退与级别语义。
 

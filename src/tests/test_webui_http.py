@@ -2710,7 +2710,7 @@ class TestConfigApiFreshInstall:
 
 
 class TestStartMainFailSafe:
-    """引擎落入 fail-safe 时，start_main 必须返回失败且不置 _app_running。
+    """引擎落入 fail-safe 时，start_main 必须返回失败且不置存活态。
 
     start_main 此前在 src/tests/ 下零引用——这是 D3 未被发现的原因。
     """
@@ -2741,7 +2741,8 @@ class TestStartMainFailSafe:
 
         assert result["success"] is False
         assert result.get("status") == "fail_safe_active"
-        assert server._app_running is False
+        # 配置闸拦截发生在句柄赋值前：无 svc、无 worker → 存活权威 False
+        assert server.get_main_status()["running"] is False
 
     def test_start_main_succeeds_when_ready(self, tmp_path):
         """配置 ready 时行为不变，避免修复把正常启动路径一起堵死。
@@ -2765,7 +2766,12 @@ class TestStartMainFailSafe:
         fake_app = MagicMock()
         fake_app._running = False
         fake_app.get_config_status.return_value = {"status": "ready", "reason": "ok"}
-        fake_app.start.side_effect = lambda: setattr(fake_app, "_running", True)
+        # 存活权威显式建模：start() 成功收尾后 observer 才真活（防 MagicMock
+        # 默认子属性真值充当存活=True 的假绿）
+        fake_app.is_engine_running.return_value = False
+        fake_app.start.side_effect = lambda: (
+            setattr(fake_app, "_running", True),
+            setattr(fake_app.is_engine_running, "return_value", True))
 
         with patch("webui.server.PROJECT_ROOT", tmp_path), \
              patch("webui.server.STATIC_DIR", tmp_path / "static"), \
@@ -2778,7 +2784,7 @@ class TestStartMainFailSafe:
                 server._app_worker_thread.join(timeout=2)
 
         assert result["success"] is True
-        assert server._app_running is True
+        assert server.get_main_status()["running"] is True
         fake_app.start.assert_called_once()
 
     def test_worker_calls_refresh_mapping_snapshot_after_storage_mapping(self, tmp_path):
@@ -2831,6 +2837,8 @@ class TestStartMainFailSafe:
         fake_app = MagicMock()
         fake_app._running = False
         fake_app.get_config_status.return_value = {"status": "ready", "reason": "ok"}
+        # 存储映射加载失败 → observer 从未挂载，存活权威如实为 False
+        fake_app.is_engine_running.return_value = False
 
         with patch("webui.server.PROJECT_ROOT", tmp_path), \
              patch("webui.server.STATIC_DIR", tmp_path / "static"), \
@@ -2842,7 +2850,7 @@ class TestStartMainFailSafe:
                 server._app_worker_thread.join(timeout=2)
 
         assert result["success"] is True
-        assert server._app_running is False
+        assert server.get_main_status()["running"] is False
         fake_app._refresh_mapping_snapshot.assert_not_called()
         fake_app.start.assert_not_called()
         # 验证 set_phase 被置为 fail_safe
@@ -2907,6 +2915,8 @@ class TestStartMainFailSafe:
         fake_app = MagicMock()
         fake_app._running = False
         fake_app.get_config_status.return_value = {"status": "ready", "reason": "ok"}
+        # start() 抛异常 → observer 从未挂载，存活权威如实为 False
+        fake_app.is_engine_running.return_value = False
         fake_app.start.side_effect = RuntimeError("Disk full error during start")
 
         with patch("webui.server.PROJECT_ROOT", tmp_path), \
@@ -2920,7 +2930,7 @@ class TestStartMainFailSafe:
 
         assert result["success"] is True
         fake_app.stop.assert_called_once()
-        assert server._app_running is False
+        assert server.get_main_status()["running"] is False
         fail_safe_calls = [
             call for call in fake_app.set_phase.call_args_list
             if call.args and call.args[0] == "fail_safe"
@@ -2992,6 +3002,8 @@ class TestStartMainFailSafe:
             app = MagicMock()
             app._running = False
             app.get_config_status.return_value = {"status": "ready", "reason": "ok"}
+            # 存活权威显式建模：start() 成功收尾后 observer 才真活
+            app.is_engine_running.return_value = False
             app.get_state_summary.return_value = {
                 "phase": "ready",
                 "is_running": False,
@@ -3000,11 +3012,17 @@ class TestStartMainFailSafe:
                 "error": None,
                 "progress": {},
             }
+
+            def _start():
+                app._running = True
+                app.is_engine_running.return_value = True
+
+            app.start.side_effect = _start
             app_attempts.append(app)
             if len(app_attempts) == 1:
-                app.start.side_effect = RuntimeError("First try failed")
-            else:
-                app.start.side_effect = lambda: setattr(app, "_running", True)
+                def _fail_start():
+                    raise RuntimeError("First try failed")
+                app.start.side_effect = _fail_start
             return app
 
         with patch("webui.server.PROJECT_ROOT", tmp_path), \
@@ -3018,7 +3036,7 @@ class TestStartMainFailSafe:
             assert r1["success"] is True
             if server._app_worker_thread:
                 server._app_worker_thread.join(timeout=2)
-            assert server._app_running is False
+            assert server.get_main_status()["running"] is False
             app_attempts[0].stop.assert_called_once()
 
             # 第二次启动：成功
@@ -3026,7 +3044,7 @@ class TestStartMainFailSafe:
             assert r2["success"] is True
             if server._app_worker_thread:
                 server._app_worker_thread.join(timeout=2)
-            assert server._app_running is True
+            assert server.get_main_status()["running"] is True
             app_attempts[1].start.assert_called_once()
 
 
@@ -3051,6 +3069,54 @@ class TestStartupMutationGuard:
             base, "/api/area/a/refresh", {"media": "test"}, session_token)
         assert status_refresh == 200
         assert resp_refresh.get("status") == "sync_in_progress"
+
+    def test_guard_reads_composite_authority_not_phase_derived_running(
+            self, webui_server):
+        """守卫契约：拦截判据读 webui_server._engine_is_running() 复合
+        存活权威，而非摘要相位派生的 is_running——摘要 is_running 被谎写
+        为 False 时，运行相位（scanning_a）下的守卫不得被误导放行。"""
+        server, base, session_token = webui_server
+        mock_app = MagicMock()
+        mock_app.get_state_summary.return_value = {
+            "phase": "scanning_a",
+            "is_running": False,
+            "is_ready": False,
+        }
+        server._app_service = mock_app
+        server._engine_is_running = lambda: True
+
+        status, _, resp = _http_post(base, "/api/index/audit", {}, session_token)
+        assert status == 200
+        assert resp.get("status") == "sync_in_progress"
+
+    def test_guard_allows_non_running_phases_when_engine_alive(
+            self, webui_server):
+        """守卫收窄契约（不该触发域）：引擎存活但摘要相位为 fail_safe /
+        stopping / unknown（非运行相位集合）时不拦截——引擎并未在跑
+        启动全量同步，「引擎正在执行启动全量同步」文案对这些相位属
+        误导。替身 _running 显式置 False 使端点确定性走 not_configured
+        业务闸（避免 truthy MagicMock 穿 _running 闸真实拉起审计后台
+        线程）。守卫放行后由端点自身业务闸返回 400 not_configured。"""
+        server, base, session_token = webui_server
+        for phase in ("fail_safe", "stopping", "unknown"):
+            mock_app = MagicMock()
+            mock_app._running = False
+            mock_app.get_state_summary.return_value = {
+                "phase": phase,
+                "is_running": False,
+                "is_ready": False,
+            }
+            server._app_service = mock_app
+            server._engine_is_running = lambda: True
+
+            status, _, resp = _http_post(
+                base, "/api/index/audit", {}, session_token)
+            assert status == 400, (
+                f"相位 {phase} 放行后应确定性到达端点业务闸，实际 HTTP {status}")
+            assert resp.get("status") == "not_configured", (
+                f"相位 {phase} 放行后应落 not_configured 业务闸，实际: {resp!r}")
+            assert resp.get("status") != "sync_in_progress", (
+                f"相位 {phase} 不属运行相位集合，守卫不得拦截")
 
 
 # ============================================================

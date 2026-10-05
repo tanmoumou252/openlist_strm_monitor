@@ -472,8 +472,11 @@ class TestConfigurationLinkage:
         status, _, resp = _http_get(base, "/api/config/status", session_token)
         assert resp["main_running"] is False
 
-        # 模拟主程序运行
-        server._app_running = True
+        # 模拟主程序运行：句柄在场 + 存活权威真活（显式打桩防假绿）
+        fake_svc = MagicMock()
+        fake_svc.is_engine_running.return_value = True
+        server._app_service = fake_svc
+        server._app_worker_thread = None
 
         # 验证状态更新
         status, _, resp = _http_get(base, "/api/config/status", session_token)
