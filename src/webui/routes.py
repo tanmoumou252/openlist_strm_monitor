@@ -3246,15 +3246,22 @@ def _process_mapping_partition(
     }
 
 def _guard_engine_ready_for_mutation(handler, webui_server) -> bool:
-    """启动扫描期间阻止外部破坏性/重型刷新请求，保持 HTTP 200 业务契约。"""
+    """启动扫描期间阻止外部破坏性/重型刷新请求，保持 HTTP 200 业务契约。
+
+    在跑判据读复合存活权威 _engine_is_running()，不读摘要相位派生的
+    is_running——引擎相位可被兜底写成中性值（unknown），相位派生值
+    不可作存活真相；摘要仅贡献 is_ready 判定与提示相位。"""
     app_service = getattr(webui_server, "_app_service", None)
     if not app_service:
+        return True
+    engine_running = getattr(webui_server, "_engine_is_running", None)
+    if not callable(engine_running):
         return True
     get_summary = getattr(app_service, "get_state_summary", None)
     if not callable(get_summary):
         return True
     summary = get_summary()
-    if summary.get("is_running") and not summary.get("is_ready"):
+    if engine_running() and not summary.get("is_ready"):
         handler._send_json({
             "ok": False,
             "success": False,

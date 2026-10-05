@@ -811,6 +811,10 @@ class WebUIServer:
         self._app_generation = 0
         self._app_phase = "stopped"
         self._app_error: str | None = None
+        # 拒绝分支写 _app_error 时的引擎相位快照：None＝无在跑拒绝记录。
+        # get_main_status 门控据此判断「引擎拒绝后是否自行推进过相位」，
+        # 仅在推进过（自愈证据）时抑制陈旧拒绝原因；缺省一律透出。
+        self._app_error_phase: str | None = None
         # 主程序启动时间戳（None 表示未运行）；与 WebUIServer._start_time 区分
         self._app_start_time: float | None = None
 
@@ -1346,6 +1350,7 @@ class WebUIServer:
                 # 任何闸拦截都保留 fail_safe 相位与错误可见。
                 self._app_phase = "stopped"
                 self._app_error = None
+                self._app_error_phase = None
                 # 不再手写存活标量：启动在跑由复合存活权威
                 # （observer 真活 ∨ worker 存活）如实表达。
                 self._app_service.set_phase("starting")
@@ -1453,10 +1458,14 @@ class WebUIServer:
                 svc.get_state_summary().get("phase")
                 if svc and hasattr(svc, "get_state_summary") else None
             )
+            # 兜底取中性相位 unknown（不在运行集合、不在 {stopped, fail_safe}
+            # 内）：写 stopped 会让活引擎 is_running 派生转假、并经 set_phase
+            # 重置 start_time，进而误导突变守卫放行破坏性请求；unknown 对
+            # 引擎零语义副作用，存活真相仍由复合存活权威表达。
             restore_phase = prev_phase if prev_phase in {
                 "starting", "authenticating", "scanning_a", "scanning_b",
                 "syncing_a_to_b", "catching_up", "ready",
-            } else "stopped"
+            } else "unknown"
             try:
                 if svc:
                     svc.set_phase("stopping")
@@ -1477,9 +1486,12 @@ class WebUIServer:
                     logging.error("[Main] 停止失败：worker join 超时仍存活")
                     self._app_phase = "fail_safe"
                     self._app_error = "旧 worker 未退出，停止未完成"
+                    # 相位快照与拒绝原因成对记录：供 get_main_status 门控
+                    # 判定引擎拒绝后是否自行推进过（自愈即抑制）。
+                    self._app_error_phase = restore_phase
                     if svc:
                         # 引擎仍在跑（worker 未退出）：恢复拒绝前真实运行
-                        # 相位（无真实运行相位时回落 stopped，不滞留
+                        # 相位（无真实运行相位时回落中性相位 unknown，不滞留
                         # stopping）；不得向仍在运行的引擎写 _phase_error——
                         # 引擎 idle 后不再调 set_phase，该错误永不自愈，会把
                         # 运行态展示永久污染。拒绝原因由 server 侧 _app_error
@@ -1505,7 +1517,9 @@ class WebUIServer:
                     logging.error("[Main] 停止失败：引擎在 stop 后仍存活")
                     self._app_phase = "fail_safe"
                     self._app_error = "引擎在 stop 后仍存活，停止未完成"
-                    # 同上：恢复拒绝前真实运行相位（无则回落 stopped，不滞留
+                    # 相位快照与拒绝原因成对记录（同 worker_alive 分支）。
+                    self._app_error_phase = restore_phase
+                    # 同上：恢复拒绝前真实运行相位（无则回落中性相位 unknown，不滞留
                     # stopping），不向仍存活的引擎写 _phase_error；拒绝原因
                     # 经 server 侧 _app_error 的合并 error 位透出。
                     # compare-then-write：仅当引擎相位仍为本方法写入的
@@ -1526,6 +1540,7 @@ class WebUIServer:
                 self._app_phase = "stopped"
                 self._app_service = None
                 self._app_error = None
+                self._app_error_phase = None
                 self._app_worker_thread = None
                 self._app_start_time = None
                 return {"success": True, "message": "主程序已停止"}
@@ -1558,6 +1573,24 @@ class WebUIServer:
                 "progress": {},
             }
         running = self._engine_is_running()
+        # svc 摘要错误优先（真实引擎故障）。server 侧拒绝/失败原因
+        # _app_error 仅在引擎未自愈时透出：引擎复合存活为真、摘要无错，
+        # 且（相位已回 ready 的健康运行态，或相位已自行推进过拒绝快照
+        # ＝自愈证据）时拒绝原因属陈旧信息，不再透出，避免配合前端
+        # 告警色渲染长期橙色告警。快照缺省或相位未推进时不抑制
+        # （fail-closed：无据不隐藏）。纯读实现，不改写 _app_error
+        # 存储位（清除点仍归 start/stop 成功路径）。
+        _self_healed = (
+            running
+            and not summary.get("error")
+            and (
+                summary.get("phase") == "ready"
+                or (
+                    getattr(self, "_app_error_phase", None) is not None
+                    and summary.get("phase") != self._app_error_phase
+                )
+            )
+        )
         result: dict = {
             "running": running,
             "ready": summary["is_ready"],
@@ -1571,15 +1604,7 @@ class WebUIServer:
             # 不改写 _app_error 存储位（清除点仍归 start/stop 成功路径）。
             "error": (
                 summary.get("error")
-                or (
-                    None
-                    if (
-                        running
-                        and summary.get("phase") == "ready"
-                        and not summary.get("error")
-                    )
-                    else getattr(self, "_app_error", None)
-                )
+                or (None if _self_healed else getattr(self, "_app_error", None))
             ),
             "uptime": int(time.time() - self._app_start_time) if running and self._app_start_time else None,
         }

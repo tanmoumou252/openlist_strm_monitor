@@ -3070,6 +3070,25 @@ class TestStartupMutationGuard:
         assert status_refresh == 200
         assert resp_refresh.get("status") == "sync_in_progress"
 
+    def test_guard_reads_composite_authority_not_phase_derived_running(
+            self, webui_server):
+        """N1 守卫契约：拦截判据读 webui_server._engine_is_running() 复合
+        存活权威，而非摘要相位派生的 is_running——摘要相位被谎写成
+        stopped/unknown 时守卫不得被误导放行。"""
+        server, base, session_token = webui_server
+        mock_app = MagicMock()
+        mock_app.get_state_summary.return_value = {
+            "phase": "unknown",
+            "is_running": False,
+            "is_ready": False,
+        }
+        server._app_service = mock_app
+        server._engine_is_running = lambda: True
+
+        status, _, resp = _http_post(base, "/api/index/audit", {}, session_token)
+        assert status == 200
+        assert resp.get("status") == "sync_in_progress"
+
 
 # ============================================================
 # 手动全量审计端点测试

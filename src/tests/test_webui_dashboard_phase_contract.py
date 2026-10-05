@@ -173,16 +173,23 @@ def test_running_branch_error_has_warning_color_and_length_guard():
 
 
 def test_running_branch_error_short_text_no_ellipsis():
-    """E1 契约：错误截断钳制——非截断路径（≤120 字符）模板串不含省略号，
-    截断路径（>120）模板串以省略号结尾。期望值由 E1 契约推导。"""
+    """E1 契约：错误截断钳制必须挂在长度条件（errText.length > 120）上，
+    截断与全文两个模板串并存且顺序为 长度判定 → 截断模板 → 全文模板；
+    段内不得存在旧的无条件截断形态（反回归锚）。期望值由 E1 契约推导。"""
     running_idx = DASHBOARD_SOURCE.find("} else if (status.running) {")
     assert running_idx != -1
     seg_end = DASHBOARD_SOURCE.find("} else if (phase === 'ready'", running_idx)
     seg = DASHBOARD_SOURCE[running_idx:seg_end]
+    len_idx = seg.find("errText.length > 120")
+    assert len_idx != -1, "长度判定条件必须存在"
     trunc_idx = seg.find("`主程序运行中：${errText.slice(0, 120)}…`")
     assert trunc_idx != -1, "截断路径模板串必须存在且以省略号结尾"
     full_idx = seg.find("`主程序运行中：${errText}`")
     assert full_idx != -1, "非截断路径模板串必须存在"
+    assert len_idx < trunc_idx < full_idx, (
+        "截断与全文模板串必须处于长度条件之后的条件分支内且顺序正确")
+    assert "${String(status.error).slice(0, 120)}…" not in seg, (
+        "不得残留旧的无条件截断形态（截断必须挂在长度条件上）")
     assert full_idx != trunc_idx, (
         "截断与非截断必须是两条互斥路径（三元表达式）")
 
