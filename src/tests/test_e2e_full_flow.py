@@ -288,6 +288,24 @@ def _http_post(base_url, path, body=None, session_token=None, timeout=3.0):
         return e.code, e.headers, body
 
 
+def _wait_main_phase(base_url, session_token, targets, timeout=10.0, interval=0.2):
+    """有界轮询 /api/main/status 至 phase ∈ targets；超时返回最后 phase。
+
+    异步受理后终态未定（worker 在后台线程），测试须有界等待 ready/fail_safe
+    再断言，避免裸 assert_called_once 竞态。超时返回实测 phase 由调用方
+    断言失败暴露，不静默通过（保真反假绿）。
+    """
+    deadline = time.time() + timeout
+    phase = None
+    while time.time() < deadline:
+        _, _, resp = _http_get(base_url, "/api/main/status", session_token)
+        phase = resp.get("phase")
+        if phase in targets:
+            return phase
+        time.sleep(interval)
+    return phase
+
+
 # ============================================================
 # 场景 1：成功路径
 # ============================================================
@@ -422,7 +440,7 @@ class TestSuccessfulFlow:
         B 区有同 mapping_id 记录（⑥⑦）。
 
         边界说明：步骤④用 AppService 替身，只验证 WebUI 的启动契约
-        （门禁 + _app_running + stop 收尾）。引擎侧「start() 成功必须置
+        （门禁 + 复合存活权威 running + stop 收尾）。引擎侧「start() 成功必须置
         _running=True」的不变式由 test_app_service_lifecycle.py 的
         TestStartMarksRunningWhenReady 锁死，两者分工互补。
         """
@@ -492,27 +510,80 @@ class TestSuccessfulFlow:
         fake_app._running = False
         fake_app.get_config_status.return_value = {
             "status": "ready", "reason": "mapping 配置有效"}
-        fake_app.start.side_effect = lambda: setattr(fake_app, "_running", True)
+        # 建模真实 AppService 状态面：get_state_summary 必须是可 JSON 序列化的 dict，
+        # 否则 /api/main/status 无法序列化，轮询拿不到 phase。is_running/is_ready
+        # 须与真实 get_state_summary 同型由 phase 派生（app_service_core.py
+        # get_state_summary：is_running = phase in 运行集，"stopping"/"stopped"/
+        # "fail_safe" 不在其内）——否则 stop_main 先 set_phase("stopping") 后，
+        # 替身仍报 is_running=True 会被生命周期停止复核误判为引擎存活。
+        _running_phases = {
+            "starting", "authenticating", "scanning_a", "scanning_b",
+            "syncing_a_to_b", "catching_up", "ready"}
+        _state = {"phase": "starting", "is_running": True, "is_ready": False,
+                  "error": None, "progress": {}}
+        fake_app.get_state_summary.return_value = _state
+
+        def _fake_set_phase(phase, error=None):
+            _state.update({
+                "phase": phase,
+                "is_running": phase in _running_phases,
+                "is_ready": phase == "ready",
+            })
+            if error:
+                _state["error"] = error
+
+        fake_app.set_phase.side_effect = _fake_set_phase
+
+        # 存活权威替身：observer 存活位显式建模（严禁 MagicMock 默认子属性
+        # 真值充当存活=True 的假绿）——start() 成功置真、stop() 置假。
+        _observer = {"alive": False}
+        fake_app.is_engine_running.side_effect = lambda: _observer["alive"]
+
+        def _fake_start():
+            _observer["alive"] = True
+            _fake_set_phase("ready")
+        fake_app.start.side_effect = _fake_start
+
+        def _fake_stop():
+            _observer["alive"] = False
+        fake_app.stop.side_effect = _fake_stop
+        # worker 内远程存储映射加载走网络，测试内 stub 掉
+        server._config.load_strm_storage_from_api = Mock()
 
         with patch("webdav_client.OpenListAdminClient", return_value=mock_client), \
              patch("app_service.AppService", return_value=fake_app), \
              patch("logger_setup.setup_logging"):
+            # 后台 worker 会调用 load_strm_storage_from_api；测试内替换为
+            # 无害桩，避免 MagicMock 客户端返回值触发真实解析分支的不确定性。
+            server._config.load_strm_storage_from_api = (
+                lambda admin_client=None: None)
             status, _, resp = _http_post(base, "/api/main/start", {}, token)
+        # 异步启动语义：HTTP 立即受理，status=starting
         assert status == 200
         assert resp.get("success") is True, f"启动应成功: {resp}"
-        assert resp.get("message") == "主程序已启动"
-        assert server._app_running is True
-        fake_app.start.assert_called_once()
+        assert resp.get("status") == "starting", f"应异步受理: {resp}"
+        # 异步受理文案语义断言（契约源：server.py 受理即返回分支）。文案必须
+        # 表达「后台启动中」而非以「已启动」宣告终态——前端据此不提前打勾；
+        # 不锁全等措辞，允许后端在不破坏语义的前提下调整文案。
+        msg = resp.get("message") or ""
+        assert not msg.endswith("已启动"), (
+            f"异步受理文案不得表述为已启动: {resp}")
+        assert "后台" in msg, f"异步受理文案应表达后台启动语义: {resp}"
+        # 异步受理后终态未定，有界轮询至 ready 再断言（消除裸 assert_called_once 竞态）
+        phase = _wait_main_phase(base, token, ("ready", "fail_safe"))
+        assert phase == "ready", f"应就绪而非 fail_safe: {phase}"
 
         status, _, resp = _http_get(base, "/api/main/status", token)
         assert status == 200
         assert resp.get("running") is True
+        assert resp.get("ready") is True
+        assert server.get_main_status()["running"] is True
 
         # 立即收尾，避免残留状态影响后续步骤与其它用例
         status, _, resp = _http_post(base, "/api/main/stop", {}, token)
         assert status == 200
         assert resp.get("success") is True
-        assert server._app_running is False
+        assert server.get_main_status()["running"] is False
 
         # ── 步骤⑤：查看 AB 分区（空库表现） ──
         for area in ("a", "b", "c"):
@@ -655,10 +726,14 @@ class TestSevenStepFailureReasons:
         assert status == 200
         assert resp.get("success") is False
         assert resp.get("status") == "fail_safe_active"
-        assert server._app_running is False
+        assert server.get_main_status()["running"] is False
 
     def test_step4_openlist_login_failure_reports_reason(self, webui_server, tmp_path):
-        """④失败原因：OpenList 登录失败。成功条件：可达 OpenList + 正确凭据。"""
+        """④失败原因：OpenList 登录失败。
+
+        异步启动语义：HTTP 侧立即受理（200 + starting），失败原因经
+        AppService 生命周期状态机的 fail_safe 阶段与 error 字段暴露。
+        """
         from config import ABMapping
         server, base, token = webui_server
         server._config.a_b_mappings = [ABMapping(
@@ -669,15 +744,25 @@ class TestSevenStepFailureReasons:
         mock_client = MagicMock()
         mock_client.login.return_value = False
         mock_client.last_error_message = "用户名或密码错误"
+        # 登录失败 → observer 从未挂载，存活权威如实为 False（显式打桩防假绿）
+        fake_app = MagicMock()
+        fake_app.is_engine_running.return_value = False
 
         with patch("webdav_client.OpenListAdminClient", return_value=mock_client), \
              patch("logger_setup.setup_logging"):
             status, _, resp = _http_post(base, "/api/main/start", {}, token)
-        # 业务失败应返回 200 + success:false + 原因
+        # 登录为慢操作：异步受理返回 success:true + status:"starting"，
+        # 失败经后台 fail_safe 暴露（两层契约）
         assert status == 200
-        assert resp.get("success") is False
-        assert "OpenList 登录失败" in resp.get("message", "")
-        assert server._app_running is False
+        assert resp.get("success") is True, f"应异步受理: {resp}"
+        assert resp.get("status") == "starting", f"应异步受理: {resp}"
+        phase = _wait_main_phase(base, token, ("ready", "fail_safe"))
+        assert phase == "fail_safe", f"登录失败应落 fail_safe: {phase}"
+        status, _, resp = _http_get(base, "/api/main/status", token)
+        # 异步 worker 透传 mock 客户端的 last_error_message 文案
+        assert "用户名或密码错误" in (resp.get("error") or ""), (
+            f"应暴露登录失败原因: {resp}")
+        assert server.get_main_status()["running"] is False
 
     def test_step5_invalid_area_rejected(self, webui_server):
         """⑤失败原因：非法分区名。成功条件：area ∈ {a,b,c}。"""
@@ -951,12 +1036,12 @@ class TestFailureScenarios:
         """POST /api/webui/config/openlist 确实路由到 _hot_reload_openlist_config。
 
         仅验证 HTTP→hotreload 的接线（wiring），逻辑覆盖见
-        test_openlist_hotreload.py::TestHotReloadOpenlistConfig。
+        test_webui_openlist_hotreload.py::TestHotReloadOpenlistConfig。
         本用例不验证 hotreload 的内部行为（异常吞咽、刷新服务重配等），
         只确认 reload 方法在 HTTP 保存后被调用。
         """
         server, base, token = webui_server
-        # 替换实例属性为 MagicMock（对齐 test_openlist_hotreload 的方式）
+        # 替换实例属性为 MagicMock（对齐 test_webui_openlist_hotreload 的方式）
         server._config.load_strm_storage_from_api = MagicMock()
 
         mock_client = MagicMock()

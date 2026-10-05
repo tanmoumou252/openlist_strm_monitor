@@ -4,300 +4,99 @@ This file provides guidance to AI coding assistants when working with code in th
 
 ## Global Rules
 
-1. **Do NOT rebuild dist/ unless you modified frontend source files**. The dist is built with `cd src/webui && npx vite build`. If you only changed Python backend code, skip the build.
-2. **When modifying files, always rebuild dist/ if you changed any file under `src/webui/modules/`**. The browser loads compiled files from `dist/assets/`, not the source files.
-3. **Server control is allowed** — this is a development/test-only project with no production environment assumption. The agent may freely start, stop, or restart the server for verification.
-4. **Do NOT run lint or full test suites** unless the user explicitly asks. Targeted unit tests for your change are fine.
-5. **For OpenList API changes, read `docs/` markdown files first** before guessing endpoint behavior.
-6. **For dangerous operations** (delete, move, cloud linkage), explain the safety risk before editing. Preserve fail-safe behavior.
-7. **Preserve the A/B/C three-zone model.** Do not merge or flatten zones.
-8. **Preserve the TMDB integration.** Do not refactor TMDB API code unless specifically requested.
-9. **Prefer small, targeted changes** over large rewrites. This project is close to completion.
-10. **Do NOT fake verification** — use real commands, real server startup, and real API/UI checks when available. Do not claim tests were run unless they were actually executed.
-11. **Reply in Chinese**
-12. **No exact line numbers in markdown docs.** Reference method, function, or class names instead of `file.py:123` or "lines 45-67".
-13. **Plans must be written to `.kilo/plans/` before execution.** Chat-only plans are drafts and never authorize code changes.
-14. **Three gates, each needs explicit user confirmation**: plan approved → execution authorized (执行/go/开始) → commit authorized. Plan approval ≠ execution authorization. **Exception**: **MUST** execute immediately without further user approval when you receive the system prompt `"Read this file first and treat it as the source of truth for implementation"` at the start of a new conversation. **DO NOT** ask the user for authorization again.
-15. **In plan mode** ("先写计划" / "不许执行"): write only to `.kilo/plans/`, read code for reference, no tests/builds/source edits.
-16. **`todo.md` is off-limits** — user's personal memo, not part of the workspace. Never read, audit, or edit it.
-17. **Do NOT use Linux commands** — the development environment is Windows; design commands accordingly.
+1. **Do NOT rebuild dist/ unless you modified frontend source files**. The server serves compiled files from `dist/assets/`, not source. If you changed any file under `src/webui/modules/` (or `main.js` / `index.html` / `styles/`), you MUST rebuild: `cd src/webui && npx vite build`. Python-only changes never need a build.
+2. **Server control is allowed** — dev/test-only project, no production assumption. The agent may freely start, stop, or restart the server for verification.
+3. **Do NOT run lint or full test suites** unless the user explicitly asks. Targeted unit tests for your change are fine.
+4. **For OpenList API changes, read `docs/` markdown files first** before guessing endpoint behavior.
+5. **For dangerous operations** (delete, move, cloud linkage), explain the safety risk before editing. Preserve fail-safe behavior.
+6. **Preserve the A/B/C three-zone model.** Do not merge or flatten zones.
+7. **Preserve the TMDB integration.** Do not refactor TMDB API code unless specifically requested.
+8. **Prefer small, targeted changes** over large rewrites. This project is close to completion.
+9. **Do NOT fake verification** — use real commands, real server startup, and real API/UI checks when available. Do not claim tests were run unless they were actually executed.
+
+10. **No exact line numbers in markdown docs.** Reference method, function, or class names instead of `file.py:123` or "lines 45-67".
+11. **`todo.md` is off-limits** — user's personal memo, not part of the workspace. Never read, audit, or edit it.
+
+### Fail-closed caller contracts (硬性调用方契约)
+
+- **`check_exists` 三态 fail-closed**：返回类型为 `bool | None`，`None` 表示"不可信"（API 失败 / 非 JSON / 非法载荷 / 安全阀耗尽）。任何破坏性清理路径**必须**：删除分支用 `if check_exists(...) is False`（权威缺席）、保活分支用 `is True`、`None` 一律跳过；**严禁** `if not check_exists(...)`（会把不可信映射为删除）。
+- **`mapping_id` fail-closed**：映射无法唯一解析（0 或多个匹配，`get_mapping_for_a/b` 返回 `None`）或记录的 `mapping_id` 与解析结果不一致时，破坏性路径（cleanup、C 区迁移、去重）必须保持源不动；绝不跨 mapping 去重、共享 lineage 或复用他区 projection。
 
 ## Configuration
 
 - **WebUI port**: 默认 8579,实际值来自 `config.toml` 的 `[webui].port`;bind: 0.0.0.0 (LAN only)
 - **Backend**: Python stdlib `http.server`, no Flask/uvicorn
-- **Frontend build**: `cd src/webui && npx vite build` (Vite 8.x)
-- **Frontend dev server**: `cd src/webui && npx vite`
-- **Database**: SQLite — `bridge.db` (core), `tmdb_watchlist.db` (TMDB cache + webui_config)
-- **Main config**: `config.toml` (YAML-like TOML)
-- **Runtime config overrides**: `webui_config` table in `tmdb_watchlist.db` (DB > config.toml)
+- **Frontend build**: `cd src/webui && npx vite build` (Vite 8.x, vanilla JS, MD3/Fluent2 dual theme); dev server `npx vite`
+- **Database**: SQLite (WAL mode) — `bridge.db` (core), `tmdb_watchlist.db` (TMDB cache + webui_config)
+- **Main config**: `config.toml`; **runtime overrides**: `webui_config` table in `tmdb_watchlist.db` (DB > config.toml)
+- **Chinese search**: FTS5 + `simple` tokenizer (`src/tokenizers/simple/simple.dll`, hard dependency for Chinese); missing DLL downgrades to `unicode61` with a WARNING — Chinese search then silently returns empty. Always ship the DLL.
+- **Admin password**: hash in `tmdb_watchlist.db` → `webui_config` (scope=`ui`, key=`admin_password`); reset with `reset_admin.py`.
 
 ## Server Entry Points
 
-- **Sync engine only**: `python src/main.py` — starts the A/B/C zone sync engine, no WebUI.
-- **WebUI**: `python src/webui/server.py` — starts the management panel with an interactive menu to optionally launch the sync engine.
-- **WebUI headless (background)**: `BRIDGE_HEADLESS=1` environment variable is handled by `server.py` (detected at the WebUI startup flow, `headless = os.environ.get("BRIDGE_HEADLESS") == "1"`) — triggers headless mode that auto-starts the sync engine (skips the interactive menu) and enters silent wait (no stdin). `main.py` does not process this variable. The repository ships `后台带Bridge启动webui.vbs` which sets this variable, reads `[webui].port` from `config.toml` (falling back to default 8579 when missing or unparseable), and launches `server.py` with a hidden console window. The VBS port check is a coarse single-instance check based on listening port only — it does not verify process identity or PID, so a different program occupying the port will also be flagged as "already running".
-
-> Do NOT use `python src/main.py --webui-only` or `--webui` — those flags do not exist (both are rejected by `main.py`).
+- **Sync engine only**: `python src/main.py` — A/B/C zone sync engine, no WebUI. Do NOT use `--webui-only` / `--webui` (rejected by `main.py`).
+- **WebUI**: `python src/webui/server.py` — management panel with interactive menu to optionally launch the sync engine.
+- **WebUI headless**: `BRIDGE_HEADLESS=1` env var handled by `server.py` — auto-starts the sync engine (skips the menu) and enters silent wait. `main.py` ignores it. `后台带Bridge启动webui.vbs` sets the var and launches `server.py` hidden; its port check is a coarse single-instance check (listening port only, no PID verification).
 
 ## Project Overview
 
-`openlist_strm_bridge` is a disaster-safe synchronization middleware for the OpenList STRM engine update mode. It coordinates the full lifecycle between:
+`openlist_strm_bridge` is a disaster-safe synchronization middleware for the OpenList STRM engine update mode, coordinating the full lifecycle: OpenList STRM generation → A-zone raw output → fingerprint/lineage verification → B-zone media-library consumption → user rename/delete operations → cloud-side API linkage → recycle-bin reconstruction → duplicate isolation → subtitle synchronization → C-zone ghost containment → SQLite state tracking → WebUI observability → TMDB watchlist vs local collection comparison.
 
-- OpenList STRM generation
-- A-zone raw STRM output
-- fingerprint/lineage verification
-- B-zone media-library consumption
-- user rename/delete operations
-- cloud-side API linkage
-- recycle-bin reconstruction
-- duplicate isolation
-- subtitle synchronization
-- C-zone ghost containment
-- SQLite state tracking
-- WebUI observability
-- TMDB watchlist vs local collection comparison
-
-## Technology Stack
-
-| Layer | Technology |
-|-------|-----------|
-| **Language** | Python 3.11+ (backend), JavaScript (frontend) |
-| **Frontend build** | Vite 8.x, vanilla JS (no React/Vue), MD3/Fluent2 dual theme |
-| **Backend HTTP** | Python stdlib `http.server` (`ThreadingHTTPServer`, multithreaded) |
-| **Database** | SQLite (WAL mode, two files) + FTS5 with `simple` extension for Chinese search |
-| **Search/Tokenizer** | `simple` tokenizer (wangfenjin/simple, cppjieba wrapper, v0.7.1) loaded from `src/tokenizers/simple/simple.dll`; hard dependency for Chinese search |
-| **File watching** | `watchdog` library |
-| **HTTP client** | `requests` library |
-| **WebDAV XML** | `lxml` library |
-| **Testing** | pytest (test files under `src/tests/`; see `src/tests/README.md` for the current list and `python -m pytest src/tests --collect-only -q` for the live count); dev deps in `src/tests/requirements-dev.txt` |
-
-## Directory Structure
+## Directory Structure (二级概览)
 
 ```
 openlist_strm_bridge/
-├── src/
-│   ├── main.py                  # Entry point
-│   ├── app_service_core.py      # Core sync engine
-│   ├── app_service.py           # Compat re-export layer
-│   ├── config.py                # Configuration classes (AppConfig, etc.)
-│   ├── database.py              # SQLite bridge.db manager
-│   ├── webdav_client.py         # OpenList Admin API + WebDAV client
-│   ├── area_watchers.py         # File system watchers for A/B/C zones
-│   ├── refresh_service.py       # Periodic WebDAV refresh
-│   ├── media_renamer.py         # Media renaming, season/episode extraction
-│   ├── tmdb_client.py           # TMDB API v3 client
-│   ├── tmdb_watchlist_db.py     # TMDB watchlist SQLite DB
-│   ├── tmdb_watchlist.py        # TMDB data classes (TmdbItem, etc.)
-│   ├── watchlist_match.py       # Watchlist matching logic
-│   ├── secret_manager.py        # Sensitive config encryption
-│   ├── logger_setup.py          # Logging setup
-│   ├── openlist_login_shared.py # Shared OpenList login logic
-│   ├── webui/
-│   │   ├── server.py            # HTTP server + auth + route dispatch
-│   │   ├── routes.py            # All API route handlers
-│   │   ├── index.html           # SPA entry point
-│   │   ├── main.js              # Frontend entry point
-│   │   ├── vite.config.js       # Vite build config
-│   │   ├── package.json         # Node dependencies
-│   │   └── modules/
-│   │       ├── core/            # api.js, router.js, state.js, icons.js, theme.js, utils.js, wallpaper.js
-│   │       ├── pages/           # dashboard.js, area.js, config.js, login.js, logs.js, openlist.js, tmdb.js
-│   │       └── components/      # dialog.js, toast.js
-│   │   ├── scripts/             # 字体子集化脚本（subset_font.py）
-│   │   ├── public/              # 静态资源（icon-preview.html 等）
-│   │   └── styles/              # CSS 样式（main.css）
-│   ├── domain/media/            # subtitle_handler.py
-│   ├── domain/sync/             # sync_service.py
-│   ├── domain/storage/          # Placeholder (reserved, currently only __init__.py)
-│   ├── utils/                   # strm_utils.py, file_utils.py, webdav_utils.py, error_translator.py, bootstrap.py, encoding_utils.py, password_utils.py
-│   ├── tools/                   # 维护工具
-│   ├── tokenizers/              # simple/ (cppjieba wrapper for Chinese search)
-│   └── tests/                   # Test files: see src/tests/README.md for live count
-│       ├── requirements-dev.txt # 测试/开发依赖
-│       └── perf/                # 性能测试
-├── dist/                        # Built frontend (Vite output)
-│   ├── assets/                  # Hashed JS/CSS/font files
-│   └── icon-preview.html        # 图标预览页面（构建产物）
-├── wiki/                        # Documentation
-├── docs/                        # API docs, design docs, UI templates
-├── config.toml                  # Main configuration
-├── bridge.db                    # Core SQLite database
-├── tmdb_watchlist.db            # TMDB watchlist SQLite database
-├── reset_admin.py               # Password reset utility
-├── requirements.txt             # Production dependencies
-├── config.toml.example          # Example configuration
-├── 嵌入式启动.bat                  # Embedded Python launcher
-├── 环境变量启动.bat                  # System Python launcher
-└── LICENSE                      # License file
+├── src/            # main.py, app_service_core.py, config.py, database.py, webdav_client.py,
+│                   # area_watchers.py, refresh_service.py, media_renamer.py, tmdb_*.py,
+│                   # webui/ (server.py, routes.py, modules/, styles/), domain/, utils/, tests/, tokenizers/, tools/
+├── dist/           # Built frontend (Vite output)
+├── wiki/           # 主题文档（见下方索引表）
+├── docs/           # API docs, design docs, 否决方案登记册
+├── config.toml     # Main configuration
+├── bridge.db / tmdb_watchlist.db
+├── reset_admin.py  # Password reset utility
+├── run_webui_regression.bat  # WebUI 专项回归一键入口（node:test + pytest -m webui）
+└── 嵌入式启动.bat / 环境变量启动.bat / 后台带Bridge启动webui.vbs
 ```
 
-## WebUI Build System
+## Topic → wiki Index
 
-The frontend is a vanilla JS SPA built with Vite:
+Detailed, authoritative write-ups live in `wiki/`（与 `docs/否决方案.md`）；重构前先查对应主题页：
 
-```bash
-cd src/webui
-npx vite build    # Production build → ../../dist/
-npx vite          # Dev server with HMR
-```
+| Topic | Where |
+|---|---|
+| Core sync engine、批量/双模式同步（`initial_scan_a`、`scan_a_to_b_full_sync`）、三层防御 L1/L2/L3 并发设计 | `wiki/Core-Sync-Engine.md` |
+| `check_exists` 三态 fail-closed、`cleanup_a_redundant_using_api`、`_parse_fs_list_content` / `_collect_cloud_files_concurrent` 响应校验、`ensure_single_visible_instance`（B3-A/B3-B 恢复） | `wiki/Safety-and-Security.md` |
+| DB schema、FTS5/simple 分词、`bulk_connection` 模式、900 参数切片、`last_verified_at` 语义（仅单 show 刷新与全量审计推进，不进 upsert 热路径） | `wiki/Database-Schema.md` |
+| WebUI 架构（认证/会话、路由、SPA）、分区页面、Onboarding | `wiki/WebUI-*.md` |
+| TMDB watchlist 与匹配（三级标题匹配 + 结构校验） | `wiki/TMDB-*.md` |
+| 有意设计决策、有意保留的死字段、已知取舍、已废弃机制、被否决修复方案 | `docs/否决方案.md` |
 
-**Critical**: The server serves files from `dist/`. If you modify any file under `src/webui/modules/`, you MUST rebuild the dist. Otherwise the browser will load the old compiled code and your changes won't take effect.
+### Key invariants quick reference
 
-The Vite config groups modules into chunks:
-- `core` chunk: `modules/core/*` + `modules/components/*`
-- Individual page chunks: `dashboard`, `area`, `config`, `tmdb`, `login`, `logs`
-- Entry chunk: `index` (imports router and lazy-loads pages)
-
-## A/B/C Zone Model
-
-### A Zone (Raw Engine Output)
-- OpenList STRM engine's output directory
-- Program extracts WebDAV mappings, computes fingerprints, monitors for subtitles
-- Watched by `AAreaEventHandler` (on_created, on_modified, on_deleted)
-
-### B Zone (Media Library Consumption)
-- The directory scanned by Emby/Jellyfin
-- Users freely rename, sort, delete files here
-- Program translates user operations into cloud API commands
-- Subtitles: movies stay in same dir, anime go into `Season XX/` subdirs
-- Watched by `BAreaEventHandler` (on_created, on_modified, on_deleted, on_moved)
-
-### C Zone (Ghost Containment)
-- Shelters orphaned paths from cloud root restructuring or mount deletion
-- Preserves historical traces without polluting media library
-- Watched by `CAreaEventHandler` (logging only)
-
-## Key Architectural Patterns
-
-### Authentication (WebUI)
-- Password-based login with PBKDF2-HMAC-SHA256 (600k iterations)
-- Session tokens stored in server memory dict, 7-day sliding expiry
-- **Session IP binding (M-4)**: Each session token is bound to the client IP at login time. Subsequent requests from a different IP are rejected with 401. Prevents stolen token reuse across IPs.
-- Token transmitted via `X-Session-Token` header
-- Frontend `api()` wrapper in `api.js` auto-attaches token from localStorage
-- IP whitelist (LAN only) as first defense layer
-- Whitelisted paths (no token required): `/api/config`, `/api/webui/config/ui`, `/api/tmdb/avatar`, `/api/tmdb/poster`, `/api/openlist/status`, `/api/openlist/ping`, `/api/admin/status` (**双语义 M5**: 无 token 免 Token，带 token 走标准校验), `/api/login`, `/login` (SPA route), `/api/page`, `/`, static assets (`/assets/*`, `/favicon.ico`, `/logo.png`, `/openlist_strm_bridge.png`, `/fonts/*`, `.woff2`/`.woff`/`.ttf`)
-- `/login` is a SPA GET route served from `dist/index.html` (same fallback as `/` and `/api/page`); it is NOT a separate login page and must stay token-free so the SPA can load before login. `/api/login` is the POST authentication endpoint — the two are different things.
-
-### Backend API Routes
-- `do_GET` / `do_POST` dispatch in `server.py` → delegates to handlers in `routes.py`
-- Every request goes through `_guard_request()` (IP check) → `_check_auth()` (token check) → route handler
-- Route handlers live in `routes.py`, organized by domain (TMDB, OpenList, Dashboard, Area, Config)
-- `POST /api/index/audit` triggers a full manual audit (single-run, non-overlapping via `_full_audit_in_progress`); `GET /api/index/audit/status` returns progress; both require authentication (not in the whitelist)
-
-### Database
-- Two SQLite databases, both in WAL mode
-- `bridge.db`: A/B/C zone file records, fingerprints, ghost protection, subtitles, sync state
-- `tmdb_watchlist.db`: TMDB cache, webui_config (scopes: tmdb, openlist, ui, migration), operation logs
-- `Database` class uses read/write connection managers with `ReadWriteLock`
-- `a_strm_files` / `b_strm_files` tables include `last_verified_at` (last verification timestamp, meaning "last checked" not "last changed"; only advanced by single-show refresh / periodic+manual full audit, not written in the upsert hot path to protect startup performance)
-
-### A↔B Mapping Isolation (`mapping_id`)
-- `ABMapping` (config) and the `a_b_mappings` config key in `webui_config` (scope=`openlist`) define each A root ↔ B root relationship; every mapping needs a unique non-empty `mapping_id` and non-empty A/B roots, otherwise `get_config_status()` returns `fail_safe_active` / `not_configured` and startup refuses to launch watchers.
-- `mapping_id` is the isolation boundary for B/C records, fingerprints, lineage, boundary snapshots, and identity projections. Never deduplicate across mappings, never share lineage, and never reuse another mapping's projection.
-- `get_mapping_for_a()` / `get_mapping_for_b()` fail closed: zero or multiple matches both return `None`. Any destructive path (cleanup, C-zone migration, dedup) must keep the source untouched when the mapping cannot be uniquely resolved or when the record's `mapping_id` disagrees with the resolved mapping.
-- When `mapping_id` is missing, `update_from_db` backfills it based on the A-root normalized path (the WebUI save payload does not contain `mapping_id`).
-
-### Frontend State Management
-- Global state in `state.js` (singleton module pattern, not a framework)
-- State includes: `CONFIG` constants, `OpenListState` (engines, status), `_hasPassword`, `_uiConfig`, TMDB cache
-- Floating-label form field pattern: `createField()` in `utils.js` generates label + input HTML
-- All API calls go through `api()` wrapper in `api.js` (auto token injection, 401 redirect, timeout)
-
-### Search & Tokenizer (FTS5 + Simple)
-- Chinese media-name search uses SQLite **FTS5** with the **`simple`** tokenizer — a cppjieba wrapper from the wangfenjin/simple project (built-in v0.7.1). The `simple.dll` lives in `src/tokenizers/simple/` (see that dir's `README.md` / `VERSION`).
-- Loading: `database.py._load_simple_tokenizer` and `tmdb_watchlist_db.py._load_simple_into` call `conn.load_extension(simple.dll)` when opening a connection.
-- Soft fallback: if `simple.dll` is missing/fails to load, the code downgrades to SQLite's built-in `unicode61` tokenizer and only logs a `WARNING` — startup is NOT blocked.
-- **Hard dependency**: `unicode61` produces no tokens for Chinese, so when `simple.dll` is absent, Chinese search silently returns empty. With a Chinese media library, `simple` is a hard dependency for search; always ship `src/tokenizers/simple/simple.dll` with the build.
-
-### Regional/Area Search
-- `GET /api/area/{area}?q=` runs FTS5 over the area tables; the query string is escaped via `_escape_fts5_query` before use.
-- The `kind` parameter (`anime` / `movie` / `other` / `all`, validated against `_KIND_FILTER_MAP`) classifies anime vs movie in the paginated media list.
-- The detail endpoint `GET /api/area/{area}/detail?media=` intentionally uses `LIKE` (small data, needs exact per-media match) rather than FTS5, and escapes LIKE wildcards with `ESCAPE '\'`.
-
-### Onboarding
-- A **7-step onboarding** flow guides first-run setup: confirm admin password (auto-generated on first startup) → configure TMDB → configure OpenList → start main program → view A/B zones → refresh TMDB watchlist → detect TMDB match status. Steps are defined in `dashboard.js`'s `steps` array.
-- State is stored in `tmdb_watchlist.db` → `webui_config` (scope=`ui`, keys like `onboarding_completed`, `onboarding_<step>_completed`).
-- Single step completion: `POST /api/onboarding/complete-step` (sets `onboarding_<step>_completed='1'`). Mark the whole flow complete or skip it via `POST /api/webui/config/ui` with `{ onboarding_completed: '1' }`.
-
-### Bulk Connection Mode (Performance Optimization)
-- `database.py` adds `bulk_connection()` context manager for startup batch sync: opens one connection, loads PRAGMAs/tokenizer once, reuses throughout
-- Bypasses `rw_lock` and `_probe_writeable` — safe only for single-threaded startup batch sync (watchdog not yet started)
-- Cross-process safe (SQLite WAL handles concurrency); same-process multi-thread unsafe
-- Three scenarios:
-  1. **First startup**: `use_bulk=True`, single transaction commit, no blocking
-  2. **Active refresh**: `use_bulk=False`, batched commits (every 1000 records), briefly blocks watchdog (max 100ms)
-  3. **User manual refresh**: per-record processing via `copy_a_record_to_b_if_needed()`, no blocking
-
-### `initial_scan_a()` Behavior Change
-- Changed from per-file `handle_a_created_or_modified()` calls to pure batch DB indexing
-- No longer processes subtitles per-file or triggers A→B copy during scan
-- **Dual-mode writes** (see the Bulk Connection Mode section):
-  - `use_bulk=True` (startup): uses `bulk_connection` + `_upsert_a_batch_bulk()`, defers FTS rebuild
-  - `use_bulk=False` (refresh): uses `upsert_a_batch()`, maintains FTS per batch
-- **Multithreaded reads**: uses `ThreadPoolExecutor(max_workers=4)` to read `.strm` files concurrently
-- **Batch size**: `BATCH_SIZE = 1000` (one batched write per 1000 records)
-- **Pre-read `IN(...)` chunking**: the batch pre-read `SELECT ... WHERE local_path IN (...)` is sliced at **900 params per batch** via `chunk_list` on `upsert_a_batch` / `upsert_b_batch` / `_upsert_a_batch_bulk` / `cleanup_invalid_subtitles` / `_upsert_movies_batch` / `_upsert_tvs_batch`. This is independent of the "every 1000 records" commit semantics and avoids SQLite's variable limit on embedded/legacy builds (<3.32, `SQLITE_MAX_VARIABLE_NUMBER` = 999). See `docs/否决方案.md` → `设计决策 | 900 保守切片 IN(...) 预读`.
-- **Log throttling**: emits a progress log every 100 records or every 2 seconds with a records/s benchmark (resolves log-freeze issue)
-- Only does DB indexing, no WebDAV checks
-
-### `cleanup_a_redundant_using_api()` New Method
-- Uses OpenList API `/api/fs/list` to batch-clean A-zone redundant files (local exists but cloud deleted)
-- Optimizes traversal scope based on local records (only traverses parent dirs with records)
-- Concurrent pagination (5 threads) + client-side filtering (only keeps .strm files)
-- **fail-closed**: if the cloud directory listing is untrusted (returns None via `_parse_fs_list_content`), all local records under that parent directory are excluded from the redundancy diff (0 deletions, 0 ghost additions)
-- Performance: from 2 hours down to <10 seconds
-
-### API Response Validation (`_parse_fs_list_content`)
-- Shared response validator for `/api/fs/list` single-page responses (defined in `docs/openlist_api_fs_list_contract.md`)
-- Requires: `code ∈ {0,200}`, `data` is dict, `data.content` is list, `data.total` is int ≥ 0
-- Returns `(content, total)` on success, `None` on untrusted (fail-closed)
-- Called by both `_collect_cloud_files_concurrent` (A-zone) and `_collect_cloud_files_in_directory` (B-zone) to enforce unified validation criteria
-
-### `_collect_cloud_files_concurrent(cloud_path) -> set[str] | None`
-- A-zone concurrent paginated collector used by `cleanup_a_redundant_using_api`
-- Uses `per_page=100` (aligned with OpenAPI spec maximum), 5-thread pool, retry on failure
-- Returns authoritative set of `.strm` file paths on success; returns `None` if any page is untrusted (fail-closed)
-- Signature changed from `(cloud_path, file_set) -> None` to `(cloud_path) -> set[str] | None` to support fail-closed signaling
-- Page2+ loop is aligned with the first-page loop: non-dict `content` elements are skipped via `isinstance(item, dict)`, preventing `AttributeError` from escalating a recoverable dirty row into a whole-directory fail-closed.
-
-### `check_exists(path) -> bool | None` (Three-State Fail-Closed)
-- Return type widened from `bool` to **`bool | None`**; `None` means "untrusted" (API failure / non-JSON / unsafe payload / safety-valve exhausted).
-- `per_page=100` (was 1000) to match the OpenAPI max, preventing server-side truncation from masquerading as "not found".
-- Uses a shared `_parse_fs_list_page` guard (mirrors `_parse_fs_list_content`): rejects `data=None`, `content=None`, bool `total`, `code ∉ {0,200}`.
-- **Caller contract**: any destructive cleanup path MUST treat `None` as fail-closed. Concretely, "delete if missing" branches use `if check_exists(...) is False` (authoritative absence) and skip on `None`; keep-alive branches use `if check_exists(...) is True`. Never use `if not check_exists(...)` in a destructive path — that maps `None` (untrusted) to a deletion.
-- Applied call sites: B-zone redundant cleanup (`cleanup_b_redundant`), `cleanup_a_deleted_on_cloud`, `handle_a_created_or_modified` (two `check_exists` gates), `SyncService.copy_a_record_to_b`, and `main.py` root reachability (`if check_exists("/") is not True`).
-
-### `ensure_single_visible_instance` Quarantine Failure Recovery (B3-A / B3-B)
-- **B3-A**: When `quarantine_file` returns `None` (target collision / OSError / source missing), the instance's `status` is restored to `valid` via `mark_b_instance_status(dup, "valid")`. This prevents the "DB=`duplicate` / disk still `.strm`" fork where `ensure_single_visible_instance` could never retry (because its `valid_files` filter only collects `status='valid'` rows).
-- Same restore-to-`valid` applies when `move_b_record` fails but the physical rollback rename succeeds — the row is back at the original `.strm`, so status must match the disk.
-- **B3-B**: When `move_b_record` fails AND the rollback rename also fails (disk full / antivirus lock), the code attempts `move_b_record(old, quarantined)` + `status='duplicate'` to align DB `local_path` with the now-quarantined disk file, then `raise`s. The exception aborts the cleanup loop so the failure is never swallowed; the DB/disk fork is minimized to the unavoidable (the file is physically at `.duplicate`).
-- `mark_other_b_instances_duplicate` is called up-front (before the quarantine loop), so these recovery branches exist specifically to undo its premature `status='duplicate'` when the physical step fails.
-
-### `scan_a_to_b_full_sync()` Dual Mode
-- New `use_bulk` parameter:
-  - `use_bulk=True`: single transaction commit (first startup, no concurrency)
-  - `use_bulk=False`: batched commits (active refresh, with concurrency)
-- Startup sync skips lineage verification and per-file `check_exists` HTTP
-- Preloads ghost protection and B-zone fingerprints into memory caches (`_cache_ghost`, `_cache_b_fp`)
-
-### Three-Layer Defense Model (Concurrency Safety)
-
-`_sync_one_record` in bulk sync does not use a fingerprint lock; instead it relies on a three-layer defense to ensure concurrency safety:
-- **L1**: In-memory cache `_cache_b_fp` — fast filtering of known fingerprints
-- **L2**: Filesystem check `b_local.exists()` — on-disk files are visible to all threads
-- **L3**: `ensure_single_visible_instance` — last-resort dedup (renames extra instances to `.duplicate`)
-
-**Design decision**: Adding a fingerprint lock would cause a performance disaster (blocking the watchdog), and `b_fingerprint_exists` cannot see uncommitted writes from `bulk_connection`. See the "Concurrency Safety Design" section in `wiki/Core-Sync-Engine.md` for details.
+- **A↔B mapping isolation**: every mapping needs a unique non-empty `mapping_id`; it is the isolation boundary for B/C records, fingerprints, lineage, boundary snapshots and identity projections. `update_from_db` backfills a missing `mapping_id` from the normalized A root.
+- **Auth (WebUI)**: PBKDF2-HMAC-SHA256 (600k iterations); sessions in server memory with 7-day sliding expiry and per-session IP binding (M-4); token via `X-Session-Token`. Whitelist paths needing no token: `/api/config` 与 `/api/webui/config/ui` **仅 GET 免 token，POST 必须认证**、`/api/tmdb/avatar`、`/api/tmdb/poster`、`/api/openlist/status`、`/api/openlist/ping`、`/api/admin/status`（双语义 M5：无 token 免校验，带 token 走标准校验）、`/api/login`、`/login`（SPA route）、`/api/page`、`/`、静态资产（`/assets/*`、fonts、images）。`/login` is a SPA GET route served from `dist/index.html`, NOT a separate page; `/api/login` is the POST auth endpoint.
+- **Vite chunks**: only `core` (+ components) is grouped via `manualChunks`; page chunks (`dashboard`/`area`/`config`/`tmdb`/`login`/`logs`) form naturally from dynamic imports in the router.
+- **Onboarding**: 7-step first-run flow defined in `dashboard.js`'s `steps` array; state in `webui_config` (scope=`ui`); single-step API `POST /api/onboarding/complete-step`, whole-flow via `POST /api/webui/config/ui` with `{ onboarding_completed: '1' }`.
+- **Frontend state**: singleton modules in `src/webui/modules/core/`（`state.js` 全局状态、`api.js` 请求封装——始终用 `api()` 而非裸 fetch、`router.js` hash SPA 路由含 auth guard、`utils.js` 的 `createField()`/`esc()`）。Floating-label form fields via `createField()`.
+- **`cleanup_a_redundant_using_api`**: batch A-zone redundancy cleanup via OpenList `/api/fs/list`, concurrent pagination (5 threads, per_page=100), only traverses parent dirs with local records; fail-closed on untrusted listings（0 删除、0 ghost 新增）. Turned a 2-hour traversal into <10s.
+- **Startup batch sync（三层防御，无指纹锁）**: L1 内存 `_cache_b_fp` → L2 `b_local.exists()` → L3 `ensure_single_visible_instance`（多余实例重命名为 `.duplicate`；B3-A 隔离/移动失败时恢复 `status='valid'`，B3-B DB 对齐被隔离文件并 re-raise）。设计依据见 `wiki/Core-Sync-Engine.md`。
+- **`initial_scan_a`**: pure batch DB indexing（不做逐文件字幕处理、不触发 A→B 复制）；dual-mode writes——启动用 `bulk_connection` 单事务，活跃刷新批量提交（每 1000 条）；ThreadPoolExecutor(4) 并发读取；每 100 条 / 2 秒输出进度日志。
+- **900-param chunking**: 批量预读 `IN(...)` 以 `chunk_list` 按 900 参数切片（适用所有批量 upsert/cleanup），与"每 1000 条提交一次"语义相互独立——保护 SQLite <3.32 的 `SQLITE_MAX_VARIABLE_NUMBER`=999。见 `docs/否决方案.md`。
 
 ## Common Pitfalls
 
-1. **Dist not rebuilt**: If you change `src/webui/modules/*.js`, the browser won't see the changes until you run `npx vite build`. This is the #1 cause of "my fix didn't work" in this project.
-2. **Server multi-threaded but DB-locked**: Python's `ThreadingHTTPServer` handles concurrent requests, but long-running operations (like TMDB sync) hold DB locks that may block other requests.
-3. **SQLite WAL mode**: The database files may have `-shm` and `-wal` companion files. Don't delete them.
-4. **Config layering**: DB configuration overrides config.toml. If you change config.toml and it doesn't take effect, check the DB `webui_config` table.
-5. **Password stored in DB**: The admin password hash is in `tmdb_watchlist.db` → `webui_config` where scope='ui' and key='admin_password'. Use `reset_admin.py` to reset.
+1. **Dist not rebuilt**: if you change `src/webui/modules/*.js`, the browser won't see changes until `npx vite build`. The #1 cause of "my fix didn't work".
+2. **Server multi-threaded but DB-locked**: long-running operations (like TMDB sync) hold DB locks that may block other requests.
+3. **SQLite WAL**: don't delete `-shm` / `-wal` companion files.
+4. **Config layering**: DB `webui_config` overrides `config.toml`. If a config.toml change doesn't take effect, check the DB.
+5. **Password stored in DB**: see Configuration section; use `reset_admin.py`.
+
+## WebUI Regression Tests
+
+- `run_webui_regression.bat`（仓库根）：先 `node.exe --test "src/webui/tests/*.test.mjs"`（零 npm 依赖的 node:test 纯逻辑用例），后 `python.exe -m pytest src/tests -m webui`；失败透传非零码。
+- `webui` marker 由 `src/tests/conftest.py` 按文件名自动打标（`test_webui_*.py`、`test_e2e_full_flow.py`、`test_onboarding_e2e.py`）；共享服务器夹具沉淀在 `src/tests/webui_fixtures.py`。
+- dist 存在性与新鲜度护栏：`src/tests/test_webui_dist_freshness.py`（源码比 dist 新 → fail，提示 rebuild；`index.html` 悬空 asset 引用 → fail）。
 
 ## Key Files Reference
 
@@ -305,30 +104,23 @@ The Vite config groups modules into chunks:
 |------|-------------|
 | `src/app_service_core.py` | Heart of the engine. Lock ordering is critical. |
 | `src/database.py` | SQLite with WAL, read/write connection managers, `ReadWriteLock`. |
-| `src/webui/routes.py` | All API handlers. `_get_media_groups_paginated` method handles pagination logic. |
-| `src/webui/server.py` | Auth, routing, SPA serving. `_check_auth()` method handles authentication. |
-| `src/webui/modules/core/api.js` | API wrapper — always use this instead of raw fetch. |
-| `src/webui/modules/core/router.js` | Hash-based SPA router with auth guard. |
-| `src/webui/modules/core/utils.js` | `createField()` for form labels, `esc()` for HTML escaping. |
-| `src/webui/modules/pages/openlist.js` | OpenList config page. Engine select change handler at `_bindEngineSelectEvents()`. |
+| `src/webui/routes.py` | All API handlers. `_get_media_groups_paginated` handles pagination. |
+| `src/webui/server.py` | Auth, routing, SPA serving. `_check_auth()` handles authentication. |
 | `src/config.py` | `AppConfig` dataclass. `load_strm_storage_from_api()` for dynamic storage mapping. |
-| `src/webdav_client.py` | JWT auth, Admin API, WebDAV protocol. TOTP support. |
-| `src/refresh_service.py` | Event-driven periodic WebDAV refresh. `RefreshService` with `_lifecycle_lock`, `reconfigure()`, `notify_config_changed()`. |
-| `src/watchlist_match.py` | TMDB watchlist vs local B-zone matching logic (three-level title match + structural verification). |
-| `src/tmdb_watchlist_db.py` | TMDB watchlist SQLite DB manager. `get_config()`/`set_config()` for `webui_config` (scope-based). |
-| `src/utils/password_utils.py` | Unified password hashing/verification (PBKDF2-HMAC-SHA256, `hash_password`/`verify_password`). |
+| `src/webdav_client.py` | JWT auth, Admin API, WebDAV protocol, TOTP support. |
+| `src/refresh_service.py` | Event-driven periodic refresh. `RefreshService` with `_lifecycle_lock`, `reconfigure()`, `notify_config_changed()`. |
+| `src/watchlist_match.py` | TMDB watchlist vs B-zone matching logic. |
+| `src/utils/password_utils.py` | Unified password hashing/verification (PBKDF2-HMAC-SHA256). |
 
 ## Known Self-Explanatory Files / Do Not Flag
 
-The following files are included as-is and should NOT be flagged as issues or refactored without explicit user instruction:
-
 | File | What it is |
 |------|-----------|
-| `edgeone_tmdb_api.js` | Deployed on Tencent EdgeOne (serverless edge function platform, comparable to Cloudflare Workers). It serves as a TMDB API/image reverse proxy for environments that cannot directly access TMDB. It is an **optional companion tool**, not a runtime dependency of the core sync engine. |
-| `后台带Bridge启动webui.vbs` | Windows VBScript launcher that starts `server.py` in headless mode with a hidden console window (sets `BRIDGE_HEADLESS=1`). |
-| `嵌入式启动.bat` | Windows batch launcher using the bundled embedded Python environment. |
-| `环境变量启动.bat` | Windows batch launcher using the system-installed Python from PATH. |
+| `edgeone_tmdb_api.js` | Deployed on Tencent EdgeOne (serverless edge platform). TMDB API/image reverse proxy for environments that cannot reach TMDB. Optional companion tool, not a runtime dependency. |
+| `后台带Bridge启动webui.vbs` | Windows VBScript launcher: headless `server.py` with hidden console (sets `BRIDGE_HEADLESS=1`). |
+| `嵌入式启动.bat` | Windows batch launcher using the bundled embedded Python. |
+| `环境变量启动.bat` | Windows batch launcher using system Python from PATH. |
 
 ## Design Decisions / Rejected Options Registry
 
-- **`docs/否决方案.md`** is the authoritative registry for intentional design decisions ("设计决策"), deliberately-kept dead/legacy fields ("有意保留"), accepted trade-offs ("已知取舍"), and deprecated/migrated mechanisms ("[已废弃]"), plus rejected fix proposals. Code comments use four stable anchor keywords as grep anchors — `# 设计决策:` / `# 有意保留:` / `# 已知取舍:` / `# [已废弃]` (bracketed, no colon for the last). Consult this file for the rationale before flagging or refactoring such code. Registry entries are indexed by `file:function`, not by plan IDs.
+- **`docs/否决方案.md`** is the authoritative registry for "设计决策" / "有意保留" / "已知取舍" / "[已废弃]" entries plus rejected fix proposals, indexed by `file:function`. Consult it before flagging or refactoring such code. Code comments use the four stable anchor keywords as grep anchors: `# 设计决策:` / `# 有意保留:` / `# 已知取舍:` / `# [已废弃]`（最后一个带方括号、不带冒号）.

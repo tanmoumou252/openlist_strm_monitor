@@ -45,3 +45,29 @@ collect_ignore_glob = [
     "test_real_server.py",
     "test_webui_standalone.py",
 ]
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "webui: WebUI 专项回归（HTTP/入口/源码契约/帮助文本/E2E/Onboarding）")
+
+
+def pytest_collection_modifyitems(config, items):
+    webui_names = ("test_webui_", "test_e2e_full_flow", "test_onboarding_e2e")
+    for item in items:
+        if item.path.name.startswith(webui_names):
+            item.add_marker(pytest.mark.webui)
+
+
+@pytest.fixture
+def webui_server_shared(tmp_path):
+    """共享 WebUI 真实服务器夹具（供新增回归用例使用）。
+
+    复用 webui_fixtures 的服务器起停 helper，PROJECT_ROOT/STATIC_DIR 均落在
+    tmp_path。既有测试文件使用各自的 webui_server fixture，不回改。
+    """
+    from webui_fixtures import start_webui_server
+    server, base_url, token = start_webui_server(tmp_path)
+    try:
+        yield server, base_url, token
+    finally:
+        server.stop()

@@ -12,6 +12,10 @@ import {
 
 export { startUptimeTimer, stopUptimeTimer, updateUptime, _loadOnboarding };
 
+// 上次轮询观测到的主程序相位；null=尚未观测。用于识别「进入终态相位」的变化，
+// 仅在 ready/fail_safe/stopped 时刷新引导步骤④勾选（见 updateMainStatus）。
+let _lastMainPhase = null;
+
 // ============================================================
 // 首次配置引导（Onboarding Guide）
 // ============================================================
@@ -288,7 +292,25 @@ export async function updateMainStatus() {
 
     if (!dot || !text) return;
 
+    // 统一出口复位悬浮提示：错误分支随后写入完整原因覆盖，其余相位分支
+    // 由此自然清空，消除上一轮渲染的 tooltip 残留。
+    text.title = '';
+
     const phase = status.phase || (status.running ? 'ready' : 'stopped');
+
+    // 引导步骤④「启动主程序」以 main_running 判定勾选，而 main_running 在受理瞬间
+    // 即为真（server 侧复合存活权威已判在跑）。故仅在轮询观测到终态相位
+    // 且相位发生变化时刷新引导：避免受理瞬间过早打勾，且 Worker 落 fail_safe 后
+    // 错误勾选可自愈（此前无自愈路径）。
+    // 终态集合含 stopping：停止操作进行中 running 已转 false，④ 此刻就该取消勾选；
+    // 且 stop_main 失败（svc.stop() 抛异常）时相位会停在 stopping 不再变化，若不在
+    // 集合内则错误勾选将滞留到用户切页/刷新。
+    // 首次观测（_lastMainPhase === null）只建立基线，不重复刷新（init 已刷新）。
+    if (_lastMainPhase !== null && phase !== _lastMainPhase
+        && ['ready', 'fail_safe', 'stopped', 'stopping'].includes(phase)) {
+      _loadOnboarding();
+    }
+    _lastMainPhase = phase;
 
     const phaseMap = {
       'starting': '启动初始化中...',
@@ -336,11 +358,44 @@ export async function updateMainStatus() {
           </div>
         `;
       }
-    } else if (phase === 'ready' || status.running) {
-      dot.style.background = '#4caf50';
-      dot.style.boxShadow = '0 0 12px rgba(76,175,80,0.6)';
-      text.textContent = '主程序运行中';
+    } else if (phase === 'stopping') {
+      // 停止操作进行中：running 已转 false 但相位未落 stopped，须与「已停止」
+      // 终态区分显示，避免误导用户再次点击启动。分支位于 ready/running 之前：
+      // stop 失败相位滞留 stopping 时（或 fallback 公式误报 running），启动
+      // 按钮保持可见但 disabled，避免双按钮全隐的不可恢复 UI 死角。
+      dot.style.background = '#ff9800';
+      dot.style.boxShadow = '0 0 12px rgba(255,152,0,0.6)';
+      text.textContent = '正在停止主程序...';
       text.style.color = 'var(--text-main)';
+      uptimeText.textContent = '停止操作进行中，请稍候';
+      if (progressContainer) progressContainer.style.display = 'none';
+      if (startBtn) {
+        startBtn.style.display = 'inline-flex';
+        startBtn.disabled = true;
+      }
+      if (stopBtn) stopBtn.style.display = 'none';
+    } else if (status.running) {
+      // 运行态错误展示：error 非空时文本与状态点转告警色并按长度条件
+      // 截断防溢出（仅超长才加省略号），完整原因入 title 悬浮；error 为
+      // 空时维持绿点与健康态配色零扰动。
+      if (status.error) {
+        const errText = String(status.error);
+        dot.style.background = 'var(--color-warning, #ff9800)';
+        dot.style.boxShadow = '0 0 12px rgba(255,152,0,0.6)';
+        // 仅超长错误才截断加省略号：短错误原样全文展示，避免
+        // 「未截断却带省略号」的误导形态。
+        text.textContent = errText.length > 120
+          ? `主程序运行中：${errText.slice(0, 120)}…`
+          : `主程序运行中：${errText}`;
+        text.title = errText;
+        text.style.color = 'var(--color-warning, #ff9800)';
+      } else {
+        dot.style.background = '#4caf50';
+        dot.style.boxShadow = '0 0 12px rgba(76,175,80,0.6)';
+        text.textContent = '主程序运行中';
+        text.title = '';
+        text.style.color = 'var(--text-main)';
+      }
       if (status.uptime != null) {
         const hours = Math.floor(status.uptime / 3600);
         const mins = Math.floor((status.uptime % 3600) / 60);
@@ -352,7 +407,24 @@ export async function updateMainStatus() {
       if (stopBtn) {
         stopBtn.style.display = 'inline-flex';
         stopBtn.disabled = false;
+        stopBtn.innerHTML = `${icon('check')} 停止主程序`;
       }
+    } else if (phase === 'ready' && !status.running) {
+      // 异常态：后端相位报 ready 但存活态为未运行，相位与存活脱钩时不再
+      // 按运行中渲染；提供启动入口恢复（服务端对残留 worker 有 join 超时
+      // 拒绝启动防线，不会误建第二个 AppService 实例）。
+      dot.style.background = '#ff9800';
+      dot.style.boxShadow = '0 0 12px rgba(255,152,0,0.6)';
+      text.textContent = '主程序状态异常（相位 ready 但未运行）';
+      text.style.color = 'var(--text-main)';
+      uptimeText.textContent = '可尝试重新启动主程序恢复';
+      if (progressContainer) progressContainer.style.display = 'none';
+      if (startBtn) {
+        startBtn.style.display = 'inline-flex';
+        startBtn.disabled = false;
+        startBtn.innerHTML = `${icon('refresh')} 启动主程序`;
+      }
+      if (stopBtn) stopBtn.style.display = 'none';
     } else if (phase === 'fail_safe') {
       dot.style.background = '#f44336';
       dot.style.boxShadow = '0 0 12px rgba(244,67,54,0.6)';
@@ -369,7 +441,11 @@ export async function updateMainStatus() {
     } else {
       dot.style.background = '#f44336';
       dot.style.boxShadow = '0 0 12px rgba(244,67,54,0.6)';
-      text.textContent = '主程序已停止';
+      // stopped/not_configured 类终态：错误非空时如实透出（不只 fail_safe 分支），
+      // 避免配置类失败落 stopped 后「已停止、无原因」丢失失败信息。
+      text.textContent = status.error
+        ? `主程序已停止: ${status.error}`
+        : '主程序已停止';
       text.style.color = 'var(--text-main)';
       uptimeText.textContent = '点击启动按钮开始同步服务';
       if (progressContainer) progressContainer.style.display = 'none';
@@ -427,10 +503,19 @@ export async function startMainProgram() {
     try {
       const result = await api('/api/main/start', { method: 'POST' });
       if (result.success) {
-        showToast('主程序已启动', 'success');
+        // 异步受理：status:"starting" 时终态未定，轮询定终态，不宣告成功
+        if (result.status === 'starting') {
+          showToast('主程序正在后台启动，请稍候…', 'info');
+        } else {
+          showToast('主程序已启动', 'success');
+        }
         updateMainStatus();
-        // 刷新引导状态
-        _loadOnboarding();
+        // 引导④以 main_running 判定，而受理瞬间 server 侧存活权威已判在跑；
+        // 异步受理（starting）不在此刷新，改由轮询观测到终态相位时刷新（见
+        // updateMainStatus），避免过早打勾且 fail_safe 后可自愈；仅同步成功立即刷新。
+        if (result.status !== 'starting') {
+          _loadOnboarding();
+        }
       } else {
         showToast('启动失败: ' + (result.message || '未知错误'), 'error');
         if (startBtn) {
@@ -462,6 +547,8 @@ export async function stopMainProgram() {
         updateMainStatus();
       } else {
         showToast('停止失败: ' + (result.message || '未知错误'), 'error');
+        // await 先落地刷新渲染，再复位按钮态，消除渲染与复位交错的竞态
+        await updateMainStatus();
         if (stopBtn) {
           stopBtn.disabled = false;
           stopBtn.innerHTML = `${icon('check')} 停止主程序`;
@@ -646,7 +733,14 @@ function _shortenPath(path) {
               // 显式判断 status === 'completed' 再读 generation，
               // 避免用 `!error` 推断成功、`|| 0` 掩盖缺 generation 的脆弱性
               if (st.result.status === 'completed') {
-                if (auditStatusText) auditStatusText.textContent = '审计完成，索引代次 #' + (st.result.index_generation || 0);
+                // 覆盖缺口可区分展示：存在未巡查 A 根时审计虽按节拍完成，
+                // 但索引代次推进与核对盖章被跳过，须透出而非静默吞掉。
+                const coverageNote = st.result.coverage_incomplete
+                  ? '（存在未巡查 A 根，已跳过索引代次推进与核对盖章）'
+                  : '';
+                if (auditStatusText) auditStatusText.textContent =
+                  '审计完成' + coverageNote + '，索引代次 #' + (st.result.index_generation || 0);
+                if (st.result.warning) showToast(st.result.warning, 'info');
               } else if (st.result.error) {
                 if (auditStatusText) auditStatusText.textContent = '审计失败: ' + st.result.error;
               } else {
